@@ -140,7 +140,9 @@ fn graph_linear_chain() {
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
-    let src_idx = src.resource_index(ResourceAccess::Read).unwrap();
+    // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (RWStructuredBuffer / UAV on DX12).
+    // Bind the UAV index — `ResourceAccess::Read` returns the SRV slot, which WARP reads as zeros.
+    let src_idx = src.resource_index(ResourceAccess::ReadWrite).unwrap();
     let dst_idx = dst.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
@@ -185,7 +187,9 @@ fn graph_independent_dispatches() {
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
-    let idx_a = buf_a.resource_index(ResourceAccess::Read).unwrap();
+    // `FILL_42_SHADER` writes `buf_a` via `Scattered<uint>` (UAV on DX12).
+    // `ResourceAccess::Read` returns the SRV slot — use Write for the UAV index.
+    let idx_a = buf_a.resource_index(ResourceAccess::Write).unwrap();
     let idx_b = buf_b.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
@@ -257,7 +261,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
-    let src_idx = src.resource_index(ResourceAccess::Read).unwrap();
+    // `src` is accessed as `Scattered<uint>` by both the fill node (write) and the
+    // double nodes (read-via-RWStructuredBuffer). All `Scattered` params need the UAV
+    // index; `ResourceAccess::Read` would return the SRV slot and read zeros on WARP.
+    let src_idx = src.resource_index(ResourceAccess::ReadWrite).unwrap();
     let y_idx = y.resource_index(ResourceAccess::Write).unwrap();
     let z_idx = z.resource_index(ResourceAccess::Write).unwrap();
     let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
@@ -326,7 +333,9 @@ fn graph_matches_encoder() {
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
-    let src_enc_idx = src_enc.resource_index(ResourceAccess::Read).unwrap();
+    // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (UAV on DX12). Use ReadWrite
+    // for the UAV index; ResourceAccess::Read returns the SRV slot and reads zeros on WARP.
+    let src_enc_idx = src_enc.resource_index(ResourceAccess::ReadWrite).unwrap();
     let dst_enc_idx = dst_enc.resource_index(ResourceAccess::Write).unwrap();
 
     {
@@ -360,7 +369,8 @@ fn graph_matches_encoder() {
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
-    let src_graph_idx = src_graph.resource_index(ResourceAccess::Read).unwrap();
+    // Same: `Scattered<uint> input` in DOUBLE_SHADER requires the UAV index.
+    let src_graph_idx = src_graph.resource_index(ResourceAccess::ReadWrite).unwrap();
     let dst_graph_idx = dst_graph.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
