@@ -427,7 +427,9 @@ pub(super) fn render(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -583,7 +585,9 @@ pub(super) fn read_to_cpu(
     }
 
     // Wait for copy to complete
-    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue

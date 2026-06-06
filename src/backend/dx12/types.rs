@@ -17,8 +17,8 @@ use super::super::{
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
     atomic::{AtomicU64, Ordering},
+    Arc,
 };
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
@@ -493,6 +493,10 @@ pub(crate) struct Dx12SubmissionContext {
     pub staging_belt: super::staging::StagingBelt,
     /// Pool that recycles texture-upload staging buffers across frames on this context.
     pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Per-context deferred deletion queue — only resources exclusively bound to this
+    /// context's timeline (e.g. temporary dispatch-batch arg buffers).  Drained at each
+    /// submit by this context's own completed fence value, never by `device_retired`.
+    pub deletion_queue: DeletionQueue,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.

@@ -100,7 +100,9 @@ pub(super) fn init_storage_texture_uav_layout(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -791,7 +793,9 @@ pub(super) fn execute_staged_uploads_sync(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -983,7 +987,9 @@ pub(super) fn read_to_cpu(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -1038,7 +1044,10 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
                 dev.reclaim_texture_slots(texture_handle);
                 return;
             }
-            let last_fence = dev.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
+            let last_fence = dev
+                .timeline_next
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(1);
             dev.deletion_queue.queue(
                 last_fence,
                 PendingDeletion::Texture {

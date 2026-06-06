@@ -350,7 +350,9 @@ impl Dx12Backend {
 
     /// Wait for the GPU to finish all work on a device (sync fence path).
     fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
-        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+        let fence_value = device
+            .timeline_next
+            .load(std::sync::atomic::Ordering::Relaxed);
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         utils::wait_for_fence(&device.fence, fence_value)
@@ -366,7 +368,9 @@ impl Dx12Backend {
             // fence values. Without this, PendingDeletion::Buffer re-signals the same value
             // that wait_for_gpu already used, violating D3D12's monotonic fence requirement
             // and causing an abnormal process exit (exit code 2173) on teardown.
-            logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            logical_device
+                .timeline_next
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             logical_device.flush_deletion_queue();
 
             if logical_device.pso_disk_cache_dirty {

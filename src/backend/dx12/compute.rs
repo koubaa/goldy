@@ -706,6 +706,7 @@ struct CmdCtx<'a> {
 fn record_gpu_command(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
+    ctx_handle: super::ContextHandle,
     ctx: &mut CmdCtx<'_>,
     cmd: &GpuCommand,
 ) -> Result<()> {
@@ -984,15 +985,16 @@ fn record_gpu_command(
                     cl.ExecuteIndirect(&batch_sig, *count, &arg_resource, 0, None, 0);
                 }
 
-                let fence_val = logical_device.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
-                let dev = state
-                    .devices
-                    .get_mut(&device_handle)
-                    .context("DispatchBatch: device gone")?;
-                dev.deletion_queue.queue(
-                    fence_val,
-                    super::types::PendingDeletion::StandaloneResource(arg_resource),
-                );
+                let fence_val = logical_device
+                    .timeline_next
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(1);
+                if let Some(sc) = state.contexts.get_mut(&ctx_handle) {
+                    sc.deletion_queue.queue(
+                        fence_val,
+                        super::types::PendingDeletion::StandaloneResource(arg_resource),
+                    );
+                }
             } else {
                 use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
                 let stride = DISPATCH_BATCH_STRIDE;
@@ -1512,9 +1514,16 @@ fn execute_signal_and_finish(
         sc.last_submitted_seq = fence_value;
     }
 
-    let retired = super::context::device_retired(state, device_handle);
+    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+    let ctx_del_batch: Vec<_> = state
+        .contexts
+        .get_mut(&ctx)
+        .map(|sc| sc.deletion_queue.drain_up_to_completed(ctx_completed))
+        .unwrap_or_default();
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.process_deletion_queue_up_to(retired);
+        for resource in ctx_del_batch {
+            types::destroy_pending_deletion(dev, resource);
+        }
         dev.drain_ready_slot_reclamations(&state.contexts);
     }
 
@@ -1713,7 +1722,7 @@ pub(super) fn submit(
 
     let belt_idx_final = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
-        let mut ctx = CmdCtx {
+        let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
             use_global_buffer_barriers,
@@ -1726,14 +1735,14 @@ pub(super) fn submit(
             current_compute_pipeline: None,
         };
         for cmd in commands {
-            record_gpu_command(state, device_handle, &mut ctx, cmd)?;
+            record_gpu_command(state, device_handle, ctx, &mut cmd_ctx, cmd)?;
         }
         debug_assert_eq!(
-            ctx.texture_upload_idx,
+            cmd_ctx.texture_upload_idx,
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        ctx.belt_idx
+        cmd_ctx.belt_idx
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
@@ -1968,7 +1977,7 @@ pub(super) fn submit_graph(
     let belt_idx_final;
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
-        let mut ctx = CmdCtx {
+        let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
             command_list7: &command_list7,
             use_global_buffer_barriers,
@@ -1984,7 +1993,7 @@ pub(super) fn submit_graph(
         for graph_cmd in commands {
             match graph_cmd {
                 GraphCommand::Compute(gpu_cmd) => {
-                    record_gpu_command(state, device_handle, &mut ctx, gpu_cmd)?;
+                    record_gpu_command(state, device_handle, ctx, &mut cmd_ctx, gpu_cmd)?;
                 }
                 GraphCommand::Render {
                     target,
@@ -2011,7 +2020,9 @@ pub(super) fn submit_graph(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    unsafe { barriers::barrier_globals(ctx.command_list7, &[compute_to_render]) };
+                    unsafe {
+                        barriers::barrier_globals(cmd_ctx.command_list7, &[compute_to_render])
+                    };
 
                     super::render_target::record_render_pass_to_list(
                         state,
@@ -2039,18 +2050,20 @@ pub(super) fn submit_graph(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    unsafe { barriers::barrier_globals(ctx.command_list7, &[render_to_compute]) };
+                    unsafe {
+                        barriers::barrier_globals(cmd_ctx.command_list7, &[render_to_compute])
+                    };
                 }
             }
         }
 
         debug_assert_eq!(
-            ctx.texture_upload_idx,
+            cmd_ctx.texture_upload_idx,
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        belt_idx_final = ctx.belt_idx;
-    } // drop ctx → release borrows on command_list / command_list7
+        belt_idx_final = cmd_ctx.belt_idx;
+    } // drop cmd_ctx → release borrows on command_list / command_list7
 
     let tail = D3D12_GLOBAL_BARRIER {
         SyncBefore: D3D12_BARRIER_SYNC(
@@ -2175,9 +2188,19 @@ pub(super) fn try_resubmit_retained(
         sc.last_submitted_seq = fence_value;
     }
 
-    let retired = super::context::device_retired(state, device_handle);
+    let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+    let retained_del_batch: Vec<_> = state
+        .contexts
+        .get_mut(&ctx)
+        .map(|sc| {
+            sc.deletion_queue
+                .drain_up_to_completed(retired_ctx_completed)
+        })
+        .unwrap_or_default();
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.process_deletion_queue_up_to(retired);
+        for resource in retained_del_batch {
+            types::destroy_pending_deletion(dev, resource);
+        }
         dev.drain_ready_slot_reclamations(&state.contexts);
     }
 

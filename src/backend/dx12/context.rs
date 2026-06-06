@@ -81,6 +81,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
                 super::staging::DEFAULT_STAGING_CHUNK_SIZE,
             ),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
+            deletion_queue: super::types::DeletionQueue::new(),
         },
     );
     Ok(id)
@@ -113,6 +114,16 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     // GPU is idle for this context (waited above); destroy per-context staging resources.
     unsafe { sc.staging_belt.destroy_all() };
     unsafe { sc.texture_staging_pool.destroy_all() };
+
+    // Drain any remaining per-context pending deletions now that the GPU is idle.
+    let batch = sc.deletion_queue.drain_everything();
+    if !batch.is_empty() {
+        if let Some(ld) = state.devices.get_mut(&device) {
+            for resource in batch {
+                super::types::destroy_pending_deletion(ld, resource);
+            }
+        }
+    }
 }
 
 pub(super) fn context_device(state: &Dx12State, ctx: ContextHandle) -> DeviceHandle {
