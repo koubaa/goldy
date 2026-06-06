@@ -2,7 +2,7 @@
 //!
 //! The client holds a [`Parcel`] by value and never sees backend resource handles.
 //! Resource indices for shader binding are exposed via [`Parcel::resource_index`];
-//! the runtime uses [`Parcel::resource_id`] when wiring [`TaskGraph`] nodes.
+//! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
 use crate::buffer::{Buffer, BufferPool, BufferView};
 use crate::task_graph::ResourceId;
@@ -130,7 +130,11 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn from_mosaic(pool: BufferPool, views: Vec<BufferView>, bookkeeping: BookkeepingGuard) -> Self {
+    pub(crate) fn from_mosaic(
+        pool: BufferPool,
+        views: Vec<BufferView>,
+        bookkeeping: BookkeepingGuard,
+    ) -> Self {
         Self {
             storage: ParcelStorage::Mosaic(Mosaic { pool, views }),
             last_referenced: None,
@@ -254,5 +258,4 @@ impl Parcel {
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
     }
-
 }

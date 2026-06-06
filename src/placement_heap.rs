@@ -314,9 +314,7 @@ impl PlacementHeap {
         let uav = view
             .resource_index(ResourceAccess::Write)
             .unwrap_or(u32::MAX);
-        let srv = view
-            .resource_index(ResourceAccess::Read)
-            .unwrap_or(uav);
+        let srv = view.resource_index(ResourceAccess::Read).unwrap_or(uav);
         self.view_cache.insert(
             slot_id,
             CachedView {

@@ -3,7 +3,7 @@
 use super::types::{self, TextureState};
 use super::utils::format_to_vk;
 use super::{DeviceHandle, TextureHandle};
-use crate::types::{TextureKind, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;

@@ -1,7 +1,7 @@
 //! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
 
 use goldy::{
-    Buffer, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, BufferKind,
+    Buffer, BufferKind, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline,
     DepthFormat, DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
     TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,

@@ -34,7 +34,7 @@ use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_F
 use super::utils::{depth_format_to_dxgi, dxgi_to_format};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};
-use crate::types::{Color, DepthFormat, TextureKind, TextureFlags, TextureFormat};
+use crate::types::{Color, DepthFormat, TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use raw_window_handle::RawWindowHandle;
 use windows::{

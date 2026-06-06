@@ -15,7 +15,7 @@
 //! DX12 and Vulkan use committed resources without a shared heap cap.
 
 use goldy::task_graph::TaskGraph;
-use goldy::types::{BufferFlags, TextureKind, TextureFlags, TextureFormat};
+use goldy::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 use goldy::{Buffer, BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
 mod common;

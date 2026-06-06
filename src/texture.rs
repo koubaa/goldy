@@ -6,7 +6,9 @@
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
-use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
+use crate::types::{
+    ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
+};
 use crate::vram_allocator::{ParcelType, VramAllocator};
 use anyhow::Result;
 use std::sync::{Arc, Mutex, Weak};
@@ -284,9 +286,10 @@ impl Texture {
             (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
                 backend.texture_bindless_sampled_index(self.handle)
             }
-            (TextureKind::DirectInterpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
-                backend.texture_bindless_index(self.handle)
-            }
+            (
+                TextureKind::DirectInterpolated,
+                ResourceAccess::Write | ResourceAccess::ReadWrite,
+            ) => backend.texture_bindless_index(self.handle),
         }
     }
 
@@ -294,7 +297,9 @@ impl Texture {
     pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         self.resource_index(access).map(|i| {
             let category = match (self.access, access) {
-                (TextureKind::DirectInterpolated, ResourceAccess::Read) => ResourceCategory::Texture,
+                (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
+                    ResourceCategory::Texture
+                }
                 _ => ResourceCategory::from(self.access),
             };
             ResourceHandle::new(category, i)

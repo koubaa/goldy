@@ -2,7 +2,7 @@
 //!
 //! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
 //! [`RetainedPool::mosaic`] are the supported ways to create retained parcels. Parcels are
-//! opaque [`Parcel`] values; relinquish via [`Self::transfer_out`] or by dropping the parcel.
+//! opaque [`Parcel`] values; relinquish via [`RetainedPool::transfer_out`] or by dropping the parcel.
 //!
 //! Reuse-gate, transient pool, and backpressure are deferred.
 
@@ -220,9 +220,7 @@ mod tests {
     use crate::types::{ResourceAccess, TextureFormat};
 
     fn test_device() -> Arc<Device> {
-        Arc::new(
-            Device::from_backend(Box::new(MockBackend::new())).expect("mock device"),
-        )
+        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }
 
     fn rgba_interpolated() -> (TextureFormat, TextureKind, TextureFlags) {
@@ -237,9 +235,7 @@ mod tests {
     fn acquire_texture_without_init_allocates() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool
-            .acquire_texture(64, 64, fmt, acc, flags, None)
-            .unwrap();
+        let p = pool.acquire_texture(64, 64, fmt, acc, flags, None).unwrap();
         assert_eq!(p.kind(), ParcelType::Texture);
         assert!(pool.bytes_by_kind().texture > 0);
         assert_eq!(pool.bytes_by_kind().buffer, 0);
@@ -277,9 +273,7 @@ mod tests {
     fn mark_referenced_is_monotonic_max() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let mut p = pool
-            .acquire_texture(8, 8, fmt, acc, flags, None)
-            .unwrap();
+        let mut p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         p.mark_referenced(10);
         p.mark_referenced(5);
         assert_eq!(p.last_referenced(), Some(10));
@@ -291,9 +285,7 @@ mod tests {
     fn transfer_out_referenced_has_ready_after() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let mut p = pool
-            .acquire_texture(8, 8, fmt, acc, flags, None)
-            .unwrap();
+        let mut p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         p.mark_referenced(42);
         let stamped = pool.transfer_out(p);
         assert_eq!(stamped.ready_after, Some(42));
@@ -304,9 +296,7 @@ mod tests {
     fn transfer_out_unreferenced_has_none_ready_after() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool
-            .acquire_texture(8, 8, fmt, acc, flags, None)
-            .unwrap();
+        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         let stamped = pool.transfer_out(p);
         assert_eq!(stamped.ready_after, None);
     }
@@ -315,9 +305,7 @@ mod tests {
     fn transfer_out_preserves_texture_handle() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool
-            .acquire_texture(8, 8, fmt, acc, flags, None)
-            .unwrap();
+        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         let h_before = p.texture_handle().unwrap();
         let stamped = pool.transfer_out(p);
         assert_eq!(stamped.parcel.texture_handle(), Some(h_before));
@@ -327,9 +315,7 @@ mod tests {
     fn bytes_by_kind_zero_after_transfer_and_drop() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool
-            .acquire_texture(16, 16, fmt, acc, flags, None)
-            .unwrap();
+        let p = pool.acquire_texture(16, 16, fmt, acc, flags, None).unwrap();
         assert!(pool.bytes_by_kind().texture > 0);
         let stamped = pool.transfer_out(p);
         assert_eq!(pool.bytes_by_kind().texture, 0);
@@ -358,7 +344,10 @@ mod tests {
         let _reserved = m.reserve::<u32>(8);
         let parcel = m.build().unwrap();
 
-        assert!(parcel.view(slot).resource_index(ResourceAccess::Write).is_some());
+        assert!(parcel
+            .view(slot)
+            .resource_index(ResourceAccess::Write)
+            .is_some());
         assert_eq!(parcel.view(slot).offset(), 0);
         assert!(parcel.view(slot).size() > 0);
     }
@@ -411,14 +400,11 @@ mod tests {
     fn copy_into_on_texture_parcel_errors() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let parcel = pool
-            .acquire_texture(4, 4, fmt, acc, flags, None)
-            .unwrap();
+        let parcel = pool.acquire_texture(4, 4, fmt, acc, flags, None).unwrap();
         let err = parcel.copy_into(&[0u32]).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("only valid for non-mosaic buffer parcels")
-        );
+        assert!(err
+            .to_string()
+            .contains("only valid for non-mosaic buffer parcels"));
     }
 
     #[test]
@@ -428,10 +414,9 @@ mod tests {
         m.emplace(&[1u32]);
         let parcel = m.build().unwrap();
         let err = parcel.copy_into(&[0u32]).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("only valid for non-mosaic buffer parcels")
-        );
+        assert!(err
+            .to_string()
+            .contains("only valid for non-mosaic buffer parcels"));
     }
 
     #[test]
@@ -458,9 +443,7 @@ mod tests {
         let device = test_device();
         let mut pool = RetainedPool::new(device.clone());
         let (fmt, acc, flags) = rgba_interpolated();
-        let parcel = pool
-            .acquire_texture(4, 4, fmt, acc, flags, None)
-            .unwrap();
+        let parcel = pool.acquire_texture(4, 4, fmt, acc, flags, None).unwrap();
         let expected = parcel.resource_id();
 
         let shader = ShaderModule::from_slang(&device, "void main() {}").unwrap();

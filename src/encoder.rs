@@ -3,7 +3,7 @@
 use crate::backend::RenderCommand;
 use crate::buffer::{Buffer, BufferSource};
 use crate::pipeline::RenderPipeline;
-use crate::types::{ResourceHandle, Color, IndexFormat};
+use crate::types::{Color, IndexFormat, ResourceHandle};
 
 /// Command encoder for recording GPU commands.
 ///

@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, Color, CommandEncoder, ComputePipeline, BufferKind, DeviceDescriptor,
+    Buffer, BufferFlags, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor,
     Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -179,8 +179,12 @@ impl RenderState {
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
-                self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
-                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
+                self.particle_buffer
+                    .resource_index(ResourceAccess::Write)
+                    .unwrap(),
+                self.params_buffer
+                    .resource_index(ResourceAccess::Read)
+                    .unwrap(),
             ])
             .dispatch(workgroups, 1, 1);
         graph.dispatch(&self.context)?;

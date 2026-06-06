@@ -12,7 +12,7 @@
 
 use crate::device::Device;
 use crate::texture::Texture;
-use crate::types::{TextureKind, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::Result;
 use std::collections::HashMap;
 

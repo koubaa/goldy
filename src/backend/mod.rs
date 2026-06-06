@@ -42,9 +42,9 @@ pub(crate) mod shared;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, ResourceHandle, BufferFlags, Color, BufferKind, DepthFormat, DepthStencilState,
-    DeviceType, IndexFormat, PresentMode, PrimitiveTopology, SamplerDesc, TextureKind,
-    TextureFlags, TextureFormat, VertexBufferLayout,
+    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType,
+    IndexFormat, PresentMode, PrimitiveTopology, ResourceHandle, SamplerDesc, TextureFlags,
+    TextureFormat, TextureKind, VertexBufferLayout,
 };
 use anyhow::Result;
 use std::sync::Arc;

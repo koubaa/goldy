@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, Color, CommandEncoder, ComputeEncoder, ComputePipeline, BufferKind, DeviceDescriptor,
+    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor,
     Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
 };

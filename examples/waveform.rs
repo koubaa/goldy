@@ -5,7 +5,7 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance, PrimitiveTopology,
+    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;

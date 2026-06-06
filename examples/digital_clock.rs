@@ -10,7 +10,7 @@ use goldy::{
     examples::digital_clock::{
         generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE,
     },
-    Buffer, CommandEncoder, BufferKind, DeviceDescriptor, Instance, RenderPipeline,
+    Buffer, BufferKind, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
 };
 use std::sync::Arc;

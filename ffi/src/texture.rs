@@ -2,7 +2,7 @@
 
 use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
-use crate::types::{GoldyTextureKind, GoldyTextureFlags, GoldyTextureFormat};
+use crate::types::{GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind};
 use std::ptr;
 
 /// Opaque handle to a Goldy Texture.

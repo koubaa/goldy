@@ -4,7 +4,7 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    Buffer, Color, CommandEncoder, CompareFunction, BufferKind, DepthFormat, DepthStencilState,
+    Buffer, BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState,
     DeviceDescriptor, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute,
     VertexBufferLayout, VertexFormat,

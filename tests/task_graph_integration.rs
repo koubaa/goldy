@@ -7,8 +7,8 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    types::{BufferFlags, ResourceAccess}, Buffer, BufferKind, ComputeEncoder, ComputePipeline,
-    NodeAccess, ShaderModule, TaskGraph,
+    types::{BufferFlags, ResourceAccess},
+    Buffer, BufferKind, ComputeEncoder, ComputePipeline, NodeAccess, ShaderModule, TaskGraph,
 };
 
 mod common;

@@ -1504,7 +1504,11 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: crate::types::ResourceAccess) -> Self {
+    pub fn bind_parcel(
+        mut self,
+        parcel: &crate::Parcel,
+        access: crate::types::ResourceAccess,
+    ) -> Self {
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access: access.into(),

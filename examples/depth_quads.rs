@@ -11,7 +11,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    Color, CommandEncoder, CompareFunction, BufferKind, DepthFormat, DepthStencilState,
+    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState,
     DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };

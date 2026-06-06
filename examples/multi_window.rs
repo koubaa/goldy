@@ -8,7 +8,7 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance, RenderPipeline,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexAttribute,
     VertexBufferLayout, VertexFormat,
 };

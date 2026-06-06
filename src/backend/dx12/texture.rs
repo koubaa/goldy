@@ -4,7 +4,7 @@ use super::barriers;
 use super::types::{Dx12State, PendingDeletion, TextureState};
 use super::utils::{format_to_dxgi, wait_for_fence};
 use super::{DeviceHandle, TextureHandle};
-use crate::types::{TextureKind, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};

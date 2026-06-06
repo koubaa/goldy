@@ -3,7 +3,7 @@
 use super::super::{DeviceHandle, TextureHandle};
 use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_SIZE};
 use super::utils::format_to_mtl;
-use crate::types::{TextureKind, TextureFlags, TextureFormat};
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use ::metal as mtl;
 use anyhow::{bail, Context, Result};
 use mtl::{MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};

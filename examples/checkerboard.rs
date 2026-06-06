@@ -8,7 +8,7 @@
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example checkerboard`
 
 use goldy::{
-    shaders, Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance,
     LayoutCheckable, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule,
     Surface, VertexBufferLayout,
 };

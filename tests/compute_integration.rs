@@ -10,7 +10,7 @@ mod submission;
 
 use goldy::{
     types::{BackendType, BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferPool, ComputeEncoder, ComputePipeline, BufferKind, Device, DeviceDescriptor,
+    Buffer, BufferKind, BufferPool, ComputeEncoder, ComputePipeline, Device, DeviceDescriptor,
     DeviceType, Instance, RequestAdapterOptions, ShaderModule,
 };
 use submission::submission_context;
@@ -1131,8 +1131,12 @@ fn test_buffer_view_copy_between_sub_regions() {
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view B");
 
-    let idx_a = view_a.resource_index(ResourceAccess::Read).expect("view A bindless index");
-    let idx_b = view_b.resource_index(ResourceAccess::Write).expect("view B bindless index");
+    let idx_a = view_a
+        .resource_index(ResourceAccess::Read)
+        .expect("view A bindless index");
+    let idx_b = view_b
+        .resource_index(ResourceAccess::Write)
+        .expect("view B bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1187,7 +1191,9 @@ fn test_buffer_view_isolation() {
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view");
 
-    let idx = view.resource_index(ResourceAccess::Write).expect("view bindless index");
+    let idx = view
+        .resource_index(ResourceAccess::Write)
+        .expect("view bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1248,8 +1254,12 @@ fn test_buffer_pool_alloc_and_dispatch() {
         .write_data(0, &src_data)
         .expect("write src data");
 
-    let src_idx = src_view.resource_index(ResourceAccess::Read).expect("src bindless index");
-    let dst_idx = dst_view.resource_index(ResourceAccess::Write).expect("dst bindless index");
+    let src_idx = src_view
+        .resource_index(ResourceAccess::Read)
+        .expect("src bindless index");
+    let dst_idx = dst_view
+        .resource_index(ResourceAccess::Write)
+        .expect("dst bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1535,7 +1545,9 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
         pass.set_pipeline(&pipeline);
         pass.bind_resources_raw(&[
             input_buf.resource_index(ResourceAccess::Read).expect("srv"),
-            output_buf.resource_index(ResourceAccess::Write).expect("uav"),
+            output_buf
+                .resource_index(ResourceAccess::Write)
+                .expect("uav"),
         ]);
         pass.dispatch(1, 1, 1);
     }
@@ -1670,7 +1682,9 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     {
         let mut pass = encoder.begin_compute_pass();
         pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[texture.resource_index(ResourceAccess::Write).expect("tex resource index")]);
+        pass.bind_resources_raw(&[texture
+            .resource_index(ResourceAccess::Write)
+            .expect("tex resource index")]);
         pass.dispatch(wg_x, wg_y, 1);
     }
     encoder.dispatch(&ctx).expect("dispatch");
@@ -1787,9 +1801,15 @@ fn test_write_buffer_reuse_across_submissions() {
         )
         .expect("out_b");
 
-    let idx_in = mid.resource_index(ResourceAccess::Write).expect("mid bindless");
-    let idx_out_a = out_a.resource_index(ResourceAccess::Write).expect("out_a bindless");
-    let idx_out_b = out_b.resource_index(ResourceAccess::Write).expect("out_b bindless");
+    let idx_in = mid
+        .resource_index(ResourceAccess::Write)
+        .expect("mid bindless");
+    let idx_out_a = out_a
+        .resource_index(ResourceAccess::Write)
+        .expect("out_a bindless");
+    let idx_out_b = out_b
+        .resource_index(ResourceAccess::Write)
+        .expect("out_b bindless");
 
     let data_a: Vec<u32> = (100..100 + N as u32).collect();
     let data_b: Vec<u32> = (900..900 + N as u32).collect();
@@ -2660,7 +2680,9 @@ fn test_transient_buffer_write_then_copy() {
     let output = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
+    let output_uav = output
+        .resource_index(ResourceAccess::Write)
+        .expect("output UAV");
 
     let mut graph = TaskGraph::new();
     let tid = graph.transient_buffer(byte_size);
@@ -2716,12 +2738,16 @@ fn test_regular_buffer_write_then_copy() {
     let scratch = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("scratch buffer");
-    let scratch_uav = scratch.resource_index(ResourceAccess::Write).expect("scratch UAV");
+    let scratch_uav = scratch
+        .resource_index(ResourceAccess::Write)
+        .expect("scratch UAV");
 
     let output = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
+    let output_uav = output
+        .resource_index(ResourceAccess::Write)
+        .expect("output UAV");
 
     let mut graph = TaskGraph::new();
 
@@ -3285,9 +3311,9 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         pass.set_pipeline(&read_pipeline);
         // Bind: Interpolated<float4> src, Filter smp, Scattered<uint> out
         pass.bind_resources_raw(&[
-            sampled_idx,                       // Texture2D<float4> SRV
+            sampled_idx,                                           // Texture2D<float4> SRV
             sampler.resource_index(ResourceAccess::Read).unwrap(), // Filter sampler
-            out.resource_index(ResourceAccess::Write).unwrap(),     // Scattered<uint> output
+            out.resource_index(ResourceAccess::Write).unwrap(),    // Scattered<uint> output
         ]);
         pass.dispatch(1, 1, 1);
     }

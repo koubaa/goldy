@@ -12,8 +12,8 @@ use goldy_ffi::{
     goldy_instance_get_adapter, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
     goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy,
     goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format, goldy_surface_frame_render,
-    goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer, GoldyColor,
-    GoldyBufferKind, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
+    goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer, GoldyBufferKind,
+    GoldyColor, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
     GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult, GoldyShaderModule, GoldySurface,
     GoldyVertexAttribute, GoldyVertexFormat,
 };

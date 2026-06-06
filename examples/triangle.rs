@@ -5,7 +5,7 @@
 //! Run with: cargo run --example triangle
 
 use goldy::{
-    shader::builtins, Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance,
+    shader::builtins, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance,
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;

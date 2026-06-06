@@ -405,8 +405,11 @@ impl Context {
             }
         }
 
-        drop(heap_guard);
-
+        // Submit while heap_guard is still held so that stamp_pending happens before
+        // any other thread can observe last_timeline.  Releasing heap_guard before
+        // stamping creates a window where a concurrent submit sees last_timeline = None
+        // and evicts in-flight transient textures synchronously, causing GPU UAF.
+        // Lock order is always heap → backend; no other code path reverses this.
         let mut backend = device.inner.backend.lock().unwrap();
         let tv = graph.submit_ir_with_resolver(
             self,
@@ -416,7 +419,6 @@ impl Context {
         )?;
         drop(backend);
 
-        let mut heap_guard = device.inner.placement_heap.lock().unwrap();
         if let Some(heap) = heap_guard.as_mut() {
             heap.stamp_pending(tv);
         }

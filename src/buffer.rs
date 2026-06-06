@@ -383,7 +383,7 @@ impl Buffer {
     }
 
     /// Resize the buffer in place, preserving contents in `[0..min(old, new))` and zero-initialising
-    /// any newly exposed bytes. The [`Self::bindless_handle`] and internal resource handle stay stable.
+    /// any newly exposed bytes. [`Self::resource_index`] values and the internal resource handle stay stable.
     pub fn resize_to(&mut self, new_size: u64) -> Result<()> {
         if new_size == self.size {
             return Ok(());
