@@ -493,7 +493,7 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
         .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
-    Ok(dev.timeline_next.saturating_sub(1))
+    Ok(dev.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1))
 }
 
 pub(super) fn present_frame(
@@ -511,7 +511,7 @@ pub(super) fn present_frame(
         .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
-    Ok(dev.timeline_next.saturating_sub(1))
+    Ok(dev.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1))
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -709,7 +709,7 @@ pub(super) fn render(
     }
 
     // Signal fence for this frame
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -718,9 +718,6 @@ pub(super) fn render(
     .context("Failed to signal fence")?;
 
     // Update fence value for next operation
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
 
     if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.frame_sync[current_frame].fence_value = fence_value;
@@ -871,17 +868,13 @@ pub(super) fn present(
                 .ExecuteCommandLists(&[Some(cmd_list)]);
         }
 
-        let fence_value = logical_device.timeline_next;
+        let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         unsafe {
             logical_device
                 .command_queue
                 .Signal(&logical_device.fence, fence_value)
         }
         .context("Failed to signal fence after present copy")?;
-
-        if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.timeline_next += 1;
-        }
 
         // Record the fence so acquire() can wait for it before reusing this slot.
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
@@ -1215,7 +1208,7 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 }
 
 fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
-    let fence_value = device.timeline_next;
+    let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }
         .context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)

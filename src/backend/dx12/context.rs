@@ -77,6 +77,10 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence_thread,
             compute_allocator_pool,
             retained_graph: None,
+            staging_belt: super::staging::StagingBelt::new(
+                super::staging::DEFAULT_STAGING_CHUNK_SIZE,
+            ),
+            texture_staging_pool: super::staging::TextureStagingPool::new(),
         },
     );
     Ok(id)
@@ -105,6 +109,10 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
             slot.retained = false;
         }
     }
+
+    // GPU is idle for this context (waited above); destroy per-context staging resources.
+    unsafe { sc.staging_belt.destroy_all() };
+    unsafe { sc.texture_staging_pool.destroy_all() };
 }
 
 pub(super) fn context_device(state: &Dx12State, ctx: ContextHandle) -> DeviceHandle {

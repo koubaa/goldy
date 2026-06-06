@@ -5,7 +5,6 @@ use super::super::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
 use super::barriers;
 use super::pso_cache;
 use super::shader;
-use super::staging;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
@@ -683,12 +682,8 @@ fn acquire_allocator_slot(
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?
-        .timeline_next;
-    state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?
-        .timeline_next += 1;
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok((cmd_list, token, slot_idx))
 }
 
@@ -989,7 +984,7 @@ fn record_gpu_command(
                     cl.ExecuteIndirect(&batch_sig, *count, &arg_resource, 0, None, 0);
                 }
 
-                let fence_val = logical_device.timeline_next.saturating_sub(1);
+                let fence_val = logical_device.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
                 let dev = state
                     .devices
                     .get_mut(&device_handle)
@@ -1524,21 +1519,18 @@ fn execute_signal_and_finish(
     }
 
     state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(fence_value);
+        .contexts
+        .get_mut(&ctx)
+        .map(|sc| sc.staging_belt.finish(fence_value));
 
     if !staged_texture_uploads.is_empty() {
         let entries = staged_texture_uploads
             .into_iter()
             .map(|u| u.staging_entry)
             .collect::<Vec<_>>();
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(super::staging::TextureStagingPool::new)
-            .release(fence_value, entries);
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            sc.texture_staging_pool.release(fence_value, entries);
+        }
     }
 
     Ok(fence_value)
@@ -1589,15 +1581,13 @@ pub(super) fn submit(
     });
     if has_upload {
         let _tz_reclaim = tracy_zone!("dx12.submit.staging_reclaim");
-        state
-            .staging_belts
-            .entry(device_handle)
-            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .reclaim(&ctx_fence_clone)?;
         let completed = super::context::device_retired(state, device_handle);
-        if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-            pool.reclaim(completed);
-        }
+        let sc = state
+            .contexts
+            .get_mut(&ctx)
+            .context("Invalid context handle")?;
+        sc.staging_belt.reclaim(&ctx_fence_clone)?;
+        sc.texture_staging_pool.reclaim(completed);
     }
 
     let command_list7: ID3D12GraphicsCommandList7 = command_list
@@ -1607,10 +1597,16 @@ pub(super) fn submit(
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
-        let mut pool = state
-            .texture_staging_pools
-            .remove(&device_handle)
-            .unwrap_or_else(super::staging::TextureStagingPool::new);
+        let mut pool = {
+            let sc = state
+                .contexts
+                .get_mut(&ctx)
+                .context("Invalid context handle")?;
+            std::mem::replace(
+                &mut sc.texture_staging_pool,
+                super::staging::TextureStagingPool::new(),
+            )
+        };
 
         let _tz_prepass = tracy_zone!("dx12.submit.upload_prepass");
         for command in commands {
@@ -1630,10 +1626,11 @@ pub(super) fn submit(
                             .devices
                             .get(&buf_dev)
                             .context("WriteBuffer pre-pass: device missing")?;
-                        let belt = state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                            staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                        });
-                        let (res, off) = belt.write(ld, data)?;
+                        let sc = state
+                            .contexts
+                            .get_mut(&ctx)
+                            .context("WriteBuffer pre-pass: context missing")?;
+                        let (res, off) = sc.staging_belt.write(ld, data)?;
                         belt_slices.push((res, off));
                     }
                 }
@@ -1679,7 +1676,9 @@ pub(super) fn submit(
             }
         }
 
-        state.texture_staging_pools.insert(device_handle, pool);
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            sc.texture_staging_pool = pool;
+        }
     }
 
     let mut dx_gpu_profile = {
@@ -1833,15 +1832,13 @@ pub(super) fn submit_graph(
         )
     });
     if has_upload {
-        state
-            .staging_belts
-            .entry(device_handle)
-            .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-            .reclaim(&ctx_fence_clone)?;
         let completed = super::context::device_retired(state, device_handle);
-        if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-            pool.reclaim(completed);
-        }
+        let sc = state
+            .contexts
+            .get_mut(&ctx)
+            .context("Invalid context handle")?;
+        sc.staging_belt.reclaim(&ctx_fence_clone)?;
+        sc.texture_staging_pool.reclaim(completed);
     }
 
     let command_list7: ID3D12GraphicsCommandList7 = command_list
@@ -1851,10 +1848,16 @@ pub(super) fn submit_graph(
     let mut belt_slices: Vec<(ID3D12Resource, u64)> = Vec::new();
     let mut staged_texture_uploads: Vec<super::texture::StagedTextureUpload> = Vec::new();
     if has_upload {
-        let mut pool = state
-            .texture_staging_pools
-            .remove(&device_handle)
-            .unwrap_or_else(super::staging::TextureStagingPool::new);
+        let mut pool = {
+            let sc = state
+                .contexts
+                .get_mut(&ctx)
+                .context("Invalid context handle")?;
+            std::mem::replace(
+                &mut sc.texture_staging_pool,
+                super::staging::TextureStagingPool::new(),
+            )
+        };
 
         let _tz_prepass = tracy_zone!("dx12.submit_graph.upload_prepass");
         for graph_cmd in commands {
@@ -1875,10 +1878,11 @@ pub(super) fn submit_graph(
                                 .devices
                                 .get(&buf_dev)
                                 .context("WriteBuffer pre-pass: device missing")?;
-                            let belt = state.staging_belts.entry(buf_dev).or_insert_with(|| {
-                                staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                            });
-                            let (res, off) = belt.write(ld, data)?;
+                            let sc = state
+                                .contexts
+                                .get_mut(&ctx)
+                                .context("WriteBuffer pre-pass: context missing")?;
+                            let (res, off) = sc.staging_belt.write(ld, data)?;
                             belt_slices.push((res, off));
                         }
                     }
@@ -1925,7 +1929,9 @@ pub(super) fn submit_graph(
             }
         }
 
-        state.texture_staging_pools.insert(device_handle, pool);
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            sc.texture_staging_pool = pool;
+        }
     }
 
     let mut dx_gpu_profile = {
@@ -2130,15 +2136,12 @@ pub(super) fn try_resubmit_retained(
         return Ok(None);
     };
 
-    let fence_value = {
-        let dev = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
-        let token = dev.timeline_next;
-        dev.timeline_next += 1;
-        token
-    };
+    let fence_value = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let cmd_list: ID3D12CommandList = command_list
         .cast()

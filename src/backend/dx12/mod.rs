@@ -342,8 +342,6 @@ impl Dx12Backend {
             next_dsv_offset: 0,
             free_dsv_offsets: Vec::new(),
             slang_compiler,
-            staging_belts: HashMap::new(),
-            texture_staging_pools: HashMap::new(),
             device_removed: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -352,7 +350,7 @@ impl Dx12Backend {
 
     /// Wait for the GPU to finish all work on a device (sync fence path).
     fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
-        let fence_value = device.timeline_next;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         utils::wait_for_fence(&device.fence, fence_value)
@@ -368,7 +366,7 @@ impl Dx12Backend {
             // fence values. Without this, PendingDeletion::Buffer re-signals the same value
             // that wait_for_gpu already used, violating D3D12's monotonic fence requirement
             // and causing an abnormal process exit (exit code 2173) on teardown.
-            logical_device.timeline_next += 1;
+            logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             logical_device.flush_deletion_queue();
 
             if logical_device.pso_disk_cache_dirty {
@@ -387,18 +385,6 @@ impl Dx12Backend {
                             "failed to save DX12 PSO disk cache"
                         );
                     }
-                }
-            }
-
-            if let Some(mut belt) = self.state.staging_belts.remove(&device_handle) {
-                unsafe {
-                    belt.destroy_all();
-                }
-            }
-
-            if let Some(mut pool) = self.state.texture_staging_pools.remove(&device_handle) {
-                unsafe {
-                    pool.destroy_all();
                 }
             }
 
@@ -1208,8 +1194,10 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
-        if let Some(belt) = self.state.staging_belts.get_mut(&device_handle) {
-            belt.trim();
+        for sc in self.state.contexts.values_mut() {
+            if sc.device == device_handle {
+                sc.staging_belt.trim();
+            }
         }
     }
 

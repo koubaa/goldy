@@ -523,14 +523,14 @@ pub(super) fn resize(
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device.timeline_next + 1;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("resize_buffer: Signal")?;
         wait_for_fence(&device.fence, fence_value)?;
         deletion_fence_marker = fence_value;
 
         if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.timeline_next = fence_value + 1;
+            dev.timeline_next.store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
     } else if !old.is_storage && preserve_contents && copy_len > 0 {
         let mut src: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -1263,7 +1263,7 @@ pub(super) fn set_logical_size(
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
-            let last_fence = device.timeline_next.saturating_sub(1);
+            let last_fence = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
 
             if buffer.is_view {
                 device.deletion_queue.queue(
@@ -1768,12 +1768,12 @@ pub(super) fn write(
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device.timeline_next + 1;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
         if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.timeline_next = fence_value + 1;
+            dev.timeline_next.store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
 
         written += this_chunk;
@@ -1896,13 +1896,13 @@ fn standalone_copy_coherent_readback(
     )];
     unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-    let fence_value = device.timeline_next + 1;
+    let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }
         .context("Failed to signal fence (coherent readback)")?;
     wait_for_fence(&device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next = fence_value + 1;
+        dev.timeline_next.store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
     }
     Ok(())
 }
@@ -2064,13 +2064,13 @@ pub(super) fn read_to_cpu(
         )];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device.timeline_next + 1;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
 
         if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.timeline_next = fence_value + 1;
+            dev.timeline_next.store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Map readback buffer and copy to output
@@ -2201,7 +2201,7 @@ pub(super) fn clear(
         )];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device.timeline_next + 1;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }
             .context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
@@ -2212,7 +2212,7 @@ pub(super) fn clear(
         }
 
         if let Some(dev) = state.devices.get_mut(&device_handle) {
-            dev.timeline_next = fence_value + 1;
+            dev.timeline_next.store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
     } else {
         // UPLOAD heap: CPU-accessible, just memset

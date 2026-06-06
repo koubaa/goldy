@@ -16,6 +16,10 @@ use super::super::{
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::{Direct3D12, Dxgi};
 
@@ -485,6 +489,10 @@ pub(crate) struct Dx12SubmissionContext {
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
     /// A single retained command list for zero-recording-cost re-submission.
     pub retained_graph: Option<RetainedGraph>,
+    /// Upload belt for `GpuCommand::WriteBuffer` on this context.
+    pub staging_belt: super::staging::StagingBelt,
+    /// Pool that recycles texture-upload staging buffers across frames on this context.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
@@ -607,7 +615,7 @@ pub(crate) struct LogicalDevice {
     /// Device fence for synchronous Signal+wait paths only (not per-submit timeline).
     pub fence: Direct3D12::ID3D12Fence,
     /// Device-global submission sequence (shared value space; contexts signal their own fences).
-    pub timeline_next: u64,
+    pub timeline_next: Arc<AtomicU64>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     pub retired_floor: u64,
 
@@ -769,8 +777,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.timeline_next;
-            ld.timeline_next += 1;
+            let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
             if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
@@ -804,8 +811,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
             );
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.timeline_next;
-            ld.timeline_next += 1;
+            let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
             if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
@@ -1074,10 +1080,6 @@ pub(super) struct Dx12State {
     pub free_dsv_offsets: Vec<u32>,
     /// Per-backend Slang compiler instance
     pub slang_compiler: crate::slang::SlangCompiler,
-    /// Per-device upload belts for `GpuCommand::WriteBuffer`.
-    pub(super) staging_belts: HashMap<DeviceHandle, super::staging::StagingBelt>,
-    /// Per-device pools that recycle texture-upload staging buffers across frames.
-    pub(super) texture_staging_pools: HashMap<DeviceHandle, super::staging::TextureStagingPool>,
     /// Set to `true` when a TDR / device-removal is detected (fence completed with `u64::MAX`
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.

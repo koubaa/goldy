@@ -429,7 +429,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             sampler_heap,
             sampler_descriptor_size,
             fence,
-            timeline_next: 1,
+            timeline_next: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             retired_floor: 0,
             supports_reserved_buffers,
             tile_heap_pool: if supports_reserved_buffers {

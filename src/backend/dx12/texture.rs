@@ -100,7 +100,7 @@ pub(super) fn init_storage_texture_uav_layout(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -108,10 +108,6 @@ pub(super) fn init_storage_texture_uav_layout(
     }
     .context("Failed to signal fence for init barrier")?;
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
-
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
 
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
 }
@@ -603,20 +599,12 @@ pub(super) fn write(
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture")?;
-    let device_handle = texture.device_handle;
     let staged = {
-        let pool = state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(super::staging::TextureStagingPool::new);
+        let mut pool = super::staging::TextureStagingPool::new();
         stage_texture_upload_full(
             &state.devices,
             &state.textures,
-            pool,
+            &mut pool,
             texture_handle,
             data,
             width,
@@ -638,20 +626,12 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture")?;
-    let device_handle = texture.device_handle;
     let staged = {
-        let pool = state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(super::staging::TextureStagingPool::new);
+        let mut pool = super::staging::TextureStagingPool::new();
         stage_texture_upload_region(
             &state.devices,
             &state.textures,
-            pool,
+            &mut pool,
             TextureUploadRegion {
                 texture_handle,
                 x,
@@ -811,7 +791,7 @@ pub(super) fn execute_staged_uploads_sync(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -820,16 +800,10 @@ pub(super) fn execute_staged_uploads_sync(
     .context("flush_pending_copies: failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
-    if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
-    }
-
     // Release and reclaim the staging entries back to the pool immediately.
-    if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-        let entries: Vec<super::staging::TextureStagingEntry> =
-            copies.into_iter().map(|c| c.staging_entry).collect();
-        pool.release(fence_value, entries);
-        pool.reclaim(fence_value);
+    // The GPU is idle for this submission (we just waited), so we can safely destroy them.
+    for copy in copies {
+        unsafe { copy.staging_entry.destroy() };
     }
 
     tracing::debug!("Flushed {} pending texture copies in one submission", count);
@@ -1009,7 +983,7 @@ pub(super) fn read_to_cpu(
             .ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
-    let fence_value = logical_device.timeline_next;
+    let fence_value = logical_device.timeline_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         logical_device
             .command_queue
@@ -1019,7 +993,6 @@ pub(super) fn read_to_cpu(
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get_mut(&device_handle) {
-        dev.timeline_next += 1;
         // Check for device removal (compute passes may have caused TDR)
         let removed = unsafe { dev.device.GetDeviceRemovedReason() };
         if removed.is_err() {
@@ -1065,7 +1038,7 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
                 dev.reclaim_texture_slots(texture_handle);
                 return;
             }
-            let last_fence = dev.timeline_next.saturating_sub(1);
+            let last_fence = dev.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
             dev.deletion_queue.queue(
                 last_fence,
                 PendingDeletion::Texture {
