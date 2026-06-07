@@ -489,6 +489,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             deletion_queue: Mutex::new(types::DeletionQueue::new()),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),
+            queue_lock: Arc::new(Mutex::new(())),
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,

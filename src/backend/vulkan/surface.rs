@@ -1237,13 +1237,17 @@ where
     let logical_device = devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
+    let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
 
-    unsafe {
-        logical_device.device.queue_submit2(
-            logical_device.queue,
-            std::slice::from_ref(&submit),
-            in_flight_fence,
-        )
+    {
+        let _queue_guard = queue_lock.lock().unwrap();
+        unsafe {
+            logical_device.device.queue_submit2(
+                logical_device.queue,
+                std::slice::from_ref(&submit),
+                in_flight_fence,
+            )
+        }
     }
     .context("Failed to submit render command buffer")?;
 
@@ -1563,9 +1567,11 @@ pub(super) fn present(
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
+        let queue_lock = std::sync::Arc::clone(&submit_ld.queue_lock);
 
         let r = {
             let _sz = crate::tracy_zone!("vk.present.queue_submit2_copy");
+            let _queue_guard = queue_lock.lock().unwrap();
             unsafe {
                 submit_ld.device.queue_submit2(
                     submit_ld.queue,
@@ -2287,6 +2293,7 @@ fn ensure_scratch_texture_slot(
             .devices
             .get(&device_handle)
             .context("Device invalid")?;
+        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         unsafe {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(ld.command_pool)
@@ -2329,12 +2336,16 @@ fn ensure_scratch_texture_slot(
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
             let submit =
                 vk::SubmitInfo2::default().command_buffer_infos(std::slice::from_ref(&cb_info));
+            // Hold queue_lock across both submit and wait_idle: vkQueueWaitIdle
+            // is also externally synchronized on the queue (Vulkan spec).
+            let _queue_guard = queue_lock.lock().unwrap();
             ld.device
                 .queue_submit2(ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
                 .context("Failed to submit scratch texture init")?;
             ld.device
                 .queue_wait_idle(ld.queue)
                 .context("queue_wait_idle after scratch init")?;
+            drop(_queue_guard);
             ld.device
                 .free_command_buffers(ld.command_pool, std::slice::from_ref(&cb));
         }

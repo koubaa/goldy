@@ -732,18 +732,22 @@ pub(super) fn submit(
             .get(&device_handle)
             .context("Invalid device handle")?;
         let queue = ld.queue;
+        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         let signal_info = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let submit_info2 =
             vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
-        let r = unsafe {
-            ld.device.queue_submit2(
-                queue,
-                std::slice::from_ref(&submit_info2),
-                vk::Fence::null(),
-            )
+        let r = {
+            let _queue_guard = queue_lock.lock().unwrap();
+            unsafe {
+                ld.device.queue_submit2(
+                    queue,
+                    std::slice::from_ref(&submit_info2),
+                    vk::Fence::null(),
+                )
+            }
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
         {
@@ -1434,6 +1438,7 @@ pub(super) fn submit(
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+    let queue_lock = std::sync::Arc::clone(&submit_device_core.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -1445,6 +1450,7 @@ pub(super) fn submit(
 
     let queue_submit_result = {
         let _tz = tracy_zone!("vk.queue_submit2");
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             submit_device_core.device.queue_submit2(
                 submit_device_core.queue,
@@ -2444,6 +2450,7 @@ fn submit_graph_impl(
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+    let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -2455,6 +2462,7 @@ fn submit_graph_impl(
 
     let queue_submit_result = {
         let _tz = tracy_zone!("vk.queue_submit2");
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             submit_device.device.queue_submit2(
                 submit_device.queue,
@@ -2641,6 +2649,7 @@ pub(super) fn try_resubmit_retained(
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+    let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -2652,6 +2661,7 @@ pub(super) fn try_resubmit_retained(
 
     {
         let _tz = tracy_zone!("vk.resubmit_retained");
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             submit_device.device.queue_submit2(
                 submit_device.queue,

@@ -679,6 +679,28 @@ pub(crate) struct LogicalDevice {
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
 
+    /// Serialises all `vkQueueSubmit2` calls on this device's queue.
+    ///
+    /// The Vulkan spec marks `vkQueueSubmit2`'s `queue` parameter as externally
+    /// synchronized (VUID-vkQueueSubmit2-queue-parameter): concurrent calls from
+    /// different threads on the same `VkQueue` are undefined behaviour.  The outer
+    /// `Arc<Mutex<Box<dyn GpuBackend>>>` currently provides this serialisation as a
+    /// side-effect, but Phase 5c will replace that coarse lock with fine-grained
+    /// per-context/device locks, leaving the queue unprotected unless we insert an
+    /// explicit guard here.
+    ///
+    /// Each submit call clones this `Arc`, locks it for the duration of
+    /// `vkQueueSubmit2`, then drops the guard — so only the GPU call itself
+    /// serialises; recording and post-submit bookkeeping run concurrently.
+    ///
+    /// NOTE (Phase 5d — intentionally deferred): giving each `SubmissionContext`
+    /// its own `VkQueue` (requested from the same family) would let submits from
+    /// different contexts proceed in parallel without ever touching this lock.
+    /// That approach is deferred because queue count is a driver resource and the
+    /// practical benefit over this per-device lock is small with today's single-
+    /// context-per-device workloads.
+    pub queue_lock: Arc<Mutex<()>>,
+
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
     pub vk_timestamp_period_ns: f32,
