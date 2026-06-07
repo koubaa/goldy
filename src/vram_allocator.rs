@@ -22,7 +22,7 @@
 //! **Deferred-reclamation ring.** The allocator also owns the timeline-gated reclamation ring.
 //! Resources with in-flight GPU work are registered via [`VramAllocator::defer_release`] and
 //! dropped by [`VramAllocator::boundary_crossed`] once the timeline retires past their epoch.
-//! [`DefaultVramAllocator`] implements the ring; [`TrackingVramAllocator`] delegates through it.
+//! [`DefaultVramAllocator`] implements the ring and optional [`AllocationPolicy`] hooks.
 //!
 //! # Architecture
 //!
@@ -48,11 +48,12 @@
 //!
 //! # Usage
 //!
-//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. Call [`Device::with_vram_allocator`]
-//! before creating any GPU resources to install a custom allocator. The default
+//! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. The default
 //! ([`DefaultVramAllocator`]) delegates directly to the backend and implements the deferred
-//! ring at zero overhead when no budget enforcement is needed. Wrap it with
-//! [`TrackingVramAllocator`] to add byte-level tracking and an optional VRAM budget.
+//! ring at zero overhead when [`NoPolicy`] is installed.
+//! Install a custom [`AllocationPolicy`] via
+//! [`Device::set_allocation_policy`](crate::device::Device::set_allocation_policy) for byte
+//! tracking and budget enforcement.
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`BufferPool`]: crate::buffer::BufferPool
@@ -66,18 +67,19 @@
 //! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
-//! [`TrackingVramAllocator`]: crate::vram_allocator::TrackingVramAllocator
+//! [`AllocationPolicy`]: crate::allocation_policy::AllocationPolicy
+//! [`BudgetPolicy`]: crate::allocation_policy::BudgetPolicy
 
+use crate::allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, NoPolicy};
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::*;
-use crate::vram_observer::VramByteTracker;
 use anyhow::Result;
 use std::any::Any;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 // -----------------------------------------------------------------------
 // DeferredPayload
@@ -141,6 +143,27 @@ impl Default for DeferredPayload {
 pub enum ParcelType {
     Buffer,
     Texture,
+}
+
+/// Weak back-reference from a deed-holding parcel to its [`VramAllocator`].
+///
+/// When the parcel is dropped, [`Self::notify_freed`] calls
+/// [`VramAllocator::notify_freed`] so allocation policies can update accounting.
+#[derive(Clone)]
+pub(crate) struct ParcelDeed {
+    allocator: std::sync::Weak<dyn VramAllocator>,
+}
+
+impl ParcelDeed {
+    pub(crate) fn new(allocator: std::sync::Weak<dyn VramAllocator>) -> Self {
+        Self { allocator }
+    }
+
+    pub fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
+        if let Some(alloc) = self.allocator.upgrade() {
+            alloc.notify_freed(reserved, committed, kind);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -281,6 +304,16 @@ pub trait VramAllocator: Send + Sync {
     ///
     /// The default implementation is a no-op.
     fn drain(&self) {}
+
+    /// Install an [`AllocationPolicy`] when the implementation supports it.
+    ///
+    /// The default implementation always fails: custom [`VramAllocator`] wrappers do
+    /// not expose a policy slot. Only [`DefaultVramAllocator`] overrides this; it
+    /// rejects a second install when a
+    /// non-[`NoPolicy`] is already set.
+    fn set_allocation_policy(&self, _policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        anyhow::bail!("this VramAllocator does not support allocation policies")
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -302,14 +335,39 @@ pub trait VramAllocator: Send + Sync {
 /// Per-handle last-touch reclamation (tighter than `device_retired`) is a future optimization.
 pub struct DefaultVramAllocator {
     deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
+    policy: RwLock<Arc<dyn AllocationPolicy>>,
 }
 
 impl DefaultVramAllocator {
-    /// Create a new default allocator.
+    /// Create a new default allocator with [`NoPolicy`].
     pub fn new() -> Self {
         Self {
             deferred: Mutex::new(VecDeque::new()),
+            policy: RwLock::new(Arc::new(NoPolicy)),
         }
+    }
+
+    /// Create a default allocator with the given [`AllocationPolicy`].
+    pub fn with_policy(policy: Arc<dyn AllocationPolicy>) -> Self {
+        Self {
+            deferred: Mutex::new(VecDeque::new()),
+            policy: RwLock::new(policy),
+        }
+    }
+
+    /// Install a custom allocation policy. Fails if one is already installed.
+    pub fn set_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        let mut guard = self.policy.write().unwrap();
+        if !guard.is_noop() {
+            anyhow::bail!("allocation policy already installed");
+        }
+        *guard = policy;
+        Ok(())
+    }
+
+    fn with_policy_read<R>(&self, f: impl FnOnce(&dyn AllocationPolicy) -> R) -> R {
+        let policy = self.policy.read().unwrap();
+        f(policy.as_ref())
     }
 }
 
@@ -320,6 +378,93 @@ impl Default for DefaultVramAllocator {
 }
 
 impl VramAllocator for DefaultVramAllocator {
+    fn alloc_buffer(
+        &self,
+        device: &Device,
+        size: u64,
+        access: BufferKind,
+        element_stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> Result<Buffer> {
+        let req = AllocRequest {
+            reserved_estimate: size,
+            committed_estimate: size,
+            kind: ParcelType::Buffer,
+        };
+        self.with_policy_read(|policy| policy.before_alloc(&req))?;
+        let buf = Buffer::new_with_stride_and_flags(device, size, access, element_stride, flags)?;
+        self.with_policy_read(|policy| {
+            policy.after_alloc(&AllocCommit::from_buffer(&buf));
+        });
+        Ok(buf)
+    }
+
+    fn alloc_buffer_with_capacity(
+        &self,
+        device: &Device,
+        initial_size: u64,
+        expected_max: u64,
+        access: BufferKind,
+        flags: BufferFlags,
+    ) -> Result<Buffer> {
+        let estimate = expected_max.max(initial_size);
+        let req = AllocRequest {
+            reserved_estimate: estimate,
+            committed_estimate: initial_size,
+            kind: ParcelType::Buffer,
+        };
+        self.with_policy_read(|policy| policy.before_alloc(&req))?;
+        let buf = Buffer::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)?;
+        self.with_policy_read(|policy| {
+            policy.after_alloc(&AllocCommit::from_buffer(&buf));
+        });
+        Ok(buf)
+    }
+
+    fn alloc_texture(
+        &self,
+        device: &Device,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<Texture> {
+        let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
+        let req = AllocRequest {
+            reserved_estimate: estimated,
+            committed_estimate: estimated,
+            kind: ParcelType::Texture,
+        };
+        self.with_policy_read(|policy| policy.before_alloc(&req))?;
+        let tex = Texture::new(device, width, height, format, access, flags)?;
+        self.with_policy_read(|policy| {
+            policy.after_alloc(&AllocCommit::from_texture(&tex));
+        });
+        Ok(tex)
+    }
+
+    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
+        let event = AllocFreeEvent {
+            reserved,
+            committed,
+            kind,
+        };
+        self.with_policy_read(|policy| policy.on_freed(&event));
+    }
+
+    fn allocated_bytes(&self) -> u64 {
+        self.with_policy_read(|policy| policy.allocated_bytes())
+    }
+
+    fn budget(&self) -> Option<u64> {
+        self.with_policy_read(|policy| policy.budget())
+    }
+
+    fn set_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        self.set_policy(policy)
+    }
+
     fn name(&self) -> &'static str {
         "default"
     }
@@ -363,144 +508,6 @@ impl VramAllocator for DefaultVramAllocator {
 }
 
 // -----------------------------------------------------------------------
-// Tracking allocator
-// -----------------------------------------------------------------------
-
-/// A `VramAllocator` that wraps another allocator and tracks total allocated bytes.
-///
-/// Optionally enforces a byte budget: allocations that would push the total above
-/// the budget return an error instead of proceeding.
-///
-/// # Example
-///
-/// ```no_run
-/// # use goldy::vram_allocator::{TrackingVramAllocator, DefaultVramAllocator};
-/// # use std::sync::Arc;
-/// // Track all allocations with a 512 MB budget:
-/// let allocator = TrackingVramAllocator::with_budget(
-///     Arc::new(DefaultVramAllocator::new()),
-///     512 * 1024 * 1024,
-/// );
-/// ```
-pub struct TrackingVramAllocator {
-    inner: Arc<dyn VramAllocator>,
-    tracker: Arc<VramByteTracker>,
-}
-
-impl TrackingVramAllocator {
-    /// Wrap `inner` with byte-level tracking but no budget.
-    pub fn new(inner: Arc<dyn VramAllocator>) -> Self {
-        Self {
-            inner,
-            tracker: Arc::new(VramByteTracker::new()),
-        }
-    }
-
-    /// Wrap `inner` with tracking and a byte budget.
-    pub fn with_budget(inner: Arc<dyn VramAllocator>, budget_bytes: u64) -> Self {
-        Self {
-            inner,
-            tracker: Arc::new(VramByteTracker::with_budget(budget_bytes)),
-        }
-    }
-
-    /// Shared byte tracker used for accounting (also implements [`VramObserver`](crate::vram_observer::VramObserver)).
-    pub fn tracker(&self) -> &VramByteTracker {
-        &self.tracker
-    }
-
-    /// Net bytes allocated through this wrapper (allocations minus frees).
-    pub fn allocated_bytes(&self) -> u64 {
-        self.tracker.allocated_bytes()
-    }
-}
-
-impl VramAllocator for TrackingVramAllocator {
-    fn alloc_buffer(
-        &self,
-        device: &Device,
-        size: u64,
-        access: BufferKind,
-        element_stride: Option<u32>,
-        flags: BufferFlags,
-    ) -> Result<Buffer> {
-        self.tracker.check_budget_for_alloc(size)?;
-        let buf = self.inner.alloc_buffer(device, size, access, element_stride, flags)?;
-        self.tracker.add_allocated(buf.allocated_size());
-        Ok(buf)
-    }
-
-    fn alloc_buffer_with_capacity(
-        &self,
-        device: &Device,
-        initial_size: u64,
-        expected_max: u64,
-        access: BufferKind,
-        flags: BufferFlags,
-    ) -> Result<Buffer> {
-        self.tracker.check_budget_for_alloc(expected_max.max(initial_size))?;
-        let buf = self
-            .inner
-            .alloc_buffer_with_capacity(device, initial_size, expected_max, access, flags)?;
-        self.tracker.add_allocated(buf.allocated_size());
-        Ok(buf)
-    }
-
-    fn alloc_texture(
-        &self,
-        device: &Device,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-        access: TextureKind,
-        flags: TextureFlags,
-    ) -> Result<Texture> {
-        let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
-        self.tracker.check_budget_for_alloc(estimated)?;
-        let tex = self.inner.alloc_texture(device, width, height, format, access, flags)?;
-        self.tracker.add_allocated(tex.byte_size() as u64);
-        Ok(tex)
-    }
-
-    fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
-        self.tracker.sub_freed(reserved);
-        self.inner.notify_freed(reserved, committed, kind);
-    }
-
-    fn allocated_bytes(&self) -> u64 {
-        self.tracker.allocated_bytes()
-    }
-
-    fn budget(&self) -> Option<u64> {
-        self.tracker.budget()
-    }
-
-    fn name(&self) -> &'static str {
-        "tracking"
-    }
-
-    fn defer_release(&self, epoch: TimelineValue, payload: DeferredPayload) {
-        self.inner.defer_release(epoch, payload);
-    }
-
-    fn boundary_crossed(&self, gpu_progress: TimelineValue) -> usize {
-        self.inner.boundary_crossed(gpu_progress)
-    }
-
-    fn has_deferred_payloads(&self) -> bool {
-        self.inner.has_deferred_payloads()
-    }
-
-    fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.inner.oldest_deferred_epoch()
-    }
-
-    fn drain(&self) {
-        self.inner.drain();
-    }
-}
-
-// -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
 
@@ -523,19 +530,65 @@ pub(crate) fn bytesize(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allocation_policy::BudgetPolicy;
     use crate::backend::mock::MockBackend;
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
-    /// Returns `(base, device, tracking)`. Keep `base` alive for the test body so the
-    /// mock backend device handle remains valid on the cloned `device` handle.
-    fn device_with_tracking() -> (Device, Device, Arc<TrackingVramAllocator>) {
-        let base = test_device();
-        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
-        let device = base.with_vram_allocator(tracking.clone());
-        (base, device, tracking)
+    /// Device with a byte budget policy installed once for the test body.
+    fn device_with_budget_policy(budget_bytes: u64) -> (Device, Arc<BudgetPolicy>) {
+        let device = test_device();
+        let policy = Arc::new(BudgetPolicy::with_budget(budget_bytes));
+        device
+            .set_allocation_policy(policy.clone())
+            .expect("install budget policy in test fixture");
+        (device, policy)
+    }
+
+    fn device_with_policy() -> (Device, Arc<BudgetPolicy>) {
+        let device = test_device();
+        let policy = Arc::new(BudgetPolicy::new());
+        device
+            .set_allocation_policy(policy.clone())
+            .expect("install budget policy in test fixture");
+        (device, policy)
+    }
+
+    mod allocation_policy {
+        use super::*;
+
+        #[test]
+        fn budget_rejects_over_cap() {
+            let (device, policy) = device_with_budget_policy(8192);
+
+            let buf = device
+                .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+                .unwrap();
+            assert_eq!(policy.allocated_bytes(), 4096);
+
+            let err = device.alloc_buffer(8192, BufferKind::Scattered, None, BufferFlags::empty());
+            assert!(err.is_err(), "allocation policy budget should reject second alloc");
+            assert_eq!(policy.allocated_bytes(), 4096);
+
+            drop(buf);
+            assert_eq!(policy.allocated_bytes(), 0);
+        }
+
+        #[test]
+        fn second_install_fails_on_default_allocator() {
+            let device = test_device();
+            device
+                .set_allocation_policy(Arc::new(BudgetPolicy::new()))
+                .expect("first policy install");
+            let err = device.set_allocation_policy(Arc::new(BudgetPolicy::new()));
+            assert!(err.is_err(), "second policy install should fail");
+            assert!(
+                err.unwrap_err().to_string().contains("already installed"),
+                "expected duplicate-install error, got different failure"
+            );
+        }
     }
 
     #[test]
@@ -567,36 +620,23 @@ mod tests {
     }
 
     #[test]
-    fn tracking_allocator_tracks_bytes() {
-        let (_base, device, tracking) = device_with_tracking();
+    fn budget_policy_tracks_bytes() {
+        let (device, policy) = device_with_policy();
 
-        assert_eq!(tracking.allocated_bytes(), 0);
+        assert_eq!(policy.allocated_bytes(), 0);
 
         let buf = device
             .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
-        assert!(tracking.allocated_bytes() >= 4096);
+        assert!(policy.allocated_bytes() >= 4096);
 
         drop(buf);
-        assert_eq!(tracking.allocated_bytes(), 0);
+        assert_eq!(policy.allocated_bytes(), 0);
     }
 
     #[test]
-    fn tracking_allocator_budget_enforcement() {
-        let device = test_device();
-        let alloc = TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator::new()), 8192);
-
-        let _buf = alloc
-            .alloc_buffer(&device, 4096, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-
-        let result = alloc.alloc_buffer(&device, 8192, BufferKind::Scattered, None, BufferFlags::empty());
-        assert!(result.is_err(), "should fail when over budget");
-    }
-
-    #[test]
-    fn tracking_allocator_texture_tracking() {
-        let (_base, device, tracking) = device_with_tracking();
+    fn budget_policy_tracks_textures() {
+        let (device, policy) = device_with_policy();
 
         let tex = device
             .alloc_texture(
@@ -607,19 +647,19 @@ mod tests {
                 TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
             )
             .unwrap();
-        assert!(tracking.allocated_bytes() > 0);
+        assert!(policy.allocated_bytes() > 0);
 
         drop(tex);
-        assert_eq!(tracking.allocated_bytes(), 0);
+        assert_eq!(policy.allocated_bytes(), 0);
     }
 
     #[test]
     fn accounting_round_trip_mixed_parcels() {
-        let (_base, device, tracking) = device_with_tracking();
+        let (device, policy) = device_with_policy();
         const N: usize = 8;
 
         for _ in 0..N {
-            assert_eq!(tracking.allocated_bytes(), 0);
+            assert_eq!(policy.allocated_bytes(), 0);
 
             let buf = device
                 .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
@@ -637,14 +677,14 @@ mod tests {
                 )
                 .unwrap();
 
-            let bytes_with_parcels = tracking.allocated_bytes();
+            let bytes_with_parcels = policy.allocated_bytes();
             assert!(bytes_with_parcels > 0);
 
             let view = buf.create_view(0, 256, Some(4)).unwrap();
-            let bytes_before_view_drop = tracking.allocated_bytes();
+            let bytes_before_view_drop = policy.allocated_bytes();
             drop(view);
             assert_eq!(
-                tracking.allocated_bytes(),
+                policy.allocated_bytes(),
                 bytes_before_view_drop,
                 "BufferView drop must not change allocator accounting"
             );
@@ -652,63 +692,8 @@ mod tests {
             drop(buf);
             drop(hinted);
             drop(tex);
-            assert_eq!(tracking.allocated_bytes(), 0);
+            assert_eq!(policy.allocated_bytes(), 0);
         }
-    }
-
-    #[test]
-    fn deed_survives_with_vram_allocator_clone() {
-        let base = test_device();
-        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
-        let device = base.with_vram_allocator(tracking.clone());
-
-        let buf = device
-            .alloc_buffer(2048, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        assert!(tracking.allocated_bytes() >= 2048);
-        drop(buf);
-        assert_eq!(tracking.allocated_bytes(), 0);
-    }
-
-    #[test]
-    fn device_vram_observer_tracks_device_alloc_path() {
-        use std::sync::Arc;
-
-        use crate::vram_observer::VramByteTracker;
-
-        let device = test_device();
-        assert!(!device.has_vram_observers());
-
-        let tracker = Arc::new(VramByteTracker::new());
-        let id = device.add_vram_observer(tracker.clone());
-        assert!(device.has_vram_observers());
-
-        let buf = device
-            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        assert!(tracker.allocated_bytes() >= 4096);
-        drop(buf);
-        assert_eq!(tracker.allocated_bytes(), 0);
-
-        assert!(device.remove_vram_observer(id));
-        assert!(!device.has_vram_observers());
-    }
-
-    #[test]
-    fn device_vram_observer_budget_rejects_alloc() {
-        use std::sync::Arc;
-
-        use crate::vram_observer::VramByteTracker;
-
-        let device = test_device();
-        let tracker = Arc::new(VramByteTracker::with_budget(8192));
-        device.add_vram_observer(tracker);
-
-        let _buf = device
-            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        let err = device.alloc_buffer(8192, BufferKind::Scattered, None, BufferFlags::empty());
-        assert!(err.is_err(), "observer budget should reject second alloc");
     }
 
     #[test]
@@ -814,46 +799,5 @@ mod tests {
         alloc.defer_release(1, DeferredPayload::new());
         // boundary_crossed returns 0 (nothing was added).
         assert_eq!(alloc.boundary_crossed(100), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // TrackingVramAllocator deferred delegation tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tracking_allocator_delegates_defer_and_boundary_crossed() {
-        let inner = Arc::new(DefaultVramAllocator::new());
-        let tracking = TrackingVramAllocator::new(inner.clone());
-
-        let alive = Arc::new(7u32);
-        let weak = Arc::downgrade(&alive);
-
-        let mut p = DeferredPayload::new();
-        p.push(alive);
-        tracking.defer_release(3, p);
-
-        // Not yet retired.
-        assert_eq!(tracking.boundary_crossed(2), 0);
-        assert!(weak.upgrade().is_some());
-
-        // Retired.
-        assert_eq!(tracking.boundary_crossed(3), 1);
-        assert!(weak.upgrade().is_none());
-    }
-
-    #[test]
-    fn tracking_allocator_delegates_drain() {
-        let inner = Arc::new(DefaultVramAllocator::new());
-        let tracking = TrackingVramAllocator::new(inner.clone());
-
-        let alive = Arc::new(8u32);
-        let weak = Arc::downgrade(&alive);
-
-        let mut p = DeferredPayload::new();
-        p.push(alive);
-        tracking.defer_release(9999, p);
-
-        tracking.drain();
-        assert!(weak.upgrade().is_none());
     }
 }

@@ -255,7 +255,7 @@ mod tests {
     fn mark_referenced_is_monotonic_max() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let mut p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
+        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         p.mark_referenced(10);
         p.mark_referenced(5);
         assert_eq!(p.last_referenced(), Some(10));
@@ -267,7 +267,7 @@ mod tests {
     fn transfer_out_referenced_has_ready_after() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
-        let mut p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
+        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         p.mark_referenced(42);
         let stamped = pool.transfer_out(p);
         assert_eq!(stamped.ready_after, Some(42));
@@ -352,7 +352,7 @@ mod tests {
         let mut pool = RetainedPool::new(test_device());
         let mut m = pool.mosaic();
         m.emplace(&[1u32]);
-        let mut parcel = m.build().unwrap();
+        let parcel = m.build().unwrap();
         parcel.mark_referenced(10);
         parcel.mark_referenced(5);
         assert_eq!(parcel.last_referenced(), Some(10));
