@@ -2,19 +2,12 @@
 # CI jobs (test-vulkan, python-linux, cpp-linux) pull this image instead of
 # running apt-get upgrade/install on every run.
 #
-# Bootstrap: merge this workflow first, run workflow_dispatch to seed :latest,
-# then merge CI changes that reference ghcr.io/koubaa/goldy/lavapipe-ci:latest.
+# Run manually via workflow_dispatch when the image should be rebuilt
+# (Dockerfile changes, Mesa updates, etc.).
 
 name: Publish lavapipe CI image
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docker/lavapipe-ci/**'
-      - '.github/workflows/publish-lavapipe-ci-image.yml'
-  schedule:
-    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 permissions:
