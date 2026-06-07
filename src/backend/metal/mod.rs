@@ -718,6 +718,7 @@ impl GpuBackend for MetalBackend {
             let retired = context::device_retired(&self.state, device);
             if let Some(sc) = self.state.contexts.get_mut(&ctx) {
                 drain_completed_cbs(sc);
+                sc.deletion_queue.process_up_to(value);
             }
             if let Some(ld) = self.state.devices.get_mut(&device) {
                 ld.process_deletion_queue_up_to(value.min(retired));
@@ -769,6 +770,7 @@ impl GpuBackend for MetalBackend {
             let retired = context::device_retired(&self.state, device);
             if let Some(sc) = self.state.contexts.get_mut(&ctx) {
                 drain_completed_cbs(sc);
+                sc.deletion_queue.process_up_to(value);
             }
             if let Some(ld) = self.state.devices.get_mut(&device) {
                 ld.process_deletion_queue_up_to(value.min(retired));
@@ -811,6 +813,9 @@ impl GpuBackend for MetalBackend {
         }
 
         let retired = context::device_retired(&self.state, device);
+        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
+            sc.deletion_queue.process_up_to(value);
+        }
         if let Some(ld) = self.state.devices.get_mut(&device) {
             ld.process_deletion_queue_up_to(value.min(retired));
         }
@@ -889,6 +894,10 @@ impl GpuBackend for MetalBackend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device);
+        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            sc.deletion_queue.process_up_to(ctx_signaled);
+        }
         if let Some(ld) = self.state.devices.get_mut(&device) {
             ld.process_deletion_queue_up_to(retired);
         }
@@ -944,11 +953,19 @@ impl GpuBackend for MetalBackend {
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
         let device = self.context_device(ctx);
-        self.state
+        let ctx_count = self
+            .state
+            .contexts
+            .get(&ctx)
+            .map(|sc| sc.deletion_queue.pending_len())
+            .unwrap_or(0);
+        let device_count = self
+            .state
             .devices
             .get(&device)
             .map(|d| d.deletion_queue.pending_len())
-            .unwrap_or(0)
+            .unwrap_or(0);
+        ctx_count + device_count
     }
 
     fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {

@@ -31,6 +31,30 @@ pub(super) fn device_retired(state: &MetalState, device: DeviceHandle) -> u64 {
     floor.max(max_ctx)
 }
 
+/// Returns the `ContextHandle` whose reclamation context is installed on the current thread
+/// for a context on `device`, if any.
+///
+/// Used to route resource deletions into the owning context's deletion queue (rather than
+/// the device-wide queue) so they reclaim on the context's own clock.  See issue #190.
+pub(super) fn context_handle_for_thread(
+    state: &MetalState,
+    device: DeviceHandle,
+) -> Option<super::ContextHandle> {
+    let thread = std::thread::current().id();
+    state
+        .contexts
+        .iter()
+        .filter(|(_, c)| c.device == device)
+        .find_map(|(h, c)| {
+            if let Some((t, _)) = c.reclamation_context {
+                if t == thread {
+                    return Some(*h);
+                }
+            }
+            None
+        })
+}
+
 pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<ContextHandle> {
     let ld = state
         .devices
@@ -57,6 +81,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             last_committed_timeline: None,
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
+            deletion_queue: super::types::DeletionQueue::new(),
         },
     );
     Ok(id)
@@ -77,6 +102,10 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
     for (_, cb) in sc.in_flight_command_buffers.drain(..) {
         cb.wait_until_completed();
     }
+    // All CBs have completed; flush any resources still parked in the per-context
+    // deletion queue.  At this point every timeline value is retired so every
+    // barrier has been passed.
+    sc.deletion_queue.flush_all();
 }
 
 pub(super) fn context_device(state: &MetalState, ctx: ContextHandle) -> DeviceHandle {

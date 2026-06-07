@@ -655,6 +655,12 @@ pub(crate) struct MetalSubmissionContext {
     pub staging_belt: super::staging::StagingBelt,
     /// Per-context staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
     pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Per-context deferred GPU resource teardown, drained on this context's own
+    /// completed timeline value (not the device-wide `device_retired` horizon).
+    /// Resources destroyed while a reclamation context is installed on the current
+    /// thread are routed here so they reclaim without blocking on any other context.
+    /// See issue #190.
+    pub deletion_queue: DeletionQueue,
 }
 
 /// A logical Metal device with associated resources.

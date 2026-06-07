@@ -397,32 +397,42 @@ pub(super) fn read_to_cpu(
 pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(texture) = state.textures.remove(&texture_handle) {
-        if let Some(device) = state.devices.get_mut(&texture.device_handle) {
-            let barrier = device
-                .timeline_scheduled_max
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let slot_barrier = if gpu_idle { None } else { Some(barrier) };
-            {
-                let mut ledger = device.ledger.lock().unwrap();
-                ledger.resource_registry.unregister_texture(texture_handle);
-                if !texture.slot_owned_externally {
-                    if texture.is_storage_image {
-                        ledger
-                            .resource_registry
-                            .release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
-                    } else {
-                        ledger
-                            .resource_registry
-                            .release_texture_slot(texture.arg_buffer_index, slot_barrier);
-                    }
+        let device_handle = texture.device_handle;
+        // Use the same reclamation_barrier logic as buffer::destroy so that
+        // in-reclamation destroys get the tighter epoch rather than the wider
+        // timeline_scheduled_max.
+        let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+        let slot_barrier = if gpu_idle { None } else { Some(barrier) };
+        if let Some(device) = state.devices.get_mut(&device_handle) {
+            let mut ledger = device.ledger.lock().unwrap();
+            ledger.resource_registry.unregister_texture(texture_handle);
+            if !texture.slot_owned_externally {
+                if texture.is_storage_image {
+                    ledger
+                        .resource_registry
+                        .release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
+                } else {
+                    ledger
+                        .resource_registry
+                        .release_texture_slot(texture.arg_buffer_index, slot_barrier);
                 }
             }
-            device.deletion_queue.queue(
-                barrier,
-                super::types::PendingDeletion::Texture {
-                    texture: texture.texture,
-                },
-            );
+        }
+        let deletion = super::types::PendingDeletion::Texture {
+            texture: texture.texture,
+        };
+        // Hot path: route to the owning context's per-context deletion queue.
+        // Falls back to device-level queue (async GC safety net) when no
+        // reclamation context is installed on the current thread.
+        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+        if let Some(h) = ctx_h {
+            if let Some(sc) = state.contexts.get_mut(&h) {
+                sc.deletion_queue.queue(barrier, deletion);
+                return;
+            }
+        }
+        if let Some(device) = state.devices.get_mut(&device_handle) {
+            device.deletion_queue.queue(barrier, deletion);
         }
     }
 }

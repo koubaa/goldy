@@ -1092,6 +1092,12 @@ pub(super) fn submit(
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
+    // Drain per-context deletion queue on the context's own clock (hot path),
+    // then the device-level queue as the async GC safety net (see issue #190).
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+        sc.deletion_queue.process_up_to(ctx_signaled);
+    }
     {
         let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get_mut(&device_handle) {
@@ -1305,6 +1311,12 @@ pub(super) fn submit_graph(
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+    }
+    // Drain per-context deletion queue on the context's own clock (hot path),
+    // then the device-level queue as the async GC safety net (see issue #190).
+    if let Some(sc) = state.contexts.get_mut(&ctx) {
+        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+        sc.deletion_queue.process_up_to(ctx_signaled);
     }
     {
         let retired = super::context::device_retired(state, device_handle);

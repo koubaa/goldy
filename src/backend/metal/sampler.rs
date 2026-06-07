@@ -92,22 +92,32 @@ pub(super) fn create(
 /// Destroy a sampler.
 pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
-        if let Some(device) = state.devices.get_mut(&sampler.device_handle) {
+        let device_handle = sampler.device_handle;
+        let gpu_idle = super::gpu_is_idle(state);
+        let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+        if let Some(device) = state.devices.get_mut(&device_handle) {
             device
                 .ledger
                 .lock()
                 .unwrap()
                 .resource_registry
                 .unregister_sampler(sampler_handle);
-            let barrier = device
-                .timeline_scheduled_max
-                .load(std::sync::atomic::Ordering::Relaxed);
-            device.deletion_queue.queue(
-                barrier,
-                super::types::PendingDeletion::Sampler {
-                    sampler: sampler.sampler,
-                },
-            );
+        }
+        let deletion = super::types::PendingDeletion::Sampler {
+            sampler: sampler.sampler,
+        };
+        // Hot path: route to the owning context's per-context deletion queue.
+        // Falls back to device-level queue (async GC safety net) when no
+        // reclamation context is installed on the current thread.
+        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+        if let Some(h) = ctx_h {
+            if let Some(sc) = state.contexts.get_mut(&h) {
+                sc.deletion_queue.queue(barrier, deletion);
+                return;
+            }
+        }
+        if let Some(device) = state.devices.get_mut(&device_handle) {
+            device.deletion_queue.queue(barrier, deletion);
         }
     }
 }

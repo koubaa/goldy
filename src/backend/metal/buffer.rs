@@ -605,12 +605,24 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
                 .unwrap()
                 .resource_registry
                 .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });
-            device.deletion_queue.queue(
-                barrier,
-                super::types::PendingDeletion::Buffer {
-                    buffer: buffer.buffer,
-                },
-            );
+        }
+        let deletion = super::types::PendingDeletion::Buffer {
+            buffer: buffer.buffer,
+        };
+        // Hot path: route to the owning context's per-context deletion queue so
+        // the MTL buffer is freed as soon as the context's own timeline retires,
+        // without waiting for device_retired (max over all contexts).
+        // Falls back to the device-level queue (async GC safety net) when there
+        // is no reclamation context installed on the current thread.
+        let ctx_h = super::context::context_handle_for_thread(state, buffer.device_handle);
+        if let Some(h) = ctx_h {
+            if let Some(sc) = state.contexts.get_mut(&h) {
+                sc.deletion_queue.queue(barrier, deletion);
+                return;
+            }
+        }
+        if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
+            device.deletion_queue.queue(barrier, deletion);
         }
     }
 }
