@@ -72,8 +72,7 @@ pub use backend::GraphCommand;
 pub use backend::{BufferHeapStats, TextureHeapStats};
 pub use context::Context;
 pub use device::{
-    Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference,
-    RequestAdapterOptions,
+    Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
 };
 pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;
@@ -85,9 +84,7 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
-pub use task_graph::{
-    GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId,
-};
+pub use task_graph::{GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId};
 pub use task_graph::{SwapchainOutputHandle, SWAPCHAIN_SLOT_PLACEHOLDER};
 
 pub use texture::Texture;

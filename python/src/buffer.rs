@@ -145,7 +145,5 @@ fn extract_bytes_with_stride(data: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, u32)
         return Ok((bytes, 1)); // Raw bytes = 1 byte stride
     }
 
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "Expected numpy array or bytes",
-    ))
+    Err(pyo3::exceptions::PyTypeError::new_err("Expected numpy array or bytes"))
 }

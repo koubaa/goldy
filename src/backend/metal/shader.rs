@@ -129,12 +129,10 @@ fn patch_msl_threadgroup_copies(msl: &str) -> String {
         let trimmed = line.trim_start();
 
         // Pattern 1a — explicit `thread array<` from KernelContext.
-        let is_p1_explicit =
-            trimmed.starts_with("thread array<") && line.contains("= *kernelContext");
+        let is_p1_explicit = trimmed.starts_with("thread array<") && line.contains("= *kernelContext");
         // Pattern 1b — implicit thread (`array<` with no qualifier) from KernelContext.
-        let is_p1_implicit = !trimmed.starts_with("thread")
-            && trimmed.starts_with("array<")
-            && line.contains("= *kernelContext");
+        let is_p1_implicit =
+            !trimmed.starts_with("thread") && trimmed.starts_with("array<") && line.contains("= *kernelContext");
         // Pattern 2 — explicit `thread array<` copying a known threadgroup-ref variable.
         let is_p2 = trimmed.starts_with("thread array<")
             && !line.contains("= *kernelContext")
@@ -268,8 +266,7 @@ pub(super) fn patch_vertex_msl_entry_point_params(msl: &str) -> String {
     // The vertex entry point ends with `[[buffer(0)]])` (the closing paren is immediately
     // after the last attribute). We replace the first occurrence only.
     const SIG_NEEDLE: &str = "[[buffer(0)]])";
-    const SIG_REPLACEMENT: &str =
-        "[[buffer(0)]], EntryPointParams_0 constant* _goldy_ep [[buffer(1)]])";
+    const SIG_REPLACEMENT: &str = "[[buffer(0)]], EntryPointParams_0 constant* _goldy_ep [[buffer(1)]])";
     let patched = if let Some(pos) = msl.find(SIG_NEEDLE) {
         let mut s = String::with_capacity(msl.len() + 80);
         s.push_str(&msl[..pos]);
@@ -323,8 +320,7 @@ fn compile_stage_with_reflection(
         desc.optimization_level,
     );
 
-    let result = compile_outcome
-        .with_context(|| format!("Failed to compile {} shader stage", desc.entry_point))?;
+    let result = compile_outcome.with_context(|| format!("Failed to compile {} shader stage", desc.entry_point))?;
 
     if !result.reflection.parameter_blocks.is_empty() {
         tracing::debug!(
@@ -353,11 +349,7 @@ fn compile_stage_with_reflection(
         }
     }
 
-    let raw_msl = result
-        .shader
-        .as_str()
-        .context("Failed to get MSL source")?
-        .to_string();
+    let raw_msl = result.shader.as_str().context("Failed to get MSL source")?.to_string();
 
     // Apply stage-specific MSL patches for known Slang codegen bugs.
     let msl_source = if desc.stage == SlangStage::Vertex {
@@ -390,11 +382,7 @@ fn compile_stage_with_reflection(
         raw_msl
     };
 
-    tracing::debug!(
-        "Compiled MSL {} shader ({} bytes)",
-        desc.entry_point,
-        msl_source.len()
-    );
+    tracing::debug!("Compiled MSL {} shader ({} bytes)", desc.entry_point, msl_source.len());
 
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
         use std::io::Write;
@@ -412,13 +400,7 @@ fn compile_stage_with_reflection(
 
     let library = device
         .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create Metal library for {}: {}",
-                desc.entry_point,
-                e
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
 
     Ok((library, Some(result.reflection)))
 }
@@ -441,9 +423,7 @@ pub(super) fn ensure_stage_compiled(
 
     let maybe_scratch: Option<CompileScratch> = {
         let shaders = &state.shaders;
-        let shader = shaders
-            .get(&shader_handle)
-            .context("Invalid shader handle")?;
+        let shader = shaders.get(&shader_handle).context("Invalid shader handle")?;
         let (entry_point, need_compile) = match stage {
             SlangStage::Vertex => ("vs_main", shader.vertex_library.is_none()),
             SlangStage::Fragment => ("fs_main", shader.fragment_library.is_none()),
@@ -477,11 +457,7 @@ pub(super) fn ensure_stage_compiled(
         .clone();
 
     let search_path_refs: Vec<&str> = scratch.search_paths.iter().map(|s| s.as_str()).collect();
-    let extra_defines: Vec<(&str, &str)> = scratch
-        .defines
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let extra_defines: Vec<(&str, &str)> = scratch.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let compile_desc = ShaderStageCompileDesc {
         slang_source: &scratch.slang_source,
         search_paths: &search_path_refs,
@@ -510,9 +486,7 @@ pub(super) fn ensure_stage_compiled(
         let reflection = reflection.map(|mut r| {
             if r.push_constant_categories.is_empty() {
                 r.push_constant_categories =
-                    crate::slang::virtual_main::extract_push_constant_categories(
-                        &scratch.slang_source,
-                    );
+                    crate::slang::virtual_main::extract_push_constant_categories(&scratch.slang_source);
             }
             r
         });
@@ -659,10 +633,7 @@ mod tests {
     fn stage_in_noop_when_absent() {
         let msl = "[[kernel]] void cs_main(device uint* buf [[buffer(0)]])\n{\n}\n";
         let out = patch_vertex_stage_in_pointer(msl);
-        assert_eq!(
-            out, msl,
-            "MSL without [[stage_in]] must pass through unchanged"
-        );
+        assert_eq!(out, msl, "MSL without [[stage_in]] must pass through unchanged");
     }
 
     // ── patch_vertex_msl_entry_point_params ──────────────────────────────────
@@ -719,10 +690,7 @@ mod tests {
         );
 
         let out = patch_vertex_msl_entry_point_params(msl);
-        assert_eq!(
-            out, msl,
-            "MSL with correct [[buffer(1)]] must pass through unchanged"
-        );
+        assert_eq!(out, msl, "MSL with correct [[buffer(1)]] must pass through unchanged");
     }
 
     /// No EntryPointParams_0 at all (simple shader): must be a no-op.
@@ -734,10 +702,7 @@ mod tests {
         );
 
         let out = patch_vertex_msl_entry_point_params(msl);
-        assert_eq!(
-            out, msl,
-            "MSL without EntryPointParams_0 must pass through unchanged"
-        );
+        assert_eq!(out, msl, "MSL without EntryPointParams_0 must pass through unchanged");
     }
 
     /// Fragment shader: Slang correctly emits [[buffer(1)]] for fragment stages,
@@ -816,10 +781,7 @@ mod tests {
         );
 
         let out = patch_compute_msl_entry_point_params(msl);
-        assert_eq!(
-            out, msl,
-            "MSL with correct constant* must pass through unchanged"
-        );
+        assert_eq!(out, msl, "MSL with correct constant* must pass through unchanged");
     }
 
     /// No EntryPointParams_0 at all: no-op.
@@ -831,10 +793,7 @@ mod tests {
         );
 
         let out = patch_compute_msl_entry_point_params(msl);
-        assert_eq!(
-            out, msl,
-            "MSL without EntryPointParams_0 must pass through unchanged"
-        );
+        assert_eq!(out, msl, "MSL without EntryPointParams_0 must pass through unchanged");
     }
 
     // ── patch_msl_threadgroup_copies ─────────────────────────────────────────
@@ -928,10 +887,7 @@ mod tests {
         );
 
         let out = patch_msl_threadgroup_copies(msl);
-        assert_eq!(
-            out, msl,
-            "MSL without kernelContext copies must pass through unchanged"
-        );
+        assert_eq!(out, msl, "MSL without kernelContext copies must pass through unchanged");
     }
 
     // ── patch_compute_msl (orchestrator) ─────────────────────────────────────
@@ -985,9 +941,6 @@ mod tests {
         );
 
         let out = patch_compute_msl(msl);
-        assert_eq!(
-            out, msl,
-            "clean MSL must pass through the orchestrator unchanged"
-        );
+        assert_eq!(out, msl, "clean MSL must pass through the orchestrator unchanged");
     }
 }

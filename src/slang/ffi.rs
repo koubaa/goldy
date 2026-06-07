@@ -162,8 +162,7 @@ pub struct IGlobalSessionVtable {
         desc: *const SessionDesc,
         out_session: *mut *mut ISession,
     ) -> SlangResult,
-    pub find_profile:
-        unsafe extern "C" fn(this: *mut IGlobalSession, name: *const c_char) -> SlangProfileID,
+    pub find_profile: unsafe extern "C" fn(this: *mut IGlobalSession, name: *const c_char) -> SlangProfileID,
     // ... more methods we don't need, but we need to know about them for vtable offset
 }
 
@@ -172,30 +171,25 @@ pub struct IGlobalSessionVtable {
 #[repr(C)]
 pub struct ISessionVtable {
     // ISlangUnknown methods (3 methods, indices 0-2)
-    pub query_interface: unsafe extern "C" fn(
-        this: *mut ISession,
-        uuid: *const c_void,
-        out_object: *mut *mut c_void,
-    ) -> SlangResult,
+    pub query_interface:
+        unsafe extern "C" fn(this: *mut ISession, uuid: *const c_void, out_object: *mut *mut c_void) -> SlangResult,
     pub add_ref: unsafe extern "C" fn(this: *mut ISession) -> u32,
     pub release: unsafe extern "C" fn(this: *mut ISession) -> u32,
     // ISession methods (indices 3-13)
-    pub get_global_session: *const c_void,              // 3
-    pub load_module: *const c_void,                     // 4
-    pub load_module_from_source: *const c_void,         // 5
-    pub create_composite_component_type: *const c_void, // 6
-    pub specialize_type: *const c_void,                 // 7
-    pub get_type_layout: *const c_void,                 // 8
-    pub get_container_type: *const c_void,              // 9
-    pub get_dynamic_type: *const c_void,                // 10
-    pub get_type_rtti_mangled_name: *const c_void,      // 11
-    pub get_type_conformance_witness_mangled_name: *const c_void, // 12
+    pub get_global_session: *const c_void,                         // 3
+    pub load_module: *const c_void,                                // 4
+    pub load_module_from_source: *const c_void,                    // 5
+    pub create_composite_component_type: *const c_void,            // 6
+    pub specialize_type: *const c_void,                            // 7
+    pub get_type_layout: *const c_void,                            // 8
+    pub get_container_type: *const c_void,                         // 9
+    pub get_dynamic_type: *const c_void,                           // 10
+    pub get_type_rtti_mangled_name: *const c_void,                 // 11
+    pub get_type_conformance_witness_mangled_name: *const c_void,  // 12
     pub get_type_conformance_witness_sequential_id: *const c_void, // 13
     // createCompileRequest (index 14)
-    pub create_compile_request: unsafe extern "C" fn(
-        this: *mut ISession,
-        out_compile_request: *mut *mut SlangCompileRequest,
-    ) -> SlangResult,
+    pub create_compile_request:
+        unsafe extern "C" fn(this: *mut ISession, out_compile_request: *mut *mut SlangCompileRequest) -> SlangResult,
 }
 
 /// Opaque compile request handle  
@@ -403,49 +397,36 @@ pub const SLANG_OPTIMIZATION_LEVEL_MAXIMAL: c_int = 3;
 /// Function pointer types for dynamic loading
 pub type FnSpCreateSession = unsafe extern "C" fn(deprecated: *const c_char) -> *mut SlangSession;
 pub type FnSpDestroySession = unsafe extern "C" fn(session: *mut SlangSession);
-pub type FnSpCreateCompileRequest =
-    unsafe extern "C" fn(session: *mut SlangSession) -> *mut SlangCompileRequest;
+pub type FnSpCreateCompileRequest = unsafe extern "C" fn(session: *mut SlangSession) -> *mut SlangCompileRequest;
 pub type FnSpDestroyCompileRequest = unsafe extern "C" fn(request: *mut SlangCompileRequest);
-pub type FnSpSetCodeGenTarget =
-    unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int);
-pub type FnSpAddCodeGenTarget =
-    unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int) -> c_int;
+pub type FnSpSetCodeGenTarget = unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int);
+pub type FnSpAddCodeGenTarget = unsafe extern "C" fn(request: *mut SlangCompileRequest, target: c_int) -> c_int;
 pub type FnSpSetTargetProfile =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, profile: c_int);
 pub type FnSpSetTargetFloatingPointMode =
     unsafe extern "C" fn(request: *mut SlangCompileRequest, target_index: c_int, mode: c_int);
 /// Find a profile by name (e.g., "sm_6_6") - uses the global session
-pub type FnSpFindProfile =
-    unsafe extern "C" fn(session: *mut SlangSession, name: *const c_char) -> SlangProfileID;
-pub type FnSpAddTranslationUnit = unsafe extern "C" fn(
-    request: *mut SlangCompileRequest,
-    language: c_int,
-    name: *const c_char,
-) -> c_int;
+pub type FnSpFindProfile = unsafe extern "C" fn(session: *mut SlangSession, name: *const c_char) -> SlangProfileID;
+pub type FnSpAddTranslationUnit =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, language: c_int, name: *const c_char) -> c_int;
 pub type FnSpAddTranslationUnitSourceString = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     translation_unit_index: c_int,
     path: *const c_char,
     source: *const c_char,
 );
-pub type FnSpAddSearchPath =
-    unsafe extern "C" fn(request: *mut SlangCompileRequest, path: *const c_char);
-pub type FnSpAddPreprocessorDefine = unsafe extern "C" fn(
-    request: *mut SlangCompileRequest,
-    key: *const c_char,
-    value: *const c_char,
-);
+pub type FnSpAddSearchPath = unsafe extern "C" fn(request: *mut SlangCompileRequest, path: *const c_char);
+pub type FnSpAddPreprocessorDefine =
+    unsafe extern "C" fn(request: *mut SlangCompileRequest, key: *const c_char, value: *const c_char);
 pub type FnSpAddEntryPoint = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     translation_unit_index: c_int,
     name: *const c_char,
     stage: c_int,
 ) -> c_int;
-pub type FnSpSetOptimizationLevel =
-    unsafe extern "C" fn(request: *mut SlangCompileRequest, level: c_int);
+pub type FnSpSetOptimizationLevel = unsafe extern "C" fn(request: *mut SlangCompileRequest, level: c_int);
 pub type FnSpCompile = unsafe extern "C" fn(request: *mut SlangCompileRequest) -> SlangResult;
-pub type FnSpGetDiagnosticOutput =
-    unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *const c_char;
+pub type FnSpGetDiagnosticOutput = unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *const c_char;
 pub type FnSpGetEntryPointCodeBlob = unsafe extern "C" fn(
     request: *mut SlangCompileRequest,
     entry_point_index: c_int,
@@ -469,8 +450,7 @@ pub type FnSlangCreateGlobalSession2 = unsafe extern "C" fn(
 // ============================================================================
 
 /// Get reflection data from a compile request (call after spCompile succeeds)
-pub type FnSpGetReflection =
-    unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *mut SlangReflection;
+pub type FnSpGetReflection = unsafe extern "C" fn(request: *mut SlangCompileRequest) -> *mut SlangReflection;
 
 /// Layout rules for [`FnSpReflectionGetTypeLayout`] (matches `SlangLayoutRules` in slang.h).
 #[repr(u32)]
@@ -481,10 +461,8 @@ pub enum SlangLayoutRules {
 }
 
 /// Find a named type in the compiled program's reflection.
-pub type FnSpReflectionFindTypeByName = unsafe extern "C" fn(
-    reflection: *mut SlangReflection,
-    name: *const c_char,
-) -> *mut SlangReflectionType;
+pub type FnSpReflectionFindTypeByName =
+    unsafe extern "C" fn(reflection: *mut SlangReflection, name: *const c_char) -> *mut SlangReflectionType;
 
 /// Get the memory layout of a type under the given rules.
 pub type FnSpReflectionGetTypeLayout = unsafe extern "C" fn(
@@ -494,34 +472,26 @@ pub type FnSpReflectionGetTypeLayout = unsafe extern "C" fn(
 ) -> *mut SlangReflectionTypeLayout;
 
 /// Get the number of parameters in the program
-pub type FnSpReflectionGetParameterCount =
-    unsafe extern "C" fn(reflection: *mut SlangReflection) -> c_int;
+pub type FnSpReflectionGetParameterCount = unsafe extern "C" fn(reflection: *mut SlangReflection) -> c_int;
 
 /// Get a parameter by index
-pub type FnSpReflectionGetParameterByIndex = unsafe extern "C" fn(
-    reflection: *mut SlangReflection,
-    index: c_int,
-) -> *mut SlangReflectionParameter;
+pub type FnSpReflectionGetParameterByIndex =
+    unsafe extern "C" fn(reflection: *mut SlangReflection, index: c_int) -> *mut SlangReflectionParameter;
 
 /// Get the type layout of a variable layout (parameter)
 /// Note: In Slang, parameters are VariableLayouts
 pub type FnSpReflectionParameterGetTypeLayout =
-    unsafe extern "C" fn(
-        var_layout: *mut SlangReflectionVariableLayout,
-    ) -> *mut SlangReflectionTypeLayout;
+    unsafe extern "C" fn(var_layout: *mut SlangReflectionVariableLayout) -> *mut SlangReflectionTypeLayout;
 
 /// Get the underlying variable from a variable layout
 pub type FnSpReflectionVariableLayoutGetVariable =
-    unsafe extern "C" fn(
-        var_layout: *mut SlangReflectionVariableLayout,
-    ) -> *mut SlangReflectionVariable;
+    unsafe extern "C" fn(var_layout: *mut SlangReflectionVariableLayout) -> *mut SlangReflectionVariable;
 
 /// Opaque reflection variable handle
 pub type SlangReflectionVariable = c_void;
 
 /// Get the name of a variable
-pub type FnSpReflectionVariableGetName =
-    unsafe extern "C" fn(variable: *mut SlangReflectionVariable) -> *const c_char;
+pub type FnSpReflectionVariableGetName = unsafe extern "C" fn(variable: *mut SlangReflectionVariable) -> *const c_char;
 
 /// Get the binding index for a parameter
 pub type FnSpReflectionParameterGetBindingIndex =
@@ -548,11 +518,10 @@ pub type FnSpReflectionTypeLayoutGetFieldCount =
     unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> c_int;
 
 /// Get a field by index from a type layout
-pub type FnSpReflectionTypeLayoutGetFieldByIndex =
-    unsafe extern "C" fn(
-        type_layout: *mut SlangReflectionTypeLayout,
-        index: c_int,
-    ) -> *mut SlangReflectionVariableLayout;
+pub type FnSpReflectionTypeLayoutGetFieldByIndex = unsafe extern "C" fn(
+    type_layout: *mut SlangReflectionTypeLayout,
+    index: c_int,
+) -> *mut SlangReflectionVariableLayout;
 
 /// Get the type from a type layout
 pub type FnSpReflectionTypeLayoutGetType =
@@ -562,20 +531,15 @@ pub type FnSpReflectionTypeLayoutGetType =
 pub type FnSpReflectionTypeGetKind = unsafe extern "C" fn(type_: *mut SlangReflectionType) -> c_int;
 
 /// Get the name of a type
-pub type FnSpReflectionTypeGetName =
-    unsafe extern "C" fn(type_: *mut SlangReflectionType) -> *const c_char;
+pub type FnSpReflectionTypeGetName = unsafe extern "C" fn(type_: *mut SlangReflectionType) -> *const c_char;
 
 /// Get the element type layout (for arrays, buffers, parameter blocks)
 pub type FnSpReflectionTypeLayoutGetElementTypeLayout =
-    unsafe extern "C" fn(
-        type_layout: *mut SlangReflectionTypeLayout,
-    ) -> *mut SlangReflectionTypeLayout;
+    unsafe extern "C" fn(type_layout: *mut SlangReflectionTypeLayout) -> *mut SlangReflectionTypeLayout;
 
 /// Get the type layout of a variable layout (field)
 pub type FnSpReflectionVariableLayoutGetTypeLayout =
-    unsafe extern "C" fn(
-        var_layout: *mut SlangReflectionVariableLayout,
-    ) -> *mut SlangReflectionTypeLayout;
+    unsafe extern "C" fn(var_layout: *mut SlangReflectionVariableLayout) -> *mut SlangReflectionTypeLayout;
 
 /// Get the offset of a variable layout within its container
 pub type FnSpReflectionVariableLayoutGetOffset =
@@ -657,10 +621,7 @@ pub unsafe fn global_session_create_session(
 ///
 /// # Safety
 /// The global_session pointer must be valid.
-pub unsafe fn global_session_find_profile(
-    global_session: *mut IGlobalSession,
-    name: *const c_char,
-) -> SlangProfileID {
+pub unsafe fn global_session_find_profile(global_session: *mut IGlobalSession, name: *const c_char) -> SlangProfileID {
     let vtable_ptr = *(global_session as *const *const IGlobalSessionVtable);
     let vtable = &*vtable_ptr;
     (vtable.find_profile)(global_session, name)
@@ -718,11 +679,7 @@ mod tests {
 
         // SessionDesc: Expected ~96 bytes on 64-bit
         // 8 + 8 + 8 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 6 + 8 + 4 + 1 + 3 = 96
-        assert_eq!(
-            std::mem::size_of::<SessionDesc>(),
-            96,
-            "SessionDesc size mismatch"
-        );
+        assert_eq!(std::mem::size_of::<SessionDesc>(), 96, "SessionDesc size mismatch");
 
         // PreprocessorMacroDesc: 2 pointers = 16 bytes
         assert_eq!(

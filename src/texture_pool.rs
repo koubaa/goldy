@@ -91,13 +91,7 @@ impl TexturePool {
         if !tex.is_owned() {
             return;
         }
-        let key = (
-            tex.width(),
-            tex.height(),
-            tex.format(),
-            tex.access(),
-            tex.flags(),
-        );
+        let key = (tex.width(), tex.height(), tex.format(), tex.access(), tex.flags());
         let slot = self.map.entry(key).or_default();
         if slot.len() >= self.config.max_per_key {
             drop(tex);
@@ -204,11 +198,7 @@ mod tests {
         assert_eq!(pool.stats().entries, 1);
 
         let _tex2 = pool.acquire(&device, 8, 8, fmt, acc, flags).unwrap();
-        assert_eq!(
-            pool.stats().entries,
-            0,
-            "slot should be empty after re-acquire"
-        );
+        assert_eq!(pool.stats().entries, 0, "slot should be empty after re-acquire");
     }
 
     // -----------------------------------------------------------------------
@@ -250,9 +240,7 @@ mod tests {
         let handle_interp = interp.gpu_handle();
         pool.release(interp);
 
-        let direct = pool
-            .acquire(&device, 16, 16, fmt, TextureKind::Direct, flags)
-            .unwrap();
+        let direct = pool.acquire(&device, 16, 16, fmt, TextureKind::Direct, flags).unwrap();
         assert_ne!(
             direct.gpu_handle(),
             handle_interp,
@@ -268,15 +256,11 @@ mod tests {
         let mut pool = TexturePool::default();
         let (fmt, acc, _) = rgba_interpolated();
 
-        let src_only = pool
-            .acquire(&device, 16, 16, fmt, acc, TextureFlags::COPY_SRC)
-            .unwrap();
+        let src_only = pool.acquire(&device, 16, 16, fmt, acc, TextureFlags::COPY_SRC).unwrap();
         let handle_src = src_only.gpu_handle();
         pool.release(src_only);
 
-        let dst_only = pool
-            .acquire(&device, 16, 16, fmt, acc, TextureFlags::COPY_DST)
-            .unwrap();
+        let dst_only = pool.acquire(&device, 16, 16, fmt, acc, TextureFlags::COPY_DST).unwrap();
         assert_ne!(
             dst_only.gpu_handle(),
             handle_src,
@@ -307,11 +291,7 @@ mod tests {
 
         // Releasing a third should drop it immediately, not push into the pool.
         pool.release(t3);
-        assert_eq!(
-            pool.stats().entries,
-            2,
-            "pool should not grow beyond max_per_key"
-        );
+        assert_eq!(pool.stats().entries, 2, "pool should not grow beyond max_per_key");
     }
 
     // -----------------------------------------------------------------------
@@ -331,11 +311,7 @@ mod tests {
         assert!(!borrow.is_owned());
 
         pool.release(borrow);
-        assert_eq!(
-            pool.stats().entries,
-            0,
-            "borrowed texture must not be pooled"
-        );
+        assert_eq!(pool.stats().entries, 0, "borrowed texture must not be pooled");
 
         // Still need to clean up the owned texture.
         pool.release(owned);

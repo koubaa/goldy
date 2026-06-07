@@ -103,16 +103,12 @@ pub fn extract_binding_element_type_names(source: &str) -> Vec<Option<String>> {
                     for i in 0..max_slots {
                         let then_name = then_params
                             .iter()
-                            .filter(|p| {
-                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
-                            })
+                            .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
                             .nth(i)
                             .and_then(type_name_for_param);
                         let else_name = else_params
                             .iter()
-                            .filter(|p| {
-                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
-                            })
+                            .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
                             .nth(i)
                             .and_then(type_name_for_param);
                         if then_name == else_name {
@@ -151,9 +147,7 @@ pub fn extract_binding_element_type_names(source: &str) -> Vec<Option<String>> {
 /// when the slot's type is unambiguous, or `None` when the source has no
 /// `[goldy_*]` annotations.  Multiple entry points (vertex + fragment) are
 /// merged: fragment takes precedence for shared slots.
-pub fn extract_push_constant_categories(
-    source: &str,
-) -> Vec<Option<crate::types::ResourceCategory>> {
+pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types::ResourceCategory>> {
     use crate::types::ResourceCategory;
 
     let entries = find_all_entries(source);
@@ -208,16 +202,12 @@ pub fn extract_push_constant_categories(
                     for i in 0..max_slots {
                         let then_cat = then_params
                             .iter()
-                            .filter(|p| {
-                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
-                            })
+                            .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
                             .nth(i)
                             .and_then(category_for_param);
                         let else_cat = else_params
                             .iter()
-                            .filter(|p| {
-                                matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast)
-                            })
+                            .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
                             .nth(i)
                             .and_then(category_for_param);
                         if then_cat == else_cat {
@@ -288,10 +278,7 @@ pub fn transform_virtual_main(source: &str) -> String {
 /// Callers that feed Slang directly (disk cache keys, `add_translation_unit_source_string`) should
 /// use this so the hashed text matches the compiled text.
 pub fn effective_slang_source_for_compile(source: &str) -> Cow<'_, str> {
-    if source.contains("[goldy_compute]")
-        || source.contains("[goldy_vertex]")
-        || source.contains("[goldy_fragment]")
-    {
+    if source.contains("[goldy_compute]") || source.contains("[goldy_vertex]") || source.contains("[goldy_fragment]") {
         Cow::Owned(transform_virtual_main(source))
     } else {
         Cow::Borrowed(source)
@@ -486,13 +473,7 @@ fn find_all_entries(source: &str) -> Vec<EntryDef> {
 }
 
 /// Parse a single entry, given the position of its `[goldy_*]` attribute.
-fn parse_entry(
-    source: &str,
-    attr_start: usize,
-    attr_end: usize,
-    stage: Stage,
-    _bytes: &[u8],
-) -> Option<EntryDef> {
+fn parse_entry(source: &str, attr_start: usize, attr_end: usize, stage: Stage, _bytes: &[u8]) -> Option<EntryDef> {
     // -----------------------------------------------------------------------
     // 1. Scan backward from attr_start to find the beginning of the attribute
     //    group (so we can find [numthreads] that appears BEFORE [goldy_*]).
@@ -569,8 +550,7 @@ fn parse_entry(
     let (return_semantic, return_semantic_range) = if source[pos..].starts_with(':') {
         let colon_pos = pos;
         let pos = skip_whitespace_and_comments(source, colon_pos + 1);
-        let (semantic, end_pos) =
-            scan_identifier(source, pos).unwrap_or_else(|| (String::new(), pos));
+        let (semantic, end_pos) = scan_identifier(source, pos).unwrap_or_else(|| (String::new(), pos));
         if !semantic.is_empty() {
             let sem_range = colon_pos..end_pos;
             (Some(semantic), Some(sem_range))
@@ -665,10 +645,7 @@ fn parse_params(params_str: &str) -> Vec<Param> {
 /// returns [`ParamItem::Conditional`] items wrapping the alternative parameter sets.
 fn parse_params_items(params_str: &str) -> Vec<ParamItem> {
     if !params_str.contains("#ifdef") {
-        return parse_params(params_str)
-            .into_iter()
-            .map(ParamItem::Single)
-            .collect();
+        return parse_params(params_str).into_iter().map(ParamItem::Single).collect();
     }
 
     let mut items: Vec<ParamItem> = Vec::new();
@@ -790,11 +767,7 @@ fn parse_single_param(s: &str) -> Option<Param> {
     };
 
     let kind = classify_type(&ty_str);
-    Some(Param {
-        name,
-        ty: ty_str,
-        kind,
-    })
+    Some(Param { name, ty: ty_str, kind })
 }
 
 /// Build the RHS initialiser expression for a resource parameter.
@@ -855,13 +828,13 @@ fn reclassify_passthrough(params: &mut [ParamItem], stage: Stage) {
     // and all PassThroughs are broadcasts.
     let preserve_idx: Option<usize> = match stage {
         Stage::Vertex | Stage::Fragment => {
-            let last_pt = params.iter().rposition(
-                |item| matches!(item, ParamItem::Single(p) if p.kind == ParamKind::PassThrough),
-            );
+            let last_pt = params
+                .iter()
+                .rposition(|item| matches!(item, ParamItem::Single(p) if p.kind == ParamKind::PassThrough));
             if let Some(idx) = last_pt {
-                let has_sv_after = params[idx + 1..].iter().any(|item| {
-                    matches!(item, ParamItem::Single(p) if matches!(p.kind, ParamKind::SystemValue(_)))
-                });
+                let has_sv_after = params[idx + 1..]
+                    .iter()
+                    .any(|item| matches!(item, ParamItem::Single(p) if matches!(p.kind, ParamKind::SystemValue(_))));
                 if has_sv_after {
                     None
                 } else {
@@ -1059,10 +1032,7 @@ impl WrapperBuilder {
                 let gn = format!("_sv{}", *sv_idx);
                 *sv_idx += 1;
                 self.push_sig(&format!("{} {} : {}", sv.primitive(), gn, sv.semantic()));
-                self.push_body_stmt(&format!(
-                    "    {} {} = {}({});",
-                    param.ty, param.name, param.ty, gn
-                ));
+                self.push_body_stmt(&format!("    {} {} = {}({});", param.ty, param.name, param.ty, gn));
                 self.push_call(&param.name);
             }
             ParamKind::Broadcast => {
@@ -1237,13 +1207,7 @@ fn emit_wrapper(entry: &EntryDef) -> String {
     for item in &entry.params {
         match item {
             ParamItem::Single(param) => {
-                wb.process_param(
-                    param,
-                    &mut bindless_idx,
-                    &mut user_idx,
-                    &mut sv_idx,
-                    &mut pt_idx,
-                );
+                wb.process_param(param, &mut bindless_idx, &mut user_idx, &mut sv_idx, &mut pt_idx);
             }
             ParamItem::Conditional {
                 condition,
@@ -1340,9 +1304,7 @@ fn apply_entry_transforms(source: &mut String, entry: &EntryDef) {
 fn skip_whitespace_in_source(source: &str, pos: usize) -> usize {
     let bytes = source.as_bytes();
     let mut p = pos;
-    while p < bytes.len()
-        && (bytes[p] == b' ' || bytes[p] == b'\t' || bytes[p] == b'\n' || bytes[p] == b'\r')
-    {
+    while p < bytes.len() && (bytes[p] == b' ' || bytes[p] == b'\t' || bytes[p] == b'\n' || bytes[p] == b'\r') {
         p += 1;
     }
     p
@@ -1373,10 +1335,7 @@ fn skip_whitespace_and_comments(source: &str, mut pos: usize) -> usize {
     loop {
         // Skip whitespace.
         while pos < bytes.len()
-            && (bytes[pos] == b' '
-                || bytes[pos] == b'\t'
-                || bytes[pos] == b'\n'
-                || bytes[pos] == b'\r')
+            && (bytes[pos] == b' ' || bytes[pos] == b'\t' || bytes[pos] == b'\n' || bytes[pos] == b'\r')
         {
             pos += 1;
         }
@@ -1514,18 +1473,12 @@ fn find_matching_open(source: &str, close_pos: usize, open: char, close: char) -
 }
 
 /// Find a `[numthreads(...)]` attribute in `source[start..end]`.
-fn find_numthreads_in_range(
-    source: &str,
-    start: usize,
-    end: usize,
-) -> Option<((u32, u32, u32), Range<usize>)> {
+fn find_numthreads_in_range(source: &str, start: usize, end: usize) -> Option<((u32, u32, u32), Range<usize>)> {
     let slice = &source[start..end];
     let needle = "numthreads";
     let rel_pos = slice.find(needle)?;
     // Find the opening `[` before this position.
-    let bracket_pos = source[start..start + rel_pos]
-        .rfind('[')
-        .map(|i| start + i)?;
+    let bracket_pos = source[start..start + rel_pos].rfind('[').map(|i| start + i)?;
     let (inner, close_pos) = scan_bracket_block(source, bracket_pos)?;
     let nt = parse_numthreads(inner.trim())?;
     Some((nt, bracket_pos..close_pos))
@@ -1579,18 +1532,9 @@ mod tests {
             classify_type("GroupThreadId"),
             ParamKind::SystemValue(SvKind::GroupThreadId)
         );
-        assert_eq!(
-            classify_type("GroupId"),
-            ParamKind::SystemValue(SvKind::GroupId)
-        );
-        assert_eq!(
-            classify_type("VertexId"),
-            ParamKind::SystemValue(SvKind::VertexId)
-        );
-        assert_eq!(
-            classify_type("InstanceId"),
-            ParamKind::SystemValue(SvKind::InstanceId)
-        );
+        assert_eq!(classify_type("GroupId"), ParamKind::SystemValue(SvKind::GroupId));
+        assert_eq!(classify_type("VertexId"), ParamKind::SystemValue(SvKind::VertexId));
+        assert_eq!(classify_type("InstanceId"), ParamKind::SystemValue(SvKind::InstanceId));
         assert_eq!(
             classify_type("IsFrontFace"),
             ParamKind::SystemValue(SvKind::IsFrontFace)
@@ -1632,10 +1576,7 @@ mod tests {
         let params = parse_params("ThreadId id");
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "id");
-        assert_eq!(
-            params[0].kind,
-            ParamKind::SystemValue(SvKind::DispatchThreadId)
-        );
+        assert_eq!(params[0].kind, ParamKind::SystemValue(SvKind::DispatchThreadId));
     }
 
     #[test]
@@ -1646,10 +1587,7 @@ mod tests {
         assert_eq!(params.len(), 4);
         assert_eq!(params[0].kind, ParamKind::Resource);
         assert_eq!(params[1].kind, ParamKind::PassThrough); // promoted to Broadcast by reclassify
-        assert_eq!(
-            params[2].kind,
-            ParamKind::SystemValue(SvKind::DispatchThreadId)
-        );
+        assert_eq!(params[2].kind, ParamKind::SystemValue(SvKind::DispatchThreadId));
         assert_eq!(params[3].kind, ParamKind::Scalar);
         assert_eq!(params[3].name, "scale");
     }
@@ -1705,10 +1643,7 @@ mod tests {
     fn numthreads_basic() {
         assert_eq!(parse_numthreads("numthreads(64, 1, 1)"), Some((64, 1, 1)));
         assert_eq!(parse_numthreads("numthreads(8, 8, 1)"), Some((8, 8, 1)));
-        assert_eq!(
-            parse_numthreads("numthreads( 32 , 2 , 1 )"),
-            Some((32, 2, 1))
-        );
+        assert_eq!(parse_numthreads("numthreads( 32 , 2 , 1 )"), Some((32, 2, 1)));
     }
 
     // -----------------------------------------------------------------------
@@ -1745,31 +1680,19 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             result.contains("[shader(\"compute\")]"),
             "Missing [shader(\"compute\")]"
         );
-        assert!(
-            result.contains("[numthreads(64, 1, 1)]"),
-            "Missing [numthreads]"
-        );
+        assert!(result.contains("[numthreads(64, 1, 1)]"), "Missing [numthreads]");
         // Fixed bindless/user words in signature.
         assert!(result.contains("uniform uint _bw0"), "Missing _bw0");
         assert!(result.contains("uniform uint _uw0"), "Missing _uw0");
-        assert!(
-            result.contains("SV_DispatchThreadID"),
-            "Missing SV_DispatchThreadID"
-        );
+        assert!(result.contains("SV_DispatchThreadID"), "Missing SV_DispatchThreadID");
         // Resource extracted from low half of _bw0.
         assert!(
             result.contains("goldy_scattered<uint>(_bw0 & 0xFFFFu)"),
             "Missing scattered init"
         );
-        assert!(
-            result.contains("ThreadId id = ThreadId(_sv0)"),
-            "Missing SV init"
-        );
+        assert!(result.contains("ThreadId id = ThreadId(_sv0)"), "Missing SV init");
         // User function must be renamed.
-        assert!(
-            result.contains("_goldy_user_cs_main"),
-            "Missing renamed user fn"
-        );
+        assert!(result.contains("_goldy_user_cs_main"), "Missing renamed user fn");
         // [goldy_compute] must be removed from user function.
         let goldy_count = result.matches("[goldy_compute]").count();
         assert_eq!(goldy_count, 0, "[goldy_compute] should be removed");
@@ -1792,10 +1715,7 @@ void cs_main(Scattered<uint> data, ThreadId id, uint base) {
             "Missing scattered from _bw0"
         );
         // User region: _uw0 for uint base.
-        assert!(
-            result.contains("uint base = _uw0"),
-            "Missing scalar user param"
-        );
+        assert!(result.contains("uint base = _uw0"), "Missing scalar user param");
         assert!(
             result.contains("_goldy_user_cs_main(data, id, base)"),
             "Wrong call args"
@@ -1814,10 +1734,7 @@ VSOutput vs_main(Scattered<QuadInstance> instances, VertexId vid, InstanceId iid
 }
 "#;
         let result = transform_virtual_main(src);
-        assert!(
-            result.contains("[shader(\"vertex\")]"),
-            "Missing vertex attr"
-        );
+        assert!(result.contains("[shader(\"vertex\")]"), "Missing vertex attr");
         assert!(result.contains("SV_VertexID"), "Missing SV_VertexID");
         assert!(result.contains("SV_InstanceID"), "Missing SV_InstanceID");
         assert!(result.contains("_goldy_user_vs_main"), "Missing renamed fn");
@@ -1833,23 +1750,14 @@ float4 fs_main(Broadcast<MyUniforms> uniforms, VaryingInput input) : SV_Target {
 }
 "#;
         let result = transform_virtual_main(src);
-        assert!(
-            result.contains("[shader(\"fragment\")]"),
-            "Missing fragment attr"
-        );
-        assert!(
-            result.contains(": SV_Target"),
-            "Wrapper must keep SV_Target"
-        );
+        assert!(result.contains("[shader(\"fragment\")]"), "Missing fragment attr");
+        assert!(result.contains(": SV_Target"), "Wrapper must keep SV_Target");
         // The user function body should no longer have : SV_Target.
         let user_fn_idx = result.find("_goldy_user_fs_main(").unwrap();
         let after_wrapper = &result[user_fn_idx..];
         // user fn declaration should not have : SV_Target.
         let decl_line = after_wrapper.lines().next().unwrap_or("");
-        assert!(
-            !decl_line.contains(": SV_Target"),
-            "User fn should not have SV_Target"
-        );
+        assert!(!decl_line.contains(": SV_Target"), "User fn should not have SV_Target");
     }
 
     #[test]
@@ -1870,8 +1778,7 @@ VSOutput vs_main(Scattered<float4> verts, VertexId vid) {
         assert!(result.contains("[shader(\"vertex\")]"), "Missing vertex");
         assert!(result.contains("_goldy_user_cs_main"), "Missing cs rename");
         assert!(result.contains("_goldy_user_vs_main"), "Missing vs rename");
-        let goldy_count =
-            result.matches("[goldy_compute]").count() + result.matches("[goldy_vertex]").count();
+        let goldy_count = result.matches("[goldy_compute]").count() + result.matches("[goldy_vertex]").count();
         assert_eq!(goldy_count, 0, "All [goldy_*] attrs should be removed");
     }
 
@@ -1886,10 +1793,7 @@ float4 fs_main(Broadcast<Uniforms> u, VaryingInput input) : SV_Target {
 "#;
         let result = transform_virtual_main(src);
         // VaryingInput should appear in the generated signature.
-        assert!(
-            result.contains("VaryingInput _pt0"),
-            "Pass-through param missing"
-        );
+        assert!(result.contains("VaryingInput _pt0"), "Pass-through param missing");
     }
 
     #[test]
@@ -1912,14 +1816,8 @@ void cs_main(BufRO<uint> config,
         let result = transform_virtual_main(src);
 
         // Wrapper must be present.
-        assert!(
-            result.contains("[shader(\"compute\")]"),
-            "Missing compute attr"
-        );
-        assert!(
-            result.contains("[numthreads(4, 16, 1)]"),
-            "Missing numthreads"
-        );
+        assert!(result.contains("[shader(\"compute\")]"), "Missing compute attr");
+        assert!(result.contains("[numthreads(4, 16, 1)]"), "Missing numthreads");
 
         // Fixed bindless/user words always present.
         assert!(result.contains("uniform uint _bw0"), "Missing _bw0");
@@ -1931,29 +1829,17 @@ void cs_main(BufRO<uint> config,
         assert!(result.contains("#endif"), "Missing #endif in sig");
 
         // Both branches must appear in the wrapper (before preprocessing).
-        assert!(
-            result.contains("mask_lut"),
-            "Missing mask_lut (msaa branch)"
-        );
+        assert!(result.contains("mask_lut"), "Missing mask_lut (msaa branch)");
         assert!(result.contains("out_tex"), "Missing out_tex");
 
         // ThreadId SV param must follow.
-        assert!(
-            result.contains("SV_DispatchThreadID"),
-            "Missing SV_DispatchThreadID"
-        );
+        assert!(result.contains("SV_DispatchThreadID"), "Missing SV_DispatchThreadID");
 
         // The user function must be renamed.
-        assert!(
-            result.contains("_goldy_user_cs_main"),
-            "Missing renamed user fn"
-        );
+        assert!(result.contains("_goldy_user_cs_main"), "Missing renamed user fn");
 
         // The [goldy_compute] attribute must be stripped.
-        assert!(
-            !result.contains("[goldy_compute]"),
-            "[goldy_compute] not removed"
-        );
+        assert!(!result.contains("[goldy_compute]"), "[goldy_compute] not removed");
 
         // #line 1 directive must appear between the generated wrapper and user source.
         assert!(result.contains("#line 1"), "Missing #line 1 directive");
@@ -1997,19 +1883,10 @@ float4 fs_main(IsFrontFace front) : SV_Target {
 }
 "#;
         let result = transform_virtual_main(src);
-        assert!(
-            result.contains("[shader(\"fragment\")]"),
-            "Missing fragment attr"
-        );
+        assert!(result.contains("[shader(\"fragment\")]"), "Missing fragment attr");
         assert!(result.contains("SV_IsFrontFace"), "Missing SV_IsFrontFace");
-        assert!(
-            result.contains("IsFrontFace front"),
-            "User fn must receive IsFrontFace"
-        );
-        assert!(
-            !result.contains("[goldy_fragment]"),
-            "[goldy_fragment] not removed"
-        );
+        assert!(result.contains("IsFrontFace front"), "User fn must receive IsFrontFace");
+        assert!(!result.contains("[goldy_fragment]"), "[goldy_fragment] not removed");
     }
 
     #[test]
@@ -2024,10 +1901,7 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
 }
 "#;
         let result = transform_virtual_main(src);
-        assert!(
-            result.contains("[shader(\"compute\")]"),
-            "Missing compute attr"
-        );
+        assert!(result.contains("[shader(\"compute\")]"), "Missing compute attr");
         // cfg at bindless[0] → _bw0 low half.
         assert!(
             result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(_bw0 & 0xFFFFu)"),
@@ -2035,8 +1909,7 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
         );
         // data at bindless[1] → _bw0 high half.
         assert!(
-            result
-                .contains("Scattered<uint> data = goldy_scattered<uint>((_bw0 >> 16u) & 0xFFFFu)"),
+            result.contains("Scattered<uint> data = goldy_scattered<uint>((_bw0 >> 16u) & 0xFFFFu)"),
             "Missing resource init"
         );
     }
@@ -2059,10 +1932,7 @@ float4 fs_main(TimeUniforms cfg, FullscreenVarying input) : SV_Target {
             "Missing broadcast init"
         );
         // input is the stage varying (PassThrough) — no bindless slot for it.
-        assert!(
-            result.contains("FullscreenVarying _pt0"),
-            "Missing passthrough param"
-        );
+        assert!(result.contains("FullscreenVarying _pt0"), "Missing passthrough param");
     }
 
     #[test]
@@ -2083,14 +1953,8 @@ VSOutput vs_main(TimeUniforms cfg, VIn input) {
             "Missing broadcast init"
         );
         // VIn input → passthrough (vertex attribute struct).
-        assert!(
-            result.contains("VIn _pt0"),
-            "Missing passthrough vertex input"
-        );
-        assert!(
-            !result.contains("goldy_broadcast<VIn>"),
-            "VIn must not be broadcast"
-        );
+        assert!(result.contains("VIn _pt0"), "Missing passthrough vertex input");
+        assert!(!result.contains("goldy_broadcast<VIn>"), "VIn must not be broadcast");
     }
 
     #[test]
@@ -2124,10 +1988,7 @@ void cs_main(Interpolated<float4> src_tex, Filter samp, Scattered<float4> dst, T
             "Missing dst init"
         );
         // SV param keeps its SV semantic.
-        assert!(
-            result.contains("SV_DispatchThreadID"),
-            "Missing SV_DispatchThreadID"
-        );
+        assert!(result.contains("SV_DispatchThreadID"), "Missing SV_DispatchThreadID");
     }
 
     // -----------------------------------------------------------------------

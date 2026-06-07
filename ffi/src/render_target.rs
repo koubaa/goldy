@@ -113,9 +113,7 @@ pub unsafe extern "C" fn goldy_render_target_height(target: *const GoldyRenderTa
 /// # Safety
 /// The target pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_render_target_format(
-    target: *const GoldyRenderTarget,
-) -> GoldyTextureFormat {
+pub unsafe extern "C" fn goldy_render_target_format(target: *const GoldyRenderTarget) -> GoldyTextureFormat {
     if target.is_null() {
         return GoldyTextureFormat::Rgba8Unorm;
     }
@@ -139,9 +137,7 @@ pub unsafe extern "C" fn goldy_render_target_has_depth(target: *const GoldyRende
 /// # Safety
 /// The target pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_render_target_buffer_size(
-    target: *const GoldyRenderTarget,
-) -> usize {
+pub unsafe extern "C" fn goldy_render_target_buffer_size(target: *const GoldyRenderTarget) -> usize {
     if target.is_null() {
         return 0;
     }

@@ -6,8 +6,7 @@
 #![allow(clippy::manual_find)]
 
 use crate::types::{
-    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
-    TextureFormat, VertexFormat,
+    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology, TextureFormat, VertexFormat,
 };
 use ash::vk;
 

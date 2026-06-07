@@ -148,12 +148,7 @@ impl StructLayout {
         let mut warnings: Vec<String> = Vec::new();
 
         // Data extent: the last byte actually declared by the shader (excludes CB tail padding).
-        let slang_data_extent = self
-            .fields
-            .iter()
-            .map(|f| f.offset + f.size)
-            .max()
-            .unwrap_or(0);
+        let slang_data_extent = self.fields.iter().map(|f| f.offset + f.size).max().unwrap_or(0);
 
         if rust_size < slang_data_extent {
             errors.push(format!(
@@ -205,11 +200,7 @@ impl StructLayout {
         if errors.is_empty() {
             Ok(())
         } else {
-            anyhow::bail!(
-                "Struct layout mismatch for `{}`:\n{}",
-                self.name,
-                errors.join("\n")
-            );
+            anyhow::bail!("Struct layout mismatch for `{}`:\n{}", self.name, errors.join("\n"));
         }
     }
 }
@@ -384,9 +375,7 @@ impl SlangCompiler {
         Ok(Self {
             library,
             global_session,
-            shader_disk_cache: std::sync::Mutex::new(
-                crate::shader_cache::ShaderBytecodeDiskCache::new_load_or_empty(),
-            ),
+            shader_disk_cache: std::sync::Mutex::new(crate::shader_cache::ShaderBytecodeDiskCache::new_load_or_empty()),
         })
     }
 
@@ -470,14 +459,8 @@ impl SlangCompiler {
         f: impl FnOnce(&Self, *mut SlangCompileRequest, i32) -> Result<R>,
     ) -> Result<R> {
         // Create session with session-level preprocessor macros.
-        let define_names: Vec<CString> = defines
-            .iter()
-            .map(|(k, _)| CString::new(*k).unwrap())
-            .collect();
-        let define_values: Vec<CString> = defines
-            .iter()
-            .map(|(_, v)| CString::new(*v).unwrap())
-            .collect();
+        let define_names: Vec<CString> = defines.iter().map(|(k, _)| CString::new(*k).unwrap()).collect();
+        let define_values: Vec<CString> = defines.iter().map(|(_, v)| CString::new(*v).unwrap()).collect();
         let macro_descs: Vec<PreprocessorMacroDesc> = define_names
             .iter()
             .zip(define_values.iter())
@@ -487,12 +470,8 @@ impl SlangCompiler {
             })
             .collect();
 
-        let search_path_cstrings: Vec<CString> = search_paths
-            .iter()
-            .map(|p| CString::new(*p).unwrap())
-            .collect();
-        let search_path_ptrs: Vec<*const c_char> =
-            search_path_cstrings.iter().map(|s| s.as_ptr()).collect();
+        let search_path_cstrings: Vec<CString> = search_paths.iter().map(|p| CString::new(*p).unwrap()).collect();
+        let search_path_ptrs: Vec<*const c_char> = search_path_cstrings.iter().map(|s| s.as_ptr()).collect();
 
         let mut session_desc = SessionDesc::default();
         if !search_path_ptrs.is_empty() {
@@ -510,9 +489,7 @@ impl SlangCompiler {
             std::mem::size_of::<SessionDesc>()
         );
         let mut session: *mut ISession = ptr::null_mut();
-        let result = unsafe {
-            global_session_create_session(self.global_session, &session_desc, &mut session)
-        };
+        let result = unsafe { global_session_create_session(self.global_session, &session_desc, &mut session) };
         if !slang_succeeded(result) || session.is_null() {
             anyhow::bail!(
                 "Failed to create Slang session with preprocessor defines (result={}, ptr={:?})",
@@ -542,16 +519,14 @@ impl SlangCompiler {
             unsafe { (library.destroy_compile_request)(req) };
         });
 
-        let target_index =
-            unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
+        let target_index = unsafe { (self.library.add_code_gen_target)(request, target.to_slang_target() as i32) };
         if target_index < 0 {
             anyhow::bail!("Failed to add code generation target");
         }
 
         if target == ShaderTarget::Dxil {
             let profile_name = CString::new("sm_6_6").unwrap();
-            let profile_id =
-                unsafe { global_session_find_profile(self.global_session, profile_name.as_ptr()) };
+            let profile_id = unsafe { global_session_find_profile(self.global_session, profile_name.as_ptr()) };
             if profile_id > 0 {
                 unsafe {
                     (self.library.set_target_profile)(request, target_index, profile_id);
@@ -561,21 +536,13 @@ impl SlangCompiler {
                 tracing::warn!("Could not find sm_6_6 profile, using default");
             }
             unsafe {
-                (self.library.set_target_floating_point_mode)(
-                    request,
-                    target_index,
-                    SLANG_FLOATING_POINT_MODE_PRECISE,
-                );
+                (self.library.set_target_floating_point_mode)(request, target_index, SLANG_FLOATING_POINT_MODE_PRECISE);
             }
         }
 
         let unit_name = CString::new("shader").unwrap();
         let translation_unit = unsafe {
-            (self.library.add_translation_unit)(
-                request,
-                SlangSourceLanguage::Slang as i32,
-                unit_name.as_ptr(),
-            )
+            (self.library.add_translation_unit)(request, SlangSourceLanguage::Slang as i32, unit_name.as_ptr())
         };
         if translation_unit < 0 {
             anyhow::bail!("Failed to add translation unit");
@@ -594,14 +561,8 @@ impl SlangCompiler {
 
         for (name, stage) in entry_points {
             let name_cstr = CString::new(*name).context("Entry point name contains null bytes")?;
-            let entry_index = unsafe {
-                (self.library.add_entry_point)(
-                    request,
-                    translation_unit,
-                    name_cstr.as_ptr(),
-                    *stage as i32,
-                )
-            };
+            let entry_index =
+                unsafe { (self.library.add_entry_point)(request, translation_unit, name_cstr.as_ptr(), *stage as i32) };
             if entry_index < 0 {
                 anyhow::bail!("Failed to add entry point: {}", name);
             }
@@ -622,9 +583,7 @@ impl SlangCompiler {
         if !slang_succeeded(result) {
             let diag_ptr = unsafe { (self.library.get_diagnostic_output)(request) };
             let diagnostic = if !diag_ptr.is_null() {
-                unsafe { CStr::from_ptr(diag_ptr) }
-                    .to_string_lossy()
-                    .into_owned()
+                unsafe { CStr::from_ptr(diag_ptr) }.to_string_lossy().into_owned()
             } else {
                 "Unknown compilation error".to_string()
             };
@@ -665,10 +624,7 @@ impl SlangCompiler {
         );
 
         {
-            let mut disk = self
-                .shader_disk_cache
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut disk = self.shader_disk_cache.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(hit) = disk.get(cache_key) {
                 return hit.with_context(|| "decode shader disk cache");
             }
@@ -685,9 +641,7 @@ impl SlangCompiler {
             optimization_level,
             |slf, request, target_index| {
                 let mut blob: *mut ISlangBlob = ptr::null_mut();
-                let result = unsafe {
-                    (slf.library.get_entry_point_code_blob)(request, 0, target_index, &mut blob)
-                };
+                let result = unsafe { (slf.library.get_entry_point_code_blob)(request, 0, target_index, &mut blob) };
 
                 if !slang_succeeded(result) || blob.is_null() {
                     anyhow::bail!("Failed to get compiled shader code");
@@ -707,8 +661,7 @@ impl SlangCompiler {
                     .iter()
                     .map(|opt_name| {
                         opt_name.as_deref().and_then(|name| {
-                            builtin_type_stride(name)
-                                .or_else(|| slf.reflect_type_size_from_request(request, name))
+                            builtin_type_stride(name).or_else(|| slf.reflect_type_size_from_request(request, name))
                         })
                     })
                     .collect();
@@ -722,10 +675,7 @@ impl SlangCompiler {
         )?;
 
         {
-            let mut disk = self
-                .shader_disk_cache
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut disk = self.shader_disk_cache.lock().unwrap_or_else(|p| p.into_inner());
             if let Err(e) = disk.insert(cache_key, &out) {
                 tracing::warn!(?e, "failed to serialize shader disk cache entry");
             }
@@ -741,11 +691,8 @@ impl SlangCompiler {
     ) -> Result<()> {
         for owned in checks {
             let layout = self.reflect_named_struct_from_request(request, &owned.type_name)?;
-            let field_refs: Vec<(&str, usize, usize)> = owned
-                .rust_fields
-                .iter()
-                .map(|(n, o, s)| (n.as_str(), *o, *s))
-                .collect();
+            let field_refs: Vec<(&str, usize, usize)> =
+                owned.rust_fields.iter().map(|(n, o, s)| (n.as_str(), *o, *s)).collect();
             layout.validate(owned.rust_size, &field_refs)?;
         }
         Ok(())
@@ -786,16 +733,13 @@ impl SlangCompiler {
         }
 
         let name_cstr = CString::new(type_name).context("type_name contains null bytes")?;
-        let ty = unsafe {
-            (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr())
-        };
+        let ty = unsafe { (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr()) };
         if ty.is_null() {
             anyhow::bail!("Slang reflection: type `{type_name}` not found");
         }
 
-        let layout_ptr = unsafe {
-            (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default)
-        };
+        let layout_ptr =
+            unsafe { (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default) };
         if layout_ptr.is_null() {
             anyhow::bail!("Slang reflection: failed to get layout for `{type_name}`");
         }
@@ -808,31 +752,23 @@ impl SlangCompiler {
     /// Uses the `Uniform` parameter category (std140-style), which matches
     /// std430 for most scalar/vector/simple-struct types.  Returns `None`
     /// when the type is not found in the compiled program.
-    fn reflect_type_size_from_request(
-        &self,
-        request: *mut SlangCompileRequest,
-        type_name: &str,
-    ) -> Option<u32> {
+    fn reflect_type_size_from_request(&self, request: *mut SlangCompileRequest, type_name: &str) -> Option<u32> {
         let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
         if reflection_ptr.is_null() {
             return None;
         }
         let name_cstr = CString::new(type_name).ok()?;
-        let ty = unsafe {
-            (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr())
-        };
+        let ty = unsafe { (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr()) };
         if ty.is_null() {
             return None;
         }
-        let layout_ptr = unsafe {
-            (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default)
-        };
+        let layout_ptr =
+            unsafe { (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default) };
         if layout_ptr.is_null() {
             return None;
         }
         let cat = SlangParameterCategory::Uniform as i32;
-        let size =
-            unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, cat) } as u32;
+        let size = unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, cat) } as u32;
         if size > 0 {
             Some(size)
         } else {
@@ -847,28 +783,22 @@ impl SlangCompiler {
     ) -> Result<StructLayout> {
         let cat = SlangParameterCategory::Uniform as i32;
         let size = unsafe { (self.library.reflection_type_layout_get_size)(type_layout, cat) };
-        let alignment =
-            unsafe { (self.library.reflection_type_layout_get_alignment)(type_layout, cat) };
+        let alignment = unsafe { (self.library.reflection_type_layout_get_alignment)(type_layout, cat) };
 
-        let field_count =
-            unsafe { (self.library.reflection_type_layout_get_field_count)(type_layout) };
+        let field_count = unsafe { (self.library.reflection_type_layout_get_field_count)(type_layout) };
 
         let mut fields = Vec::new();
         for i in 0..field_count {
-            let field_var =
-                unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
+            let field_var = unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
             if field_var.is_null() {
                 continue;
             }
 
-            let variable =
-                unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
+            let variable = unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
             let name = if !variable.is_null() {
                 let name_ptr = unsafe { (self.library.reflection_variable_get_name)(variable) };
                 if !name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(name_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
+                    unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().into_owned()
                 } else {
                     format!("field_{i}")
                 }
@@ -876,25 +806,19 @@ impl SlangCompiler {
                 format!("field_{i}")
             };
 
-            let field_type_layout =
-                unsafe { (self.library.reflection_variable_layout_get_type_layout)(field_var) };
+            let field_type_layout = unsafe { (self.library.reflection_variable_layout_get_type_layout)(field_var) };
             if field_type_layout.is_null() {
                 continue;
             }
 
-            let offset =
-                unsafe { (self.library.reflection_variable_layout_get_offset)(field_var, cat) };
-            let fsize =
-                unsafe { (self.library.reflection_type_layout_get_size)(field_type_layout, cat) };
+            let offset = unsafe { (self.library.reflection_variable_layout_get_offset)(field_var, cat) };
+            let fsize = unsafe { (self.library.reflection_type_layout_get_size)(field_type_layout, cat) };
 
-            let field_type =
-                unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
+            let field_type = unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
             let type_name = if !field_type.is_null() {
                 let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
                 if !type_name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(type_name_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
+                    unsafe { CStr::from_ptr(type_name_ptr) }.to_string_lossy().into_owned()
                 } else {
                     String::new()
                 }
@@ -933,8 +857,7 @@ impl SlangCompiler {
         let param_count = unsafe { (self.library.reflection_get_parameter_count)(reflection_ptr) };
 
         for i in 0..param_count {
-            let param =
-                unsafe { (self.library.reflection_get_parameter_by_index)(reflection_ptr, i) };
+            let param = unsafe { (self.library.reflection_get_parameter_by_index)(reflection_ptr, i) };
             if param.is_null() {
                 continue;
             }
@@ -944,9 +867,7 @@ impl SlangCompiler {
             let name = if !variable.is_null() {
                 let name_ptr = unsafe { (self.library.reflection_variable_get_name)(variable) };
                 if !name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(name_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
+                    unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().into_owned()
                 } else {
                     format!("param_{}", i)
                 }
@@ -970,8 +891,7 @@ impl SlangCompiler {
 
             // Check if this is a ParameterBlock
             if type_kind == SlangTypeKind::ParameterBlock as i32 {
-                let block_layout =
-                    self.extract_parameter_block_layout(param, type_layout, &name)?;
+                let block_layout = self.extract_parameter_block_layout(param, type_layout, &name)?;
                 parameter_blocks.push(block_layout);
             }
         }
@@ -979,10 +899,7 @@ impl SlangCompiler {
         goldy_event!(
             "slang.reflection.extract",
             parameter_blocks = parameter_blocks.len(),
-            total_fields = parameter_blocks
-                .iter()
-                .map(|pb| pb.fields.len())
-                .sum::<usize>()
+            total_fields = parameter_blocks.iter().map(|pb| pb.fields.len()).sum::<usize>()
         );
 
         Ok(ShaderReflection {
@@ -1000,14 +917,11 @@ impl SlangCompiler {
         name: &str,
     ) -> Result<ParameterBlockLayout> {
         // Get binding information
-        let binding_slot =
-            unsafe { (self.library.reflection_parameter_get_binding_index)(param) } as u32;
-        let binding_space =
-            unsafe { (self.library.reflection_parameter_get_binding_space)(param) } as u32;
+        let binding_slot = unsafe { (self.library.reflection_parameter_get_binding_index)(param) } as u32;
+        let binding_space = unsafe { (self.library.reflection_parameter_get_binding_space)(param) } as u32;
 
         // Get the element type layout (the T in ParameterBlock<T>)
-        let element_type_layout =
-            unsafe { (self.library.reflection_type_layout_get_element_type_layout)(type_layout) };
+        let element_type_layout = unsafe { (self.library.reflection_type_layout_get_element_type_layout)(type_layout) };
 
         // Get size, alignment, and fields from the element type
         // Note: Slang returns slot counts, not byte sizes. Each slot = 8 bytes.
@@ -1034,16 +948,10 @@ impl SlangCompiler {
         } else {
             // Fallback: use the type_layout directly
             let size = unsafe {
-                (self.library.reflection_type_layout_get_size)(
-                    type_layout,
-                    SlangParameterCategory::Uniform as i32,
-                )
+                (self.library.reflection_type_layout_get_size)(type_layout, SlangParameterCategory::Uniform as i32)
             };
             let alignment = unsafe {
-                (self.library.reflection_type_layout_get_alignment)(
-                    type_layout,
-                    SlangParameterCategory::Uniform as i32,
-                )
+                (self.library.reflection_type_layout_get_alignment)(type_layout, SlangParameterCategory::Uniform as i32)
             };
             (size, alignment, Vec::new())
         };
@@ -1072,31 +980,23 @@ impl SlangCompiler {
     }
 
     /// Extract field layouts from a struct type (used for ParameterBlock element types).
-    fn extract_struct_fields(
-        &self,
-        type_layout: *mut SlangReflectionTypeLayout,
-    ) -> Result<Vec<FieldLayout>> {
+    fn extract_struct_fields(&self, type_layout: *mut SlangReflectionTypeLayout) -> Result<Vec<FieldLayout>> {
         let mut fields = Vec::new();
 
-        let field_count =
-            unsafe { (self.library.reflection_type_layout_get_field_count)(type_layout) };
+        let field_count = unsafe { (self.library.reflection_type_layout_get_field_count)(type_layout) };
 
         for i in 0..field_count {
-            let field_var =
-                unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
+            let field_var = unsafe { (self.library.reflection_type_layout_get_field_by_index)(type_layout, i) };
             if field_var.is_null() {
                 continue;
             }
 
             // Get field name (variable layout -> variable -> name)
-            let variable =
-                unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
+            let variable = unsafe { (self.library.reflection_variable_layout_get_variable)(field_var) };
             let name = if !variable.is_null() {
                 let name_ptr = unsafe { (self.library.reflection_variable_get_name)(variable) };
                 if !name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(name_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
+                    unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().into_owned()
                 } else {
                     format!("field_{}", i)
                 }
@@ -1105,8 +1005,7 @@ impl SlangCompiler {
             };
 
             // Get field type layout
-            let field_type_layout =
-                unsafe { (self.library.reflection_variable_layout_get_type_layout)(field_var) };
+            let field_type_layout = unsafe { (self.library.reflection_variable_layout_get_type_layout)(field_var) };
             if field_type_layout.is_null() {
                 continue;
             }
@@ -1141,18 +1040,21 @@ impl SlangCompiler {
 
             tracing::trace!(
                 "Field {} (index {}): offset_slots={}, size_slots={} -> offset={}, size={}, resource_kind={:?}",
-                name, i, offset_slots, size_slots, offset, size, resource_kind
+                name,
+                i,
+                offset_slots,
+                size_slots,
+                offset,
+                size,
+                resource_kind
             );
 
             // Get type name
-            let field_type =
-                unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
+            let field_type = unsafe { (self.library.reflection_type_layout_get_type)(field_type_layout) };
             let type_name = if !field_type.is_null() {
                 let type_name_ptr = unsafe { (self.library.reflection_type_get_name)(field_type) };
                 if !type_name_ptr.is_null() {
-                    unsafe { CStr::from_ptr(type_name_ptr) }
-                        .to_string_lossy()
-                        .into_owned()
+                    unsafe { CStr::from_ptr(type_name_ptr) }.to_string_lossy().into_owned()
                 } else {
                     String::new()
                 }
@@ -1180,8 +1082,7 @@ impl SlangCompiler {
         }
 
         let type_kind = unsafe { (self.library.reflection_type_get_kind)(type_ptr) };
-        let binding_type =
-            unsafe { (self.library.reflection_type_layout_get_binding_type)(type_layout) };
+        let binding_type = unsafe { (self.library.reflection_type_layout_get_binding_type)(type_layout) };
 
         // Debug logging for type detection
         tracing::trace!(
@@ -1198,17 +1099,11 @@ impl SlangCompiler {
                 // Check binding type to distinguish buffer vs texture, mutable vs immutable
                 match binding_type {
                     b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => {
-                        ResourceKind::MutableTexture
-                    }
+                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
                     b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => {
-                        ResourceKind::MutableBuffer
-                    }
+                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
                     b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => {
-                        ResourceKind::MutableBuffer
-                    }
+                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
                     _ => ResourceKind::Other,
                 }
             }
@@ -1218,21 +1113,13 @@ impl SlangCompiler {
                 // This helps with StructuredBuffer which may have different type_kind
                 match binding_type {
                     b if b == SlangBindingType::TypedBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableTypedBuffer as i32 => {
-                        ResourceKind::MutableBuffer
-                    }
+                    b if b == SlangBindingType::MutableTypedBuffer as i32 => ResourceKind::MutableBuffer,
                     b if b == SlangBindingType::RawBuffer as i32 => ResourceKind::Buffer,
-                    b if b == SlangBindingType::MutableRawBuffer as i32 => {
-                        ResourceKind::MutableBuffer
-                    }
+                    b if b == SlangBindingType::MutableRawBuffer as i32 => ResourceKind::MutableBuffer,
                     b if b == SlangBindingType::Texture as i32 => ResourceKind::Texture,
-                    b if b == SlangBindingType::MutableTexture as i32 => {
-                        ResourceKind::MutableTexture
-                    }
+                    b if b == SlangBindingType::MutableTexture as i32 => ResourceKind::MutableTexture,
                     b if b == SlangBindingType::Sampler as i32 => ResourceKind::Sampler,
-                    b if b == SlangBindingType::ConstantBuffer as i32 => {
-                        ResourceKind::ConstantBuffer
-                    }
+                    b if b == SlangBindingType::ConstantBuffer as i32 => ResourceKind::ConstantBuffer,
                     _ => ResourceKind::Other,
                 }
             }
@@ -1360,8 +1247,7 @@ mod struct_layout_validate_tests {
         let rust_fields = [("time", 0usize, 4usize)];
         let err = slang.validate(2, &rust_fields).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("smaller than the shader's data extent"),
+            err.to_string().contains("smaller than the shader's data extent"),
             "{err}"
         );
     }
@@ -1386,9 +1272,7 @@ mod struct_layout_validate_tests {
 
     #[test]
     fn validate_ok_when_matching() {
-        two_float_layout()
-            .validate(8, &[("a", 0, 4), ("b", 4, 4)])
-            .unwrap();
+        two_float_layout().validate(8, &[("a", 0, 4), ("b", 4, 4)]).unwrap();
     }
 
     #[test]
@@ -1403,10 +1287,7 @@ mod struct_layout_validate_tests {
 
     #[test]
     fn validate_err_on_field_count_mismatch() {
-        let err = two_float_layout()
-            .validate(8, &[("a", 0, 4)])
-            .unwrap_err()
-            .to_string();
+        let err = two_float_layout().validate(8, &[("a", 0, 4)]).unwrap_err().to_string();
         assert!(
             err.contains("`b`") && err.contains("missing"),
             "expected shader field b missing in Rust: {err}"
@@ -1457,10 +1338,7 @@ mod struct_layout_validate_tests {
     #[test]
     fn validate_reports_multiple_errors() {
         // Only `a` in Rust, wrong offset — missing `b` and offset error for `a`.
-        let err = two_float_layout()
-            .validate(8, &[("a", 4, 4)])
-            .unwrap_err()
-            .to_string();
+        let err = two_float_layout().validate(8, &[("a", 4, 4)]).unwrap_err().to_string();
         assert!(
             err.contains("offset") && err.contains("`a`"),
             "expected offset error for a: {err}"
@@ -1620,10 +1498,7 @@ mod struct_layout_validate_tests {
             err.contains("offset"),
             "error should describe the offset mismatch: {err}"
         );
-        assert!(
-            err.contains("`y`"),
-            "error should name the offending field: {err}"
-        );
+        assert!(err.contains("`y`"), "error should name the offending field: {err}");
     }
 
     /// Integration test: compiles a `[goldy_compute]` shader that uses

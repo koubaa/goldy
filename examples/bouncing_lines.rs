@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor,
-    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ShaderModule, Surface, VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -88,16 +88,10 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for line physics
-        let compute_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/bouncing_lines_update.slang"),
-        )?;
+        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
 
         // Render shader for visualization
-        let render_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/bouncing_lines_render.slang"),
-        )?;
+        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
 
         // Create line buffer with initial positions matching the original example
         let mut lines = Vec::with_capacity(NUM_LINES as usize);
@@ -105,15 +99,9 @@ impl RenderState {
             let angle = (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
             lines.push(Line {
                 p1: [angle.cos() * 0.3, angle.sin() * 0.3],
-                v1: [
-                    0.01 * (idx as f32 * 0.7).cos(),
-                    0.012 * (idx as f32 * 0.9).sin(),
-                ],
+                v1: [0.01 * (idx as f32 * 0.7).cos(), 0.012 * (idx as f32 * 0.9).sin()],
                 p2: [-angle.cos() * 0.3, -angle.sin() * 0.3],
-                v2: [
-                    -0.011 * (idx as f32 * 1.1).cos(),
-                    0.009 * (idx as f32 * 1.3).sin(),
-                ],
+                v2: [-0.011 * (idx as f32 * 1.1).cos(), 0.009 * (idx as f32 * 1.3).sin()],
                 color_index: idx,
                 _pad1: 0,
                 _pad2: 0,

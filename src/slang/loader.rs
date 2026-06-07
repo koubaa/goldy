@@ -87,8 +87,7 @@ pub struct SlangLibrary {
     pub reflection_type_layout_get_type: FnSpReflectionTypeLayoutGetType,
     pub reflection_type_get_kind: FnSpReflectionTypeGetKind,
     pub reflection_type_get_name: FnSpReflectionTypeGetName,
-    pub reflection_type_layout_get_element_type_layout:
-        FnSpReflectionTypeLayoutGetElementTypeLayout,
+    pub reflection_type_layout_get_element_type_layout: FnSpReflectionTypeLayoutGetElementTypeLayout,
     pub reflection_variable_layout_get_type_layout: FnSpReflectionVariableLayoutGetTypeLayout,
     pub reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset,
     pub reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType,
@@ -144,10 +143,9 @@ impl SlangLibrary {
             let destroy_compile_request: FnSpDestroyCompileRequest = *library
                 .get(b"spDestroyCompileRequest\0")
                 .context("Failed to load spDestroyCompileRequest")?;
-            let add_code_gen_target: FnSpAddCodeGenTarget =
-                *library
-                    .get(b"spAddCodeGenTarget\0")
-                    .context("Failed to load spAddCodeGenTarget")?;
+            let add_code_gen_target: FnSpAddCodeGenTarget = *library
+                .get(b"spAddCodeGenTarget\0")
+                .context("Failed to load spAddCodeGenTarget")?;
             let set_target_profile: FnSpSetTargetProfile = *library
                 .get(b"spSetTargetProfile\0")
                 .context("Failed to load spSetTargetProfile")?;
@@ -175,9 +173,7 @@ impl SlangLibrary {
             let set_optimization_level: FnSpSetOptimizationLevel = *library
                 .get(b"spSetOptimizationLevel\0")
                 .context("Failed to load spSetOptimizationLevel")?;
-            let compile: FnSpCompile = *library
-                .get(b"spCompile\0")
-                .context("Failed to load spCompile")?;
+            let compile: FnSpCompile = *library.get(b"spCompile\0").context("Failed to load spCompile")?;
             let get_diagnostic_output: FnSpGetDiagnosticOutput = *library
                 .get(b"spGetDiagnosticOutput\0")
                 .context("Failed to load spGetDiagnosticOutput")?;
@@ -206,45 +202,38 @@ impl SlangLibrary {
             let reflection_get_parameter_by_index: FnSpReflectionGetParameterByIndex = *library
                 .get(b"spReflection_GetParameterByIndex\0")
                 .context("Failed to load spReflection_GetParameterByIndex")?;
-            let reflection_parameter_get_type_layout: FnSpReflectionParameterGetTypeLayout =
-                *library
-                    .get(b"spReflectionVariableLayout_GetTypeLayout\0")
-                    .context("Failed to load spReflectionVariableLayout_GetTypeLayout")?;
-            let reflection_variable_layout_get_variable: FnSpReflectionVariableLayoutGetVariable =
-                *library
-                    .get(b"spReflectionVariableLayout_GetVariable\0")
-                    .context("Failed to load spReflectionVariableLayout_GetVariable")?;
+            let reflection_parameter_get_type_layout: FnSpReflectionParameterGetTypeLayout = *library
+                .get(b"spReflectionVariableLayout_GetTypeLayout\0")
+                .context("Failed to load spReflectionVariableLayout_GetTypeLayout")?;
+            let reflection_variable_layout_get_variable: FnSpReflectionVariableLayoutGetVariable = *library
+                .get(b"spReflectionVariableLayout_GetVariable\0")
+                .context("Failed to load spReflectionVariableLayout_GetVariable")?;
             let reflection_variable_get_name: FnSpReflectionVariableGetName = *library
                 .get(b"spReflectionVariable_GetName\0")
                 .context("Failed to load spReflectionVariable_GetName")?;
 
-            let reflection_parameter_get_binding_index: FnSpReflectionParameterGetBindingIndex =
-                *library
-                    .get(b"spReflectionParameter_GetBindingIndex\0")
-                    .context("Failed to load spReflectionParameter_GetBindingIndex")?;
-            let reflection_parameter_get_binding_space: FnSpReflectionParameterGetBindingSpace =
-                *library
-                    .get(b"spReflectionParameter_GetBindingSpace\0")
-                    .context("Failed to load spReflectionParameter_GetBindingSpace")?;
+            let reflection_parameter_get_binding_index: FnSpReflectionParameterGetBindingIndex = *library
+                .get(b"spReflectionParameter_GetBindingIndex\0")
+                .context("Failed to load spReflectionParameter_GetBindingIndex")?;
+            let reflection_parameter_get_binding_space: FnSpReflectionParameterGetBindingSpace = *library
+                .get(b"spReflectionParameter_GetBindingSpace\0")
+                .context("Failed to load spReflectionParameter_GetBindingSpace")?;
             let reflection_type_layout_get_size: FnSpReflectionTypeLayoutGetSize = *library
                 .get(b"spReflectionTypeLayout_GetSize\0")
                 .context("Failed to load spReflectionTypeLayout_GetSize")?;
             let reflection_type_layout_get_stride: FnSpReflectionTypeLayoutGetStride = *library
                 .get(b"spReflectionTypeLayout_GetStride\0")
                 .context("Failed to load spReflectionTypeLayout_GetStride")?;
-            let reflection_type_layout_get_alignment: FnSpReflectionTypeLayoutGetAlignment =
-                *library
-                    .get(b"spReflectionTypeLayout_getAlignment\0")
-                    .context("Failed to load spReflectionTypeLayout_getAlignment")?;
+            let reflection_type_layout_get_alignment: FnSpReflectionTypeLayoutGetAlignment = *library
+                .get(b"spReflectionTypeLayout_getAlignment\0")
+                .context("Failed to load spReflectionTypeLayout_getAlignment")?;
 
-            let reflection_type_layout_get_field_count: FnSpReflectionTypeLayoutGetFieldCount =
-                *library
-                    .get(b"spReflectionTypeLayout_GetFieldCount\0")
-                    .context("Failed to load spReflectionTypeLayout_GetFieldCount")?;
-            let reflection_type_layout_get_field_by_index: FnSpReflectionTypeLayoutGetFieldByIndex =
-                *library
-                    .get(b"spReflectionTypeLayout_GetFieldByIndex\0")
-                    .context("Failed to load spReflectionTypeLayout_GetFieldByIndex")?;
+            let reflection_type_layout_get_field_count: FnSpReflectionTypeLayoutGetFieldCount = *library
+                .get(b"spReflectionTypeLayout_GetFieldCount\0")
+                .context("Failed to load spReflectionTypeLayout_GetFieldCount")?;
+            let reflection_type_layout_get_field_by_index: FnSpReflectionTypeLayoutGetFieldByIndex = *library
+                .get(b"spReflectionTypeLayout_GetFieldByIndex\0")
+                .context("Failed to load spReflectionTypeLayout_GetFieldByIndex")?;
             let reflection_type_layout_get_type: FnSpReflectionTypeLayoutGetType = *library
                 .get(b"spReflectionTypeLayout_GetType\0")
                 .context("Failed to load spReflectionTypeLayout_GetType")?;
@@ -260,17 +249,13 @@ impl SlangLibrary {
             let reflection_variable_layout_get_type_layout: FnSpReflectionVariableLayoutGetTypeLayout = *library
                 .get(b"spReflectionVariableLayout_GetTypeLayout\0")
                 .context("Failed to load spReflectionVariableLayout_GetTypeLayout")?;
-            let reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset =
-                *library
-                    .get(b"spReflectionVariableLayout_GetOffset\0")
-                    .context("Failed to load spReflectionVariableLayout_GetOffset")?;
+            let reflection_variable_layout_get_offset: FnSpReflectionVariableLayoutGetOffset = *library
+                .get(b"spReflectionVariableLayout_GetOffset\0")
+                .context("Failed to load spReflectionVariableLayout_GetOffset")?;
 
-            let reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType =
-                *library
-                    .get(b"spReflectionTypeLayout_getDescriptorSetDescriptorRangeType\0")
-                    .context(
-                        "Failed to load spReflectionTypeLayout_getDescriptorSetDescriptorRangeType",
-                    )?;
+            let reflection_type_layout_get_binding_type: FnSpReflectionTypeLayoutGetBindingType = *library
+                .get(b"spReflectionTypeLayout_getDescriptorSetDescriptorRangeType\0")
+                .context("Failed to load spReflectionTypeLayout_getDescriptorSetDescriptorRangeType")?;
 
             let reflection_type_layout_get_category: FnSpReflectionTypeLayoutGetCategory = *library
                 .get(b"spReflectionTypeLayout_GetParameterCategory\0")
@@ -341,10 +326,7 @@ impl SlangLibrary {
                 tracing::debug!("Using Slang from GOLDY_SLANG_PATH: {}", path.display());
                 return Ok(path);
             }
-            tracing::warn!(
-                "GOLDY_SLANG_PATH set but file not found: {}",
-                path.display()
-            );
+            tracing::warn!("GOLDY_SLANG_PATH set but file not found: {}", path.display());
         }
 
         // 2. Check vendored binaries next to executable
@@ -443,16 +425,11 @@ impl SlangLibrary {
 
     /// Extract all embedded Slang files to the cache directory.
     fn extract_to_cache(cache_dir: &PathBuf) -> Result<()> {
-        tracing::info!(
-            "Extracting Slang {} to cache: {}",
-            SLANG_VERSION,
-            cache_dir.display()
-        );
+        tracing::info!("Extracting Slang {} to cache: {}", SLANG_VERSION, cache_dir.display());
 
         // Create cache directory
-        fs::create_dir_all(cache_dir).with_context(|| {
-            format!("Failed to create cache directory: {}", cache_dir.display())
-        })?;
+        fs::create_dir_all(cache_dir)
+            .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
 
         // Extract each file. PID-scoped temp names avoid conflicts when multiple
         // processes extract concurrently (e.g. cargo-nextest parallel workers).
@@ -461,9 +438,8 @@ impl SlangLibrary {
             let dest_path = cache_dir.join(filename);
             let temp_path = cache_dir.join(format!("{}.{}.tmp", filename, pid));
 
-            fs::write(&temp_path, bytes).with_context(|| {
-                format!("Failed to write Slang library: {}", temp_path.display())
-            })?;
+            fs::write(&temp_path, bytes)
+                .with_context(|| format!("Failed to write Slang library: {}", temp_path.display()))?;
 
             // rename is atomic on POSIX; on Windows it replaces the target.
             // If another process already placed the file, that's fine.
@@ -473,11 +449,7 @@ impl SlangLibrary {
                     tracing::debug!("Extracted by another process: {filename}");
                 } else {
                     return Err(e).with_context(|| {
-                        format!(
-                            "Failed to rename {} to {}",
-                            temp_path.display(),
-                            dest_path.display()
-                        )
+                        format!("Failed to rename {} to {}", temp_path.display(), dest_path.display())
                     });
                 }
             } else {
@@ -487,8 +459,7 @@ impl SlangLibrary {
 
         // Write the sentinel last so a partial extraction never leaves a valid marker.
         let sentinel_tmp = cache_dir.join(format!("version.{}.txt", pid));
-        fs::write(&sentinel_tmp, SLANG_VERSION)
-            .context("Failed to write Slang version sentinel")?;
+        fs::write(&sentinel_tmp, SLANG_VERSION).context("Failed to write Slang version sentinel")?;
         let _ = fs::rename(&sentinel_tmp, cache_dir.join("version.txt"));
 
         goldy_event!(

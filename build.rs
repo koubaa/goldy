@@ -84,12 +84,8 @@ fn main() {
             manifest.version, platform_dir
         );
 
-        if let Err(e) = download_slang_to_vendored(
-            &vendored_dir,
-            platform_dir,
-            &manifest.version,
-            &platform_info.files,
-        ) {
+        if let Err(e) = download_slang_to_vendored(&vendored_dir, platform_dir, &manifest.version, &platform_info.files)
+        {
             println!("cargo:warning=Failed to download Slang: {}", e);
             println!("cargo:warning=Run: cd slang && ./download.sh");
             generate_empty_embedded_module();
@@ -154,9 +150,7 @@ fn generate_embedded_module(version: &str, vendored_dir: &Path, platform_info: &
         let file_path = vendored_dir.join(file);
         if file_path.exists() {
             // Use absolute path for include_bytes!
-            let abs_path = file_path
-                .canonicalize()
-                .unwrap_or_else(|_| file_path.clone());
+            let abs_path = file_path.canonicalize().unwrap_or_else(|_| file_path.clone());
 
             // On Windows, canonicalize adds \\?\ prefix, which we need to handle
             let path_str = abs_path.display().to_string();
@@ -165,15 +159,9 @@ fn generate_embedded_module(version: &str, vendored_dir: &Path, platform_info: &
             // Escape backslashes for the string literal
             let escaped_path = path_str.replace('\\', "/");
 
-            content.push_str(&format!(
-                "    (\"{}\", include_bytes!(\"{}\")),\n",
-                file, escaped_path
-            ));
+            content.push_str(&format!("    (\"{}\", include_bytes!(\"{}\")),\n", file, escaped_path));
         } else {
-            println!(
-                "cargo:warning=Slang file not found: {}",
-                file_path.display()
-            );
+            println!("cargo:warning=Slang file not found: {}", file_path.display());
         }
     }
 
@@ -314,10 +302,7 @@ fn download_slang_to_vendored(
         .status()?;
 
     if !status.success() {
-        return Err(io::Error::other(format!(
-            "curl download failed for {}",
-            url
-        )));
+        return Err(io::Error::other(format!("curl download failed for {}", url)));
     }
 
     // Create temp extraction directory
@@ -367,10 +352,7 @@ fn download_slang_to_vendored(
             fs::copy(&src_path, &dest)?;
             copied += 1;
         } else {
-            println!(
-                "cargo:warning=Slang file not found in archive: {}",
-                file_name
-            );
+            println!("cargo:warning=Slang file not found in archive: {}", file_name);
         }
     }
 

@@ -11,8 +11,8 @@
 //! - Update-after-bind allows descriptor updates without pipeline barriers
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle,
+    SurfaceHandle, TextureHandle,
 };
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
@@ -131,19 +131,13 @@ impl DeviceLedger {
     /// than querying semaphores directly, so this method is safe to call while holding the
     /// ledger lock without creating a semaphore-query → ledger-lock ordering hazard.
     /// A missing entry means the context has been destroyed and is considered fully retired.
-    pub(crate) fn drain_ready_slot_reclamations(
-        &mut self,
-        completed_values: &HashMap<super::ContextHandle, u64>,
-    ) {
+    pub(crate) fn drain_ready_slot_reclamations(&mut self, completed_values: &HashMap<super::ContextHandle, u64>) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
-            let ready = self.pending_slot_reclamations[i].requirements.iter().all(
-                |(ctx_id, required_seq)| {
-                    completed_values
-                        .get(ctx_id)
-                        .is_none_or(|&v| v >= *required_seq)
-                },
-            );
+            let ready = self.pending_slot_reclamations[i]
+                .requirements
+                .iter()
+                .all(|(ctx_id, required_seq)| completed_values.get(ctx_id).is_none_or(|&v| v >= *required_seq));
             if ready {
                 let entry = self.pending_slot_reclamations.swap_remove(i);
                 self.resource_registry.free_slot(entry.slot);
@@ -170,11 +164,7 @@ pub(super) fn snapshot_context_completed_values(
             if sc.device != for_device {
                 return None;
             }
-            let v = unsafe {
-                device
-                    .get_semaphore_counter_value(sc.timeline_semaphore)
-                    .unwrap_or(0)
-            };
+            let v = unsafe { device.get_semaphore_counter_value(sc.timeline_semaphore).unwrap_or(0) };
             Some((id, v))
         })
         .collect()
@@ -271,8 +261,7 @@ impl ResourceRegistry {
         } else {
             self.sampled_texture.alloc()
         };
-        self.texture_indices
-            .insert(handle, (index, is_storage_image));
+        self.texture_indices.insert(handle, (index, is_storage_image));
         index
     }
 
@@ -442,9 +431,7 @@ mod registry_tests {
     fn live_resources_get_distinct_indices() {
         let mut reg = ResourceRegistry::new();
         const N: u64 = 64;
-        let mut indices: Vec<u32> = (0..N)
-            .map(|i| reg.register_buffer(i as BufferHandle, true))
-            .collect();
+        let mut indices: Vec<u32> = (0..N).map(|i| reg.register_buffer(i as BufferHandle, true)).collect();
         indices.sort_unstable();
         indices.dedup();
         assert_eq!(
@@ -545,24 +532,23 @@ mod registry_tests {
 
         let mut retired = HashMap::from([(CTX_A, 0u64), (CTX_B, 0u64)]);
 
-        let drain_pending =
-            |retired: &HashMap<ContextHandle, u64>,
-             reg: &mut ResourceRegistry,
-             pending: &mut Vec<PendingSlotReclamation>| {
-                let mut i = 0;
-                while i < pending.len() {
-                    let ready = pending[i]
-                        .requirements
-                        .iter()
-                        .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
-                    if ready {
-                        let entry = pending.swap_remove(i);
-                        reg.free_slot(entry.slot);
-                    } else {
-                        i += 1;
-                    }
+        let drain_pending = |retired: &HashMap<ContextHandle, u64>,
+                             reg: &mut ResourceRegistry,
+                             pending: &mut Vec<PendingSlotReclamation>| {
+            let mut i = 0;
+            while i < pending.len() {
+                let ready = pending[i]
+                    .requirements
+                    .iter()
+                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                if ready {
+                    let entry = pending.swap_remove(i);
+                    reg.free_slot(entry.slot);
+                } else {
+                    i += 1;
                 }
-            };
+            }
+        };
 
         drain_pending(&retired, &mut reg, &mut pending);
         assert_eq!(reg.storage_buffer.free_count(), 0);
@@ -724,13 +710,9 @@ impl LogicalDevice {
         offset: vk::DeviceSize,
         size: vk::DeviceSize,
     ) -> ash::prelude::VkResult<*mut core::ffi::c_void> {
-        let info = vk::MemoryMapInfoKHR::default()
-            .memory(memory)
-            .offset(offset)
-            .size(size);
+        let info = vk::MemoryMapInfoKHR::default().memory(memory).offset(offset).size(size);
         let mut ptr = core::ptr::null_mut();
-        (self.map_memory2.fp().map_memory2_khr)(self.device.handle(), &info, &mut ptr)
-            .result_with_success(ptr)
+        (self.map_memory2.fp().map_memory2_khr)(self.device.handle(), &info, &mut ptr).result_with_success(ptr)
     }
 
     /// `vkUnmapMemory2KHR` — core in Vulkan 1.4. Returns `VkResult` (unlike legacy `vkUnmapMemory`).
@@ -895,8 +877,7 @@ impl TextureState {
     }
 
     pub fn set_image_layout(&self, layout: vk::ImageLayout) {
-        self.current_layout
-            .store(layout.as_raw(), Ordering::Relaxed);
+        self.current_layout.store(layout.as_raw(), Ordering::Relaxed);
     }
 }
 
@@ -1126,14 +1107,9 @@ impl DeletionQueue {
 ///
 /// `ledger` must be the already-locked `DeviceLedger` from `ld.ledger`; passing it separately
 /// avoids holding the ledger lock while the caller re-locks it (double-lock hazard).
-pub(crate) fn destroy_pending_deletion(
-    ld: &LogicalDevice,
-    ledger: &mut DeviceLedger,
-    resource: PendingDeletion,
-) {
+pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLedger, resource: PendingDeletion) {
     match &resource {
-        PendingDeletion::Buffer { buffer_handle, .. }
-        | PendingDeletion::BufferView { buffer_handle } => {
+        PendingDeletion::Buffer { buffer_handle, .. } | PendingDeletion::BufferView { buffer_handle } => {
             ledger.reclaim_buffer_slots(*buffer_handle);
         }
         PendingDeletion::Texture { texture_handle, .. } => {
@@ -1172,12 +1148,8 @@ pub(crate) fn destroy_pending_deletion(
                                     .flags(vk::SparseMemoryBindFlags::empty()),
                             );
                         }
-                        if let Err(e) = super::sparse::queue_bind_sparse_sync(
-                            device,
-                            bind_queue,
-                            buffer,
-                            &sparse_binds,
-                        ) {
+                        if let Err(e) = super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds)
+                        {
                             tracing::warn!(?e, "sparse unbind on buffer destroy failed");
                         }
                         for (_res_off, mem, mem_off) in &td.binds {
@@ -1234,12 +1206,7 @@ pub(crate) fn destroy_pending_deletion(
                                 .flags(vk::SparseMemoryBindFlags::empty()),
                         );
                     }
-                    if let Err(e) = super::sparse::queue_bind_sparse_sync(
-                        device,
-                        bind_queue,
-                        buffer,
-                        &sparse_binds,
-                    ) {
+                    if let Err(e) = super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds) {
                         tracing::warn!(?e, "sparse unbind on replaced buffer failed");
                     }
                     for (_res_off, mem, mem_off) in &binds {

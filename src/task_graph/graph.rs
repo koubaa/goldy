@@ -1,16 +1,13 @@
 //! `TaskGraph` — analyzed GPU task graph with automatic barrier insertion.
 
 use super::analysis;
-use super::ir::{
-    CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode,
-};
+use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use super::{
-    ResourceId, SwapchainOutputHandle, TransientBufferSpec, TransientId, TransientTextureId,
-    TransientTextureKey, TransientTextureSpec,
+    ResourceId, SwapchainOutputHandle, TransientBufferSpec, TransientId, TransientTextureId, TransientTextureKey,
+    TransientTextureSpec,
 };
 use crate::backend::{
-    BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle,
-    TextureHandle,
+    BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, TextureHandle,
 };
 use crate::buffer::{Buffer, BufferView};
 use crate::compute::ComputePipeline;
@@ -53,10 +50,7 @@ fn build_upload_remap(ir: &GraphIR, commands: &[GpuCommand]) -> Vec<(usize, usiz
 /// Build the upload remap for a partitioned command set.
 ///
 /// Each entry is `(partition_index, command_index_within_partition, ir_node_index)`.
-fn build_partitioned_upload_remap(
-    ir: &GraphIR,
-    partitions: &[Vec<GpuCommand>],
-) -> Vec<(usize, usize, usize)> {
+fn build_partitioned_upload_remap(ir: &GraphIR, partitions: &[Vec<GpuCommand>]) -> Vec<(usize, usize, usize)> {
     let mut remap = Vec::with_capacity(8);
     let mut consumed = vec![false; ir.nodes.len()];
     for (part_idx, commands) in partitions.iter().enumerate() {
@@ -79,20 +73,13 @@ fn find_upload_node(ir: &GraphIR, cmd: &GpuCommand, consumed: &[bool]) -> Option
         let matches = match (cmd, &node.kind) {
             (
                 GpuCommand::WriteBuffer {
-                    buffer: cb,
-                    offset: co,
-                    ..
+                    buffer: cb, offset: co, ..
                 },
                 NodeKind::WriteBuffer {
-                    buffer: nb,
-                    offset: no,
-                    ..
+                    buffer: nb, offset: no, ..
                 },
             ) => cb == nb && co == no,
-            (
-                GpuCommand::WriteTexture { texture: ct, .. },
-                NodeKind::WriteTexture { texture: nt, .. },
-            ) => ct == nt,
+            (GpuCommand::WriteTexture { texture: ct, .. }, NodeKind::WriteTexture { texture: nt, .. }) => ct == nt,
             (
                 GpuCommand::WriteTextureRegion {
                     texture: ct,
@@ -273,8 +260,7 @@ impl TaskGraph {
             }
         }
 
-        self.transient_specs
-            .push(TransientBufferSpec { id, size, stride });
+        self.transient_specs.push(TransientBufferSpec { id, size, stride });
         TransientId(id)
     }
 
@@ -291,12 +277,7 @@ impl TaskGraph {
     /// recording phase. The texture cache in [`crate::placement_heap::PlacementHeap`]
     /// keys on the graph-coloring color index, which is derived from stable spec ordering.
     /// Recordings must be deterministic; debug builds warn when a slot's shape changes.
-    pub fn transient_texture(
-        &mut self,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-    ) -> TransientTextureId {
+    pub fn transient_texture(&mut self, width: u32, height: u32, format: TextureFormat) -> TransientTextureId {
         let id = self.next_transient_texture_id;
         self.next_transient_texture_id += 1;
 
@@ -335,10 +316,7 @@ impl TaskGraph {
     /// the layout is placed at a non-zero base offset (e.g. inside a ring
     /// buffer), that base must be a multiple of this value so that every
     /// internal offset remains stride-aligned for its buffer view descriptor.
-    pub(crate) fn transient_heap_size_and_layout(
-        &self,
-        node_waves: &[u32],
-    ) -> Result<(u64, u64, HashMap<u32, u64>)> {
+    pub(crate) fn transient_heap_size_and_layout(&self, node_waves: &[u32]) -> Result<(u64, u64, HashMap<u32, u64>)> {
         Self::transient_heap_layout(&self.transient_specs, &self.ir, node_waves)
     }
 
@@ -368,10 +346,7 @@ impl TaskGraph {
         backend: &mut dyn GpuBackend,
         ir: &GraphIR,
     ) -> Result<TimelineValue> {
-        let has_render = ir
-            .nodes
-            .iter()
-            .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
+        let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
 
         if has_render {
             // Render-pass graphs: single submission (mixed compute+render CBs).
@@ -404,10 +379,7 @@ impl TaskGraph {
         backend: &mut dyn GpuBackend,
         ir: &GraphIR,
     ) -> Result<TimelineValue> {
-        let has_render = ir
-            .nodes
-            .iter()
-            .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
+        let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
 
         if has_render {
             // Render-pass graphs cannot be retained (mixed command lists); fall back.
@@ -434,8 +406,7 @@ impl TaskGraph {
         // Derive the retention key from full CB content so it is always correct.
         let key = Self::retention_fingerprint(ir);
         let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
-        let graph_cmds: Vec<GraphCommand> =
-            cmds.iter().cloned().map(GraphCommand::Compute).collect();
+        let graph_cmds: Vec<GraphCommand> = cmds.iter().cloned().map(GraphCommand::Compute).collect();
         backend.submit_graph_and_retain(context.backend_handle(), &graph_cmds, key)
     }
 
@@ -471,10 +442,7 @@ impl TaskGraph {
         let intervals = analysis::transient_wave_intervals(ir, node_waves)?;
         for s in specs {
             if !intervals.contains_key(&s.id) {
-                anyhow::bail!(
-                    "transient_buffer id {} is never referenced by any graph node",
-                    s.id
-                );
+                anyhow::bail!("transient_buffer id {} is never referenced by any graph node", s.id);
             }
         }
 
@@ -509,10 +477,7 @@ impl TaskGraph {
             let iv = (it.start, it.end);
             let mut chosen = None;
             for (c, assigned) in colors.iter().enumerate() {
-                if assigned
-                    .iter()
-                    .all(|&other| !wave_intervals_overlap(iv, other))
-                {
+                if assigned.iter().all(|&other| !wave_intervals_overlap(iv, other)) {
                     chosen = Some(c);
                     break;
                 }
@@ -621,16 +586,11 @@ impl TaskGraph {
         let intervals = analysis::transient_texture_wave_intervals(&self.ir, node_waves)?;
         for s in &self.transient_texture_specs {
             if !intervals.contains_key(&s.id) {
-                anyhow::bail!(
-                    "transient_texture id {} is never referenced by any graph node",
-                    s.id
-                );
+                anyhow::bail!("transient_texture id {} is never referenced by any graph node", s.id);
             }
         }
-        let (id_to_color, color_keys) =
-            Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
-        let per_color_handles =
-            heap.get_or_create_textures(device, &color_keys, page_slot, retired_timeline)?;
+        let (id_to_color, color_keys) = Self::transient_texture_coloring(&self.transient_texture_specs, &intervals)?;
+        let per_color_handles = heap.get_or_create_textures(device, &color_keys, page_slot, retired_timeline)?;
         let mut out = HashMap::new();
         for s in &self.transient_texture_specs {
             let c = id_to_color[&s.id];
@@ -684,10 +644,7 @@ impl TaskGraph {
                 if color_keys[c] != it.key {
                     continue;
                 }
-                if assigned
-                    .iter()
-                    .all(|&other| !wave_intervals_overlap(iv, other))
-                {
+                if assigned.iter().all(|&other| !wave_intervals_overlap(iv, other)) {
                     chosen = Some(c);
                     break;
                 }
@@ -735,11 +692,10 @@ impl TaskGraph {
 
     /// Returns `true` if the graph contains any node that binds `SwapchainOutput`.
     pub(crate) fn has_swapchain_output(&self) -> bool {
-        self.ir.nodes.iter().any(|n| {
-            n.bindings
-                .iter()
-                .any(|b| b.resource == ResourceId::SwapchainOutput)
-        })
+        self.ir
+            .nodes
+            .iter()
+            .any(|n| n.bindings.iter().any(|b| b.resource == ResourceId::SwapchainOutput))
     }
 
     pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
@@ -749,9 +705,7 @@ impl TaskGraph {
     }
 
     fn has_render_passes_in_ir(ir: &GraphIR) -> bool {
-        ir.nodes
-            .iter()
-            .any(|n| matches!(n.kind, NodeKind::RenderPass { .. }))
+        ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }))
     }
 
     pub fn has_render_passes(&self) -> bool {
@@ -760,11 +714,7 @@ impl TaskGraph {
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
     /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
-    pub fn node<'a>(
-        &'a mut self,
-        label: &'static str,
-        pipeline: &ComputePipeline,
-    ) -> NodeBuilder<'a> {
+    pub fn node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
             label,
@@ -857,11 +807,7 @@ impl TaskGraph {
     pub fn write_texture(&mut self, texture: &Texture, data: Vec<u8>) -> Result<()> {
         let expected = texture.byte_size();
         if data.len() != expected {
-            anyhow::bail!(
-                "write_texture: expected {} bytes, got {}",
-                expected,
-                data.len()
-            );
+            anyhow::bail!("write_texture: expected {} bytes, got {}", expected, data.len());
         }
         let width = texture.width();
         let height = texture.height();
@@ -987,11 +933,7 @@ impl TaskGraph {
     }
 
     /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
-    pub fn render_pass<'a>(
-        &'a mut self,
-        label: &'static str,
-        target: &RenderTarget,
-    ) -> RenderPassBuilder<'a> {
+    pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         RenderPassBuilder {
             graph: self,
             label,
@@ -1051,11 +993,7 @@ impl TaskGraph {
         // Snapshot current specs for debug-assertions telemetry before clearing.
         #[cfg(debug_assertions)]
         {
-            self.prev_transient_shapes = self
-                .transient_specs
-                .iter()
-                .map(|s| (s.size, s.stride))
-                .collect();
+            self.prev_transient_shapes = self.transient_specs.iter().map(|s| (s.size, s.stride)).collect();
             self.prev_transient_texture_keys = self
                 .transient_texture_specs
                 .iter()
@@ -1177,11 +1115,7 @@ impl TaskGraph {
                         }
                     }
                 }
-                NodeKind::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
+                NodeKind::ClearBuffer { buffer, offset, size } => {
                     1u8.hash(&mut h);
                     buffer.hash(&mut h);
                     offset.hash(&mut h);
@@ -1247,14 +1181,12 @@ impl TaskGraph {
                 for &(cmd_idx, node_idx) in &entry.upload_remap {
                     let node = &ir.nodes[node_idx];
                     match (&mut commands[cmd_idx], &node.kind) {
-                        (
-                            GpuCommand::WriteBuffer { data, .. },
-                            NodeKind::WriteBuffer { data: src, .. },
-                        ) => *data = src.clone(),
-                        (
-                            GpuCommand::WriteTexture { data, .. },
-                            NodeKind::WriteTexture { data: src, .. },
-                        ) => *data = src.clone(),
+                        (GpuCommand::WriteBuffer { data, .. }, NodeKind::WriteBuffer { data: src, .. }) => {
+                            *data = src.clone()
+                        }
+                        (GpuCommand::WriteTexture { data, .. }, NodeKind::WriteTexture { data: src, .. }) => {
+                            *data = src.clone()
+                        }
                         (
                             GpuCommand::WriteTextureRegion { data, .. },
                             NodeKind::WriteTextureRegion { data: src, .. },
@@ -1312,9 +1244,7 @@ impl TaskGraph {
             });
         }
 
-        let needs_build = cache
-            .as_ref()
-            .is_none_or(|e| e.partitioned_commands.is_none());
+        let needs_build = cache.as_ref().is_none_or(|e| e.partitioned_commands.is_none());
 
         tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "partitioned_commands");
 
@@ -1325,14 +1255,12 @@ impl TaskGraph {
                 for &(part_idx, cmd_idx, node_idx) in &entry.partitioned_upload_remap {
                     let node = &ir.nodes[node_idx];
                     match (&mut parts[part_idx][cmd_idx], &node.kind) {
-                        (
-                            GpuCommand::WriteBuffer { data, .. },
-                            NodeKind::WriteBuffer { data: src, .. },
-                        ) => *data = src.clone(),
-                        (
-                            GpuCommand::WriteTexture { data, .. },
-                            NodeKind::WriteTexture { data: src, .. },
-                        ) => *data = src.clone(),
+                        (GpuCommand::WriteBuffer { data, .. }, NodeKind::WriteBuffer { data: src, .. }) => {
+                            *data = src.clone()
+                        }
+                        (GpuCommand::WriteTexture { data, .. }, NodeKind::WriteTexture { data: src, .. }) => {
+                            *data = src.clone()
+                        }
                         (
                             GpuCommand::WriteTextureRegion { data, .. },
                             NodeKind::WriteTextureRegion { data: src, .. },
@@ -1341,12 +1269,7 @@ impl TaskGraph {
                     }
                 }
             }
-            return cache
-                .as_ref()
-                .unwrap()
-                .partitioned_commands
-                .as_deref()
-                .unwrap();
+            return cache.as_ref().unwrap().partitioned_commands.as_deref().unwrap();
         }
 
         // Miss: emit partitioned commands from the cached schedule.
@@ -1355,12 +1278,7 @@ impl TaskGraph {
         let remap = build_partitioned_upload_remap(ir, &partitions);
         entry.partitioned_commands = Some(partitions);
         entry.partitioned_upload_remap = remap;
-        cache
-            .as_ref()
-            .unwrap()
-            .partitioned_commands
-            .as_deref()
-            .unwrap()
+        cache.as_ref().unwrap().partitioned_commands.as_deref().unwrap()
     }
 
     /// Compile the graph into a flat command stream.
@@ -1507,11 +1425,7 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
-    pub fn bind_parcel(
-        mut self,
-        parcel: &crate::Parcel,
-        access: crate::types::ResourceAccess,
-    ) -> Self {
+    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: crate::types::ResourceAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access: access.into(),
@@ -1542,11 +1456,7 @@ impl<'a> NodeBuilder<'a> {
     /// [`super::SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
     /// binding position so `TaskGraph::lower_swapchain_output` can patch it with the
     /// real UAV bindless index after `surface.begin()`.
-    pub fn bind_swapchain_output(
-        mut self,
-        _handle: SwapchainOutputHandle,
-        access: NodeAccess,
-    ) -> Self {
+    pub fn bind_swapchain_output(mut self, _handle: SwapchainOutputHandle, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::SwapchainOutput,
             access,
@@ -1833,13 +1743,9 @@ mod tests {
             .dispatch(1, 1, 1);
 
         let (schedule, _) = graph.schedule_and_split_wave();
-        let node_waves =
-            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+        let node_waves = crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
         let (total, _, layout) = graph.transient_heap_size_and_layout(&node_waves).unwrap();
-        assert_eq!(
-            total, 256,
-            "sequential transients should pack into one 256-byte slot"
-        );
+        assert_eq!(total, 256, "sequential transients should pack into one 256-byte slot");
         assert_eq!(layout[&t0.0], layout[&t1.0]);
         graph.submit(&ctx).unwrap();
     }
@@ -1866,8 +1772,7 @@ mod tests {
             .dispatch(1, 1, 1);
 
         let (schedule, _) = graph.schedule_and_split_wave();
-        let node_waves =
-            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+        let node_waves = crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
         let (total, _, layout) = graph.transient_heap_size_and_layout(&node_waves).unwrap();
         assert!(
             total >= 512,
@@ -1908,23 +1813,11 @@ mod tests {
         assert_eq!(cmds.len(), 7);
         assert!(matches!(cmds[0], GpuCommand::SetPipeline(_)));
         assert!(matches!(cmds[1], GpuCommand::BindResourcesRaw { .. }));
-        assert!(matches!(
-            cmds[2],
-            GpuCommand::Dispatch {
-                workgroups_x: 8,
-                ..
-            }
-        ));
+        assert!(matches!(cmds[2], GpuCommand::Dispatch { workgroups_x: 8, .. }));
         assert!(matches!(cmds[3], GpuCommand::ResourceBarrier { .. }));
         assert!(matches!(cmds[4], GpuCommand::SetPipeline(_)));
         assert!(matches!(cmds[5], GpuCommand::BindResourcesRaw { .. }));
-        assert!(matches!(
-            cmds[6],
-            GpuCommand::Dispatch {
-                workgroups_x: 4,
-                ..
-            }
-        ));
+        assert!(matches!(cmds[6], GpuCommand::Dispatch { workgroups_x: 4, .. }));
     }
 
     #[test]
@@ -1948,9 +1841,7 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert_eq!(count_logical_dispatches(&cmds), 2);
     }
 
@@ -2033,10 +1924,7 @@ mod tests {
             .count();
         assert_eq!(barrier_count, 2);
 
-        let dispatch_count = cmds
-            .iter()
-            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
-            .count();
+        let dispatch_count = cmds.iter().filter(|c| matches!(c, GpuCommand::Dispatch { .. })).count();
         assert_eq!(dispatch_count, 4);
     }
 
@@ -2108,15 +1996,9 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ClearBuffer { .. })));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::Dispatch { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, GpuCommand::ClearBuffer { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, GpuCommand::Dispatch { .. })));
     }
 
     #[test]
@@ -2138,8 +2020,7 @@ mod tests {
 
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "expected a barrier between write_buffer and dispatch"
         );
     }
@@ -2162,9 +2043,7 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
@@ -2193,8 +2072,7 @@ mod tests {
         let cmds = graph.compile_commands();
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "expected a barrier between write_texture and dispatch"
         );
     }
@@ -2224,9 +2102,7 @@ mod tests {
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
@@ -2241,9 +2117,7 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert_eq!(
             cmds.iter()
                 .filter(|c| matches!(c, GpuCommand::ClearBuffer { .. }))
@@ -2282,14 +2156,7 @@ mod tests {
 
     /// Create a pool of `total_size` bytes and return it together with
     /// a device, shader, and pipeline for convenience.
-    fn make_pool_setup(
-        total_size: u64,
-    ) -> (
-        Device,
-        ShaderModule,
-        crate::compute::ComputePipeline,
-        BufferPool,
-    ) {
+    fn make_pool_setup(total_size: u64) -> (Device, ShaderModule, crate::compute::ComputePipeline, BufferPool) {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -2319,9 +2186,7 @@ mod tests {
         let cmds = graph.compile_commands();
 
         // No barrier — independent regions
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
         assert_eq!(count_logical_dispatches(&cmds), 2);
     }
 
@@ -2390,10 +2255,7 @@ mod tests {
             .count();
         assert_eq!(barrier_count, 1);
 
-        let dispatch_count = cmds
-            .iter()
-            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
-            .count();
+        let dispatch_count = cmds.iter().filter(|c| matches!(c, GpuCommand::Dispatch { .. })).count();
         assert_eq!(dispatch_count, 3);
     }
 
@@ -2441,10 +2303,7 @@ mod tests {
             .count();
         assert_eq!(barrier_count, 2);
 
-        let dispatch_count = cmds
-            .iter()
-            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
-            .count();
+        let dispatch_count = cmds.iter().filter(|c| matches!(c, GpuCommand::Dispatch { .. })).count();
         assert_eq!(dispatch_count, 4);
     }
 
@@ -2497,9 +2356,7 @@ mod tests {
         let cmds = graph.compile_commands();
 
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            !cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "10 independent pool views should produce zero barriers"
         );
         assert_eq!(count_logical_dispatches(&cmds), 10);
@@ -2577,10 +2434,7 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, GpuCommand::ResourceBarrier { .. }))
             .count();
-        assert_eq!(
-            barrier_count, 1,
-            "expected exactly one barrier (clear → views)"
-        );
+        assert_eq!(barrier_count, 1, "expected exactly one barrier (clear → views)");
 
         // ClearBuffer is the first command
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
@@ -2634,9 +2488,7 @@ mod tests {
         let cmds = graph.compile_commands();
 
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            !cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "disjoint views should produce no barrier"
         );
     }

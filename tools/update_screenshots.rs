@@ -77,8 +77,7 @@ fn main() {
 }
 
 fn save_png(path: &Path, width: u32, height: u32, rgba_data: &[u8]) {
-    let img = image::RgbaImage::from_raw(width, height, rgba_data.to_vec())
-        .expect("Failed to create image");
+    let img = image::RgbaImage::from_raw(width, height, rgba_data.to_vec()).expect("Failed to create image");
     img.save(path).expect("Failed to save PNG");
     println!("Saved: {}", path.display());
 }

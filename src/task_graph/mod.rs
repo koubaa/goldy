@@ -258,9 +258,10 @@ impl SlotResolver {
             }
             ResourceId::TransientTexture(t) => ResourceId::Texture(self.textures[&t.0].handle),
             ResourceId::SwapchainOutput => {
-                let sc = self.swapchain.as_ref().expect(
-                    "SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired",
-                );
+                let sc = self
+                    .swapchain
+                    .as_ref()
+                    .expect("SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired");
                 ResourceId::Texture(sc.handle)
             }
             other => other,
@@ -269,11 +270,7 @@ impl SlotResolver {
 
     /// Resolve a dispatch's `resource_slots`, patching transient and swapchain
     /// entries to their concrete bindless indices.
-    pub fn resolve_slots(
-        &self,
-        resource_slots: &[u32],
-        bindings: &[ir::ResourceBinding],
-    ) -> Vec<u32> {
+    pub fn resolve_slots(&self, resource_slots: &[u32], bindings: &[ir::ResourceBinding]) -> Vec<u32> {
         let mut out = resource_slots.to_vec();
         for (i, b) in bindings.iter().enumerate() {
             if i >= out.len() {
@@ -283,11 +280,7 @@ impl SlotResolver {
                 ResourceId::TransientBuffer(t) => {
                     let r = &self.buffers[&t.0];
                     let is_read_only = b.access == ir::NodeAccess::Read;
-                    out[i] = if is_read_only {
-                        r.srv_index
-                    } else {
-                        r.uav_index
-                    };
+                    out[i] = if is_read_only { r.srv_index } else { r.uav_index };
                 }
                 ResourceId::SwapchainOutput if out[i] == SWAPCHAIN_SLOT_PLACEHOLDER => {
                     let sc = self

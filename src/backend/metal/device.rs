@@ -2,8 +2,8 @@
 
 use super::super::DeviceHandle;
 use super::types::{
-    DeletionQueue, DeviceLedger, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
-    TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
+    DeletionQueue, DeviceLedger, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, TextureHeapAllocator,
+    ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 /// upper bound.
 const INITIAL_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 use mtl::{
-    Device as MTLDevice, HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType,
-    MTLResourceOptions, MTLStorageMode,
+    Device as MTLDevice, HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType, MTLResourceOptions,
+    MTLStorageMode,
 };
 
 /// Enumerate available Metal devices/adapters.
@@ -83,8 +83,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     tracing::info!("Metal Argument Buffers Tier 2 confirmed — bindless enabled");
 
     // Create global argument buffer (stores resource device pointers)
-    let argument_buffer =
-        device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModeShared);
+    let argument_buffer = device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModeShared);
     tracing::info!("Created argument buffer");
 
     // Create heaps for resource allocation.
@@ -93,8 +92,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     let heap_size = INITIAL_HEAP_SIZE;
     let (heap_allocator, texture_heap) = create_heaps(&device, heap_size);
 
-    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) =
-        create_argument_encoders(&device);
+    let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) = create_argument_encoders(&device);
 
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
@@ -167,10 +165,7 @@ fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHe
     buffer_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
     let buffer_heap = device.new_heap(&buffer_heap_desc);
     let heap_allocator = HeapAllocator::new(device.clone(), buffer_heap, heap_size);
-    tracing::info!(
-        "Created buffer heap allocator (primary={}MB)",
-        heap_size / 1024 / 1024
-    );
+    tracing::info!("Created buffer heap allocator (primary={}MB)", heap_size / 1024 / 1024);
 
     tracing::info!("Creating texture heap...");
     let texture_heap_desc = HeapDescriptor::new();
@@ -231,8 +226,7 @@ pub(super) fn create_argument_encoders(
     storage_image_arg_desc.set_data_type(mtl::MTLDataType::Texture);
     storage_image_arg_desc.set_texture_type(mtl::MTLTextureType::D2);
     storage_image_arg_desc.set_access(mtl::MTLArgumentAccess::ReadWrite);
-    let storage_image_encoder =
-        device.new_argument_encoder(mtl::Array::from_slice(&[storage_image_arg_desc]));
+    let storage_image_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[storage_image_arg_desc]));
     tracing::info!(
         "Created storage image ArgumentEncoder (encoded_length={})",
         storage_image_encoder.encoded_length()
@@ -246,10 +240,7 @@ pub(super) fn create_argument_encoders(
     sampler_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
     let sampler_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[sampler_arg_desc]));
     let sampler_stride = sampler_encoder.encoded_length();
-    tracing::info!(
-        "Created sampler ArgumentEncoder (encoded_length={})",
-        sampler_stride
-    );
+    tracing::info!("Created sampler ArgumentEncoder (encoded_length={})", sampler_stride);
 
     // Every resource category in the argument buffer is laid out as
     // MAX_RESOURCES_PER_CATEGORY × 8 bytes.  ARGUMENT_BUFFER_SIZE is derived
@@ -275,30 +266,14 @@ pub(super) fn create_argument_encoders(
 pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
     if let Some(ld) = state.devices.remove(&device_handle) {
         ld.deletion_queue.lock().unwrap().flush_all();
-        state
-            .buffers
-            .retain(|_, b| b.device_handle != device_handle);
-        state
-            .shaders
-            .retain(|_, s| s.device_handle != device_handle);
-        state
-            .pipelines
-            .retain(|_, p| p.device_handle != device_handle);
-        state
-            .compute_pipelines
-            .retain(|_, p| p.device_handle != device_handle);
-        state
-            .render_targets
-            .retain(|_, t| t.device_handle != device_handle);
-        state
-            .surfaces
-            .retain(|_, s| s.device_handle != device_handle);
-        state
-            .textures
-            .retain(|_, t| t.device_handle != device_handle);
-        state
-            .samplers
-            .retain(|_, s| s.device_handle != device_handle);
+        state.buffers.retain(|_, b| b.device_handle != device_handle);
+        state.shaders.retain(|_, s| s.device_handle != device_handle);
+        state.pipelines.retain(|_, p| p.device_handle != device_handle);
+        state.compute_pipelines.retain(|_, p| p.device_handle != device_handle);
+        state.render_targets.retain(|_, t| t.device_handle != device_handle);
+        state.surfaces.retain(|_, s| s.device_handle != device_handle);
+        state.textures.retain(|_, t| t.device_handle != device_handle);
+        state.samplers.retain(|_, s| s.device_handle != device_handle);
 
         tracing::info!("Destroyed Metal device {}", device_handle);
     }

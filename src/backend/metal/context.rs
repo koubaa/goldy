@@ -42,10 +42,7 @@ pub(super) fn device_retired(state: &MetalState, device: DeviceHandle) -> u64 {
 ///
 /// Used to route resource deletions into the owning context's deletion queue (rather than
 /// the device-wide queue) so they reclaim on the context's own clock.  See issue #190.
-pub(super) fn context_handle_for_thread(
-    state: &MetalState,
-    device: DeviceHandle,
-) -> Option<super::ContextHandle> {
+pub(super) fn context_handle_for_thread(state: &MetalState, device: DeviceHandle) -> Option<super::ContextHandle> {
     let thread = std::thread::current().id();
     state.contexts.iter().find_map(|(h, sc_arc)| {
         let sc = sc_arc.lock().unwrap();
@@ -61,10 +58,7 @@ pub(super) fn context_handle_for_thread(
 }
 
 pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<ContextHandle> {
-    let ld = state
-        .devices
-        .get(&device)
-        .context("Invalid device handle")?;
+    let ld = state.devices.get(&device).context("Invalid device handle")?;
 
     let timeline_event = ld.device.new_shared_event();
     let signal_queue = Arc::new(crate::signal::SignalQueue::new());
@@ -160,10 +154,7 @@ pub(super) fn wait_until_device_seq_at_least(
 }
 
 /// Oldest in-flight command buffer across all contexts on `device` (by timeline value).
-pub(super) fn oldest_in_flight_cb(
-    state: &MetalState,
-    device: DeviceHandle,
-) -> Option<mtl::CommandBuffer> {
+pub(super) fn oldest_in_flight_cb(state: &MetalState, device: DeviceHandle) -> Option<mtl::CommandBuffer> {
     state
         .contexts
         .values()

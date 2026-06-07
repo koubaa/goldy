@@ -354,11 +354,7 @@ impl VramAllocator for DefaultVramAllocator {
     }
 
     fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.deferred
-            .lock()
-            .unwrap()
-            .front()
-            .map(|(epoch, _)| *epoch)
+        self.deferred.lock().unwrap().front().map(|(epoch, _)| *epoch)
     }
 
     fn drain(&self) {
@@ -439,9 +435,7 @@ impl VramAllocator for TrackingVramAllocator {
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(size)?;
-        let buf = self
-            .inner
-            .alloc_buffer(device, size, access, element_stride, flags)?;
+        let buf = self.inner.alloc_buffer(device, size, access, element_stride, flags)?;
         self.live_bytes
             .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
         Ok(buf)
@@ -456,13 +450,9 @@ impl VramAllocator for TrackingVramAllocator {
         flags: BufferFlags,
     ) -> Result<Buffer> {
         self.check_budget(expected_max.max(initial_size))?;
-        let buf = self.inner.alloc_buffer_with_capacity(
-            device,
-            initial_size,
-            expected_max,
-            access,
-            flags,
-        )?;
+        let buf = self
+            .inner
+            .alloc_buffer_with_capacity(device, initial_size, expected_max, access, flags)?;
         self.live_bytes
             .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
         Ok(buf)
@@ -479,17 +469,13 @@ impl VramAllocator for TrackingVramAllocator {
     ) -> Result<Texture> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
         self.check_budget(estimated)?;
-        let tex = self
-            .inner
-            .alloc_texture(device, width, height, format, access, flags)?;
-        self.live_bytes
-            .fetch_add(tex.byte_size() as i64, Ordering::Relaxed);
+        let tex = self.inner.alloc_texture(device, width, height, format, access, flags)?;
+        self.live_bytes.fetch_add(tex.byte_size() as i64, Ordering::Relaxed);
         Ok(tex)
     }
 
     fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
-        self.live_bytes
-            .fetch_sub(reserved as i64, Ordering::Relaxed);
+        self.live_bytes.fetch_sub(reserved as i64, Ordering::Relaxed);
         self.inner.notify_freed(reserved, committed, kind);
     }
 
@@ -559,9 +545,7 @@ mod tests {
     /// mock backend device handle remains valid on the cloned `device` handle.
     fn device_with_tracking() -> (Device, Device, Arc<TrackingVramAllocator>) {
         let base = test_device();
-        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(
-            DefaultVramAllocator::new(),
-        )));
+        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
         let device = base.with_vram_allocator(tracking.clone());
         (base, device, tracking)
     }
@@ -571,13 +555,7 @@ mod tests {
         let device = test_device();
         let alloc = DefaultVramAllocator::new();
         let buf = alloc
-            .alloc_buffer(
-                &device,
-                1024,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .alloc_buffer(&device, 1024, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         assert_eq!(buf.size(), 1024);
     }
@@ -621,22 +599,10 @@ mod tests {
         let alloc = TrackingVramAllocator::with_budget(Arc::new(DefaultVramAllocator::new()), 8192);
 
         let _buf = alloc
-            .alloc_buffer(
-                &device,
-                4096,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .alloc_buffer(&device, 4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
-        let result = alloc.alloc_buffer(
-            &device,
-            8192,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        );
+        let result = alloc.alloc_buffer(&device, 8192, BufferKind::Scattered, None, BufferFlags::empty());
         assert!(result.is_err(), "should fail when over budget");
     }
 
@@ -705,9 +671,7 @@ mod tests {
     #[test]
     fn deed_survives_with_vram_allocator_clone() {
         let base = test_device();
-        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(
-            DefaultVramAllocator::new(),
-        )));
+        let tracking = Arc::new(TrackingVramAllocator::new(Arc::new(DefaultVramAllocator::new())));
         let device = base.with_vram_allocator(tracking.clone());
 
         let buf = device
@@ -768,10 +732,7 @@ mod tests {
 
         // gpu_progress=5 — should reclaim and drop.
         assert_eq!(alloc.boundary_crossed(5), 1);
-        assert!(
-            weak.upgrade().is_none(),
-            "resource should have been dropped"
-        );
+        assert!(weak.upgrade().is_none(), "resource should have been dropped");
     }
 
     #[test]
@@ -798,10 +759,7 @@ mod tests {
 
         // Reclaim the rest.
         assert_eq!(alloc.boundary_crossed(10), 1);
-        assert!(
-            weak_late.upgrade().is_none(),
-            "epoch=10 should now be dropped"
-        );
+        assert!(weak_late.upgrade().is_none(), "epoch=10 should now be dropped");
     }
 
     #[test]

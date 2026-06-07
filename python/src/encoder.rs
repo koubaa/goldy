@@ -152,8 +152,7 @@ impl PyRenderPass {
     fn bind_resources(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
             // Collect buffer references - deref the Arc to get &Buffer
-            let buffer_refs: Vec<&goldy::Buffer> =
-                buffers.iter().map(|b| b.inner.as_ref()).collect();
+            let buffer_refs: Vec<&goldy::Buffer> = buffers.iter().map(|b| b.inner.as_ref()).collect();
 
             let mut pass = enc.begin_render_pass();
             pass.bind_resources(&buffer_refs);
@@ -170,12 +169,7 @@ impl PyRenderPass {
     ///     >>> rp.draw(range(3))  # Draw 3 vertices
     ///     >>> rp.draw(range(6), range(10))  # Draw 6 vertices, 10 instances
     #[pyo3(signature = (vertices, instances=None))]
-    fn draw(
-        &self,
-        py: Python<'_>,
-        vertices: &Bound<'_, PyAny>,
-        instances: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<()> {
+    fn draw(&self, py: Python<'_>, vertices: &Bound<'_, PyAny>, instances: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let vertex_range = extract_range(vertices)?;
         let instance_range = if let Some(inst) = instances {
             extract_range(inst)?

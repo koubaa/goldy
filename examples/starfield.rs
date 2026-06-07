@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor,
-    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ShaderModule, Surface, VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -113,12 +113,10 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for star movement
-        let compute_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
+        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
 
         // Render shader for visualization
-        let render_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
+        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
 
         // Create star buffer with initial random positions and types
         // Start with z close to 1.0 so stars are immediately visible (small projection)
@@ -154,8 +152,7 @@ impl RenderState {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer =
-            device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
+        let params_buffer = device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;

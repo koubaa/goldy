@@ -103,9 +103,7 @@ pub struct ComputeEncoder {
 impl ComputeEncoder {
     /// Create a new compute encoder.
     pub fn new() -> Self {
-        Self {
-            commands: Vec::new(),
-        }
+        Self { commands: Vec::new() }
     }
 
     /// Begin a compute pass.
@@ -122,10 +120,7 @@ impl ComputeEncoder {
     ///
     /// This submits the compute work to the GPU and waits for completion.
     pub fn dispatch(&self, context: &crate::Context) -> Result<()> {
-        tracing::debug!(
-            command_count = self.commands.len(),
-            "Dispatching compute commands"
-        );
+        tracing::debug!(command_count = self.commands.len(), "Dispatching compute commands");
         let mut backend = context.device().inner.backend.lock().unwrap();
         backend.dispatch_compute(context.backend_handle(), &self.commands)
     }
@@ -153,9 +148,7 @@ pub struct ComputePass<'a> {
 impl<'a> ComputePass<'a> {
     /// Set the active compute pipeline.
     pub fn set_pipeline(&mut self, pipeline: &ComputePipeline) {
-        self.encoder
-            .commands
-            .push(GpuCommand::SetPipeline(pipeline.handle));
+        self.encoder.commands.push(GpuCommand::SetPipeline(pipeline.handle));
     }
 
     /// Bind resource slots for a compute dispatch.

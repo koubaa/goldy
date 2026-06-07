@@ -34,13 +34,9 @@ use types::MetalState;
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     state.devices.iter().all(|(device, ld)| {
-        ld.timeline_scheduled_max
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 0
+        ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed) == 0
             || context::device_retired(state, *device)
-                >= ld
-                    .timeline_scheduled_max
-                    .load(std::sync::atomic::Ordering::Relaxed)
+                >= ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed)
     })
 }
 
@@ -50,12 +46,7 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
-        device
-            .ledger
-            .lock()
-            .unwrap()
-            .resource_registry
-            .drain_pending_slots();
+        device.ledger.lock().unwrap().resource_registry.drain_pending_slots();
     }
 }
 
@@ -73,10 +64,7 @@ pub(in crate::backend::metal) fn drain_completed_cbs(sc: &mut types::MetalSubmis
 }
 
 /// Block until scheduled timeline values have been signaled on one device, or timeout.
-pub(in crate::backend::metal) fn wait_device_idle(
-    state: &MetalState,
-    device: DeviceHandle,
-) -> Result<()> {
+pub(in crate::backend::metal) fn wait_device_idle(state: &MetalState, device: DeviceHandle) -> Result<()> {
     use std::sync::atomic::Ordering;
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
@@ -85,9 +73,7 @@ pub(in crate::backend::metal) fn wait_device_idle(
         .devices
         .get(&device)
         .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
-    let target = ld
-        .timeline_scheduled_max
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let target = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed);
     if target == 0 {
         return Ok(());
     }
@@ -127,15 +113,12 @@ impl MetalBackend {
 
         // Runtime Metal shader validation reads `MTL_SHADER_VALIDATION` before the first
         // device is created when GPU API validation is on (`GOLDY_VALIDATION=1`, `api`, `all`, …).
-        if crate::backend::goldy_validation_enabled()
-            && std::env::var_os("MTL_SHADER_VALIDATION").is_none()
-        {
+        if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
             std::env::set_var("MTL_SHADER_VALIDATION", "1");
             tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION); was unset");
         }
 
-        let slang_compiler =
-            crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
+        let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         let adapters: Vec<types::MetalAdapterInfo> = ::metal::Device::all()
             .into_iter()
@@ -240,9 +223,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn is_device_lost(&self, _device: DeviceHandle) -> bool {
-        self.state
-            .device_lost
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.state.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_buffer(
@@ -338,22 +319,11 @@ impl GpuBackend for MetalBackend {
         buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
     }
 
-    fn read_buffer_to_cpu(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
+    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
         buffer::read_to_cpu(&self.state, device, buffer, output)
     }
 
-    fn clear_buffer(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    ) -> Result<()> {
+    fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         buffer::clear(&self.state, device, buffer, offset, size)
     }
 
@@ -365,14 +335,7 @@ impl GpuBackend for MetalBackend {
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
-        self.create_shader_with_checks(
-            device,
-            slang_source,
-            search_paths,
-            defines,
-            optimization_level,
-            vec![],
-        )
+        self.create_shader_with_checks(device, slang_source, search_paths, defines, optimization_level, vec![])
     }
 
     fn create_shader_with_checks(
@@ -388,14 +351,8 @@ impl GpuBackend for MetalBackend {
             &self.state.devices,
             &mut self.state.shaders,
             &mut self.state.next_shader_handle,
-            crate::backend::shared::ShaderDesc::new(
-                device,
-                slang_source,
-                search_paths,
-                defines,
-                optimization_level,
-            )
-            .with_layout_checks(layout_checks),
+            crate::backend::shared::ShaderDesc::new(device, slang_source, search_paths, defines, optimization_level)
+                .with_layout_checks(layout_checks),
         )
     }
 
@@ -412,8 +369,7 @@ impl GpuBackend for MetalBackend {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
         let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
             device_handle: device,
             vertex_shader,
@@ -433,9 +389,8 @@ impl GpuBackend for MetalBackend {
         target_format: TextureFormat,
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
-                .with_depth_stencil(depth_stencil);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
+            .with_depth_stencil(depth_stencil);
         let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
             device_handle: device,
             vertex_shader,
@@ -467,14 +422,7 @@ impl GpuBackend for MetalBackend {
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
-        render_target::create_with_depth(
-            &mut self.state,
-            device,
-            width,
-            height,
-            color_format,
-            depth_format,
-        )
+        render_target::create_with_depth(&mut self.state, device, width, height, color_format, depth_format)
     }
 
     fn destroy_render_target(&mut self, target: RenderTargetHandle) {
@@ -503,24 +451,10 @@ impl GpuBackend for MetalBackend {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        texture::create(
-            &mut self.state,
-            device,
-            width,
-            height,
-            format,
-            access,
-            flags,
-        )
+        texture::create(&mut self.state, device, width, height, format, access, flags)
     }
 
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
         texture::write(&self.state, texture, data, width, height)
     }
 
@@ -552,11 +486,7 @@ impl GpuBackend for MetalBackend {
         texture::bindless_sampled_index(&self.state, texture)
     }
 
-    fn create_sampler(
-        &mut self,
-        device: DeviceHandle,
-        desc: &SamplerDesc,
-    ) -> Result<SamplerHandle> {
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
         sampler::create(&mut self.state, device, desc)
     }
 
@@ -582,14 +512,10 @@ impl GpuBackend for MetalBackend {
         surface::destroy(&mut self.state, surface);
     }
 
-    fn begin_frame(
-        &mut self,
-        surface: SurfaceHandle,
-        ctx: ContextHandle,
-    ) -> Result<(FrameToken, TextureHandle)> {
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
         let image = surface::acquire(&mut self.state, surface, ctx)?;
-        let tex = surface::frame_texture(&self.state, surface)
-            .context("begin_frame: surface frame texture unavailable")?;
+        let tex =
+            surface::frame_texture(&self.state, surface).context("begin_frame: surface frame texture unavailable")?;
         Ok((
             FrameToken {
                 surface,
@@ -616,11 +542,7 @@ impl GpuBackend for MetalBackend {
         surface::format(&self.state, surface)
     }
 
-    fn surface_set_present_mode(
-        &mut self,
-        surface: SurfaceHandle,
-        mode: crate::types::PresentMode,
-    ) -> Result<()> {
+    fn surface_set_present_mode(&mut self, surface: SurfaceHandle, mode: crate::types::PresentMode) -> Result<()> {
         surface::set_present_mode(&mut self.state, surface, mode)
     }
 
@@ -640,14 +562,7 @@ impl GpuBackend for MetalBackend {
         self.state
             .contexts
             .get(&ctx)
-            .map(|sc_arc| {
-                sc_arc
-                    .lock()
-                    .unwrap()
-                    .timeline_event
-                    .as_ref()
-                    .signaled_value()
-            })
+            .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
             .unwrap_or(0)
     }
 
@@ -655,18 +570,12 @@ impl GpuBackend for MetalBackend {
         context::device_retired(&self.state, device)
     }
 
-    fn device_wait_until(
-        &mut self,
-        device: DeviceHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> anyhow::Result<()> {
+    fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         let timeout = std::time::Duration::from_secs(60);
         if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
             Ok(())
         } else {
-            anyhow::bail!(
-                "device_wait_until: timed out after 60 s waiting for timeline value {value}"
-            )
+            anyhow::bail!("device_wait_until: timed out after 60 s waiting for timeline value {value}")
         }
     }
 
@@ -677,8 +586,7 @@ impl GpuBackend for MetalBackend {
             None => return Vec::new(),
         };
         let sc = sc_arc.lock().unwrap();
-        let returns: Vec<(SurfaceHandle, u32)> =
-            std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
+        let returns: Vec<(SurfaceHandle, u32)> = std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
         drop(sc);
         for (surface_handle, _image_index) in returns {
             if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
@@ -710,11 +618,7 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
-    fn wait_until(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         use std::sync::atomic::Ordering;
         let device = self.context_device(ctx);
         let _tz = crate::tracy_zone!("mtl.wait_until");
@@ -883,29 +787,15 @@ impl GpuBackend for MetalBackend {
         compute::destroy(&mut self.state, pipeline);
     }
 
-    fn available_bindless_slots(
-        &self,
-        device: DeviceHandle,
-        category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn available_bindless_slots(&self, device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
         self.state
             .devices
             .get(&device)
-            .map(|ld| {
-                ld.ledger
-                    .lock()
-                    .unwrap()
-                    .resource_registry
-                    .available_slots(category)
-            })
+            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 
-    fn max_bindless_slots_per_category(
-        &self,
-        _device: DeviceHandle,
-        _category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn max_bindless_slots_per_category(&self, _device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {
         types::MAX_RESOURCES_PER_CATEGORY
     }
 
@@ -922,14 +812,9 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-    fn set_reclamation_context(
-        &mut self,
-        ctx: ContextHandle,
-        epoch: Option<crate::timeline::TimelineValue>,
-    ) {
+    fn set_reclamation_context(&mut self, ctx: ContextHandle, epoch: Option<crate::timeline::TimelineValue>) {
         if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            sc_arc.lock().unwrap().reclamation_context =
-                epoch.map(|epoch| (std::thread::current().id(), epoch));
+            sc_arc.lock().unwrap().reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
         }
     }
 
@@ -947,11 +832,7 @@ impl GpuBackend for MetalBackend {
         }
         drain_all_pending_slots(&mut self.state);
         if let Some(logical_device) = self.state.devices.get(&device) {
-            logical_device
-                .heap_allocator
-                .lock()
-                .unwrap()
-                .reset_for_frame();
+            logical_device.heap_allocator.lock().unwrap().reset_for_frame();
         }
     }
 
@@ -967,16 +848,8 @@ impl GpuBackend for MetalBackend {
 
     fn compact_overflow_heaps(&mut self, device: DeviceHandle) {
         if let Some(logical_device) = self.state.devices.get(&device) {
-            logical_device
-                .heap_allocator
-                .lock()
-                .unwrap()
-                .compact_overflow();
-            logical_device
-                .texture_heap
-                .lock()
-                .unwrap()
-                .compact_overflow();
+            logical_device.heap_allocator.lock().unwrap().compact_overflow();
+            logical_device.texture_heap.lock().unwrap().compact_overflow();
         }
     }
 
@@ -1040,11 +913,7 @@ mod tests {
     #[test]
     fn test_metal_backend_creation() {
         let backend = MetalBackend::new();
-        assert!(
-            backend.is_ok(),
-            "Failed to create Metal backend: {:?}",
-            backend.err()
-        );
+        assert!(backend.is_ok(), "Failed to create Metal backend: {:?}", backend.err());
         let backend = backend.unwrap();
         assert_eq!(backend.backend_type(), BackendType::Metal);
     }
@@ -1063,11 +932,7 @@ mod tests {
     fn test_metal_device_creation() {
         let mut backend = MetalBackend::new().unwrap();
         let device = backend.create_device(0);
-        assert!(
-            device.is_ok(),
-            "Failed to create Metal device: {:?}",
-            device.err()
-        );
+        assert!(device.is_ok(), "Failed to create Metal device: {:?}", device.err());
         let device = device.unwrap();
         assert!(backend.is_device_valid(device));
         backend.destroy_device(device);

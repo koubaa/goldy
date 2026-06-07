@@ -75,10 +75,7 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
         &[]
     };
 
-    match (*device)
-        .inner
-        .alloc_buffer_with_bytes(data_slice, access.into())
-    {
+    match (*device).inner.alloc_buffer_with_bytes(data_slice, access.into()) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

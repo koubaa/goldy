@@ -11,8 +11,8 @@
 //! - Shaders access resources by index into the argument buffer
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle,
+    SurfaceHandle, TextureHandle,
 };
 use crate::backend::BufferKind;
 use crate::timeline::TimelineValue;
@@ -23,10 +23,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
-    ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
-    ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
-    Device as MTLDevice, Heap, Library, MTLPrimitiveType, MTLResourceOptions, RenderPipelineState,
-    SamplerState, SharedEvent, Texture as MTLTexture,
+    ArgumentEncoder, Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
+    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Heap, Library, MTLPrimitiveType,
+    MTLResourceOptions, RenderPipelineState, SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer.
@@ -240,11 +239,7 @@ impl HeapAllocator {
     }
 
     /// Declare all buffer heaps resident for a render encoder at the given stages.
-    pub fn use_heaps_for_render(
-        &self,
-        encoder: &mtl::RenderCommandEncoderRef,
-        stages: mtl::MTLRenderStages,
-    ) {
+    pub fn use_heaps_for_render(&self, encoder: &mtl::RenderCommandEncoderRef, stages: mtl::MTLRenderStages) {
         if !self.has_buffers() {
             return;
         }
@@ -478,11 +473,7 @@ impl TextureHeapAllocator {
     }
 
     /// Declare all texture heaps resident for a render encoder at the given stages.
-    pub fn use_heaps_for_render(
-        &self,
-        encoder: &mtl::RenderCommandEncoderRef,
-        stages: mtl::MTLRenderStages,
-    ) {
+    pub fn use_heaps_for_render(&self, encoder: &mtl::RenderCommandEncoderRef, stages: mtl::MTLRenderStages) {
         if !self.has_textures() {
             return;
         }
@@ -581,8 +572,7 @@ impl TimelineWaiter {
     pub fn signal(&self, value: u64) {
         // Stamp CPU time first so TID_RENDER sees a timestamp that is never
         // newer than the condvar wake-up it will observe.
-        self.last_signal_instant_ns
-            .store(metal_instant_ns(), Ordering::Release);
+        self.last_signal_instant_ns.store(metal_instant_ns(), Ordering::Release);
 
         if let Some(queue) = &self.signal_queue {
             let mut last = self.last_emitted.load(Ordering::Acquire);
@@ -828,8 +818,7 @@ impl ResourceRegistry {
     /// Failing fast surfaces the leak instead of producing corrupt frames.
     pub fn register_storage_buffer(&mut self, handle: BufferHandle) -> u32 {
         assert!(
-            self.storage_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY
-                || self.storage_buffer.free_count() > 0,
+            self.storage_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY || self.storage_buffer.free_count() > 0,
             "storage-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
              next_index={} free={} pending_free={} live_indices={} \
              (Scattered={}, Broadcast={}). \
@@ -851,8 +840,7 @@ impl ResourceRegistry {
                 .count(),
         );
         let local_index = self.storage_buffer.alloc();
-        self.buffer_indices
-            .insert(handle, (local_index, BufferKind::Scattered));
+        self.buffer_indices.insert(handle, (local_index, BufferKind::Scattered));
         local_index
     }
 
@@ -868,14 +856,12 @@ impl ResourceRegistry {
     /// and cause silent shader-side garbage reads.
     pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
         assert!(
-            self.uniform_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY
-                || self.uniform_buffer.free_count() > 0,
+            self.uniform_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY || self.uniform_buffer.free_count() > 0,
             "uniform-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
              Likely a per-frame leak in bind_map for Broadcast buffers."
         );
         let local_index = self.uniform_buffer.alloc();
-        self.buffer_indices
-            .insert(handle, (local_index, BufferKind::Broadcast));
+        self.buffer_indices.insert(handle, (local_index, BufferKind::Broadcast));
         local_index
     }
 
@@ -988,15 +974,13 @@ impl ResourceRegistry {
                     self.storage_buffer.free(local_index);
                 }
                 (BufferKind::Scattered, Some(b)) => {
-                    self.pending_free_storage_buffer_slots
-                        .push((local_index, b));
+                    self.pending_free_storage_buffer_slots.push((local_index, b));
                 }
                 (BufferKind::Broadcast, None) => {
                     self.uniform_buffer.free(local_index);
                 }
                 (BufferKind::Broadcast, Some(b)) => {
-                    self.pending_free_uniform_buffer_slots
-                        .push((local_index, b));
+                    self.pending_free_uniform_buffer_slots.push((local_index, b));
                 }
             }
         }
@@ -1330,14 +1314,10 @@ pub(super) struct MetalState {
 
 impl MetalState {
     #[inline]
-    pub(super) fn slang_compiler_mut_or_init(
-        &mut self,
-    ) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
+    pub(super) fn slang_compiler_mut_or_init(&mut self) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
         use anyhow::Context;
         if self.slang_compiler.is_none() {
-            self.slang_compiler = Some(
-                crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?,
-            );
+            self.slang_compiler = Some(crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?);
         }
         Ok(self.slang_compiler.as_mut().expect("just set"))
     }
@@ -1468,19 +1448,12 @@ mod tests {
 
         // GPU is "busy" → park on pending.
         reg.unregister_buffer(h0, Some(1));
-        assert_eq!(
-            reg.pending_buffer_slot_count(),
-            1,
-            "expected slot to land in pending"
-        );
+        assert_eq!(reg.pending_buffer_slot_count(), 1, "expected slot to land in pending");
 
         // Until drain, register must NOT re-hand out slot 0.
         let h1: BufferHandle = 2;
         let i1 = reg.register_storage_buffer(h1);
-        assert_eq!(
-            i1, 1,
-            "register_storage_buffer must not recycle a still-pending slot"
-        );
+        assert_eq!(i1, 1, "register_storage_buffer must not recycle a still-pending slot");
 
         // After drain, pending→free, and the next register picks it up.
         reg.drain_pending_slots();
@@ -1525,10 +1498,7 @@ mod tests {
 
         let h1: TextureHandle = 101;
         let i1 = reg.register_texture(h1);
-        assert_ne!(
-            i1, i0,
-            "texture slot must not be recycled while still pending"
-        );
+        assert_ne!(i1, i0, "texture slot must not be recycled while still pending");
 
         reg.drain_pending_slots();
         reg.release_texture_slot(i1, None);

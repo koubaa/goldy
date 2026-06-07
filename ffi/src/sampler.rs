@@ -50,9 +50,7 @@ pub unsafe extern "C" fn goldy_sampler_create(
 /// # Safety
 /// The device pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_sampler_create_default(
-    device: *const GoldyDevice,
-) -> *mut GoldySampler {
+pub unsafe extern "C" fn goldy_sampler_create_default(device: *const GoldyDevice) -> *mut GoldySampler {
     goldy_sampler_create(device, ptr::null())
 }
 

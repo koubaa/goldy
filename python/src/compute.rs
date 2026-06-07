@@ -32,8 +32,7 @@ impl PyComputePipeline {
     ///     A new ComputePipeline instance.
     #[new]
     fn new(device: &PyDevice, compute_shader: &PyShaderModule) -> PyResult<Self> {
-        let pipeline =
-            goldy::ComputePipeline::new(&device.inner, &compute_shader.inner).into_py_result()?;
+        let pipeline = goldy::ComputePipeline::new(&device.inner, &compute_shader.inner).into_py_result()?;
 
         Ok(PyComputePipeline {
             inner: Arc::new(pipeline),
@@ -147,8 +146,7 @@ impl PyComputePass {
     fn bind_resources(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) {
         self.encoder.borrow(py).with_encoder(|enc| {
             // Collect buffer references - deref the Arc to get &Buffer
-            let buffer_refs: Vec<&goldy::Buffer> =
-                buffers.iter().map(|b| b.inner.as_ref()).collect();
+            let buffer_refs: Vec<&goldy::Buffer> = buffers.iter().map(|b| b.inner.as_ref()).collect();
 
             let mut pass = enc.begin_compute_pass();
             pass.bind_resources(&buffer_refs);

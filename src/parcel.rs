@@ -130,11 +130,7 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn from_mosaic(
-        pool: BufferPool,
-        views: Vec<BufferView>,
-        bookkeeping: BookkeepingGuard,
-    ) -> Self {
+    pub(crate) fn from_mosaic(pool: BufferPool, views: Vec<BufferView>, bookkeeping: BookkeepingGuard) -> Self {
         Self {
             storage: ParcelStorage::Mosaic(Mosaic { pool, views }),
             last_referenced: None,
@@ -228,9 +224,7 @@ impl Parcel {
         match &self.storage {
             ParcelStorage::Buffer(b) => ResourceId::Buffer(b.gpu_buffer_handle()),
             ParcelStorage::Texture(t) => ResourceId::Texture(t.gpu_handle()),
-            ParcelStorage::Mosaic(m) => {
-                ResourceId::Buffer(m.pool.backing_buffer().gpu_buffer_handle())
-            }
+            ParcelStorage::Mosaic(m) => ResourceId::Buffer(m.pool.backing_buffer().gpu_buffer_handle()),
         }
     }
 

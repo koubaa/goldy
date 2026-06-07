@@ -47,10 +47,7 @@ pub unsafe extern "C" fn goldy_device_is_valid(device: *const GoldyDevice) -> bo
 /// # Safety
 /// The device pointer and name must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_device_has_library(
-    device: *const GoldyDevice,
-    name: *const c_char,
-) -> bool {
+pub unsafe extern "C" fn goldy_device_has_library(device: *const GoldyDevice, name: *const c_char) -> bool {
     if device.is_null() || name.is_null() {
         return false;
     }

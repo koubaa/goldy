@@ -11,8 +11,8 @@
 //! - Shaders access resources by indexing into the descriptor heaps
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle,
-    RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
+    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use std::collections::HashMap;
@@ -204,9 +204,7 @@ impl ResourceRegistry {
     /// same pool. Sampler has its own heap.
     pub fn available_slots(&self, category: crate::types::ResourceCategory) -> u32 {
         match category {
-            crate::types::ResourceCategory::Sampler => {
-                MAX_BINDLESS_SAMPLERS.saturating_sub(self.sampler.live_count())
-            }
+            crate::types::ResourceCategory::Sampler => MAX_BINDLESS_SAMPLERS.saturating_sub(self.sampler.live_count()),
             _ => MAX_BINDLESS_CBV_SRV_UAV.saturating_sub(self.cbv_srv_uav.live_count()),
         }
     }
@@ -272,11 +270,7 @@ mod registry_tests {
             2,
             "counter should only have advanced twice (one UAV + one SRV slot ever minted)"
         );
-        assert_eq!(
-            reg.cbv_srv_uav.free_count(),
-            2,
-            "both slots must be in the free list"
-        );
+        assert_eq!(reg.cbv_srv_uav.free_count(), 2, "both slots must be in the free list");
     }
 
     /// Textures with both SRV and UAV views (storage textures) must recycle both slots.
@@ -311,16 +305,10 @@ mod registry_tests {
     fn live_resources_get_distinct_slots() {
         let mut reg = ResourceRegistry::new();
         const N: u64 = 64;
-        let mut slots: Vec<u32> = (0..N)
-            .map(|i| reg.register_buffer_uav(i as BufferHandle))
-            .collect();
+        let mut slots: Vec<u32> = (0..N).map(|i| reg.register_buffer_uav(i as BufferHandle)).collect();
         slots.sort_unstable();
         slots.dedup();
-        assert_eq!(
-            slots.len(),
-            N as usize,
-            "duplicate slots assigned to live resources"
-        );
+        assert_eq!(slots.len(), N as usize, "duplicate slots assigned to live resources");
     }
 
     /// Slots freed by destroyed resources must be reused before the counter advances,
@@ -363,42 +351,33 @@ mod registry_tests {
             requirements: vec![(CTX_A, SEQ)],
         }];
 
-        assert_eq!(
-            reg.cbv_srv_uav.free_count(),
-            0,
-            "slot must not be freed yet"
-        );
+        assert_eq!(reg.cbv_srv_uav.free_count(), 0, "slot must not be freed yet");
 
         let mut retired = HashMap::from([(CTX_A, 4u64)]);
-        let drain_pending =
-            |retired: &HashMap<ContextHandle, u64>,
-             reg: &mut ResourceRegistry,
-             pending: &mut Vec<PendingSlotReclamation>| {
-                let mut i = 0;
-                while i < pending.len() {
-                    let ready = pending[i]
-                        .requirements
-                        .iter()
-                        .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
-                    if ready {
-                        let entry = pending.swap_remove(i);
-                        reg.free_deferred_slot(entry.slot);
-                    } else {
-                        i += 1;
-                    }
+        let drain_pending = |retired: &HashMap<ContextHandle, u64>,
+                             reg: &mut ResourceRegistry,
+                             pending: &mut Vec<PendingSlotReclamation>| {
+            let mut i = 0;
+            while i < pending.len() {
+                let ready = pending[i]
+                    .requirements
+                    .iter()
+                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                if ready {
+                    let entry = pending.swap_remove(i);
+                    reg.free_deferred_slot(entry.slot);
+                } else {
+                    i += 1;
                 }
-            };
+            }
+        };
 
         drain_pending(&retired, &mut reg, &mut pending);
         assert_eq!(reg.cbv_srv_uav.free_count(), 0, "still in flight at seq 4");
 
         retired.insert(CTX_A, SEQ);
         drain_pending(&retired, &mut reg, &mut pending);
-        assert_eq!(
-            reg.cbv_srv_uav.free_count(),
-            1,
-            "slot freed after context retires"
-        );
+        assert_eq!(reg.cbv_srv_uav.free_count(), 1, "slot freed after context retires");
     }
 
     /// Slot used by two contexts waits for both to retire.
@@ -419,24 +398,23 @@ mod registry_tests {
 
         let mut retired = HashMap::from([(CTX_A, 0u64), (CTX_B, 0u64)]);
 
-        let drain_pending =
-            |retired: &HashMap<ContextHandle, u64>,
-             reg: &mut ResourceRegistry,
-             pending: &mut Vec<PendingSlotReclamation>| {
-                let mut i = 0;
-                while i < pending.len() {
-                    let ready = pending[i]
-                        .requirements
-                        .iter()
-                        .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
-                    if ready {
-                        let entry = pending.swap_remove(i);
-                        reg.free_deferred_slot(entry.slot);
-                    } else {
-                        i += 1;
-                    }
+        let drain_pending = |retired: &HashMap<ContextHandle, u64>,
+                             reg: &mut ResourceRegistry,
+                             pending: &mut Vec<PendingSlotReclamation>| {
+            let mut i = 0;
+            while i < pending.len() {
+                let ready = pending[i]
+                    .requirements
+                    .iter()
+                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                if ready {
+                    let entry = pending.swap_remove(i);
+                    reg.free_deferred_slot(entry.slot);
+                } else {
+                    i += 1;
                 }
-            };
+            }
+        };
 
         drain_pending(&retired, &mut reg, &mut pending);
         assert_eq!(reg.cbv_srv_uav.free_count(), 0);
@@ -693,13 +671,14 @@ impl DeviceLedger {
     ) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
-            let ready = self.pending_slot_reclamations[i].requirements.iter().all(
-                |(ctx_id, required_seq)| {
-                    context_fences.get(ctx_id).is_none_or(|(_, fence)| unsafe {
-                        fence.GetCompletedValue() >= *required_seq
-                    })
-                },
-            );
+            let ready = self.pending_slot_reclamations[i]
+                .requirements
+                .iter()
+                .all(|(ctx_id, required_seq)| {
+                    context_fences
+                        .get(ctx_id)
+                        .is_none_or(|(_, fence)| unsafe { fence.GetCompletedValue() >= *required_seq })
+                });
             if ready {
                 let entry = self.pending_slot_reclamations.swap_remove(i);
                 self.resource_registry.free_deferred_slot(entry.slot);
@@ -724,10 +703,7 @@ pub(crate) struct PsoCache {
 }
 
 impl PsoCache {
-    pub(crate) fn new(
-        graphics_blobs: HashMap<u64, Vec<u8>>,
-        compute_blobs: HashMap<u64, Vec<u8>>,
-    ) -> Self {
+    pub(crate) fn new(graphics_blobs: HashMap<u64, Vec<u8>>, compute_blobs: HashMap<u64, Vec<u8>>) -> Self {
         Self {
             graphics_blobs,
             compute_blobs,
@@ -799,11 +775,7 @@ pub(crate) type SharedSubmissionContext = Arc<Mutex<Dx12SubmissionContext>>;
 
 impl LogicalDevice {
     pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
-        let batch = self
-            .deletion_queue
-            .lock()
-            .unwrap()
-            .drain_up_to_completed(completed);
+        let batch = self.deletion_queue.lock().unwrap().drain_up_to_completed(completed);
         if batch.is_empty() {
             return;
         }
@@ -833,11 +805,7 @@ impl LogicalDevice {
     }
 }
 
-pub(crate) fn destroy_pending_deletion(
-    ld: &LogicalDevice,
-    ledger: &mut DeviceLedger,
-    resource: PendingDeletion,
-) {
+pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLedger, resource: PendingDeletion) {
     match resource {
         PendingDeletion::Buffer {
             buffer_handle,
@@ -849,12 +817,7 @@ pub(crate) fn destroy_pending_deletion(
             ledger.reclaim_buffer_slots(buffer_handle);
             if let Some(tiles) = reserved_tiles {
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
-                super::tiles::teardown_reserved_mappings(
-                    &ld.command_queue,
-                    &mut pool,
-                    &resource,
-                    &tiles,
-                );
+                super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
             }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
@@ -886,12 +849,7 @@ pub(crate) fn destroy_pending_deletion(
         } => {
             {
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
-                super::tiles::teardown_reserved_mappings(
-                    &ld.command_queue,
-                    &mut pool,
-                    &resource,
-                    &tiles,
-                );
+                super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
             }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.

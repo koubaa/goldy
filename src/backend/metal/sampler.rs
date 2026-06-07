@@ -12,10 +12,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     desc: &crate::types::SamplerDesc,
 ) -> Result<SamplerHandle> {
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get_mut(&device_handle).context("Invalid device handle")?;
 
     let handle = state.next_sampler_handle;
     state.next_sampler_handle += 1;
@@ -58,9 +55,7 @@ pub(super) fn create(
         logical_device
             .sampler_encoder
             .set_argument_buffer(&logical_device.argument_buffer, offset);
-        logical_device
-            .sampler_encoder
-            .set_sampler_state(0, &sampler);
+        logical_device.sampler_encoder.set_sampler_state(0, &sampler);
         tracing::trace!(
             "Encoded sampler {} at arg buffer offset {} (stride={})",
             handle,
@@ -112,28 +107,17 @@ pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
         let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         if let Some(h) = ctx_h {
             if let Some(sc_arc) = state.contexts.get(&h) {
-                sc_arc
-                    .lock()
-                    .unwrap()
-                    .deletion_queue
-                    .queue(barrier, deletion);
+                sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
                 return;
             }
         }
         if let Some(device) = state.devices.get(&device_handle) {
-            device
-                .deletion_queue
-                .lock()
-                .unwrap()
-                .queue(barrier, deletion);
+            device.deletion_queue.lock().unwrap().queue(barrier, deletion);
         }
     }
 }
 
 /// Get the bindless index for a sampler.
 pub(super) fn bindless_index(state: &MetalState, sampler_handle: SamplerHandle) -> Option<u32> {
-    state
-        .samplers
-        .get(&sampler_handle)
-        .map(|s| s.arg_buffer_index)
+    state.samplers.get(&sampler_handle).map(|s| s.arg_buffer_index)
 }

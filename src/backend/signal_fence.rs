@@ -24,9 +24,7 @@ pub fn spawn_fence_poller(state: FencePollerState) -> JoinHandle<()> {
             let mut last = state.last_emitted_epoch.load(Ordering::Acquire);
             while last < completed {
                 last += 1;
-                state
-                    .signal_queue
-                    .push(Signal::BoundaryCrossed { epoch: last });
+                state.signal_queue.push(Signal::BoundaryCrossed { epoch: last });
                 state.last_emitted_epoch.store(last, Ordering::Release);
             }
             // Avoid busy-spin; driver callbacks are coarse-grained.

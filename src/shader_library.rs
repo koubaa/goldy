@@ -106,10 +106,7 @@ impl ShaderLibrary {
     /// ]);
     /// ```
     pub fn from_embedded(name: &str, modules: &[(&str, &str)]) -> Self {
-        let modules = modules
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let modules = modules.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         Self {
             name: name.to_string(),
             modules,
@@ -145,9 +142,8 @@ impl ShaderLibrary {
 
         // Read primary module
         let primary_path = path.join(format!("{}.slang", name));
-        let primary_source = std::fs::read_to_string(&primary_path).with_context(|| {
-            format!("Failed to read primary module: {}", primary_path.display())
-        })?;
+        let primary_source = std::fs::read_to_string(&primary_path)
+            .with_context(|| format!("Failed to read primary module: {}", primary_path.display()))?;
         modules.insert(name.to_string(), primary_source);
 
         // Read sub-modules from subdirectory
@@ -162,11 +158,7 @@ impl ShaderLibrary {
         })
     }
 
-    fn read_submodules(
-        modules: &mut HashMap<String, String>,
-        prefix: &str,
-        dir: &Path,
-    ) -> Result<()> {
+    fn read_submodules(modules: &mut HashMap<String, String>, prefix: &str, dir: &Path) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -239,34 +231,16 @@ impl ShaderLibrary {
             "goldy_exp",
             &[
                 ("goldy_exp", include_str!("../shaders/goldy_exp.slang")),
-                (
-                    "goldy_exp/math",
-                    include_str!("../shaders/goldy_exp/math.slang"),
-                ),
-                (
-                    "goldy_exp/algebra",
-                    include_str!("../shaders/goldy_exp/algebra.slang"),
-                ),
+                ("goldy_exp/math", include_str!("../shaders/goldy_exp/math.slang")),
+                ("goldy_exp/algebra", include_str!("../shaders/goldy_exp/algebra.slang")),
                 (
                     "goldy_exp/collectives",
                     include_str!("../shaders/goldy_exp/collectives.slang"),
                 ),
-                (
-                    "goldy_exp/atomics",
-                    include_str!("../shaders/goldy_exp/atomics.slang"),
-                ),
-                (
-                    "goldy_exp/color",
-                    include_str!("../shaders/goldy_exp/color.slang"),
-                ),
-                (
-                    "goldy_exp/vertex",
-                    include_str!("../shaders/goldy_exp/vertex.slang"),
-                ),
-                (
-                    "goldy_exp/types",
-                    include_str!("../shaders/goldy_exp/types.slang"),
-                ),
+                ("goldy_exp/atomics", include_str!("../shaders/goldy_exp/atomics.slang")),
+                ("goldy_exp/color", include_str!("../shaders/goldy_exp/color.slang")),
+                ("goldy_exp/vertex", include_str!("../shaders/goldy_exp/vertex.slang")),
+                ("goldy_exp/types", include_str!("../shaders/goldy_exp/types.slang")),
                 (
                     "goldy_exp/primitives",
                     include_str!("../shaders/goldy_exp/primitives.slang"),
@@ -283,10 +257,7 @@ impl ShaderLibrary {
                     "goldy_exp/bindless_resources",
                     include_str!("../shaders/goldy_exp/bindless_resources.slang"),
                 ),
-                (
-                    "goldy_exp/access",
-                    include_str!("../shaders/goldy_exp/access.slang"),
-                ),
+                ("goldy_exp/access", include_str!("../shaders/goldy_exp/access.slang")),
             ],
         )
     }
@@ -310,10 +281,7 @@ mod tests {
     fn test_from_embedded_creates_multiple_modules() {
         let lib = ShaderLibrary::from_embedded(
             "mylib",
-            &[
-                ("mylib", "module mylib;"),
-                ("mylib/sub", "implementing mylib;"),
-            ],
+            &[("mylib", "module mylib;"), ("mylib/sub", "implementing mylib;")],
         );
 
         assert_eq!(lib.name(), "mylib");

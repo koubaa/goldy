@@ -117,12 +117,7 @@ impl StagingBelt {
         data: &[u8],
     ) -> Result<(vk::Buffer, u64)> {
         let (idx, start) = self.core.write(data, |size| {
-            allocate_chunk(
-                instance,
-                logical_device,
-                logical_device.physical_device,
-                size,
-            )
+            allocate_chunk(instance, logical_device, logical_device.physical_device, size)
         })?;
         Ok((self.core.active[idx].buffer, start))
     }
@@ -155,8 +150,7 @@ fn allocate_chunk(
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let buffer = unsafe { device.device.create_buffer(&info, None) }
-        .context("StagingBelt: create_buffer failed")?;
+    let buffer = unsafe { device.device.create_buffer(&info, None) }.context("StagingBelt: create_buffer failed")?;
 
     let reqs = unsafe { device.device.get_buffer_memory_requirements(buffer) };
     let mem_type = find_memory_type(
@@ -171,11 +165,10 @@ fn allocate_chunk(
         .allocation_size(reqs.size)
         .memory_type_index(mem_type);
 
-    let memory = unsafe { device.device.allocate_memory(&alloc, None) }
-        .context("StagingBelt: allocate_memory failed")?;
+    let memory =
+        unsafe { device.device.allocate_memory(&alloc, None) }.context("StagingBelt: allocate_memory failed")?;
 
-    unsafe { device.device.bind_buffer_memory(buffer, memory, 0) }
-        .context("StagingBelt: bind_buffer_memory failed")?;
+    unsafe { device.device.bind_buffer_memory(buffer, memory, 0) }.context("StagingBelt: bind_buffer_memory failed")?;
 
     let mapped = unsafe {
         device
@@ -390,11 +383,7 @@ mod tests {
 
         // Reclaim up to timeline 10 — first batch freed, second stays in-flight.
         pool.reclaim(10);
-        assert_eq!(
-            pool.free.len(),
-            2,
-            "two entries from timeline 10 should be free"
-        );
+        assert_eq!(pool.free.len(), 2, "two entries from timeline 10 should be free");
         assert_eq!(pool.in_flight.len(), 1, "timeline 20 batch still in-flight");
 
         // Reclaim up to timeline 20 — second batch freed.
@@ -434,15 +423,8 @@ mod tests {
 
         // Requesting more than the free entry's capacity → miss.
         let miss = pool.acquire_from_free_only(256);
-        assert!(
-            miss.is_none(),
-            "entry with capacity 128 should not satisfy 256"
-        );
-        assert_eq!(
-            pool.free.len(),
-            1,
-            "entry should remain in free list on miss"
-        );
+        assert!(miss.is_none(), "entry with capacity 128 should not satisfy 256");
+        assert_eq!(pool.free.len(), 1, "entry should remain in free list on miss");
     }
 
     #[test]

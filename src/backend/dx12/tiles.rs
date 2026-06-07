@@ -148,8 +148,8 @@ pub(crate) fn map_tiles_batched(
         let mut i = 0usize;
         while i < tiles.len() {
             let (t0, byte0) = tiles[i];
-            let heap_tile0 = u32::try_from(byte0 / u64::from(BUFFER_TILE_BYTES))
-                .map_err(|_| anyhow::anyhow!("heap tile index"))?;
+            let heap_tile0 =
+                u32::try_from(byte0 / u64::from(BUFFER_TILE_BYTES)).map_err(|_| anyhow::anyhow!("heap tile index"))?;
             let mut run_len = 1u32;
             let mut expect_t = t0.saturating_add(1);
             let mut expect_heap_tile = heap_tile0.saturating_add(1);

@@ -8,18 +8,11 @@ use anyhow::{Context, Result};
 use windows::Win32::Graphics::Direct3D12::*;
 
 /// Create a sampler.
-pub(super) fn create(
-    state: &mut Dx12State,
-    device_handle: DeviceHandle,
-    desc: &SamplerDesc,
-) -> Result<SamplerHandle> {
+pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
     let handle = state.next_sampler_handle;
     state.next_sampler_handle += 1;
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let sampler_offset = logical_device
         .ledger
@@ -45,16 +38,12 @@ pub(super) fn create(
     };
 
     let sampler_cpu_handle = unsafe {
-        let mut handle = logical_device
-            .sampler_heap
-            .GetCPUDescriptorHandleForHeapStart();
+        let mut handle = logical_device.sampler_heap.GetCPUDescriptorHandleForHeapStart();
         handle.ptr += (sampler_offset * logical_device.sampler_descriptor_size) as usize;
         handle
     };
     unsafe {
-        logical_device
-            .device
-            .CreateSampler(&sampler_desc, sampler_cpu_handle);
+        logical_device.device.CreateSampler(&sampler_desc, sampler_cpu_handle);
     }
 
     state.samplers.insert(
@@ -75,18 +64,12 @@ pub(super) fn create(
 pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
         if let Some(ld) = state.devices.get(&sampler.device_handle) {
-            ld.ledger
-                .lock()
-                .unwrap()
-                .reclaim_sampler_slots(sampler_handle);
+            ld.ledger.lock().unwrap().reclaim_sampler_slots(sampler_handle);
         }
     }
 }
 
 /// Get the bindless index for a sampler.
 pub(super) fn bindless_index(state: &Dx12State, sampler_handle: SamplerHandle) -> Option<u32> {
-    state
-        .samplers
-        .get(&sampler_handle)
-        .and_then(|s| s.bindless_offset)
+    state.samplers.get(&sampler_handle).and_then(|s| s.bindless_offset)
 }

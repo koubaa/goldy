@@ -6,16 +6,15 @@
 use goldy_ffi::winit_surface::goldy_surface_from_winit_window;
 use goldy_ffi::{
     goldy_buffer_create_with_data, goldy_buffer_destroy, goldy_device_destroy, goldy_encoder_clear,
-    goldy_encoder_create, goldy_encoder_draw, goldy_encoder_set_pipeline,
-    goldy_encoder_set_vertex_buffer, goldy_get_last_error, goldy_instance_adapter_count,
-    goldy_instance_create, goldy_instance_create_device_for_adapter, goldy_instance_destroy,
-    goldy_instance_get_adapter, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
-    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy,
-    goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format, goldy_surface_frame_render,
-    goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer, GoldyBufferKind,
-    GoldyColor, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
-    GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult, GoldyShaderModule, GoldySurface,
-    GoldyVertexAttribute, GoldyVertexFormat,
+    goldy_encoder_create, goldy_encoder_draw, goldy_encoder_set_pipeline, goldy_encoder_set_vertex_buffer,
+    goldy_get_last_error, goldy_instance_adapter_count, goldy_instance_create,
+    goldy_instance_create_device_for_adapter, goldy_instance_destroy, goldy_instance_get_adapter,
+    goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_shader_builtin_vertex_color_2d,
+    goldy_shader_create, goldy_shader_destroy, goldy_surface_acquire, goldy_surface_destroy, goldy_surface_format,
+    goldy_surface_frame_render, goldy_surface_present, goldy_surface_resize, GoldyAdapterInfo, GoldyBuffer,
+    GoldyBufferKind, GoldyColor, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyPrimitiveTopology,
+    GoldyRenderPipeline, GoldyRenderPipelineDesc, GoldyResult, GoldyShaderModule, GoldySurface, GoldyVertexAttribute,
+    GoldyVertexFormat,
 };
 use std::ffi::CStr;
 use std::mem::size_of;
@@ -110,10 +109,7 @@ impl App {
 
         self.surface = goldy_surface_from_winit_window(self.device, window.as_ref());
         if self.surface.is_null() {
-            return Err(format!(
-                "goldy_surface_from_winit_window: {}",
-                last_ffi_message()
-            ));
+            return Err(format!("goldy_surface_from_winit_window: {}", last_ffi_message()));
         }
 
         let vertices = [
@@ -138,10 +134,7 @@ impl App {
             GoldyBufferKind::Scattered,
         );
         if self.vertex_buffer.is_null() {
-            return Err(format!(
-                "goldy_buffer_create_with_data: {}",
-                last_ffi_message()
-            ));
+            return Err(format!("goldy_buffer_create_with_data: {}", last_ffi_message()));
         }
 
         let src = goldy_shader_builtin_vertex_color_2d();
@@ -172,13 +165,9 @@ impl App {
             ..Default::default()
         };
 
-        self.pipeline =
-            goldy_render_pipeline_create(self.device, self.shader, self.shader, &pipeline_desc);
+        self.pipeline = goldy_render_pipeline_create(self.device, self.shader, self.shader, &pipeline_desc);
         if self.pipeline.is_null() {
-            return Err(format!(
-                "goldy_render_pipeline_create: {}",
-                last_ffi_message()
-            ));
+            return Err(format!("goldy_render_pipeline_create: {}", last_ffi_message()));
         }
 
         Ok(())
@@ -215,10 +204,7 @@ impl App {
         goldy_encoder_draw(encoder, 0, 3, 0, 1);
 
         if goldy_surface_frame_render(frame, encoder) != GoldyResult::Ok {
-            return Err(format!(
-                "goldy_surface_frame_render: {}",
-                last_ffi_message()
-            ));
+            return Err(format!("goldy_surface_frame_render: {}", last_ffi_message()));
         }
 
         if goldy_surface_present(self.surface, frame) != GoldyResult::Ok {

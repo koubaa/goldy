@@ -204,12 +204,9 @@ unsafe impl Sync for Win32WindowWrapper {}
 
 #[cfg(target_os = "windows")]
 impl raw_window_handle::HasWindowHandle for Win32WindowWrapper {
-    fn window_handle(
-        &self,
-    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let handle = raw_window_handle::Win32WindowHandle::new(
-            std::num::NonZeroIsize::new(self.hwnd as isize).unwrap(),
-        );
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let handle =
+            raw_window_handle::Win32WindowHandle::new(std::num::NonZeroIsize::new(self.hwnd as isize).unwrap());
         let raw = raw_window_handle::RawWindowHandle::Win32(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }
@@ -217,9 +214,7 @@ impl raw_window_handle::HasWindowHandle for Win32WindowWrapper {
 
 #[cfg(target_os = "windows")]
 impl raw_window_handle::HasDisplayHandle for Win32WindowWrapper {
-    fn display_handle(
-        &self,
-    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
         let handle = raw_window_handle::WindowsDisplayHandle::new();
         let raw = raw_window_handle::RawDisplayHandle::Windows(handle);
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })
@@ -239,9 +234,7 @@ unsafe impl Sync for X11WindowWrapper {}
 
 #[cfg(target_os = "linux")]
 impl raw_window_handle::HasWindowHandle for X11WindowWrapper {
-    fn window_handle(
-        &self,
-    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         let mut handle = raw_window_handle::XlibWindowHandle::new(self.window as _);
         let raw = raw_window_handle::RawWindowHandle::Xlib(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
@@ -250,11 +243,8 @@ impl raw_window_handle::HasWindowHandle for X11WindowWrapper {
 
 #[cfg(target_os = "linux")]
 impl raw_window_handle::HasDisplayHandle for X11WindowWrapper {
-    fn display_handle(
-        &self,
-    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let handle =
-            raw_window_handle::XlibDisplayHandle::new(std::ptr::NonNull::new(self.display), 0);
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        let handle = raw_window_handle::XlibDisplayHandle::new(std::ptr::NonNull::new(self.display), 0);
         let raw = raw_window_handle::RawDisplayHandle::Xlib(handle);
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })
     }
@@ -272,12 +262,8 @@ unsafe impl Sync for CocoaWindowWrapper {}
 
 #[cfg(target_os = "macos")]
 impl raw_window_handle::HasWindowHandle for CocoaWindowWrapper {
-    fn window_handle(
-        &self,
-    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let handle = raw_window_handle::AppKitWindowHandle::new(
-            std::ptr::NonNull::new(self.ns_view).unwrap(),
-        );
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let handle = raw_window_handle::AppKitWindowHandle::new(std::ptr::NonNull::new(self.ns_view).unwrap());
         let raw = raw_window_handle::RawWindowHandle::AppKit(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }
@@ -285,9 +271,7 @@ impl raw_window_handle::HasWindowHandle for CocoaWindowWrapper {
 
 #[cfg(target_os = "macos")]
 impl raw_window_handle::HasDisplayHandle for CocoaWindowWrapper {
-    fn display_handle(
-        &self,
-    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
         let handle = raw_window_handle::AppKitDisplayHandle::new();
         let raw = raw_window_handle::RawDisplayHandle::AppKit(handle);
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })

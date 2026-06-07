@@ -2,10 +2,7 @@
 #![cfg(any(feature = "vulkan", feature = "dx12"))]
 
 use goldy::shader_cache::{ShaderBytecodeDiskCache, GOLDY_SHADER_CACHE_MAGIC};
-use goldy::{
-    types::BackendType, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions,
-    ShaderModule,
-};
+use goldy::{types::BackendType, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule};
 /// Simple compute shader (same intent as [`compute_integration::DOUBLE_SHADER`]).
 const CACHE_TEST_COMPUTE: &str = r#"
 import goldy_exp;
@@ -43,8 +40,7 @@ fn vk_pipeline_cache_file_written_on_drop() {
         .join("goldy")
         .join(format!("pipeline_cache_{adapter_id}.bin"));
 
-    let shader =
-        ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
+    let shader = ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
     let _pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
 
     // Drop pipeline and shader first so their Arc<DeviceInner> refs are released,
@@ -53,11 +49,7 @@ fn vk_pipeline_cache_file_written_on_drop() {
     drop(shader);
     drop(device);
 
-    assert!(
-        expected.exists(),
-        "expected Vulkan pipeline cache at {:?}",
-        expected
-    );
+    assert!(expected.exists(), "expected Vulkan pipeline cache at {:?}", expected);
     drop(instance);
 }
 
@@ -68,8 +60,7 @@ fn vk_pipeline_cache_survives_reload() {
     let Some((instance, device)) = try_vulkan_gpu() else {
         return;
     };
-    let shader =
-        ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
+    let shader = ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
     let _pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
     drop(_pipeline);
     drop(shader);
@@ -86,8 +77,7 @@ fn vk_pipeline_cache_survives_reload() {
         "second device backend mismatch"
     );
     let shader2 = ShaderModule::from_slang(&device2, CACHE_TEST_COMPUTE).expect("compile phase 2");
-    let _pipeline2 =
-        ComputePipeline::new(&device2, &shader2).expect("compute pipeline after reload");
+    let _pipeline2 = ComputePipeline::new(&device2, &shader2).expect("compute pipeline after reload");
 }
 
 /// Compiled Slang shaders flush `shader_cache.bin.zst` on [`Device`] / compiler teardown.
@@ -110,8 +100,7 @@ fn shader_cache_file_written_after_compile() {
         Err(_) => return,
     };
 
-    let shader =
-        ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
+    let shader = ShaderModule::from_slang(&device, CACHE_TEST_COMPUTE).expect("compile CACHE_TEST_COMPUTE");
     let _pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
 
     drop(_pipeline);
@@ -119,11 +108,7 @@ fn shader_cache_file_written_after_compile() {
     drop(device);
     drop(instance);
 
-    assert!(
-        path.exists(),
-        "expected Slang bytecode cache file at {:?}",
-        path
-    );
+    assert!(path.exists(), "expected Slang bytecode cache file at {:?}", path);
 }
 
 /// Wrong version line in envelope → cold [`ShaderBytecodeDiskCache`] (does not corrupt process cache).
@@ -139,9 +124,6 @@ fn shader_cache_stale_version_is_ignored() {
     std::fs::write(&path, compressed).expect("write test cache blob");
 
     let cache = ShaderBytecodeDiskCache::new_at_path(path);
-    assert!(
-        !cache.version_ok_on_disk(),
-        "stale envelope must not flag version_ok"
-    );
+    assert!(!cache.version_ok_on_disk(), "stale envelope must not flag version_ok");
     assert!(cache.is_empty(), "cold map when version mismatches build");
 }

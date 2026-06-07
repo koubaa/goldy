@@ -103,11 +103,7 @@ impl ShaderModule {
     ///     &["my_project/shaders"],
     /// )?;
     /// ```
-    pub fn from_slang_with_paths(
-        device: &Device,
-        source: &str,
-        extra_paths: &[&str],
-    ) -> Result<Self> {
+    pub fn from_slang_with_paths(device: &Device, source: &str, extra_paths: &[&str]) -> Result<Self> {
         Self::from_slang_with_options(device, source, extra_paths, &[], Default::default(), &[])
     }
 
@@ -120,14 +116,7 @@ impl ShaderModule {
         extra_paths: &[&str],
         defines: &[(&str, &str)],
     ) -> Result<Self> {
-        Self::from_slang_with_options(
-            device,
-            source,
-            extra_paths,
-            defines,
-            Default::default(),
-            &[],
-        )
+        Self::from_slang_with_options(device, source, extra_paths, defines, Default::default(), &[])
     }
 
     /// Create a shader module with full control over compilation options.
@@ -173,10 +162,8 @@ impl ShaderModule {
 
         let mut backend = device.inner.backend.lock().unwrap();
         let handle = if validate {
-            let owned_checks: Vec<OwnedLayoutCheck> = layout_checks
-                .iter()
-                .map(OwnedLayoutCheck::from_layout_check)
-                .collect();
+            let owned_checks: Vec<OwnedLayoutCheck> =
+                layout_checks.iter().map(OwnedLayoutCheck::from_layout_check).collect();
             backend.create_shader_with_checks(
                 device.inner.handle,
                 source,
@@ -186,13 +173,7 @@ impl ShaderModule {
                 owned_checks,
             )?
         } else {
-            backend.create_shader_with_paths(
-                device.inner.handle,
-                source,
-                &path_refs,
-                defines,
-                optimization_level,
-            )?
+            backend.create_shader_with_paths(device.inner.handle, source, &path_refs, defines, optimization_level)?
         };
 
         tracing::debug!("Shader module created");

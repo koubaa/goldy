@@ -32,16 +32,11 @@ fn alloc_committed_buffer_pair(
     cpu_readable: bool,
 ) -> Result<(ID3D12Resource, Option<ID3D12Resource>, Option<usize>)> {
     if cpu_readable && !is_storage {
-        anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for storage (UAV) buffers on resize allocation"
-        );
+        anyhow::bail!("BufferFlags::CPU_READABLE is only valid for storage (UAV) buffers on resize allocation");
     }
 
     let (heap_type, resource_flags) = if is_storage {
-        (
-            D3D12_HEAP_TYPE_DEFAULT,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        )
+        (D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
     } else {
         (D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE)
     };
@@ -62,10 +57,7 @@ fn alloc_committed_buffer_pair(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: resource_flags,
     };
@@ -106,10 +98,7 @@ fn alloc_committed_buffer_pair(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             Flags: D3D12_RESOURCE_FLAG_NONE,
         };
@@ -165,19 +154,14 @@ fn rewrite_root_buffer_descriptors(
                 },
             };
             let uav_cpu_handle = unsafe {
-                let mut cpu_handle = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
+                let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
                 cpu_handle.ptr += (uav_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 cpu_handle
             };
             unsafe {
-                logical_device.device.CreateUnorderedAccessView(
-                    new_resource,
-                    None,
-                    Some(&uav_desc),
-                    uav_cpu_handle,
-                );
+                logical_device
+                    .device
+                    .CreateUnorderedAccessView(new_resource, None, Some(&uav_desc), uav_cpu_handle);
             }
         }
         if let Some(srv_off) = old.bindless_srv_offset {
@@ -195,18 +179,14 @@ fn rewrite_root_buffer_descriptors(
                 },
             };
             let srv_cpu_handle = unsafe {
-                let mut cpu_handle = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
+                let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
                 cpu_handle.ptr += (srv_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 cpu_handle
             };
             unsafe {
-                logical_device.device.CreateShaderResourceView(
-                    new_resource,
-                    Some(&srv_desc),
-                    srv_cpu_handle,
-                );
+                logical_device
+                    .device
+                    .CreateShaderResourceView(new_resource, Some(&srv_desc), srv_cpu_handle);
             }
         }
     } else if let Some(cbv_off) = old.bindless_offset {
@@ -216,9 +196,7 @@ fn rewrite_root_buffer_descriptors(
             SizeInBytes: aligned_size as u32,
         };
         let cbv_handle = unsafe {
-            let mut cpu_handle = logical_device
-                .cbv_srv_uav_heap
-                .GetCPUDescriptorHandleForHeapStart();
+            let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
             cpu_handle.ptr += (cbv_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
             cpu_handle
         };
@@ -231,10 +209,7 @@ fn rewrite_root_buffer_descriptors(
     Ok(())
 }
 
-fn patch_buffer_views_after_parent_resize(
-    state: &mut Dx12State,
-    parent_handle: BufferHandle,
-) -> Result<()> {
+fn patch_buffer_views_after_parent_resize(state: &mut Dx12State, parent_handle: BufferHandle) -> Result<()> {
     let new_resource = state
         .buffers
         .get(&parent_handle)
@@ -255,8 +230,7 @@ fn patch_buffer_views_after_parent_resize(
             (
                 v.device_handle,
                 v.element_stride.unwrap_or(4),
-                v.view_byte_offset
-                    .context("patch_buffer_views: view offset")?,
+                v.view_byte_offset.context("patch_buffer_views: view offset")?,
                 v.size,
                 v.bindless_offset,
                 v.bindless_srv_offset,
@@ -292,9 +266,7 @@ fn patch_buffer_views_after_parent_resize(
                     },
                 };
                 let uav_cpu_handle = unsafe {
-                    let mut h = logical_device
-                        .cbv_srv_uav_heap
-                        .GetCPUDescriptorHandleForHeapStart();
+                    let mut h = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
                     h.ptr += (uav_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
                     h
                 };
@@ -321,18 +293,14 @@ fn patch_buffer_views_after_parent_resize(
                     },
                 };
                 let srv_cpu_handle = unsafe {
-                    let mut h = logical_device
-                        .cbv_srv_uav_heap
-                        .GetCPUDescriptorHandleForHeapStart();
+                    let mut h = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
                     h.ptr += (srv_off * logical_device.cbv_srv_uav_descriptor_size) as usize;
                     h
                 };
                 unsafe {
-                    logical_device.device.CreateShaderResourceView(
-                        &new_resource,
-                        Some(&srv_desc),
-                        srv_cpu_handle,
-                    );
+                    logical_device
+                        .device
+                        .CreateShaderResourceView(&new_resource, Some(&srv_desc), srv_cpu_handle);
                 }
             }
         }
@@ -408,42 +376,25 @@ pub(super) fn resize(
         uniform_buffer_allocation_width(new_size, new_size)
     };
 
-    let (new_resource, new_readback, new_readback_mapped) = alloc_committed_buffer_pair(
-        logical_device_ro,
-        new_alloc_width,
-        old.is_storage,
-        cpu_readable,
-    )?;
+    let (new_resource, new_readback, new_readback_mapped) =
+        alloc_committed_buffer_pair(logical_device_ro, new_alloc_width, old.is_storage, cpu_readable)?;
 
     let old_resource = old.resource.clone();
-    let copy_len = if preserve_contents {
-        old.size.min(new_size)
-    } else {
-        0
-    };
+    let copy_len = if preserve_contents { old.size.min(new_size) } else { 0 };
 
     let need_copy = old.is_storage && copy_len > 0;
     let need_tail_clear = old.is_storage && preserve_contents && new_size > old.size;
 
     if old.is_storage && (need_copy || need_tail_clear) {
-        let device = state
-            .devices
-            .get(&device_handle)
-            .context("resize_buffer: device")?;
+        let device = state.devices.get(&device_handle).context("resize_buffer: device")?;
 
-        let copy_allocator: ID3D12CommandAllocator = unsafe {
+        let copy_allocator: ID3D12CommandAllocator =
+            unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                .context("resize_buffer: allocator")?;
+        let cmd: ID3D12GraphicsCommandList = unsafe {
             device
                 .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-        }
-        .context("resize_buffer: allocator")?;
-        let cmd: ID3D12GraphicsCommandList = unsafe {
-            device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &copy_allocator,
-                None,
-            )
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &copy_allocator, None)
         }
         .context("resize_buffer: command list")?;
         let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
@@ -495,13 +446,7 @@ pub(super) fn resize(
             while tail_written < tail_len {
                 let this_chunk = (tail_len - tail_written).min(ZERO_BUFFER_SIZE);
                 unsafe {
-                    cmd.CopyBufferRegion(
-                        &new_resource,
-                        old.size + tail_written,
-                        zero,
-                        0,
-                        this_chunk,
-                    );
+                    cmd.CopyBufferRegion(&new_resource, old.size + tail_written, zero, 0, this_chunk);
                 }
                 tail_written += this_chunk;
             }
@@ -523,12 +468,8 @@ pub(super) fn resize(
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device
-            .timeline_next
-            .load(std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-            .context("resize_buffer: Signal")?;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
+        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("resize_buffer: Signal")?;
         wait_for_fence(&device.fence, fence_value)?;
         deletion_fence_marker = fence_value;
 
@@ -542,12 +483,10 @@ pub(super) fn resize(
             Begin: 0,
             End: old.size as usize,
         };
-        unsafe { old_resource.Map(0, Some(&read_all), Some(&mut src)) }
-            .context("resize_buffer: map old uniform")?;
+        unsafe { old_resource.Map(0, Some(&read_all), Some(&mut src)) }.context("resize_buffer: map old uniform")?;
         let mut dst: *mut std::ffi::c_void = std::ptr::null_mut();
         let dst_range = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { new_resource.Map(0, Some(&dst_range), Some(&mut dst)) }
-            .context("resize_buffer: map new uniform")?;
+        unsafe { new_resource.Map(0, Some(&dst_range), Some(&mut dst)) }.context("resize_buffer: map new uniform")?;
         unsafe {
             std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, copy_len as usize);
             if new_size > old.size {
@@ -648,10 +587,7 @@ pub(super) fn create(
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     // First pass: create the resource (immutable borrow of device)
     let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
         let is_storage = access == BufferKind::Scattered;
@@ -663,10 +599,7 @@ pub(super) fn create(
         // Storage buffers need DEFAULT heap for UAV support (bindless)
         // Non-storage buffers can use UPLOAD heap for simpler CPU access
         let (heap_type, resource_flags) = if is_storage {
-            (
-                D3D12_HEAP_TYPE_DEFAULT,
-                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            )
+            (D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
         } else {
             (D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE)
         };
@@ -687,10 +620,7 @@ pub(super) fn create(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             Flags: resource_flags,
         };
@@ -744,10 +674,7 @@ pub(super) fn create(
                 DepthOrArraySize: 1,
                 MipLevels: 1,
                 Format: DXGI_FORMAT_UNKNOWN,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
                 Flags: D3D12_RESOURCE_FLAG_NONE,
             };
@@ -793,10 +720,7 @@ pub(super) fn create(
     // Scattered access -> UAV + SRV descriptors, Broadcast access -> CBV descriptors
     let is_uniform = access == BufferKind::Broadcast;
     let (bindless_offset, bindless_srv_offset) = if is_storage || is_uniform {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         if is_storage {
             // For storage buffers, create BOTH UAV (for compute write) and SRV (for graphics read)
@@ -833,21 +757,15 @@ pub(super) fn create(
             };
 
             let uav_cpu_handle = unsafe {
-                let mut cpu_handle = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
-                cpu_handle.ptr +=
-                    (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+                cpu_handle.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 cpu_handle
             };
 
             unsafe {
-                logical_device.device.CreateUnorderedAccessView(
-                    &resource,
-                    None,
-                    Some(&uav_desc),
-                    uav_cpu_handle,
-                );
+                logical_device
+                    .device
+                    .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
             }
 
             // Also register and create SRV for read-only graphics access (StructuredBuffer)
@@ -873,20 +791,15 @@ pub(super) fn create(
             };
 
             let srv_cpu_handle = unsafe {
-                let mut cpu_handle = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
-                cpu_handle.ptr +=
-                    (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+                cpu_handle.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 cpu_handle
             };
 
             unsafe {
-                logical_device.device.CreateShaderResourceView(
-                    &resource,
-                    Some(&srv_desc),
-                    srv_cpu_handle,
-                );
+                logical_device
+                    .device
+                    .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
             }
 
             tracing::debug!(
@@ -909,9 +822,7 @@ pub(super) fn create(
             let aligned_size = (logical_size + 255) & !255;
 
             if aligned_size > allocation_size {
-                anyhow::bail!(
-                    "uniform buffer CBV size {aligned_size} exceeds allocation {allocation_size}"
-                );
+                anyhow::bail!("uniform buffer CBV size {aligned_size} exceeds allocation {allocation_size}");
             }
 
             // Create CBV descriptor
@@ -921,11 +832,8 @@ pub(super) fn create(
             };
 
             let cbv_handle = unsafe {
-                let mut cpu_handle = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
-                cpu_handle.ptr +=
-                    (cbv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+                let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+                cpu_handle.ptr += (cbv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 cpu_handle
             };
 
@@ -935,11 +843,7 @@ pub(super) fn create(
                     .CreateConstantBufferView(Some(&cbv_desc), cbv_handle);
             }
 
-            tracing::debug!(
-                "Created CBV for buffer {} at heap offset {}",
-                handle,
-                cbv_offset
-            );
+            tracing::debug!("Created CBV for buffer {} at heap offset {}", handle, cbv_offset);
             (Some(cbv_offset), None) // No SRV for uniform buffers
         }
     } else {
@@ -994,33 +898,21 @@ pub(super) fn create_reserved_with_capacity(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
     };
 
     let (resource, reserved_tiles) = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let mut pool_guard = ld.tile_heap_pool.lock().unwrap();
-        let pool = pool_guard
-            .as_mut()
-            .context("internal: tile heap pool missing")?;
+        let pool = pool_guard.as_mut().context("internal: tile heap pool missing")?;
         let queue = ld.command_queue.clone();
 
         let mut resource: Option<ID3D12Resource> = None;
         unsafe {
-            ld.device.CreateReservedResource(
-                &resource_desc,
-                D3D12_RESOURCE_STATE_COMMON,
-                None,
-                &mut resource,
-            )
+            ld.device
+                .CreateReservedResource(&resource_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut resource)
         }
         .context("CreateReservedResource")?;
         let resource = resource.context("CreateReservedResource returned null")?;
@@ -1048,16 +940,8 @@ pub(super) fn create_reserved_with_capacity(
     let num_elements = (logical_size as u32) / stride;
 
     let (bindless_offset, bindless_srv_offset) = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
-        let uav_offset = ld
-            .ledger
-            .lock()
-            .unwrap()
-            .resource_registry
-            .register_buffer_uav(handle);
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let uav_offset = ld.ledger.lock().unwrap().resource_registry.register_buffer_uav(handle);
         let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
             Format: DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
@@ -1081,12 +965,7 @@ pub(super) fn create_reserved_with_capacity(
                 .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
         }
 
-        let srv_offset = ld
-            .ledger
-            .lock()
-            .unwrap()
-            .resource_registry
-            .register_buffer_srv(handle);
+        let srv_offset = ld.ledger.lock().unwrap().resource_registry.register_buffer_srv(handle);
         let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
             Format: DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
@@ -1159,25 +1038,10 @@ pub(super) fn create_with_capacity(
                 && !flags.contains(BufferFlags::CPU_READABLE)
         });
     if use_reserved {
-        let h = create_reserved_with_capacity(
-            state,
-            device_handle,
-            initial_size,
-            cap,
-            element_stride,
-            flags,
-        )?;
+        let h = create_reserved_with_capacity(state, device_handle, initial_size, cap, element_stride, flags)?;
         return Ok((h, capacity(state, h)));
     }
-    let h = create(
-        state,
-        device_handle,
-        initial_size,
-        cap,
-        access,
-        element_stride,
-        flags,
-    )?;
+    let h = create(state, device_handle, initial_size, cap, access, element_stride, flags)?;
     Ok((h, capacity(state, h)))
 }
 
@@ -1217,9 +1081,7 @@ pub(super) fn set_logical_size(
     }
     let stride = old.element_stride.unwrap_or(4);
     if old.is_storage && stride > 0 && !(new_logical_size as u32).is_multiple_of(stride) {
-        anyhow::bail!(
-            "set_logical_size: new size {new_logical_size} not divisible by stride {stride}"
-        );
+        anyhow::bail!("set_logical_size: new size {new_logical_size} not divisible by stride {stride}");
     }
     if !old.is_storage {
         let aligned = (new_logical_size + 255) & !255;
@@ -1232,19 +1094,11 @@ pub(super) fn set_logical_size(
         let old_pages = tiles::tiles_needed_for_logical_size(old.size);
         let new_pages = tiles::tiles_needed_for_logical_size(new_logical_size);
         {
-            let ld = state
-                .devices
-                .get(&device_handle)
-                .context("set_logical_size: device")?;
+            let ld = state.devices.get(&device_handle).context("set_logical_size: device")?;
             let mut pool_guard = ld.tile_heap_pool.lock().unwrap();
-            let pool = pool_guard
-                .as_mut()
-                .context("set_logical_size: tile heap pool")?;
+            let pool = pool_guard.as_mut().context("set_logical_size: tile heap pool")?;
             let queue = ld.command_queue.clone();
-            let buf = state
-                .buffers
-                .get_mut(&buffer_handle)
-                .expect("set_logical_size: buffer");
+            let buf = state.buffers.get_mut(&buffer_handle).expect("set_logical_size: buffer");
             if new_pages > old_pages {
                 let mut mappings = Vec::with_capacity((new_pages - old_pages) as usize);
                 for i in old_pages..new_pages {
@@ -1257,30 +1111,20 @@ pub(super) fn set_logical_size(
                 let n = old_pages - new_pages;
                 tiles::unmap_tile_run(&queue, &buf.resource, new_pages, n)?;
                 for i in new_pages..old_pages {
-                    if let Some((heap, off)) = buf
-                        .reserved_tiles
-                        .get_mut(i as usize)
-                        .and_then(|s| s.take())
-                    {
+                    if let Some((heap, off)) = buf.reserved_tiles.get_mut(i as usize).and_then(|s| s.take()) {
                         pool.free_tile(&heap, off);
                     }
                 }
             }
         }
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("set_logical_size: device")?;
+        let logical_device = state.devices.get(&device_handle).context("set_logical_size: device")?;
         let buf = state.buffers.get(&buffer_handle).unwrap();
         rewrite_root_buffer_descriptors(logical_device, &buf.resource, new_logical_size, buf)?;
         state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
         return Ok(());
     }
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("set_logical_size: device")?;
+    let logical_device = state.devices.get(&device_handle).context("set_logical_size: device")?;
     rewrite_root_buffer_descriptors(logical_device, &old.resource, new_logical_size, &old)?;
     state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
     Ok(())
@@ -1298,19 +1142,16 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
                 .saturating_sub(1);
 
             if buffer.is_view {
-                device.deletion_queue.lock().unwrap().queue(
-                    last_fence,
-                    super::types::PendingDeletion::BufferView { buffer_handle },
-                );
+                device
+                    .deletion_queue
+                    .lock()
+                    .unwrap()
+                    .queue(last_fence, super::types::PendingDeletion::BufferView { buffer_handle });
                 return;
             }
 
             if buffer.transient_placed {
-                device
-                    .ledger
-                    .lock()
-                    .unwrap()
-                    .reclaim_buffer_slots(buffer_handle);
+                device.ledger.lock().unwrap().reclaim_buffer_slots(buffer_handle);
                 return;
             }
             if buffer.coherent_readback_mapped.is_some() {
@@ -1426,11 +1267,7 @@ pub(super) fn create_view(
         anyhow::bail!("View byte size {size} is not evenly divisible by element stride {stride}");
     }
     if !offset.is_multiple_of(stride as u64) {
-        anyhow::bail!(
-            "View offset {} is not aligned to element stride {}",
-            offset,
-            stride
-        );
+        anyhow::bail!("View offset {} is not aligned to element stride {}", offset, stride);
     }
 
     let device_handle = parent.device_handle;
@@ -1443,10 +1280,7 @@ pub(super) fn create_view(
     state.next_buffer_handle += 1;
 
     let (bindless_offset, bindless_srv_offset) = {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         if num_elements == 0 {
             (None, None)
@@ -1474,20 +1308,15 @@ pub(super) fn create_view(
             };
 
             let uav_cpu_handle = unsafe {
-                let mut h = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
+                let mut h = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
                 h.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 h
             };
 
             unsafe {
-                logical_device.device.CreateUnorderedAccessView(
-                    &resource,
-                    None,
-                    Some(&uav_desc),
-                    uav_cpu_handle,
-                );
+                logical_device
+                    .device
+                    .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
             }
 
             // SRV descriptor
@@ -1513,19 +1342,15 @@ pub(super) fn create_view(
             };
 
             let srv_cpu_handle = unsafe {
-                let mut h = logical_device
-                    .cbv_srv_uav_heap
-                    .GetCPUDescriptorHandleForHeapStart();
+                let mut h = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
                 h.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
                 h
             };
 
             unsafe {
-                logical_device.device.CreateShaderResourceView(
-                    &resource,
-                    Some(&srv_desc),
-                    srv_cpu_handle,
-                );
+                logical_device
+                    .device
+                    .CreateShaderResourceView(&resource, Some(&srv_desc), srv_cpu_handle);
             }
 
             tracing::debug!(
@@ -1577,11 +1402,9 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
 
     if unsafe { fence.GetCompletedValue() } < value {
-        let event =
-            unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+        let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
-        unsafe { fence.SetEventOnCompletion(value, event) }
-            .context("Failed to set event on completion")?;
+        unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
 
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe { CloseHandle(event) }.ok();
@@ -1601,11 +1424,7 @@ pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
 ///
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
 /// upload resource is ready before command recording begins.
-pub(super) fn ensure_upload_buffer(
-    state: &mut Dx12State,
-    buffer_handle: BufferHandle,
-    min_size: u64,
-) -> Result<()> {
+pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferHandle, min_size: u64) -> Result<()> {
     let buffer = state
         .buffers
         .get(&buffer_handle)
@@ -1634,10 +1453,7 @@ pub(super) fn ensure_upload_buffer(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -1653,8 +1469,7 @@ pub(super) fn ensure_upload_buffer(
         )
     }
     .context("ensure_upload_buffer: create failed")?;
-    state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer =
-        Some(upload.context("Upload buffer is null")?);
+    state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer = Some(upload.context("Upload buffer is null")?);
     Ok(())
 }
 
@@ -1663,20 +1478,12 @@ pub(super) fn ensure_upload_buffer(
 /// For storage buffers (DEFAULT heap), uses a capped-size upload buffer and copies
 /// in chunks to avoid doubling memory for huge buffers. For UPLOAD heap buffers
 /// (uniform), maps directly.
-pub(super) fn write(
-    state: &mut Dx12State,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    data: &[u8],
-) -> Result<()> {
+pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
     if data.is_empty() {
         return Ok(());
     }
 
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     if offset + data.len() as u64 > buffer.size {
         anyhow::bail!("Write would exceed buffer bounds");
@@ -1700,18 +1507,9 @@ pub(super) fn write(
         // UPLOAD heap: direct map
         let mut mapped_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let read_range = D3D12_RANGE { Begin: 0, End: 0 };
+        unsafe { buffer.resource.Map(0, Some(&read_range), Some(&mut mapped_ptr)) }.context("Failed to map buffer")?;
         unsafe {
-            buffer
-                .resource
-                .Map(0, Some(&read_range), Some(&mut mapped_ptr))
-        }
-        .context("Failed to map buffer")?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                (mapped_ptr as *mut u8).add(offset as usize),
-                data.len(),
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr(), (mapped_ptr as *mut u8).add(offset as usize), data.len());
         }
         let written_range = D3D12_RANGE {
             Begin: offset as usize,
@@ -1752,14 +1550,9 @@ pub(super) fn write(
         // Map, copy data, unmap
         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
         let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }
-            .context("Failed to map upload buffer")?;
+        unsafe { upload_buf.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map upload buffer")?;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                src_slice.as_ptr(),
-                mapped as *mut u8,
-                this_chunk as usize,
-            );
+            std::ptr::copy_nonoverlapping(src_slice.as_ptr(), mapped as *mut u8, this_chunk as usize);
         }
         let write_range = D3D12_RANGE {
             Begin: 0,
@@ -1768,17 +1561,11 @@ pub(super) fn write(
         unsafe { upload_buf.Unmap(0, Some(&write_range)) };
 
         // GPU copy from staging to main buffer
-        let device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-        let alloc: ID3D12CommandAllocator = unsafe {
-            device
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-        }
-        .context("Failed to create command allocator")?;
+        let alloc: ID3D12CommandAllocator =
+            unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                .context("Failed to create command allocator")?;
         let cmd: ID3D12GraphicsCommandList = unsafe {
             device
                 .device
@@ -1814,12 +1601,8 @@ pub(super) fn write(
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device
-            .timeline_next
-            .load(std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-            .context("Failed to signal fence")?;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
+        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
         if let Some(dev) = state.devices.get(&device_handle) {
             dev.timeline_next
@@ -1834,19 +1617,12 @@ pub(super) fn write(
 
 /// Get the size of a buffer in bytes.
 pub(super) fn size(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
-    state
-        .buffers
-        .get(&buffer_handle)
-        .map(|b| b.size)
-        .unwrap_or(0)
+    state.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
 pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
-    state
-        .buffers
-        .get(&buffer_handle)
-        .and_then(|b| b.bindless_offset)
+    state.buffers.get(&buffer_handle).and_then(|b| b.bindless_offset)
 }
 
 /// Get the SRV (read-only / StructuredBuffer) bindless index for a storage buffer.
@@ -1869,10 +1645,7 @@ pub(super) fn emit_copy_coherent_readback_on_command_list(
     use windows::Win32::Graphics::Direct3D12::*;
 
     let (main_resource, readback, len) = {
-        let buffer = state
-            .buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
+        let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
         if !buffer.flags.contains(BufferFlags::CPU_READABLE) || !buffer.is_storage {
             return Ok(());
         }
@@ -1917,17 +1690,11 @@ fn standalone_copy_coherent_readback(
     use super::utils::wait_for_fence;
     use windows::Win32::Graphics::Direct3D12::*;
 
-    let device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let copy_allocator: ID3D12CommandAllocator = unsafe {
-        device
-            .device
-            .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-    }
-    .context("Failed to create copy command allocator (coherent readback)")?;
+    let copy_allocator: ID3D12CommandAllocator =
+        unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+            .context("Failed to create copy command allocator (coherent readback)")?;
 
     let copy_list: ID3D12GraphicsCommandList = unsafe {
         device
@@ -1938,18 +1705,12 @@ fn standalone_copy_coherent_readback(
     let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast()?;
 
     emit_copy_coherent_readback_on_command_list(state, buffer_handle, &copy_list, &copy_list7)?;
-    unsafe { copy_list.Close() }
-        .context("Failed to close copy command list (coherent readback)")?;
+    unsafe { copy_list.Close() }.context("Failed to close copy command list (coherent readback)")?;
 
-    let lists: [Option<ID3D12CommandList>; 1] = [Some(
-        copy_list.cast().context("Failed to cast command list")?,
-    )];
+    let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
     unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-    let fence_value = device
-        .timeline_next
-        .load(std::sync::atomic::Ordering::Relaxed)
-        + 1;
+    let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }
         .context("Failed to signal fence (coherent readback)")?;
     wait_for_fence(&device.fence, fence_value)?;
@@ -1968,9 +1729,7 @@ pub(super) fn read_coherent(
     offset: u64,
     output: &mut [u8],
 ) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
     if !buffer.flags.contains(BufferFlags::CPU_READABLE) {
         anyhow::bail!("read_coherent requires BufferFlags::CPU_READABLE");
     }
@@ -1982,11 +1741,7 @@ pub(super) fn read_coherent(
     }
     let p = base as *mut u8;
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            p.add(offset as usize) as *const u8,
-            output.as_mut_ptr(),
-            output.len(),
-        );
+        std::ptr::copy_nonoverlapping(p.add(offset as usize) as *const u8, output.as_mut_ptr(), output.len());
     }
     Ok(())
 }
@@ -2003,30 +1758,21 @@ pub(super) fn read_to_cpu(
 ) -> Result<()> {
     use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let len = output.len() as u64;
     if len > buffer.size {
         anyhow::bail!("Read would exceed buffer bounds");
     }
 
-    if buffer.is_storage
-        && buffer.flags.contains(BufferFlags::CPU_READABLE)
-        && buffer.coherent_readback.is_some()
-    {
+    if buffer.is_storage && buffer.flags.contains(BufferFlags::CPU_READABLE) && buffer.coherent_readback.is_some() {
         standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;
         return read_coherent(&state.buffers, buffer_handle, 0, output);
     }
 
     if buffer.is_storage {
         // DEFAULT heap (storage): need a READBACK buffer + GPU copy
-        let device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         let readback_heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_READBACK,
@@ -2043,10 +1789,7 @@ pub(super) fn read_to_cpu(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             Flags: D3D12_RESOURCE_FLAG_NONE,
         };
@@ -2067,24 +1810,17 @@ pub(super) fn read_to_cpu(
         let main_resource = buffer.resource.clone();
 
         // Command list: transition → copy → transition back
-        let copy_allocator: ID3D12CommandAllocator = unsafe {
-            device
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-        }
-        .context("Failed to create copy command allocator")?;
+        let copy_allocator: ID3D12CommandAllocator =
+            unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                .context("Failed to create copy command allocator")?;
 
         let copy_list: ID3D12GraphicsCommandList = unsafe {
-            device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &copy_allocator,
-                None,
-            )
+            device
+                .device
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &copy_allocator, None)
         }
         .context("Failed to create copy command list")?;
-        let copy_list7: ID3D12GraphicsCommandList7 =
-            copy_list.cast().context("ID3D12GraphicsCommandList7")?;
+        let copy_list7: ID3D12GraphicsCommandList7 = copy_list.cast().context("ID3D12GraphicsCommandList7")?;
 
         // Use global barriers instead of per-buffer barriers. D3D12_BARRIER_TYPE_BUFFER
         // enhanced barriers cause WARP on Windows Server to silently remove the device
@@ -2113,17 +1849,11 @@ pub(super) fn read_to_cpu(
         }
         unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
 
-        let lists: [Option<ID3D12CommandList>; 1] = [Some(
-            copy_list.cast().context("Failed to cast command list")?,
-        )];
+        let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device
-            .timeline_next
-            .load(std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-            .context("Failed to signal fence")?;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
+        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
 
         if let Some(dev) = state.devices.get(&device_handle) {
@@ -2137,8 +1867,7 @@ pub(super) fn read_to_cpu(
             Begin: 0,
             End: len as usize,
         };
-        unsafe { readback.Map(0, Some(&read_range), Some(&mut mapped)) }
-            .context("Failed to map readback buffer")?;
+        unsafe { readback.Map(0, Some(&read_range), Some(&mut mapped)) }.context("Failed to map readback buffer")?;
         unsafe {
             std::ptr::copy_nonoverlapping(mapped as *const u8, output.as_mut_ptr(), len as usize);
         }
@@ -2151,8 +1880,7 @@ pub(super) fn read_to_cpu(
             Begin: 0,
             End: len as usize,
         };
-        unsafe { buffer.resource.Map(0, Some(&read_range), Some(&mut mapped)) }
-            .context("Failed to map buffer")?;
+        unsafe { buffer.resource.Map(0, Some(&read_range), Some(&mut mapped)) }.context("Failed to map buffer")?;
         unsafe {
             std::ptr::copy_nonoverlapping(mapped as *const u8, output.as_mut_ptr(), len as usize);
         }
@@ -2174,10 +1902,7 @@ pub(super) fn clear(
     offset: u64,
     size: u64,
 ) -> Result<()> {
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let clear_size = super::super::shared::resolve_clear_size(buffer.size, offset, size);
 
@@ -2192,29 +1917,19 @@ pub(super) fn clear(
         // DEFAULT heap storage buffer: zero-fill via CopyBufferRegion from the device's
         // zero buffer. Unlike ClearUnorderedAccessViewUint, CopyBufferRegion has no
         // per-device shared-descriptor aliasing hazard.
-        let device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-        let copy_allocator: ID3D12CommandAllocator = unsafe {
-            device
-                .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-        }
-        .context("Failed to create command allocator")?;
+        let copy_allocator: ID3D12CommandAllocator =
+            unsafe { device.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+                .context("Failed to create command allocator")?;
 
         let cmd_list: ID3D12GraphicsCommandList = unsafe {
-            device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &copy_allocator,
-                None,
-            )
+            device
+                .device
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &copy_allocator, None)
         }
         .context("Failed to create command list")?;
-        let cmd_list7: ID3D12GraphicsCommandList7 =
-            cmd_list.cast().context("ID3D12GraphicsCommandList7")?;
+        let cmd_list7: ID3D12GraphicsCommandList7 = cmd_list.cast().context("ID3D12GraphicsCommandList7")?;
 
         let buf_resource = buffer.resource.clone();
         let zero = device.zero_buffer.clone();
@@ -2254,17 +1969,11 @@ pub(super) fn clear(
 
         unsafe { cmd_list.Close() }.context("Failed to close command list")?;
 
-        let lists: [Option<ID3D12CommandList>; 1] = [Some(
-            cmd_list.cast().context("Failed to cast command list")?,
-        )];
+        let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd_list.cast().context("Failed to cast command list")?)];
         unsafe { device.command_queue.ExecuteCommandLists(&lists) };
 
-        let fence_value = device
-            .timeline_next
-            .load(std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-            .context("Failed to signal fence")?;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
+        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
         wait_for_fence(&device.fence, fence_value)?;
 
         let removed_reason = unsafe { device.device.GetDeviceRemovedReason() };
@@ -2280,14 +1989,9 @@ pub(super) fn clear(
         // UPLOAD heap: CPU-accessible, just memset
         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
         let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-        unsafe { buffer.resource.Map(0, Some(&no_read), Some(&mut mapped)) }
-            .context("Failed to map buffer")?;
+        unsafe { buffer.resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map buffer")?;
         unsafe {
-            std::ptr::write_bytes(
-                (mapped as *mut u8).add(offset as usize),
-                0,
-                clear_size as usize,
-            );
+            std::ptr::write_bytes((mapped as *mut u8).add(offset as usize), 0, clear_size as usize);
         }
         let written = D3D12_RANGE {
             Begin: offset as usize,

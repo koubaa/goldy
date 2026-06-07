@@ -45,9 +45,7 @@
 //! `swapchain_render_present_command_buffers`).  The scratch texture is not
 //! touched in that path.
 
-use super::types::{
-    self, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
-};
+use super::types::{self, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type};
 use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
@@ -116,18 +114,14 @@ pub(super) fn create_platform_surface(
                 unsafe { wayland_surface.create_wayland_surface(&create_info, None) }
                     .context("Failed to create Wayland surface")
             }
-            _ => anyhow::bail!(
-                "Expected Wayland window/display handles on Linux (X11 not supported)"
-            ),
+            _ => anyhow::bail!("Expected Wayland window/display handles on Linux (X11 not supported)"),
         }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (entry, instance);
-        anyhow::bail!(
-            "Surface creation not supported on this platform - use Metal backend on macOS"
-        )
+        anyhow::bail!("Surface creation not supported on this platform - use Metal backend on macOS")
     }
 }
 
@@ -146,9 +140,7 @@ pub(super) fn create(
     display: &dyn raw_window_handle::HasDisplayHandle,
     depth_format: Option<DepthFormat>,
 ) -> Result<SurfaceHandle> {
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
     let physical_device = logical_device.physical_device;
 
     // Create platform-specific surface
@@ -156,15 +148,12 @@ pub(super) fn create(
 
     // Get surface capabilities
     let surface_loader = khr::surface::Instance::new(entry, instance);
-    let capabilities = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
-    }
-    .context("Failed to get surface capabilities")?;
+    let capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface) }
+        .context("Failed to get surface capabilities")?;
 
     // Choose surface format (prefer BGRA8 for better compatibility)
-    let formats =
-        unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface) }
-            .context("Failed to get surface formats")?;
+    let formats = unsafe { surface_loader.get_physical_device_surface_formats(physical_device, surface) }
+        .context("Failed to get surface formats")?;
 
     let format = formats
         .iter()
@@ -216,9 +205,7 @@ pub(super) fn create(
         .image_extent(extent)
         .image_array_layers(1)
         .image_usage(
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-                | vk::ImageUsageFlags::STORAGE
-                | vk::ImageUsageFlags::TRANSFER_DST,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST,
         )
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
@@ -227,12 +214,12 @@ pub(super) fn create(
         .clipped(true);
 
     let swapchain_loader = khr::swapchain::Device::new(instance, &logical_device.device);
-    let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_info, None) }
-        .context("Failed to create swapchain")?;
+    let swapchain =
+        unsafe { swapchain_loader.create_swapchain(&swapchain_info, None) }.context("Failed to create swapchain")?;
 
     // Get swapchain images
-    let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain) }
-        .context("Failed to get swapchain images")?;
+    let swapchain_images =
+        unsafe { swapchain_loader.get_swapchain_images(swapchain) }.context("Failed to get swapchain images")?;
 
     // Create image views
     let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
@@ -260,25 +247,13 @@ pub(super) fn create(
     for _ in 0..MAX_FRAMES_IN_FLIGHT {
         // Create semaphores
         let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let image_available_semaphore = unsafe {
-            logical_device
-                .device
-                .create_semaphore(&semaphore_info, None)
-        }
-        .context("Failed to create image available semaphore")?;
-        let render_finished_semaphore = unsafe {
-            logical_device
-                .device
-                .create_semaphore(&semaphore_info, None)
-        }
-        .context("Failed to create render finished semaphore")?;
+        let image_available_semaphore = unsafe { logical_device.device.create_semaphore(&semaphore_info, None) }
+            .context("Failed to create image available semaphore")?;
+        let render_finished_semaphore = unsafe { logical_device.device.create_semaphore(&semaphore_info, None) }
+            .context("Failed to create render finished semaphore")?;
 
-        let work_done_semaphore = unsafe {
-            logical_device
-                .device
-                .create_semaphore(&semaphore_info, None)
-        }
-        .context("Failed to create work-done semaphore")?;
+        let work_done_semaphore = unsafe { logical_device.device.create_semaphore(&semaphore_info, None) }
+            .context("Failed to create work-done semaphore")?;
 
         // Create per-slot in-flight fence unsignaled. The wait in acquire() is guarded
         // by `fence_pending`, so we never wait on an unsignaled fence. Submitting a
@@ -295,9 +270,8 @@ pub(super) fn create(
             .command_pool(logical_device.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(2);
-        let command_buffers =
-            unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
-                .context("Failed to allocate command buffers")?;
+        let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
+            .context("Failed to allocate command buffers")?;
 
         frame_sync.push(FrameSync {
             command_buffer: command_buffers[0],
@@ -352,12 +326,8 @@ pub(super) fn create(
         let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
             .context("Failed to allocate surface depth memory")?;
 
-        unsafe {
-            logical_device
-                .device
-                .bind_image_memory(d_image, d_memory, 0)
-        }
-        .context("Failed to bind surface depth memory")?;
+        unsafe { logical_device.device.bind_image_memory(d_image, d_memory, 0) }
+            .context("Failed to bind surface depth memory")?;
 
         let d_view_info = vk::ImageViewCreateInfo::default()
             .image(d_image)
@@ -397,8 +367,7 @@ pub(super) fn create(
         )
     };
 
-    let goldy_format =
-        super::utils::vk_to_format(format.format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
+    let goldy_format = super::utils::vk_to_format(format.format).unwrap_or(TextureFormat::Bgra8UnormSrgb);
     let mut swapchain_texture_handles = Vec::with_capacity(swapchain_images.len());
     for &image in &swapchain_images {
         let th = register_surface_texture(
@@ -526,10 +495,7 @@ fn destroy_impl(
         s.current_texture_handle = None;
     }
     // Unregister all persistently-registered swapchain image textures.
-    let device_handle = surfaces
-        .get(&surface_handle)
-        .map(|s| s.device_handle)
-        .unwrap_or(0);
+    let device_handle = surfaces.get(&surface_handle).map(|s| s.device_handle).unwrap_or(0);
     // Unregister all persistently-registered swapchain image textures.
     if let Some(handles) = surfaces
         .get_mut(&surface_handle)
@@ -552,11 +518,7 @@ fn destroy_impl(
         .flatten()
         .map(|slot| {
             if let Some(logical_device) = device_ref.get_ld(device_handle) {
-                unregister_swapchain_texture_with_device(
-                    logical_device,
-                    textures,
-                    slot.texture_handle,
-                );
+                unregister_swapchain_texture_with_device(logical_device, textures, slot.texture_handle);
             }
             (slot.image, slot.memory)
         })
@@ -594,15 +556,11 @@ fn destroy_impl(
                     logical_device
                         .device
                         .destroy_semaphore(frame.image_available_semaphore, None);
-                    logical_device
-                        .device
-                        .destroy_semaphore(frame.work_done_semaphore, None);
+                    logical_device.device.destroy_semaphore(frame.work_done_semaphore, None);
                     logical_device
                         .device
                         .destroy_semaphore(frame.render_finished_semaphore, None);
-                    logical_device
-                        .device
-                        .destroy_fence(frame.in_flight_fence, None);
+                    logical_device.device.destroy_fence(frame.in_flight_fence, None);
                 }
 
                 for view in surface_state.swapchain_image_views {
@@ -626,8 +584,7 @@ fn destroy_impl(
                     logical_device.device.free_memory(depth_memory, None);
                 }
 
-                let swapchain_loader =
-                    khr::swapchain::Device::new(instance, &logical_device.device);
+                let swapchain_loader = khr::swapchain::Device::new(instance, &logical_device.device);
                 swapchain_loader.destroy_swapchain(surface_state.swapchain, None);
 
                 let surface_loader = khr::surface::Instance::new(entry, instance);
@@ -653,10 +610,7 @@ pub(super) fn acquire(
     // Get surface state and current frame index.
     let (device_handle, current_frame, swapchain, image_available_semaphore) = {
         let _fz = crate::tracy_zone!("vk.surface.acquire.frame_state");
-        let surface_state = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface_state = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let frame = &surface_state.frame_sync[surface_state.current_frame];
         (
             surface_state.device_handle,
@@ -687,13 +641,8 @@ pub(super) fn acquire(
     // max(copy, next_compute) is monotonic; no WSI dependency on this wait.
     {
         let _wz = crate::tracy_zone!("vk.surface.wait_compute");
-        let surface_state = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
-        let slot_copy = surface_state.frame_sync[current_frame]
-            .copy_timeline_value
-            .unwrap_or(0);
+        let surface_state = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
+        let slot_copy = surface_state.frame_sync[current_frame].copy_timeline_value.unwrap_or(0);
         let next_slot = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         let next_compute = surface_state.frame_sync[next_slot].last_compute_timeline_value;
         let slot_timeline = slot_copy.max(next_compute);
@@ -713,9 +662,7 @@ pub(super) fn acquire(
         }
         if crate::validation_env::timeline_validation_enabled()
             && next_compute == 0
-            && surface_state.frame_sync[next_slot]
-                .copy_timeline_value
-                .is_some()
+            && surface_state.frame_sync[next_slot].copy_timeline_value.is_some()
         {
             tracing::warn!(
                 current_frame,
@@ -768,8 +715,7 @@ pub(super) fn acquire(
                     .reset_fences(&[in_flight_fence])
                     .context("Failed to reset in-flight fence")?;
             }
-            state.surfaces.get_mut(&surface_handle).unwrap().frame_sync[current_frame]
-                .fence_pending = false;
+            state.surfaces.get_mut(&surface_handle).unwrap().frame_sync[current_frame].fence_pending = false;
         }
     }
 
@@ -805,11 +751,7 @@ pub(super) fn acquire(
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let drained = logical_device
-            .deletion_queue
-            .lock()
-            .unwrap()
-            .drain_up_to(completed);
+        let drained = logical_device.deletion_queue.lock().unwrap().drain_up_to(completed);
         if !drained.is_empty() {
             let ledger_arc = std::sync::Arc::clone(&logical_device.ledger);
             let mut ledger = ledger_arc.lock().unwrap();
@@ -830,12 +772,7 @@ pub(super) fn acquire(
             .context("Surface's device is invalid")?;
         let swapchain_loader = khr::swapchain::Device::new(&state.instance, &ld.device);
         unsafe {
-            swapchain_loader.acquire_next_image(
-                swapchain,
-                u64::MAX,
-                image_available_semaphore,
-                vk::Fence::null(),
-            )
+            swapchain_loader.acquire_next_image(swapchain, u64::MAX, image_available_semaphore, vk::Fence::null())
         }
     };
 
@@ -854,14 +791,12 @@ pub(super) fn acquire(
             // Ensure the per-slot scratch texture exists and is the right size.
             // Compute shaders write here; the swapchain image is never touched
             // until the copy in `present()`.
-            let scratch_handle =
-                ensure_scratch_texture_slot(state, surface_handle, device_handle, current_frame)?;
+            let scratch_handle = ensure_scratch_texture_slot(state, surface_handle, device_handle, current_frame)?;
 
             {
                 let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
                 surface_state.current_texture_handle = Some(scratch_handle);
-                surface_state.pending_acquire_count =
-                    surface_state.pending_acquire_count.saturating_add(1);
+                surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
             }
 
             if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -900,9 +835,7 @@ pub(super) fn frame_texture(
     surfaces: &HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
 ) -> Option<TextureHandle> {
-    surfaces
-        .get(&surface_handle)
-        .and_then(|s| s.current_texture_handle)
+    surfaces.get(&surface_handle).and_then(|s| s.current_texture_handle)
 }
 
 /// Render commands to the surface's current swapchain image.
@@ -917,12 +850,7 @@ pub(super) fn render<F>(
     record_commands_fn: F,
 ) -> Result<()>
 where
-    F: FnOnce(
-        vk::CommandBuffer,
-        &[RenderCommand],
-        &LogicalDevice,
-        &mut Option<PipelineHandle>,
-    ) -> Result<()>,
+    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>) -> Result<()>,
 {
     let (
         _image_index,
@@ -943,9 +871,7 @@ where
         render_finished_semaphore,
         in_flight_fence,
     ) = {
-        let surface_state = surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let image_index = surface_state
             .current_image_index
             .context("No image acquired - call surface_acquire first")?;
@@ -989,9 +915,7 @@ where
         .unwrap_or(1.0);
 
     {
-        let logical_device = devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
+        let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
 
         // Begin command buffer (reset after acquire waited on in_flight_fence)
         unsafe {
@@ -1000,8 +924,7 @@ where
                 .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
                 .context("Failed to reset render command buffer")?;
         }
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
             .context("Failed to begin command buffer")?;
@@ -1012,20 +935,15 @@ where
         // but NOT memory visibility — explicit synchronisation is required.
         unsafe {
             let mem_barrier = vk::MemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-                )
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
                 .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                 .dst_stage_mask(
                     vk::PipelineStageFlags2::VERTEX_SHADER
                         | vk::PipelineStageFlags2::FRAGMENT_SHADER
                         | vk::PipelineStageFlags2::VERTEX_INPUT,
                 )
-                .dst_access_mask(
-                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
-                );
-            let dep_info =
-                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ);
+            let dep_info = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
@@ -1059,12 +977,10 @@ where
                 .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
                 .src_access_mask(vk::AccessFlags2::NONE)
                 .dst_stage_mask(
-                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
                 )
                 .dst_access_mask(
-                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
-                        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 )
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -1123,11 +1039,7 @@ where
             rendering_info = rendering_info.depth_attachment(depth_att);
         }
 
-        unsafe {
-            logical_device
-                .device
-                .cmd_begin_rendering(cmd, &rendering_info)
-        };
+        unsafe { logical_device.device.cmd_begin_rendering(cmd, &rendering_info) };
 
         // Negative viewport height flips Y to match DX12 (core since Vulkan 1.1)
         let viewport = vk::Viewport {
@@ -1183,16 +1095,10 @@ where
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        let dep_present = vk::DependencyInfo::default()
-            .image_memory_barriers(std::slice::from_ref(&present_barrier));
-        unsafe {
-            logical_device
-                .device
-                .cmd_pipeline_barrier2(cmd, &dep_present)
-        };
+        let dep_present = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&present_barrier));
+        unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_present) };
 
-        unsafe { logical_device.device.end_command_buffer(cmd) }
-            .context("Failed to end command buffer")?;
+        unsafe { logical_device.device.end_command_buffer(cmd) }.context("Failed to end command buffer")?;
     }
 
     // Single submit: render CB (with inlined present barrier) + fence + semaphores.
@@ -1210,9 +1116,7 @@ where
     let _ = work_done_semaphore;
 
     let signal_timeline_value = {
-        let ld = devices
-            .get(&device_handle)
-            .context("Surface's device is invalid")?;
+        let ld = devices.get(&device_handle).context("Surface's device is invalid")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
     let wait_acq = vk::SemaphoreSubmitInfo::default()
@@ -1234,19 +1138,15 @@ where
         .command_buffer_infos(std::slice::from_ref(&cmd_info))
         .signal_semaphore_infos(&signals);
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
+    let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
     let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
 
     {
         let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
-            logical_device.device.queue_submit2(
-                logical_device.queue,
-                std::slice::from_ref(&submit),
-                in_flight_fence,
-            )
+            logical_device
+                .device
+                .queue_submit2(logical_device.queue, std::slice::from_ref(&submit), in_flight_fence)
         }
     }
     .context("Failed to submit render command buffer")?;
@@ -1284,10 +1184,7 @@ pub(super) fn submit_frame(
         return super::compute::submit(state, frame.context, &pending);
     }
 
-    let ld = state
-        .devices
-        .get(&dh)
-        .context("Surface's device is invalid")?;
+    let ld = state.devices.get(&dh).context("Surface's device is invalid")?;
     Ok(ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
 }
 
@@ -1316,14 +1213,7 @@ pub(super) fn present(
     // The swapchain image view + bindless descriptor are permanent (registered
     // at swapchain creation), so no deferred unregister is needed.  Just clear
     // the per-frame alias and proceed.
-    let (
-        image_index,
-        current_frame,
-        render_pass_submitted,
-        device_handle,
-        render_finished_sem_present,
-        swapchain,
-    ) = {
+    let (image_index, current_frame, render_pass_submitted, device_handle, render_finished_sem_present, swapchain) = {
         let s = state
             .surfaces
             .get_mut(&surface_handle)
@@ -1336,14 +1226,7 @@ pub(super) fn present(
         let rp = s.frame_sync[cf].render_pass_submitted;
         let dh = s.device_handle;
         let fr = &s.frame_sync[cf];
-        (
-            image_index,
-            cf,
-            rp,
-            dh,
-            fr.render_finished_semaphore,
-            s.swapchain,
-        )
+        (image_index, cf, rp, dh, fr.render_finished_semaphore, s.swapchain)
     };
 
     let image_available_sem_present = {
@@ -1373,10 +1256,7 @@ pub(super) fn present(
             let scratch = s.scratch_texture_slots[current_frame]
                 .as_ref()
                 .expect("scratch texture slot not initialized before present");
-            (
-                scratch.image,
-                s.frame_sync[current_frame].copy_command_buffer,
-            )
+            (scratch.image, s.frame_sync[current_frame].copy_command_buffer)
         };
         let swapchain_image = {
             let s = state.surfaces.get(&surface_handle).unwrap();
@@ -1399,8 +1279,8 @@ pub(super) fn present(
                 ld.device
                     .reset_command_buffer(copy_cb, vk::CommandBufferResetFlags::empty())
                     .context("Failed to reset copy command buffer")?;
-                let begin_info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                let begin_info =
+                    vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 ld.device
                     .begin_command_buffer(copy_cb, &begin_info)
                     .context("Failed to begin copy command buffer")?;
@@ -1573,11 +1453,9 @@ pub(super) fn present(
             let _sz = crate::tracy_zone!("vk.present.queue_submit2_copy");
             let _queue_guard = queue_lock.lock().unwrap();
             unsafe {
-                submit_ld.device.queue_submit2(
-                    submit_ld.queue,
-                    std::slice::from_ref(&submit),
-                    vk::Fence::null(),
-                )
+                submit_ld
+                    .device
+                    .queue_submit2(submit_ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
             }
         };
         if let Err(e) = r {
@@ -1603,12 +1481,9 @@ pub(super) fn present(
             // finishes — the copy only reads the scratch texture, so there's no
             // need for callers to wait for the WSI copy before reclaiming RTs.
             let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
-            surface_state_mut.frame_sync[current_frame].frame_timeline_value =
-                Some(frame_compute_timeline_value);
-            surface_state_mut.frame_sync[current_frame].last_compute_timeline_value =
-                frame_compute_timeline_value;
-            surface_state_mut.frame_sync[current_frame].copy_timeline_value =
-                Some(signal_timeline_value);
+            surface_state_mut.frame_sync[current_frame].frame_timeline_value = Some(frame_compute_timeline_value);
+            surface_state_mut.frame_sync[current_frame].last_compute_timeline_value = frame_compute_timeline_value;
+            surface_state_mut.frame_sync[current_frame].copy_timeline_value = Some(signal_timeline_value);
             tracing::debug!(
                 current_frame,
                 frame_compute_timeline_value,
@@ -1644,10 +1519,7 @@ pub(super) fn present(
         // resizing: they signal that the swapchain needs rebuilding, which the caller does
         // reactively. Treat them as routine control flow (debug), not as warnings. Any other
         // error is a genuine failure and stays at warn.
-        let expected_during_resize = matches!(
-            *e,
-            vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR
-        );
+        let expected_during_resize = matches!(*e, vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR);
         if expected_during_resize {
             tracing::debug!(
                 surface_handle,
@@ -1680,9 +1552,7 @@ pub(super) fn present(
 
     if let Some(tv) = copy_tv {
         if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
-            surface_state
-                .pending_swapchain_returns
-                .push((image_idx_for_return, tv));
+            surface_state.pending_swapchain_returns.push((image_idx_for_return, tv));
         }
     } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
@@ -1731,9 +1601,7 @@ pub(super) fn resize(
 ) -> Result<()> {
     // Get surface info we need
     let (device_handle, surface, old_swapchain, format, depth_fmt, stored_present_mode) = {
-        let surface_state = surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
         (
             surface_state.device_handle,
             surface_state.surface,
@@ -1744,23 +1612,16 @@ pub(super) fn resize(
         )
     };
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
+    let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
     let physical_device = logical_device.physical_device;
 
     // Get new capabilities early so we can bail out if nothing changed.
     let surface_loader = khr::surface::Instance::new(entry, instance);
-    let capabilities = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(physical_device, surface)
-    }
-    .context("Failed to get surface capabilities")?;
+    let capabilities = unsafe { surface_loader.get_physical_device_surface_capabilities(physical_device, surface) }
+        .context("Failed to get surface capabilities")?;
 
     let extent = vk::Extent2D {
-        width: width.clamp(
-            capabilities.min_image_extent.width,
-            capabilities.max_image_extent.width,
-        ),
+        width: width.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
         height: height.clamp(
             capabilities.min_image_extent.height,
             capabilities.max_image_extent.height,
@@ -1775,9 +1636,7 @@ pub(super) fn resize(
     // `present_mode_dirty` is set by `set_present_mode` so a mode change
     // always triggers recreation even when the window dimensions are unchanged.
     {
-        let surface_state = surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
         if surface_state.width == extent.width
             && surface_state.height == extent.height
             && !surface_state.present_mode_dirty
@@ -1857,9 +1716,7 @@ pub(super) fn resize(
         s.scratch_texture_slots = (0..MAX_FRAMES_IN_FLIGHT).map(|_| None).collect();
     }
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
+    let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
 
     // Destroy old image views
     if let Some(surface_state) = surfaces.get(&surface_handle) {
@@ -1885,9 +1742,7 @@ pub(super) fn resize(
         .image_extent(extent)
         .image_array_layers(1)
         .image_usage(
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-                | vk::ImageUsageFlags::STORAGE
-                | vk::ImageUsageFlags::TRANSFER_DST,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST,
         )
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
@@ -1897,15 +1752,15 @@ pub(super) fn resize(
         .old_swapchain(old_swapchain);
 
     let swapchain_loader = khr::swapchain::Device::new(instance, &logical_device.device);
-    let new_swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_info, None) }
-        .context("Failed to recreate swapchain")?;
+    let new_swapchain =
+        unsafe { swapchain_loader.create_swapchain(&swapchain_info, None) }.context("Failed to recreate swapchain")?;
 
     // Destroy old swapchain
     unsafe { swapchain_loader.destroy_swapchain(old_swapchain, None) };
 
     // Get new images and create views
-    let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(new_swapchain) }
-        .context("Failed to get swapchain images")?;
+    let swapchain_images =
+        unsafe { swapchain_loader.get_swapchain_images(new_swapchain) }.context("Failed to get swapchain images")?;
 
     let swapchain_image_views: Vec<vk::ImageView> = swapchain_images
         .iter()
@@ -1964,12 +1819,8 @@ pub(super) fn resize(
         let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
             .context("Failed to allocate surface depth memory on resize")?;
 
-        unsafe {
-            logical_device
-                .device
-                .bind_image_memory(d_image, d_memory, 0)
-        }
-        .context("Failed to bind surface depth memory on resize")?;
+        unsafe { logical_device.device.bind_image_memory(d_image, d_memory, 0) }
+            .context("Failed to bind surface depth memory on resize")?;
 
         let d_view_info = vk::ImageViewCreateInfo::default()
             .image(d_image)
@@ -2058,18 +1909,12 @@ pub(super) fn set_present_mode(
     mode: crate::types::PresentMode,
 ) -> Result<()> {
     let (w, h, current_vk) = {
-        let s = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let s = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         (s.width, s.height, s.present_mode)
     };
 
     let (physical_device, vk_surface) = {
-        let surface_state = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface_state = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let pd = state
             .devices
             .get(&surface_state.device_handle)
@@ -2079,10 +1924,9 @@ pub(super) fn set_present_mode(
     };
 
     let surface_loader = khr::surface::Instance::new(&state.entry, &state.instance);
-    let present_modes = unsafe {
-        surface_loader.get_physical_device_surface_present_modes(physical_device, vk_surface)
-    }
-    .context("Failed to get present modes")?;
+    let present_modes =
+        unsafe { surface_loader.get_physical_device_surface_present_modes(physical_device, vk_surface) }
+            .context("Failed to get present modes")?;
 
     let vk_mode = pick_vk_present_mode(mode, &present_modes)?;
     if vk_mode == current_vk {
@@ -2159,10 +2003,7 @@ fn vk_to_goldy_present_mode(mode: vk::PresentModeKHR) -> crate::types::PresentMo
 }
 
 /// Get the current size of the surface.
-pub(super) fn size(
-    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
-    surface_handle: SurfaceHandle,
-) -> (u32, u32) {
+pub(super) fn size(surfaces: &HashMap<SurfaceHandle, SurfaceState>, surface_handle: SurfaceHandle) -> (u32, u32) {
     surfaces
         .get(&surface_handle)
         .map(|s| (s.width, s.height))
@@ -2170,10 +2011,7 @@ pub(super) fn size(
 }
 
 /// Get the format of the surface.
-pub(super) fn format(
-    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
-    surface_handle: SurfaceHandle,
-) -> TextureFormat {
+pub(super) fn format(surfaces: &HashMap<SurfaceHandle, SurfaceState>, surface_handle: SurfaceHandle) -> TextureFormat {
     surfaces
         .get(&surface_handle)
         .and_then(|s| super::utils::vk_to_format(s.format))
@@ -2227,10 +2065,7 @@ fn ensure_scratch_texture_slot(
         .and_then(|slot| slot.take())
     {
         unregister_surface_texture(&state.devices, &mut state.textures, old.texture_handle);
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Device invalid")?;
+        let ld = state.devices.get(&device_handle).context("Device invalid")?;
         unsafe {
             ld.device.destroy_image(old.image, None);
             ld.device.free_memory(old.memory, None);
@@ -2238,10 +2073,7 @@ fn ensure_scratch_texture_slot(
     }
 
     let (image, memory) = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Device invalid")?;
+        let ld = state.devices.get(&device_handle).context("Device invalid")?;
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -2254,16 +2086,12 @@ fn ensure_scratch_texture_slot(
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(
-                vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_SRC
-                    | vk::ImageUsageFlags::TRANSFER_DST,
-            )
+            .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let img = unsafe { ld.device.create_image(&image_info, None) }
-            .context("Failed to create scratch texture image")?;
+        let img =
+            unsafe { ld.device.create_image(&image_info, None) }.context("Failed to create scratch texture image")?;
 
         let mem_reqs = unsafe { ld.device.get_image_memory_requirements(img) };
         let mem_type = find_memory_type(
@@ -2280,8 +2108,7 @@ fn ensure_scratch_texture_slot(
         let mem = unsafe { ld.device.allocate_memory(&alloc_info, None) }
             .context("Failed to allocate scratch texture memory")?;
 
-        unsafe { ld.device.bind_image_memory(img, mem, 0) }
-            .context("Failed to bind scratch texture memory")?;
+        unsafe { ld.device.bind_image_memory(img, mem, 0) }.context("Failed to bind scratch texture memory")?;
 
         (img, mem)
     };
@@ -2289,10 +2116,7 @@ fn ensure_scratch_texture_slot(
     // Transition UNDEFINED → GENERAL via a one-shot submit so compute shaders
     // can write immediately on the first frame that uses this slot.
     {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Device invalid")?;
+        let ld = state.devices.get(&device_handle).context("Device invalid")?;
         let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         unsafe {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -2305,8 +2129,7 @@ fn ensure_scratch_texture_slot(
                 .context("Failed to alloc CB for scratch init")?;
             let cb = cbs[0];
 
-            let begin = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            let begin = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             ld.device
                 .begin_command_buffer(cb, &begin)
                 .context("begin scratch init CB")?;
@@ -2326,16 +2149,12 @@ fn ensure_scratch_texture_slot(
                     base_array_layer: 0,
                     layer_count: 1,
                 });
-            let dep =
-                vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+            let dep = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
             ld.device.cmd_pipeline_barrier2(cb, &dep);
-            ld.device
-                .end_command_buffer(cb)
-                .context("end scratch init CB")?;
+            ld.device.end_command_buffer(cb).context("end scratch init CB")?;
 
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
-            let submit =
-                vk::SubmitInfo2::default().command_buffer_infos(std::slice::from_ref(&cb_info));
+            let submit = vk::SubmitInfo2::default().command_buffer_infos(std::slice::from_ref(&cb_info));
             // Hold queue_lock across both submit and wait_idle: vkQueueWaitIdle
             // is also externally synchronized on the queue (Vulkan spec).
             let _queue_guard = queue_lock.lock().unwrap();
@@ -2404,9 +2223,7 @@ fn register_surface_texture(
     let handle = *next_texture_handle;
     *next_texture_handle += 1;
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Device no longer valid")?;
+    let logical_device = devices.get(&device_handle).context("Device no longer valid")?;
 
     // Create an image view for compute storage access
     let view_info = vk::ImageViewCreateInfo::default()
@@ -2498,15 +2315,9 @@ fn unregister_swapchain_texture_with_device(
     tex_handle: TextureHandle,
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
-        logical_device
-            .ledger
-            .lock()
-            .unwrap()
-            .reclaim_texture_slots(tex_handle);
+        logical_device.ledger.lock().unwrap().reclaim_texture_slots(tex_handle);
         unsafe {
-            logical_device
-                .device
-                .destroy_image_view(tex_state.view, None);
+            logical_device.device.destroy_image_view(tex_state.view, None);
         }
         tracing::debug!("Unregistered swapchain texture {}", tex_handle);
     }
@@ -2521,11 +2332,7 @@ fn unregister_swapchain_texture(
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
         if let Some(device) = devices.get(&tex_state.device_handle) {
-            device
-                .ledger
-                .lock()
-                .unwrap()
-                .reclaim_texture_slots(tex_handle);
+            device.ledger.lock().unwrap().reclaim_texture_slots(tex_handle);
             unsafe {
                 device.device.destroy_image_view(tex_state.view, None);
             }
@@ -2648,12 +2455,10 @@ fn alloc_and_record_present_cbs(
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
         unsafe { logical_device.device.cmd_pipeline_barrier2(cb, &dep_info) };
 
-        unsafe { logical_device.device.end_command_buffer(cb) }
-            .context("Failed to end barrier command buffer")?;
+        unsafe { logical_device.device.end_command_buffer(cb) }.context("Failed to end barrier command buffer")?;
     }
 
     Ok(cbs)

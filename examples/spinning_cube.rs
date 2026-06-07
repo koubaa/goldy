@@ -5,8 +5,8 @@
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
+    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;

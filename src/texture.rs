@@ -6,9 +6,7 @@
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
-use crate::types::{
-    ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
-};
+use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::{ParcelType, VramAllocator};
 use anyhow::Result;
 use std::sync::{Arc, Mutex, Weak};
@@ -236,9 +234,7 @@ impl Texture {
 
     /// Get the size of the texture data in bytes.
     pub fn byte_size(&self) -> usize {
-        let bytes = u64::from(self.width)
-            * u64::from(self.height)
-            * u64::from(self.format.bytes_per_pixel());
+        let bytes = u64::from(self.width) * u64::from(self.height) * u64::from(self.format.bytes_per_pixel());
         usize::try_from(bytes).unwrap_or(usize::MAX)
     }
 
@@ -256,11 +252,7 @@ impl Texture {
     pub fn read_to_cpu(&self, output: &mut [u8]) -> Result<()> {
         let expected_size = self.byte_size();
         if output.len() < expected_size {
-            anyhow::bail!(
-                "Output buffer too small: {} < {}",
-                output.len(),
-                expected_size
-            );
+            anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
         }
         let mut backend = self.backend.lock().unwrap();
         backend.read_texture_to_cpu(self.handle, output)
@@ -275,9 +267,7 @@ impl Texture {
     pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         match (self.access, access) {
-            (TextureKind::Interpolated, ResourceAccess::Read) => {
-                backend.texture_bindless_index(self.handle)
-            }
+            (TextureKind::Interpolated, ResourceAccess::Read) => backend.texture_bindless_index(self.handle),
             (TextureKind::Interpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
             (TextureKind::Direct, ResourceAccess::Read) => None,
             (TextureKind::Direct, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
@@ -286,10 +276,9 @@ impl Texture {
             (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
                 backend.texture_bindless_sampled_index(self.handle)
             }
-            (
-                TextureKind::DirectInterpolated,
-                ResourceAccess::Write | ResourceAccess::ReadWrite,
-            ) => backend.texture_bindless_index(self.handle),
+            (TextureKind::DirectInterpolated, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
+                backend.texture_bindless_index(self.handle)
+            }
         }
     }
 
@@ -297,9 +286,7 @@ impl Texture {
     pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
         self.resource_index(access).map(|i| {
             let category = match (self.access, access) {
-                (TextureKind::DirectInterpolated, ResourceAccess::Read) => {
-                    ResourceCategory::Texture
-                }
+                (TextureKind::DirectInterpolated, ResourceAccess::Read) => ResourceCategory::Texture,
                 _ => ResourceCategory::from(self.access),
             };
             ResourceHandle::new(category, i)

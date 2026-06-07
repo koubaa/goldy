@@ -160,8 +160,7 @@ mod tests {
         let device = create_test_device();
         let shader = create_test_shader(&device);
 
-        let pipeline =
-            RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc::default()).unwrap();
+        let pipeline = RenderPipeline::new(&device, &shader, &shader, &RenderPipelineDesc::default()).unwrap();
 
         assert!(pipeline.handle > 0);
     }

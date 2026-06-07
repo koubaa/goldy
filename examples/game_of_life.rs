@@ -9,9 +9,9 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferPool, BufferView, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    BufferPool, BufferView, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ShaderModule,
+    Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -152,13 +152,9 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Load shaders
-        let compute_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
+        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
 
-        let render_shader = ShaderModule::from_slang(
-            &device,
-            include_str!("../shaders/game_of_life_render.slang"),
-        )?;
+        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
 
         // Allocate both ping-pong buffers from a single pool (one GPU allocation).
         let initial_state = create_initial_state();
@@ -189,10 +185,7 @@ impl RenderState {
             },
         )?;
 
-        println!(
-            "Game of Life initialized: {}x{} grid",
-            GRID_WIDTH, GRID_HEIGHT
-        );
+        println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
         println!("Features Gosper Glider Gun + random cells");
         println!("Press Escape or close window to exit");
 

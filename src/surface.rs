@@ -77,11 +77,7 @@ impl Surface {
     /// `Frame::present`) and for [`GpuContext::poll_signals`] / reclamation on this
     /// surface. Creating the surface on one context while submitting or polling on
     /// another leaves `gpu_progress()` and swapchain signals on mismatched clocks.
-    pub fn new_with_config<W>(
-        context: &GpuContext,
-        window: &W,
-        config: SurfaceConfig,
-    ) -> Result<Self>
+    pub fn new_with_config<W>(context: &GpuContext, window: &W, config: SurfaceConfig) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
@@ -425,10 +421,8 @@ impl Surface {
         let mut heap_guard = self.context.inner.placement_heap.lock().unwrap();
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * GpuContext::DEFAULT_PIPELINE_DEPTH);
-            *heap_guard = Some(
-                PlacementHeap::with_capacity(device, cap)
-                    .context("failed to create context placement heap")?,
-            );
+            *heap_guard =
+                Some(PlacementHeap::with_capacity(device, cap).context("failed to create context placement heap")?);
         }
         let heap = heap_guard.as_mut().unwrap();
 
@@ -444,13 +438,7 @@ impl Surface {
         let tex_page_slot = heap.current_page_slot();
         let tex_handles = {
             let _tz = tracy_zone!("surface.build_resolver.resolve_textures");
-            graph.resolve_transient_textures_with_heap(
-                device,
-                heap,
-                node_waves,
-                tex_page_slot,
-                retired_timeline,
-            )?
+            graph.resolve_transient_textures_with_heap(device, heap, node_waves, tex_page_slot, retired_timeline)?
         };
         for (id, handle) in &tex_handles {
             resolver
@@ -477,8 +465,7 @@ impl Surface {
             for spec in graph.transient_specs() {
                 let offset = base_offset + layout[&spec.id];
                 let view_stride = spec.stride.max(1);
-                let (uav, srv, _hit) =
-                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, device)?;
+                let (uav, srv, _hit) = heap.get_or_create_view(spec.id, offset, spec.size, view_stride, device)?;
                 resolver.buffers.insert(
                     spec.id,
                     ResolvedTransientBuffer {
@@ -511,11 +498,7 @@ impl Surface {
 
 impl Drop for Surface {
     fn drop(&mut self) {
-        tracing::debug!(
-            width = self.width,
-            height = self.height,
-            "Destroying surface"
-        );
+        tracing::debug!(width = self.width, height = self.height, "Destroying surface");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_surface(self.handle);
     }
@@ -632,29 +615,21 @@ mod tests {
     }
 
     impl raw_window_handle::HasWindowHandle for MockWindow {
-        fn window_handle(
-            &self,
-        ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
             Ok(unsafe {
-                raw_window_handle::WindowHandle::borrow_raw(
-                    raw_window_handle::RawWindowHandle::Web(
-                        raw_window_handle::WebWindowHandle::new(0),
-                    ),
-                )
+                raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                    raw_window_handle::WebWindowHandle::new(0),
+                ))
             })
         }
     }
 
     impl raw_window_handle::HasDisplayHandle for MockWindow {
-        fn display_handle(
-            &self,
-        ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
             Ok(unsafe {
-                raw_window_handle::DisplayHandle::borrow_raw(
-                    raw_window_handle::RawDisplayHandle::Web(
-                        raw_window_handle::WebDisplayHandle::new(),
-                    ),
-                )
+                raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                    raw_window_handle::WebDisplayHandle::new(),
+                ))
             })
         }
     }
@@ -699,8 +674,7 @@ mod tests {
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface =
-            Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth24Plus)).unwrap();
+        let surface = Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth24Plus)).unwrap();
 
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -797,8 +771,7 @@ mod tests {
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface =
-            Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth32Float)).unwrap();
+        let surface = Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth32Float)).unwrap();
 
         let frame = surface.begin().unwrap();
 
@@ -855,13 +828,9 @@ mod tests {
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&ctx, &window).unwrap();
 
-        assert!(surface
-            .validate_pipeline_format(TextureFormat::Rgba8Unorm)
-            .is_ok());
+        assert!(surface.validate_pipeline_format(TextureFormat::Rgba8Unorm).is_ok());
 
-        assert!(surface
-            .validate_pipeline_format(TextureFormat::Bgra8UnormSrgb)
-            .is_err());
+        assert!(surface.validate_pipeline_format(TextureFormat::Bgra8UnormSrgb).is_err());
     }
 
     #[test]

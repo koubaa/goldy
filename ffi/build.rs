@@ -30,8 +30,7 @@ fn generate_c_header(crate_dir: &Path) {
     let output_file = output_dir.join("goldy.h");
 
     // Run cbindgen
-    let config =
-        cbindgen::Config::from_file("cbindgen.toml").expect("Failed to read cbindgen.toml");
+    let config = cbindgen::Config::from_file("cbindgen.toml").expect("Failed to read cbindgen.toml");
 
     cbindgen::Builder::new()
         .with_crate(crate_dir)
@@ -54,17 +53,10 @@ fn copy_slang_libraries(crate_dir: &Path, out_dir: &Path) {
     };
 
     let platform_dir = get_platform_dir();
-    let slang_bin_dir = crate_dir
-        .join("..")
-        .join("slang")
-        .join("bin")
-        .join(platform_dir);
+    let slang_bin_dir = crate_dir.join("..").join("slang").join("bin").join(platform_dir);
 
     if !slang_bin_dir.exists() {
-        println!(
-            "cargo:warning=Slang binaries not found at {}",
-            slang_bin_dir.display()
-        );
+        println!("cargo:warning=Slang binaries not found at {}", slang_bin_dir.display());
         println!("cargo:warning=Run slang/download.sh to download Slang binaries");
         return;
     }
@@ -73,10 +65,7 @@ fn copy_slang_libraries(crate_dir: &Path, out_dir: &Path) {
     let files = match extract_platform_files(&manifest_content, platform_dir) {
         Some(files) => files,
         None => {
-            println!(
-                "cargo:warning=Platform {} not found in manifest",
-                platform_dir
-            );
+            println!("cargo:warning=Platform {} not found in manifest", platform_dir);
             return;
         }
     };
@@ -99,10 +88,7 @@ fn copy_slang_libraries(crate_dir: &Path, out_dir: &Path) {
     }
 
     // Also emit a path that binding build scripts can use
-    println!(
-        "cargo:rustc-env=GOLDY_SLANG_BIN_DIR={}",
-        slang_bin_dir.display()
-    );
+    println!("cargo:rustc-env=GOLDY_SLANG_BIN_DIR={}", slang_bin_dir.display());
 }
 
 fn get_platform_dir() -> &'static str {

@@ -53,11 +53,7 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetVertexBuffer {
-                slot,
-                buffer,
-                offset,
-            } => {
+            RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
                 if let Some(buf_state) = buffers.get(buffer) {
                     unsafe {
                         logical_device.device.cmd_bind_vertex_buffers(
@@ -69,13 +65,9 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::BindResources {
-                buffers: buf_handles,
-            } => {
+            RenderCommand::BindResources { buffers: buf_handles } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                    if crate::slang::layout_validation_enabled()
-                        && !pipeline.binding_element_strides.is_empty()
-                    {
+                    if crate::slang::layout_validation_enabled() && !pipeline.binding_element_strides.is_empty() {
                         let actual: Vec<Option<u32>> = buf_handles
                             .iter()
                             .map(|h| buffers.get(h).and_then(|b| b.element_stride))
@@ -122,9 +114,7 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::BindResourcesTyped {
-                handles: typed_handles,
-            } => {
+            RenderCommand::BindResourcesTyped { handles: typed_handles } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
@@ -144,11 +134,7 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetIndexBuffer {
-                buffer,
-                offset,
-                format,
-            } => {
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 if let Some(buf_state) = buffers.get(buffer) {
                     unsafe {
                         logical_device.device.cmd_bind_index_buffer(
@@ -166,13 +152,9 @@ pub(super) fn record(
                 first_vertex,
                 first_instance,
             } => unsafe {
-                logical_device.device.cmd_draw(
-                    cmd,
-                    *vertex_count,
-                    *instance_count,
-                    *first_vertex,
-                    *first_instance,
-                );
+                logical_device
+                    .device
+                    .cmd_draw(cmd, *vertex_count, *instance_count, *first_vertex, *first_instance);
             },
             RenderCommand::DrawIndexed {
                 index_count,

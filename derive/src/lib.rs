@@ -22,12 +22,9 @@ pub fn derive_structured_buffer_element(input: TokenStream) -> TokenStream {
     match &input.data {
         Data::Struct(_) => {}
         _ => {
-            return syn::Error::new_spanned(
-                name,
-                "StructuredBufferElement can only be derived for structs",
-            )
-            .to_compile_error()
-            .into();
+            return syn::Error::new_spanned(name, "StructuredBufferElement can only be derived for structs")
+                .to_compile_error()
+                .into();
         }
     }
 

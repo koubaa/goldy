@@ -34,8 +34,7 @@ impl PyRenderTarget {
     #[new]
     #[pyo3(signature = (device, width, height, format=PyTextureFormat::RGBA8_UNORM))]
     fn new(device: &PyDevice, width: u32, height: u32, format: PyTextureFormat) -> PyResult<Self> {
-        let target = goldy::RenderTarget::new(&device.inner, width, height, format.into())
-            .into_py_result()?;
+        let target = goldy::RenderTarget::new(&device.inner, width, height, format.into()).into_py_result()?;
         Ok(PyRenderTarget {
             inner: Arc::new(target),
         })

@@ -73,8 +73,7 @@ pub(super) fn init_storage_texture_uav_layout(
         )
     }
     .context("Failed to create init barrier command list")?;
-    let init_cmd7: ID3D12GraphicsCommandList7 =
-        init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
+    let init_cmd7: ID3D12GraphicsCommandList7 = init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
     let b = barriers::texture_barrier_full(
         resource,
@@ -91,24 +90,16 @@ pub(super) fn init_storage_texture_uav_layout(
     }
     .context("Failed to close init barrier command list")?;
 
-    let cmd_list: ID3D12CommandList = init_cmd
-        .cast()
-        .context("Failed to cast init command list")?;
+    let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast init command list")?;
     unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
     let fence_value = logical_device
         .timeline_next
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal fence for init barrier")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal fence for init barrier")?;
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
@@ -124,16 +115,10 @@ pub(super) fn create(
     access: TextureKind,
     flags: TextureFlags,
 ) -> Result<TextureHandle> {
-    let is_storage = matches!(
-        access,
-        TextureKind::Direct | TextureKind::DirectInterpolated
-    );
+    let is_storage = matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated);
     let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let heap_properties = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_DEFAULT,
@@ -157,10 +142,7 @@ pub(super) fn create(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: format_to_dxgi(format),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
         Flags: resource_flags,
     };
@@ -193,10 +175,7 @@ pub(super) fn create(
 
     // Create SRV - use unified resource registry to avoid descriptor heap collisions
     // (textures and buffers share the same CBV/SRV/UAV heap)
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let srv_offset = logical_device
         .ledger
         .lock()
@@ -219,9 +198,7 @@ pub(super) fn create(
     };
 
     let srv_cpu_handle = unsafe {
-        let mut cpu_handle = logical_device
-            .cbv_srv_uav_heap
-            .GetCPUDescriptorHandleForHeapStart();
+        let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
         cpu_handle.ptr += (srv_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
         cpu_handle
     };
@@ -251,19 +228,14 @@ pub(super) fn create(
             },
         };
         let uav_cpu_handle = unsafe {
-            let mut cpu_handle = logical_device
-                .cbv_srv_uav_heap
-                .GetCPUDescriptorHandleForHeapStart();
+            let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
             cpu_handle.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
             cpu_handle
         };
         unsafe {
-            logical_device.device.CreateUnorderedAccessView(
-                Some(&resource),
-                None,
-                Some(&uav_desc),
-                uav_cpu_handle,
-            );
+            logical_device
+                .device
+                .CreateUnorderedAccessView(Some(&resource), None, Some(&uav_desc), uav_cpu_handle);
         }
         Some(uav_offset)
     } else {
@@ -272,10 +244,7 @@ pub(super) fn create(
 
     // For DirectInterpolated, additionally register a sampled SRV slot.
     let sampled_bindless_offset = if is_dual_access {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         let srv2_offset = logical_device
             .ledger
             .lock()
@@ -283,9 +252,7 @@ pub(super) fn create(
             .resource_registry
             .register_texture_srv(handle);
         let srv2_cpu_handle = unsafe {
-            let mut cpu_handle = logical_device
-                .cbv_srv_uav_heap
-                .GetCPUDescriptorHandleForHeapStart();
+            let mut cpu_handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
             cpu_handle.ptr += (srv2_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
             cpu_handle
         };
@@ -303,11 +270,9 @@ pub(super) fn create(
             },
         };
         unsafe {
-            logical_device.device.CreateShaderResourceView(
-                &resource,
-                Some(&srv2_desc),
-                srv2_cpu_handle,
-            );
+            logical_device
+                .device
+                .CreateShaderResourceView(&resource, Some(&srv2_desc), srv2_cpu_handle);
         }
         Some(srv2_offset)
     } else {
@@ -360,18 +325,14 @@ pub(super) fn stage_texture_upload_full(
     width: u32,
     height: u32,
 ) -> Result<StagedTextureUpload> {
-    let texture = textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
 
     if texture.width != width || texture.height != height {
         anyhow::bail!("Texture dimensions mismatch");
     }
 
     let device_handle = texture.device_handle;
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let resource_desc = unsafe { texture.resource.GetDesc() };
     let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
@@ -402,11 +363,7 @@ pub(super) fn stage_texture_upload_full(
         let src_offset = (row as usize) * bytes_per_row;
         let dst_offset = (footprint.Offset + row as u64 * row_pitch_bytes as u64) as usize;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr().add(src_offset),
-                mapped_ptr.add(dst_offset),
-                bytes_per_row,
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(src_offset), mapped_ptr.add(dst_offset), bytes_per_row);
         }
     }
 
@@ -437,9 +394,7 @@ pub(super) fn stage_texture_upload_region(
         height,
         data,
     } = region;
-    let texture = textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
 
     if x + width > texture.width || y + height > texture.height {
         anyhow::bail!(
@@ -455,17 +410,11 @@ pub(super) fn stage_texture_upload_region(
 
     let expected_size = (width * height * texture.format.bytes_per_pixel()) as usize;
     if data.len() != expected_size {
-        anyhow::bail!(
-            "Data size mismatch: expected {}, got {}",
-            expected_size,
-            data.len()
-        );
+        anyhow::bail!("Data size mismatch: expected {}, got {}", expected_size, data.len());
     }
 
     let device_handle = texture.device_handle;
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let region_desc = D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
@@ -475,10 +424,7 @@ pub(super) fn stage_texture_upload_region(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: format_to_dxgi(texture.format),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -511,11 +457,7 @@ pub(super) fn stage_texture_upload_region(
         let src_offset = (row as usize) * bytes_per_row;
         let dst_offset = (footprint.Offset + row as u64 * row_pitch_bytes as u64) as usize;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr().add(src_offset),
-                mapped_ptr.add(dst_offset),
-                bytes_per_row,
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(src_offset), mapped_ptr.add(dst_offset), bytes_per_row);
         }
     }
 
@@ -570,20 +512,11 @@ pub(super) fn record_staged_texture_upload(
     let dst_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
         Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            SubresourceIndex: 0,
-        },
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
     };
 
     unsafe {
-        command_list.CopyTextureRegion(
-            &dst_location,
-            upload.dst_x,
-            upload.dst_y,
-            0,
-            &src_location,
-            None,
-        );
+        command_list.CopyTextureRegion(&dst_location, upload.dst_x, upload.dst_y, 0, &src_location, None);
     }
 
     let mut b_to_shader = [barriers::texture_barrier_full(
@@ -667,10 +600,7 @@ pub(super) fn write_region(
 }
 
 /// Execute staged texture uploads on a dedicated command list and wait (sync path).
-pub(super) fn execute_staged_uploads_sync(
-    state: &mut Dx12State,
-    uploads: Vec<StagedTextureUpload>,
-) -> Result<()> {
+pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<StagedTextureUpload>) -> Result<()> {
     if uploads.is_empty() {
         return Ok(());
     }
@@ -701,13 +631,11 @@ pub(super) fn execute_staged_uploads_sync(
         )
     }
     .context("flush_pending_copies: failed to create command list")?;
-    let command_list7: ID3D12GraphicsCommandList7 =
-        command_list.cast().context("ID3D12GraphicsCommandList7")?;
+    let command_list7: ID3D12GraphicsCommandList7 = command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     // Group copies by texture handle (preserving order within each texture).
     let mut texture_order: Vec<TextureHandle> = Vec::new();
-    let mut groups: std::collections::HashMap<TextureHandle, Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<TextureHandle, Vec<usize>> = std::collections::HashMap::new();
     for (i, copy) in copies.iter().enumerate() {
         groups
             .entry(copy.texture_handle)
@@ -759,20 +687,11 @@ pub(super) fn execute_staged_uploads_sync(
             let dst_location = D3D12_TEXTURE_COPY_LOCATION {
                 pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                    SubresourceIndex: 0,
-                },
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
             };
 
             unsafe {
-                command_list.CopyTextureRegion(
-                    &dst_location,
-                    copy.dst_x,
-                    copy.dst_y,
-                    0,
-                    &src_location,
-                    None,
-                );
+                command_list.CopyTextureRegion(&dst_location, copy.dst_x, copy.dst_y, 0, &src_location, None);
             }
         }
 
@@ -793,26 +712,19 @@ pub(super) fn execute_staged_uploads_sync(
         }
     }
 
-    unsafe { command_list.Close() }
-        .context("flush_pending_copies: failed to close command list")?;
+    unsafe { command_list.Close() }.context("flush_pending_copies: failed to close command list")?;
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
     let logical_device = state.devices.get(&device_handle).unwrap();
     unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
     let fence_value = logical_device
         .timeline_next
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("flush_pending_copies: failed to signal fence")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("flush_pending_copies: failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     // Release and reclaim the staging entries back to the pool immediately.
@@ -827,17 +739,10 @@ pub(super) fn execute_staged_uploads_sync(
 
 /// Read texture contents to CPU memory.
 /// The texture must have been created with TextureFlags::COPY_SRC.
-pub(super) fn read_to_cpu(
-    state: &mut Dx12State,
-    texture_handle: TextureHandle,
-    output: &mut [u8],
-) -> Result<()> {
+pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
     use windows::Win32::Graphics::Direct3D12::*;
 
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let width = texture.width;
@@ -846,17 +751,10 @@ pub(super) fn read_to_cpu(
     let expected_size = (width * height * format.bytes_per_pixel()) as usize;
 
     if output.len() < expected_size {
-        anyhow::bail!(
-            "Output buffer too small: {} < {}",
-            output.len(),
-            expected_size
-        );
+        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
     }
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Use the texture's actual resource desc for correct layout
     let res_desc = unsafe { texture.resource.GetDesc() };
@@ -894,10 +792,7 @@ pub(super) fn read_to_cpu(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -905,10 +800,7 @@ pub(super) fn read_to_cpu(
     // Check for device removal before allocating (TDR during prior compute work)
     let removed_reason = unsafe { logical_device.device.GetDeviceRemovedReason() };
     if removed_reason.is_err() {
-        anyhow::bail!(
-            "Device removed before texture readback: {:?}",
-            removed_reason
-        );
+        anyhow::bail!("Device removed before texture readback: {:?}", removed_reason);
     }
 
     let mut staging_buffer: Option<ID3D12Resource> = None;
@@ -926,8 +818,7 @@ pub(super) fn read_to_cpu(
     let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
 
     // Reset allocator before reuse (required after prior compute/render work that used it)
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("Failed to reset command allocator")?;
+    unsafe { logical_device.command_allocator.Reset() }.context("Failed to reset command allocator")?;
 
     let command_list: ID3D12GraphicsCommandList = unsafe {
         logical_device.device.CreateCommandList(
@@ -938,8 +829,7 @@ pub(super) fn read_to_cpu(
         )
     }
     .context("Failed to create command list")?;
-    let command_list7: ID3D12GraphicsCommandList7 =
-        command_list.cast().context("ID3D12GraphicsCommandList7")?;
+    let command_list7: ID3D12GraphicsCommandList7 = command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     // Newly created list is already in recording state; Reset is for reusing a closed list
 
@@ -959,9 +849,7 @@ pub(super) fn read_to_cpu(
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
         Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            SubresourceIndex: 0,
-        },
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
     };
 
     let dst_location = D3D12_TEXTURE_COPY_LOCATION {
@@ -993,20 +881,14 @@ pub(super) fn read_to_cpu(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
     unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
     let fence_value = logical_device
         .timeline_next
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal fence")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get(&device_handle) {
@@ -1018,14 +900,8 @@ pub(super) fn read_to_cpu(
     }
 
     let mut mapped_data: *mut u8 = std::ptr::null_mut();
-    unsafe {
-        staging_buffer.Map(
-            0,
-            None,
-            Some(&mut mapped_data as *mut *mut u8 as *mut *mut _),
-        )
-    }
-    .context("Failed to map staging buffer (texture read_to_cpu)")?;
+    unsafe { staging_buffer.Map(0, None, Some(&mut mapped_data as *mut *mut u8 as *mut *mut _)) }
+        .context("Failed to map staging buffer (texture read_to_cpu)")?;
 
     let bytes_per_row = (width * format.bytes_per_pixel()) as usize;
     let row_pitch_bytes = footprint.Footprint.RowPitch as usize;
@@ -1052,10 +928,7 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
         if let Some(dev) = state.devices.get(&tex.device_handle) {
             if tex.transient_placed {
-                dev.ledger
-                    .lock()
-                    .unwrap()
-                    .reclaim_texture_slots(texture_handle);
+                dev.ledger.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;
             }
             let last_fence = dev
@@ -1075,17 +948,11 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
 
 /// Get the bindless index for a texture.
 pub(super) fn bindless_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
-    state
-        .textures
-        .get(&texture_handle)
-        .and_then(|t| t.bindless_offset)
+    state.textures.get(&texture_handle).and_then(|t| t.bindless_offset)
 }
 
 /// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
-pub(super) fn bindless_sampled_index(
-    state: &Dx12State,
-    texture_handle: TextureHandle,
-) -> Option<u32> {
+pub(super) fn bindless_sampled_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
     state
         .textures
         .get(&texture_handle)

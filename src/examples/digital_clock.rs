@@ -174,21 +174,11 @@ pub fn digit_vertices(
         let dot_size = seg_h * 1.5;
         let dot_spacing = dig_h * 0.5;
 
-        let (x, y) = pixel_to_ndc(
-            cx - dot_size / 2.0,
-            cy - dot_spacing - dot_size / 2.0,
-            width,
-            height,
-        );
+        let (x, y) = pixel_to_ndc(cx - dot_size / 2.0, cy - dot_spacing - dot_size / 2.0, width, height);
         let (w, h) = (dot_size / width * 2.0, dot_size / height * 2.0);
         vertices.extend_from_slice(&quad_vertices(x, y, w, -h, color));
 
-        let (x, y) = pixel_to_ndc(
-            cx - dot_size / 2.0,
-            cy + dot_spacing - dot_size / 2.0,
-            width,
-            height,
-        );
+        let (x, y) = pixel_to_ndc(cx - dot_size / 2.0, cy + dot_spacing - dot_size / 2.0, width, height);
         vertices.extend_from_slice(&quad_vertices(x, y, w, -h, color));
 
         return vertices;
@@ -226,12 +216,7 @@ pub fn digit_vertices(
         add_segment(cx - seg_w / 2.0, cy - seg_h / 2.0, seg_w, seg_h);
     }
     if pattern[4] {
-        add_segment(
-            cx - seg_w / 2.0 - seg_h,
-            cy + gap,
-            seg_h,
-            dig_h - seg_h - gap * 2.0,
-        );
+        add_segment(cx - seg_w / 2.0 - seg_h, cy + gap, seg_h, dig_h - seg_h - gap * 2.0);
     }
     if pattern[5] {
         add_segment(cx + seg_w / 2.0, cy + gap, seg_h, dig_h - seg_h - gap * 2.0);
@@ -277,12 +262,7 @@ impl TimeData {
 }
 
 /// Generate all vertices for the clock display.
-pub fn generate_clock_vertices(
-    time: TimeData,
-    color: Color,
-    width: u32,
-    height: u32,
-) -> Vec<ClockVertex> {
+pub fn generate_clock_vertices(time: TimeData, color: Color, width: u32, height: u32) -> Vec<ClockVertex> {
     let digits = time.to_digits();
 
     let scale = height as f32 / 720.0;
@@ -298,11 +278,7 @@ pub fn generate_clock_vertices(
     let mut all_vertices = Vec::new();
 
     for &digit in digits.iter() {
-        let w = if digit == 10 {
-            colon_width
-        } else {
-            digit_width
-        };
+        let w = if digit == 10 { colon_width } else { digit_width };
         let verts = digit_vertices(digit, cx, cy, scale, color, width as f32, height as f32);
         all_vertices.extend_from_slice(&verts);
         cx += w + spacing;

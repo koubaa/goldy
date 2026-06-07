@@ -7,10 +7,7 @@ use anyhow::Context;
 use goldy::DeviceDescriptor;
 use std::ptr;
 
-fn device_for_adapter(
-    instance: &goldy::Instance,
-    adapter_id: u32,
-) -> anyhow::Result<goldy::Device> {
+fn device_for_adapter(instance: &goldy::Instance, adapter_id: u32) -> anyhow::Result<goldy::Device> {
     let adapters = instance.enumerate_adapters();
     let adapter = adapters
         .iter()
@@ -55,9 +52,7 @@ pub unsafe extern "C" fn goldy_instance_destroy(instance: *mut GoldyInstance) {
 /// # Safety
 /// The instance pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_instance_backend_type(
-    instance: *const GoldyInstance,
-) -> GoldyBackendType {
+pub unsafe extern "C" fn goldy_instance_backend_type(instance: *const GoldyInstance) -> GoldyBackendType {
     if instance.is_null() {
         return GoldyBackendType::Vulkan;
     }

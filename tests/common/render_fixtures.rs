@@ -1,10 +1,10 @@
 //! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
 
 use goldy::{
-    BufferKind, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline,
-    DepthFormat, DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
-    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DepthFormat,
+    DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 pub fn create_device() -> Option<Device> {
@@ -17,8 +17,8 @@ pub fn create_device() -> Option<Device> {
 }
 
 pub fn render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {
-    let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target =
+        RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     let mut encoder = CommandEncoder::new();
     {
@@ -37,8 +37,8 @@ pub fn render_triangle(
     clear_color: Color,
     vertices: [Vertex2D; 3],
 ) -> Vec<u8> {
-    let target = RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target =
+        RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     let shader_source = r#"
         struct VertexInput {
@@ -175,15 +175,11 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let render_width = 512u32;
     let render_height = 512u32;
 
-    let compute_shader =
-        ShaderModule::from_slang(device, include_str!("../../shaders/game_of_life.slang"))
-            .expect("Failed to load compute shader");
+    let compute_shader = ShaderModule::from_slang(device, include_str!("../../shaders/game_of_life.slang"))
+        .expect("Failed to load compute shader");
 
-    let render_shader = ShaderModule::from_slang(
-        device,
-        include_str!("../../shaders/game_of_life_render.slang"),
-    )
-    .expect("Failed to load render shader");
+    let render_shader = ShaderModule::from_slang(device, include_str!("../../shaders/game_of_life_render.slang"))
+        .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
     let buffer_a = device
@@ -193,8 +189,7 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         .alloc_buffer_with_data(&initial_state, BufferKind::Scattered)
         .expect("Failed to create buffer B");
 
-    let compute_pipeline =
-        ComputePipeline::new(device, &compute_shader).expect("Failed to create compute pipeline");
+    let compute_pipeline = ComputePipeline::new(device, &compute_shader).expect("Failed to create compute pipeline");
 
     let render_pipeline = RenderPipeline::new(
         device,
@@ -225,19 +220,12 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             }
             pass.dispatch(workgroups_x, workgroups_y, 1);
         }
-        compute_encoder
-            .dispatch(&ctx)
-            .expect("Compute dispatch failed");
+        compute_encoder.dispatch(&ctx).expect("Compute dispatch failed");
         use_buffer_a = !use_buffer_a;
     }
 
-    let target = RenderTarget::new(
-        device,
-        render_width,
-        render_height,
-        TextureFormat::Rgba8Unorm,
-    )
-    .expect("Failed to create render target");
+    let target = RenderTarget::new(device, render_width, render_height, TextureFormat::Rgba8Unorm)
+        .expect("Failed to create render target");
 
     let mut encoder = CommandEncoder::new();
     {

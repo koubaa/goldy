@@ -25,26 +25,9 @@ macro_rules! impl_structured_buffer_element_for_primitives {
     };
 }
 
-impl_structured_buffer_element_for_primitives!(
-    (),
-    i16,
-    u16,
-    i32,
-    u32,
-    i64,
-    u64,
-    i128,
-    u128,
-    isize,
-    usize,
-    f32,
-    f64,
-);
+impl_structured_buffer_element_for_primitives!((), i16, u16, i32, u32, i64, u64, i128, u128, isize, usize, f32, f64,);
 
-impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T; N] where
-    [T; N]: bytemuck::Pod
-{
-}
+impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T; N] where [T; N]: bytemuck::Pod {}
 
 /// A GPU buffer.
 pub struct Buffer {
@@ -100,13 +83,7 @@ impl Buffer {
         expected_max: u64,
         access: BufferKind,
     ) -> Result<Self> {
-        Self::new_with_capacity_hint_and_flags(
-            device,
-            initial_size,
-            expected_max,
-            access,
-            BufferFlags::empty(),
-        )
+        Self::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, BufferFlags::empty())
     }
 
     /// Like [`Self::new_with_capacity_hint`], with explicit [`BufferFlags`].
@@ -120,9 +97,7 @@ impl Buffer {
         flags: BufferFlags,
     ) -> Result<Self> {
         if flags.contains(BufferFlags::GPU_ONLY) && flags.contains(BufferFlags::CPU_READABLE) {
-            anyhow::bail!(
-                "BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE"
-            );
+            anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE");
         }
         let capacity = expected_max.max(initial_size);
         tracing::debug!(
@@ -133,14 +108,8 @@ impl Buffer {
             "Creating buffer with capacity hint"
         );
         let mut backend = device.inner.backend.lock().unwrap();
-        let (handle, allocated_size) = backend.create_buffer_with_capacity(
-            device.inner.handle,
-            initial_size,
-            capacity,
-            access,
-            None,
-            flags,
-        )?;
+        let (handle, allocated_size) =
+            backend.create_buffer_with_capacity(device.inner.handle, initial_size, capacity, access, None, flags)?;
         Ok(Self {
             device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
@@ -174,13 +143,10 @@ impl Buffer {
     ) -> Result<Self> {
         tracing::debug!(size, ?access, element_stride, ?flags, "Creating buffer");
         if flags.contains(BufferFlags::GPU_ONLY) && flags.contains(BufferFlags::CPU_READABLE) {
-            anyhow::bail!(
-                "BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE"
-            );
+            anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with BufferFlags::CPU_READABLE");
         }
         let mut backend = device.inner.backend.lock().unwrap();
-        let handle =
-            backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
+        let handle = backend.create_buffer(device.inner.handle, size, access, element_stride, flags)?;
 
         Ok(Self {
             device: device.clone(),
@@ -277,13 +243,7 @@ impl Buffer {
         access: BufferKind,
         element_stride: u32,
     ) -> Result<Self> {
-        Self::with_bytes_stride_and_flags(
-            device,
-            data,
-            access,
-            element_stride,
-            BufferFlags::empty(),
-        )
+        Self::with_bytes_stride_and_flags(device, data, access, element_stride, BufferFlags::empty())
     }
 
     /// Like [`Self::with_bytes_stride`], with explicit [`BufferFlags`].
@@ -395,11 +355,7 @@ impl Buffer {
             backend.set_buffer_logical_size(self.device.inner.handle, self.handle, new_size)?;
             drop(backend);
             if new_size > old_logical {
-                self.clear(
-                    &self.device,
-                    old_logical,
-                    new_size.saturating_sub(old_logical),
-                )?;
+                self.clear(&self.device, old_logical, new_size.saturating_sub(old_logical))?;
             }
             self.size = new_size;
             return Ok(());
@@ -447,13 +403,9 @@ impl Buffer {
     pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
         let backend = self.backend.lock().unwrap();
         match (self.access, access) {
-            (BufferKind::Broadcast, ResourceAccess::Read) => {
-                backend.buffer_bindless_index(self.handle)
-            }
+            (BufferKind::Broadcast, ResourceAccess::Read) => backend.buffer_bindless_index(self.handle),
             (BufferKind::Broadcast, ResourceAccess::Write | ResourceAccess::ReadWrite) => None,
-            (BufferKind::Scattered, ResourceAccess::Read) => {
-                backend.buffer_bindless_srv_index(self.handle)
-            }
+            (BufferKind::Scattered, ResourceAccess::Read) => backend.buffer_bindless_srv_index(self.handle),
             (BufferKind::Scattered, ResourceAccess::Write | ResourceAccess::ReadWrite) => {
                 backend.buffer_bindless_index(self.handle)
             }
@@ -498,12 +450,7 @@ impl Buffer {
     ///
     /// `element_stride` sets the structured buffer stride for the view's descriptor.
     /// If `None`, defaults to 4 bytes (u32).
-    pub fn create_view(
-        &self,
-        offset: u64,
-        size: u64,
-        element_stride: Option<u32>,
-    ) -> Result<BufferView> {
+    pub fn create_view(&self, offset: u64, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
         let mut backend = self.backend.lock().unwrap();
         let handle = backend.create_buffer_view(self.handle, offset, size, element_stride)?;
         Ok(BufferView {
@@ -520,11 +467,7 @@ impl Buffer {
     ///
     /// Convenience wrapper that computes the byte offset, byte size, and element stride
     /// from the type `T` and element count.
-    pub fn create_typed_view<T: bytemuck::Pod>(
-        &self,
-        first_element: u64,
-        count: u64,
-    ) -> Result<BufferView> {
+    pub fn create_typed_view<T: bytemuck::Pod>(&self, first_element: u64, count: u64) -> Result<BufferView> {
         let stride = std::mem::size_of::<T>() as u64;
         let offset = first_element * stride;
         let size = count * stride;
@@ -589,9 +532,7 @@ impl BufferView {
         let backend = self.backend.lock().unwrap();
         match access {
             ResourceAccess::Read => backend.buffer_bindless_srv_index(self.handle),
-            ResourceAccess::Write | ResourceAccess::ReadWrite => {
-                backend.buffer_bindless_index(self.handle)
-            }
+            ResourceAccess::Write | ResourceAccess::ReadWrite => backend.buffer_bindless_index(self.handle),
         }
     }
 
@@ -666,9 +607,7 @@ impl BufferView {
         let parent_size = backend.buffer_size(self.parent_handle);
         let mut full = vec![0u8; parent_size as usize];
         backend.read_buffer_to_cpu(device.inner.handle, self.parent_handle, &mut full)?;
-        output.copy_from_slice(
-            &full[self.offset as usize..self.offset as usize + self.size as usize],
-        );
+        output.copy_from_slice(&full[self.offset as usize..self.offset as usize + self.size as usize]);
         Ok(())
     }
 
@@ -786,17 +725,9 @@ impl BufferPool {
 
     /// Create a pool with a custom sub-allocation alignment.
     pub fn with_alignment(device: &Device, total_size: u64, alignment: u64) -> Result<Self> {
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
+        assert!(alignment.is_power_of_two(), "alignment must be a power of two");
         tracing::debug!(total_size, alignment, "Creating buffer pool");
-        let backing = device.alloc_buffer(
-            total_size,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )?;
+        let backing = device.alloc_buffer(total_size, BufferKind::Scattered, None, BufferFlags::empty())?;
         Ok(Self {
             backing,
             offset: 0,
@@ -811,13 +742,7 @@ impl BufferPool {
         expected_max: u64,
         alignment: u64,
     ) -> Result<Self> {
-        Self::with_alignment_capacity_hint_and_flags(
-            device,
-            total_size,
-            expected_max,
-            alignment,
-            BufferFlags::empty(),
-        )
+        Self::with_alignment_capacity_hint_and_flags(device, total_size, expected_max, alignment, BufferFlags::empty())
     }
 
     /// Like [`Self::with_alignment_and_capacity_hint`] with [`BufferFlags`].
@@ -828,10 +753,7 @@ impl BufferPool {
         alignment: u64,
         flags: BufferFlags,
     ) -> Result<Self> {
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
+        assert!(alignment.is_power_of_two(), "alignment must be a power of two");
         tracing::debug!(
             total_size,
             expected_max,
@@ -839,12 +761,7 @@ impl BufferPool {
             ?flags,
             "Creating buffer pool with capacity hint"
         );
-        let backing = device.alloc_buffer_with_capacity(
-            total_size,
-            expected_max,
-            BufferKind::Scattered,
-            flags,
-        )?;
+        let backing = device.alloc_buffer_with_capacity(total_size, expected_max, BufferKind::Scattered, flags)?;
         Ok(Self {
             backing,
             offset: 0,
@@ -873,10 +790,7 @@ impl BufferPool {
     ///
     /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
     /// Same element-stride rules as [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data).
-    pub fn alloc_with_data<T: StructuredBufferElement>(
-        &mut self,
-        data: &[T],
-    ) -> Result<BufferView> {
+    pub fn alloc_with_data<T: StructuredBufferElement>(&mut self, data: &[T]) -> Result<BufferView> {
         let view = self.alloc::<T>(data.len() as u64)?;
         view.write_data(data)?;
         Ok(view)
@@ -929,9 +843,7 @@ impl BufferPool {
             );
         }
 
-        let view = self
-            .backing
-            .create_view(aligned_offset, size, element_stride)?;
+        let view = self.backing.create_view(aligned_offset, size, element_stride)?;
         self.offset = aligned_offset + size;
         Ok(view)
     }

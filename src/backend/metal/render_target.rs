@@ -29,10 +29,7 @@ pub(super) fn create_with_depth(
     color_format: TextureFormat,
     depth_format: Option<DepthFormat>,
 ) -> Result<RenderTargetHandle> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let descriptor = TextureDescriptor::new();
     descriptor.set_width(width as u64);
@@ -91,15 +88,9 @@ pub(super) fn render_to(
     target: RenderTargetHandle,
     commands: &[super::super::RenderCommand],
 ) -> Result<()> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let render_target = state
-        .render_targets
-        .get(&target)
-        .context("Invalid render target")?;
+    let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
     let mut clear_color = None;
     let mut clear_depth = None;
@@ -174,15 +165,8 @@ pub(super) fn render_to(
 }
 
 /// Read render target contents back to CPU.
-pub(super) fn read_to_cpu(
-    state: &MetalState,
-    target: RenderTargetHandle,
-    output: &mut [u8],
-) -> Result<()> {
-    let render_target = state
-        .render_targets
-        .get(&target)
-        .context("Invalid render target")?;
+pub(super) fn read_to_cpu(state: &MetalState, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
+    let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
     if !render_target.has_rendered {
         anyhow::bail!("Cannot read from render target that hasn't been rendered to");
@@ -207,10 +191,9 @@ pub(super) fn read_to_cpu(
         );
     }
 
-    let staging_buffer = logical_device.device.new_buffer(
-        expected_size as u64,
-        mtl::MTLResourceOptions::StorageModeShared,
-    );
+    let staging_buffer = logical_device
+        .device
+        .new_buffer(expected_size as u64, mtl::MTLResourceOptions::StorageModeShared);
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let blit_encoder = command_buffer.new_blit_command_encoder();

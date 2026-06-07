@@ -543,9 +543,7 @@ pub enum DeviceType {
 /// Use `None` to work around driver bugs in software renderers (e.g. lavapipe SSA corruption
 /// across barriers).
 #[repr(u8)]
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum OptimizationLevel {
     /// No optimization — preserves all loads and barriers exactly as written.
     None,

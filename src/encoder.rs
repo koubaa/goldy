@@ -33,9 +33,7 @@ pub struct CommandEncoder {
 impl CommandEncoder {
     /// Create a new command encoder.
     pub fn new() -> Self {
-        Self {
-            commands: Vec::new(),
-        }
+        Self { commands: Vec::new() }
     }
 
     /// Begin a render pass.
@@ -76,9 +74,7 @@ impl<'a> RenderPass<'a> {
 
     /// Set the active render pipeline.
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) {
-        self.encoder
-            .commands
-            .push(RenderCommand::SetPipeline(pipeline.handle));
+        self.encoder.commands.push(RenderCommand::SetPipeline(pipeline.handle));
     }
 
     /// Set a vertex buffer.
@@ -160,11 +156,9 @@ impl<'a> RenderPass<'a> {
     /// pass.bind_resources_typed(&[tex, samp]);
     /// ```
     pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) {
-        self.encoder
-            .commands
-            .push(RenderCommand::BindResourcesTyped {
-                handles: handles.to_vec(),
-            });
+        self.encoder.commands.push(RenderCommand::BindResourcesTyped {
+            handles: handles.to_vec(),
+        });
     }
 
     /// Draw primitives.
@@ -190,12 +184,7 @@ impl<'a> RenderPass<'a> {
     }
 
     /// Set an index buffer with an additional offset.
-    pub fn set_index_buffer_offset(
-        &mut self,
-        buffer: &impl BufferSource,
-        offset: u64,
-        format: IndexFormat,
-    ) {
+    pub fn set_index_buffer_offset(&mut self, buffer: &impl BufferSource, offset: u64, format: IndexFormat) {
         self.encoder.commands.push(RenderCommand::SetIndexBuffer {
             buffer: buffer.source_handle(),
             offset: buffer.source_offset() + offset,
@@ -211,12 +200,7 @@ impl<'a> RenderPass<'a> {
     /// - `indices`: Range of indices to draw
     /// - `base_vertex`: Value added to each index before fetching the vertex
     /// - `instances`: Range of instances to draw
-    pub fn draw_indexed(
-        &mut self,
-        indices: std::ops::Range<u32>,
-        base_vertex: i32,
-        instances: std::ops::Range<u32>,
-    ) {
+    pub fn draw_indexed(&mut self, indices: std::ops::Range<u32>, base_vertex: i32, instances: std::ops::Range<u32>) {
         self.encoder.commands.push(RenderCommand::DrawIndexed {
             index_count: indices.end - indices.start,
             instance_count: instances.end - instances.start,

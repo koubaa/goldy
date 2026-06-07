@@ -36,11 +36,7 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetVertexBuffer {
-                slot,
-                buffer,
-                offset,
-            } => {
+            RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
                 if let Some(buf) = buffers.get(buffer) {
                     let metal_slot = (*slot as u64) + super::types::VERTEX_BUFFER_START_SLOT;
                     encoder.set_vertex_buffer(metal_slot, Some(&buf.buffer), *offset);
@@ -50,19 +46,12 @@ pub(super) fn record(
                     );
                 }
             }
-            RenderCommand::SetIndexBuffer {
-                buffer,
-                offset,
-                format,
-            } => {
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 current_index_buffer = Some((*buffer, *offset, *format));
             }
-            RenderCommand::BindResources {
-                buffers: buf_handles,
-            } => {
+            RenderCommand::BindResources { buffers: buf_handles } => {
                 if crate::slang::layout_validation_enabled() {
-                    if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h))
-                    {
+                    if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h)) {
                         if !pipeline.binding_element_strides.is_empty() {
                             let actual: Vec<Option<u32>> = buf_handles
                                 .iter()
@@ -113,9 +102,7 @@ pub(super) fn record(
                     layout_bytes.as_ptr() as *const _,
                 );
             }
-            RenderCommand::BindResourcesTyped {
-                handles: typed_handles,
-            } => {
+            RenderCommand::BindResourcesTyped { handles: typed_handles } => {
                 if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h)) {
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
@@ -217,9 +204,9 @@ pub(super) fn create_render_pass<'a>(
     color_attachment.set_store_action(mtl::MTLStoreAction::Store);
 
     if let Some(depth) = depth_texture {
-        let depth_attachment = descriptor.depth_attachment().expect(
-            "Metal render pass descriptor must have a depth attachment when depth texture is set",
-        );
+        let depth_attachment = descriptor
+            .depth_attachment()
+            .expect("Metal render pass descriptor must have a depth attachment when depth texture is set");
         depth_attachment.set_texture(Some(depth));
         if let Some(depth_value) = clear_depth {
             depth_attachment.set_load_action(mtl::MTLLoadAction::Clear);

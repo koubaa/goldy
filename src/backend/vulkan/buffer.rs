@@ -30,8 +30,7 @@ fn submit_copy(
         .context("Failed to allocate transfer command buffer")?;
     let cmd = cmd_buffers[0];
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     let region = vk::BufferCopy {
         src_offset,
@@ -48,17 +47,13 @@ fn submit_copy(
         let mem_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER
-                    | vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
-            )
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT)
             .dst_access_mask(
                 vk::AccessFlags2::SHADER_READ
                     | vk::AccessFlags2::SHADER_WRITE
                     | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
             );
-        let dep_info =
-            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+        let dep_info = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
         device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
         device.device.end_command_buffer(cmd)?;
@@ -68,9 +63,7 @@ fn submit_copy(
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
-        device
-            .device
-            .free_command_buffers(device.command_pool, &cmd_buffers);
+        device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
     Ok(())
@@ -91,9 +84,7 @@ pub(super) fn create(
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     assert!(logical_size <= allocation_size);
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Map access pattern to Vulkan buffer usage flags
     // All buffers get TRANSFER_SRC | TRANSFER_DST for flexibility
@@ -118,9 +109,7 @@ pub(super) fn create(
 
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     if cpu_readable && !is_storage {
-        anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
-        );
+        anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
@@ -130,8 +119,8 @@ pub(super) fn create(
         .usage(vk_usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let buffer = unsafe { logical_device.device.create_buffer(&buffer_info, None) }
-        .context("Failed to create buffer")?;
+    let buffer =
+        unsafe { logical_device.device.create_buffer(&buffer_info, None) }.context("Failed to create buffer")?;
 
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
 
@@ -169,8 +158,7 @@ pub(super) fn create(
         })
         .context("Failed to allocate buffer memory")?;
 
-    unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
-        .context("Failed to bind buffer memory")?;
+    unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }.context("Failed to bind buffer memory")?;
 
     // Staging buffer is created lazily on first write() to avoid doubling memory
     // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
@@ -298,9 +286,7 @@ pub(super) fn create_sparse_with_capacity(
     element_stride: Option<u32>,
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
-    let ld = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let ld = devices.get(&device_handle).context("Invalid device handle")?;
     let block = ld.sparse_buffer_block_size;
     anyhow::ensure!(block > 0, "sparse block size not initialized");
 
@@ -310,9 +296,8 @@ pub(super) fn create_sparse_with_capacity(
     anyhow::ensure!(num_pages > 0, "sparse buffer capacity too small");
 
     let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
-    vk_usage |= vk::BufferUsageFlags::STORAGE_BUFFER
-        | vk::BufferUsageFlags::VERTEX_BUFFER
-        | vk::BufferUsageFlags::INDEX_BUFFER;
+    vk_usage |=
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER;
     if logical_size >= 12 {
         vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
     }
@@ -323,8 +308,7 @@ pub(super) fn create_sparse_with_capacity(
         .flags(vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }
-        .context("Failed to create sparse buffer")?;
+    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }.context("Failed to create sparse buffer")?;
 
     let initial_pages = sparse::pages_needed_for_bytes(logical_size, block) as usize;
     let mut sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>> = vec![None; num_pages];
@@ -334,9 +318,7 @@ pub(super) fn create_sparse_with_capacity(
     let dev = &ld.device;
 
     let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
-    let pool = pool_guard
-        .as_mut()
-        .context("internal: sparse page pool missing")?;
+    let pool = pool_guard.as_mut().context("internal: sparse page pool missing")?;
 
     for (i, sparse_page) in sparse_pages.iter_mut().enumerate().take(initial_pages) {
         let (mem, mem_off) = pool.alloc_page(dev)?;
@@ -379,8 +361,7 @@ pub(super) fn create_sparse_with_capacity(
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&buffer_info));
             unsafe {
-                ld.device
-                    .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+                ld.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
             }
         }
         Some(index)
@@ -445,10 +426,7 @@ pub(super) fn hint_unused_above(
         };
         let bind_queue = ld.sparse_binding_queue;
         let dev: &ash::Device = &ld.device;
-        let sparse_pages = &mut buffers
-            .get_mut(&buffer_handle)
-            .expect("buffer missing")
-            .sparse_pages;
+        let sparse_pages = &mut buffers.get_mut(&buffer_handle).expect("buffer missing").sparse_pages;
 
         let mut binds = Vec::new();
         let mut to_free: Vec<(vk::DeviceMemory, vk::DeviceSize)> = Vec::new();
@@ -483,14 +461,8 @@ pub(super) fn hint_unused_above(
 }
 
 /// Byte size of the underlying VkBuffer allocation.
-pub(super) fn capacity(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-) -> u64 {
-    buffers
-        .get(&buffer_handle)
-        .map(|b| b.allocation_size)
-        .unwrap_or(0)
+pub(super) fn capacity(buffers: &HashMap<BufferHandle, BufferState>, buffer_handle: BufferHandle) -> u64 {
+    buffers.get(&buffer_handle).map(|b| b.allocation_size).unwrap_or(0)
 }
 
 pub(super) fn set_logical_size(
@@ -500,24 +472,13 @@ pub(super) fn set_logical_size(
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
-    let is_sparse = buffers
-        .get(&buffer_handle)
-        .map(|b| b.is_sparse)
-        .unwrap_or(false);
+    let is_sparse = buffers.get(&buffer_handle).map(|b| b.is_sparse).unwrap_or(false);
     if is_sparse {
-        return set_logical_size_sparse(
-            devices,
-            buffers,
-            device_handle,
-            buffer_handle,
-            new_logical_size,
-        );
+        return set_logical_size_sparse(devices, buffers, device_handle, buffer_handle, new_logical_size);
     }
 
     let (bindless_index, is_storage, vkbuf, old_logical) = {
-        let buf = buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
+        let buf = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
         if buf.is_view {
             anyhow::bail!("cannot set logical size on buffer views");
         }
@@ -569,8 +530,7 @@ pub(super) fn set_logical_size(
         .context("Invalid device handle")?
         .bindless_descriptor_set;
 
-    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index)
-    {
+    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index) {
         let buffer_info = vk::DescriptorBufferInfo::default()
             .buffer(vkbuf)
             .offset(0)
@@ -613,9 +573,7 @@ fn set_logical_size_sparse(
     new_logical_size: u64,
 ) -> Result<()> {
     let (bindless_index, is_storage, vkbuf, old_logical, block) = {
-        let buf = buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
+        let buf = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
         if buf.is_view {
             anyhow::bail!("cannot set logical size on buffer views");
         }
@@ -648,9 +606,7 @@ fn set_logical_size_sparse(
     let new_pages = sparse::pages_needed_for_bytes(new_logical_size, block) as usize;
 
     {
-        let ld = devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = devices.get(&device_handle).context("Invalid device handle")?;
         let bind_queue = ld.sparse_binding_queue;
         let dev: &ash::Device = &ld.device;
 
@@ -660,9 +616,7 @@ fn set_logical_size_sparse(
             .sparse_pages;
 
         let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
-        let pool = pool_guard
-            .as_mut()
-            .context("internal: sparse pool missing")?;
+        let pool = pool_guard.as_mut().context("internal: sparse pool missing")?;
 
         if new_pages > old_pages {
             let mut binds = Vec::with_capacity(new_pages - old_pages);
@@ -738,8 +692,7 @@ fn set_logical_size_sparse(
         .context("Invalid device handle")?
         .bindless_descriptor_set;
 
-    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index)
-    {
+    if let (Some(descriptor_set), Some(bindless_index)) = (bindless_descriptor_set, bindless_index) {
         let buffer_info = vk::DescriptorBufferInfo::default()
             .buffer(vkbuf)
             .offset(0)
@@ -783,9 +736,7 @@ fn allocate_vk_buffer_memory(
     is_storage: bool,
     flags: BufferFlags,
 ) -> Result<(vk::Buffer, vk::DeviceMemory, Option<usize>)> {
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let mut vk_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
 
@@ -802,9 +753,7 @@ fn allocate_vk_buffer_memory(
 
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     if cpu_readable && !is_storage {
-        anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
-        );
+        anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
 
     let desired_flags = if is_storage {
@@ -883,8 +832,7 @@ fn submit_resize_transfer(
             .size(CHUNK)
             .usage(staging_usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let zb = unsafe { device.device.create_buffer(&staging_info, None) }
-            .context("resize: zero staging buffer")?;
+        let zb = unsafe { device.device.create_buffer(&staging_info, None) }.context("resize: zero staging buffer")?;
         let req = unsafe { device.device.get_buffer_memory_requirements(zb) };
         let mt = find_memory_type(
             instance,
@@ -896,13 +844,10 @@ fn submit_resize_transfer(
         let ai = vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(mt);
-        let zm = unsafe { device.device.allocate_memory(&ai, None) }
-            .context("resize: zero staging alloc")?;
+        let zm = unsafe { device.device.allocate_memory(&ai, None) }.context("resize: zero staging alloc")?;
         unsafe { device.device.bind_buffer_memory(zb, zm, 0) }.context("resize: zero bind")?;
         unsafe {
-            let ptr = device
-                .map_memory2(zm, 0, CHUNK)
-                .context("resize: map zero staging")? as *mut u8;
+            let ptr = device.map_memory2(zm, 0, CHUNK).context("resize: map zero staging")? as *mut u8;
             std::ptr::write_bytes(ptr, 0, CHUNK as usize);
             device.unmap_memory2(zm)?;
         }
@@ -920,8 +865,7 @@ fn submit_resize_transfer(
         .context("Failed to allocate transfer command buffer (resize)")?;
     let cmd = cmd_buffers[0];
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         device.device.begin_command_buffer(cmd, &begin_info)?;
@@ -954,17 +898,13 @@ fn submit_resize_transfer(
         let mem_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER
-                    | vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
-            )
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT)
             .dst_access_mask(
                 vk::AccessFlags2::SHADER_READ
                     | vk::AccessFlags2::SHADER_WRITE
                     | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
             );
-        let dep_info =
-            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+        let dep_info = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
         device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
         device.device.end_command_buffer(cmd)?;
@@ -974,9 +914,7 @@ fn submit_resize_transfer(
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
-        device
-            .device
-            .free_command_buffers(device.command_pool, &cmd_buffers);
+        device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
     if let (Some(zb), Some(zm)) = (zero_staging, zero_mem) {
@@ -999,10 +937,7 @@ pub(super) fn resize(
     new_size: u64,
     preserve_contents: bool,
 ) -> Result<()> {
-    let old_state = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?
-        .clone();
+    let old_state = buffers.get(&buffer_handle).context("Invalid buffer handle")?.clone();
 
     if old_state.is_view {
         anyhow::bail!("cannot resize buffer views");
@@ -1036,29 +971,17 @@ pub(super) fn resize(
 
     let is_storage = old_state.is_storage;
 
-    let (new_buffer, new_memory, new_host_mapped) = allocate_vk_buffer_memory(
-        instance,
-        devices,
-        device_handle,
-        new_size,
-        is_storage,
-        old_state.flags,
-    )?;
+    let (new_buffer, new_memory, new_host_mapped) =
+        allocate_vk_buffer_memory(instance, devices, device_handle, new_size, is_storage, old_state.flags)?;
 
     let copy_len = if preserve_contents {
         old_state.size.min(new_size)
     } else {
         0
     };
-    let zero_from = if preserve_contents {
-        copy_len
-    } else {
-        new_size
-    };
+    let zero_from = if preserve_contents { copy_len } else { new_size };
 
-    let logical_ref = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_ref = devices.get(&device_handle).context("Invalid device handle")?;
     submit_resize_transfer(
         instance,
         logical_ref,
@@ -1115,10 +1038,7 @@ pub(super) fn resize(
         .load(Ordering::Relaxed)
         .saturating_sub(1);
     let pending = if old_state.is_sparse {
-        let binds = sparse::collect_sparse_binds_for_teardown(
-            old_state.sparse_block_size,
-            &old_state.sparse_pages,
-        );
+        let binds = sparse::collect_sparse_binds_for_teardown(old_state.sparse_block_size, &old_state.sparse_pages);
         types::PendingDeletion::ReplacedSparseBufferGpu {
             buffer: old_state.buffer,
             allocation_size: old_state.allocation_size,
@@ -1221,25 +1141,19 @@ pub(super) fn destroy(
 ) {
     if let Some(buffer) = buffers.remove(&buffer_handle) {
         if let Some(device) = devices.get(&buffer.device_handle) {
-            let barrier = device
-                .timeline_next
-                .load(Ordering::Relaxed)
-                .saturating_sub(1);
+            let barrier = device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
 
             if buffer.is_view {
-                device.deletion_queue.lock().unwrap().queue(
-                    barrier,
-                    types::PendingDeletion::BufferView { buffer_handle },
-                );
+                device
+                    .deletion_queue
+                    .lock()
+                    .unwrap()
+                    .queue(barrier, types::PendingDeletion::BufferView { buffer_handle });
                 return;
             }
 
             if buffer.transient_heap_suballoc {
-                device
-                    .ledger
-                    .lock()
-                    .unwrap()
-                    .reclaim_buffer_slots(buffer_handle);
+                device.ledger.lock().unwrap().reclaim_buffer_slots(buffer_handle);
                 unsafe {
                     device.device.destroy_buffer(buffer.buffer, None);
                 }
@@ -1247,20 +1161,14 @@ pub(super) fn destroy(
             }
             if buffer.host_mapped.is_some() && !buffer.is_sparse {
                 if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
-                    tracing::warn!(
-                        ?e,
-                        "unmap_memory2 failed for CPU_READABLE buffer on destroy"
-                    );
+                    tracing::warn!(?e, "unmap_memory2 failed for CPU_READABLE buffer on destroy");
                 }
             }
             let sparse_teardown = if buffer.is_sparse {
                 Some(types::SparseBufferTeardown {
                     allocation_size: buffer.allocation_size,
                     block_size: buffer.sparse_block_size,
-                    binds: sparse::collect_sparse_binds_for_teardown(
-                        buffer.sparse_block_size,
-                        &buffer.sparse_pages,
-                    ),
+                    binds: sparse::collect_sparse_binds_for_teardown(buffer.sparse_block_size, &buffer.sparse_pages),
                 })
             } else {
                 None
@@ -1297,9 +1205,7 @@ pub(super) fn create_view(
     size: u64,
     element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
-    let parent = buffers
-        .get(&parent_handle)
-        .context("Invalid parent buffer handle")?;
+    let parent = buffers.get(&parent_handle).context("Invalid parent buffer handle")?;
 
     if offset + size > parent.size {
         anyhow::bail!(
@@ -1319,9 +1225,7 @@ pub(super) fn create_view(
     let is_storage = parent.is_storage;
     let parent_flags = parent.flags;
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
@@ -1409,13 +1313,8 @@ pub(super) fn ensure_staging(
     buffers: &mut HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
 ) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
-    if !buffer.is_storage
-        || buffer.staging_buffer.is_some()
-        || buffer.flags.contains(BufferFlags::CPU_READABLE)
-    {
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_storage || buffer.staging_buffer.is_some() || buffer.flags.contains(BufferFlags::CPU_READABLE) {
         return Ok(());
     }
     let size = buffer.size;
@@ -1429,8 +1328,8 @@ pub(super) fn ensure_staging(
         .usage(staging_usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let stg_buf = unsafe { device.device.create_buffer(&staging_info, None) }
-        .context("Failed to create staging buffer")?;
+    let stg_buf =
+        unsafe { device.device.create_buffer(&staging_info, None) }.context("Failed to create staging buffer")?;
 
     let stg_reqs = unsafe { device.device.get_buffer_memory_requirements(stg_buf) };
 
@@ -1449,8 +1348,7 @@ pub(super) fn ensure_staging(
     let stg_mem = unsafe { device.device.allocate_memory(&stg_alloc, None) }
         .context("Failed to allocate staging buffer memory")?;
 
-    unsafe { device.device.bind_buffer_memory(stg_buf, stg_mem, 0) }
-        .context("Failed to bind staging buffer memory")?;
+    unsafe { device.device.bind_buffer_memory(stg_buf, stg_mem, 0) }.context("Failed to bind staging buffer memory")?;
 
     let buf = buffers.get_mut(&buffer_handle).unwrap();
     buf.staging_buffer = Some(stg_buf);
@@ -1476,18 +1374,14 @@ pub(super) fn write(
     }
 
     {
-        let buffer = buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
+        let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
         if offset + data.len() as u64 > buffer.size {
             anyhow::bail!("Write would exceed buffer bounds");
         }
     }
 
     {
-        let buffer = buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
+        let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
         if let Some(base) = buffer.host_mapped {
             let p = base as *mut u8;
             unsafe {
@@ -1500,9 +1394,7 @@ pub(super) fn write(
     // Lazily create staging buffer for storage buffers
     ensure_staging(instance, devices, buffers, buffer_handle)?;
 
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let device = devices
         .get(&buffer.device_handle)
@@ -1520,14 +1412,7 @@ pub(super) fn write(
                 .context("Failed to unmap staging buffer")?;
         }
 
-        submit_copy(
-            device,
-            stg_buf,
-            buffer.buffer,
-            offset,
-            offset,
-            data.len() as u64,
-        )?;
+        submit_copy(device, stg_buf, buffer.buffer, offset, offset, data.len() as u64)?;
     } else {
         // HOST_VISIBLE path: direct map
         unsafe {
@@ -1545,18 +1430,12 @@ pub(super) fn write(
 }
 
 /// Get the size of a buffer in bytes.
-pub(super) fn size(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-) -> u64 {
+pub(super) fn size(buffers: &HashMap<BufferHandle, BufferState>, buffer_handle: BufferHandle) -> u64 {
     buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
-pub(super) fn bindless_index(
-    buffers: &HashMap<BufferHandle, BufferState>,
-    buffer_handle: BufferHandle,
-) -> Option<u32> {
+pub(super) fn bindless_index(buffers: &HashMap<BufferHandle, BufferState>, buffer_handle: BufferHandle) -> Option<u32> {
     buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
 }
 
@@ -1575,9 +1454,7 @@ pub(super) fn read_to_cpu(
     let _tz = crate::tracy_zone!("vk.buffer.read_to_cpu");
     {
         let _validate = crate::tracy_zone!("vk.buffer.read_to_cpu.validate");
-        let buffer = buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?;
+        let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
         if buffer.device_handle != device_handle {
             anyhow::bail!("Buffer belongs to different device");
         }
@@ -1603,14 +1480,10 @@ pub(super) fn read_to_cpu(
 
     let buffer = {
         let _lookup = crate::tracy_zone!("vk.buffer.read_to_cpu.lookup_after_staging");
-        buffers
-            .get(&buffer_handle)
-            .context("Invalid buffer handle")?
+        buffers.get(&buffer_handle).context("Invalid buffer handle")?
     };
 
-    let device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let device = devices.get(&device_handle).context("Invalid device handle")?;
 
     if buffer.device_handle != device_handle {
         anyhow::bail!("Buffer belongs to different device");
@@ -1664,13 +1537,9 @@ pub(super) fn clear(
     offset: u64,
     size: u64,
 ) -> Result<()> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
-    let device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let device = devices.get(&device_handle).context("Invalid device handle")?;
 
     if buffer.device_handle != device_handle {
         anyhow::bail!("Buffer belongs to different device");
@@ -1692,27 +1561,23 @@ pub(super) fn clear(
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
 
-    let cmd_buffers = unsafe { device.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
+    let cmd_buffers =
+        unsafe { device.device.allocate_command_buffers(&alloc_info) }.context("Failed to allocate command buffer")?;
     let cmd = cmd_buffers[0];
 
     // Record fill command
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         device.device.begin_command_buffer(cmd, &begin_info)?;
-        device
-            .device
-            .cmd_fill_buffer(cmd, buffer.buffer, offset, clear_size, 0);
+        device.device.cmd_fill_buffer(cmd, buffer.buffer, offset, clear_size, 0);
 
         let mem_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
-        let dep_info =
-            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+        let dep_info = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
         device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
         device.device.end_command_buffer(cmd)?;
@@ -1725,9 +1590,7 @@ pub(super) fn clear(
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
-        device
-            .device
-            .free_command_buffers(device.command_pool, &cmd_buffers);
+        device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
     Ok(())

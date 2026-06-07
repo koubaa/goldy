@@ -10,8 +10,8 @@ mod submission;
 
 use goldy::{
     types::{BackendType, BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferKind, BufferPool, ComputeEncoder, ComputePipeline, Device, DeviceDescriptor,
-    DeviceType, Instance, RequestAdapterOptions, ShaderModule,
+    Buffer, BufferKind, BufferPool, ComputeEncoder, ComputePipeline, Device, DeviceDescriptor, DeviceType, Instance,
+    RequestAdapterOptions, ShaderModule,
 };
 use submission::submission_context;
 
@@ -62,8 +62,7 @@ fn test_compute_pipeline_creation() {
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
 
-    let shader =
-        ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
 
     let pipeline = ComputePipeline::new(&device, &shader);
 
@@ -88,8 +87,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
 
-    let shader =
-        ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
     let pipeline = ComputePipeline::new(&device, &shader);
 
@@ -114,11 +112,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let device = request_default_device(&instance);
     let ctx = submission_context(&device);
 
-    let shader =
-        ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
-    let pipeline =
-        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -137,8 +133,7 @@ fn test_compute_with_uav_buffer() {
     let device = request_default_device(&instance);
     let ctx = submission_context(&device);
 
-    let shader =
-        ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
 
     // Create buffer with initial data
     let initial_data: Vec<u32> = (0..64).collect();
@@ -146,8 +141,7 @@ fn test_compute_with_uav_buffer() {
         .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
         .expect("Failed to create buffer");
 
-    let pipeline =
-        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
     // Dispatch compute
     let mut encoder = ComputeEncoder::new();
@@ -186,8 +180,7 @@ fn test_compute_with_srv_and_uav() {
         .alloc_buffer_with_data(&output_data, BufferKind::Scattered)
         .expect("Failed to create output buffer");
 
-    let pipeline =
-        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
     // Dispatch compute
     let mut encoder = ComputeEncoder::new();
@@ -201,11 +194,7 @@ fn test_compute_with_srv_and_uav() {
     }
 
     let result = encoder.dispatch(&ctx);
-    assert!(
-        result.is_ok(),
-        "Failed to dispatch with SRV+UAV: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Failed to dispatch with SRV+UAV: {:?}", result.err());
 }
 
 /// Compute shader that increments each value by 1.
@@ -303,8 +292,7 @@ fn vk_api_validation_timeline_semaphore() {
     let instance = Instance::new().expect("instance");
     let device = request_default_device(&instance);
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
+    let shader = ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
     let mut encoder = ComputeEncoder::new();
@@ -337,8 +325,7 @@ fn vk_api_validation_two_device_teardown() {
 
     let submit_minimal = |device: &goldy::Device| {
         let ctx = submission_context(device);
-        let shader =
-            ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
+        let shader = ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
         let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
         let mut encoder = ComputeEncoder::new();
         {
@@ -594,12 +581,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     }
 
     let mut buf = device
-        .alloc_buffer_with_capacity(
-            256,
-            4 * 64 * 1024,
-            BufferKind::Scattered,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer_with_capacity(256, 4 * 64 * 1024, BufferKind::Scattered, BufferFlags::empty())
         .expect("buf");
     let bindless = buf.resource_index(ResourceAccess::Write).expect("bindless");
 
@@ -692,20 +674,11 @@ fn test_compute_write_and_readback() {
     encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
-    buffer
-        .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+    buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result.iter().enumerate() {
-        assert_eq!(
-            val,
-            (i as u32) * 2,
-            "element {} expected {} got {}",
-            i,
-            i * 2,
-            val
-        );
+        assert_eq!(val, (i as u32) * 2, "element {} expected {} got {}", i, i * 2, val);
     }
 }
 
@@ -722,17 +695,11 @@ fn test_buffer_clear_standalone() {
     buffer.clear(&device, 0, 0).expect("clear (full)");
 
     let mut output = vec![0u8; 64 * 4];
-    buffer
-        .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+    buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result.iter().enumerate() {
-        assert_eq!(
-            val, 0,
-            "element {} should be 0 after clear, got {:#x}",
-            i, val
-        );
+        assert_eq!(val, 0, "element {} should be 0 after clear, got {:#x}", i, val);
     }
 }
 
@@ -751,18 +718,12 @@ fn test_buffer_clear_partial() {
     buffer.clear(&device, 64, 64).expect("partial clear");
 
     let mut output = vec![0u8; 64 * 4];
-    buffer
-        .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+    buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result.iter().enumerate() {
         let expected = if (16..32).contains(&i) { 0 } else { sentinel };
-        assert_eq!(
-            val, expected,
-            "element {} expected {:#x} got {:#x}",
-            i, expected, val
-        );
+        assert_eq!(val, expected, "element {} expected {:#x} got {:#x}", i, expected, val);
     }
 }
 
@@ -781,18 +742,12 @@ fn test_buffer_clear_to_end() {
     buffer.clear(&device, 128, 0).expect("clear to end");
 
     let mut output = vec![0u8; 64 * 4];
-    buffer
-        .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+    buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result.iter().enumerate() {
         let expected = if i < 32 { sentinel } else { 0 };
-        assert_eq!(
-            val, expected,
-            "element {} expected {:#x} got {:#x}",
-            i, expected, val
-        );
+        assert_eq!(val, expected, "element {} expected {:#x} got {:#x}", i, expected, val);
     }
 }
 
@@ -924,20 +879,11 @@ fn test_compute_dispatch_indirect() {
     encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
-    data_buf
-        .read_to_cpu(&device, &mut output)
-        .expect("readback");
+    data_buf.read_to_cpu(&device, &mut output).expect("readback");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result.iter().enumerate() {
-        assert_eq!(
-            val,
-            (i as u32) * 2,
-            "element {} expected {} got {}",
-            i,
-            i * 2,
-            val
-        );
+        assert_eq!(val, (i as u32) * 2, "element {} expected {} got {}", i, i * 2, val);
     }
 }
 
@@ -1058,8 +1004,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
     let device = request_default_device(&instance);
     let ctx = submission_context(&device);
 
-    let shader =
-        ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("Failed to compile shader");
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1081,8 +1026,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
         .alloc_buffer_with_data(&particles, BufferKind::Scattered)
         .expect("Failed to create buffer");
 
-    let pipeline =
-        ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1124,9 +1068,7 @@ fn test_buffer_view_copy_between_sub_regions() {
         .alloc_buffer_with_data(&data, BufferKind::Scattered)
         .expect("create pool buffer");
 
-    let view_a = pool_buf
-        .create_view(0, (N * 4) as u64, Some(4))
-        .expect("create view A");
+    let view_a = pool_buf.create_view(0, (N * 4) as u64, Some(4)).expect("create view A");
     let view_b = pool_buf
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view B");
@@ -1153,9 +1095,7 @@ fn test_buffer_view_copy_between_sub_regions() {
 
     // Read back the entire pool buffer and check the second half
     let mut output = vec![0u8; N * 2 * 4];
-    pool_buf
-        .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+    pool_buf.read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for (i, &val) in result[N..].iter().enumerate() {
@@ -1195,9 +1135,7 @@ fn test_buffer_view_isolation() {
         .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
         .expect("create view");
 
-    let idx = view
-        .resource_index(ResourceAccess::Write)
-        .expect("view bindless index");
+    let idx = view.resource_index(ResourceAccess::Write).expect("view bindless index");
 
     let mut encoder = ComputeEncoder::new();
     {
@@ -1209,19 +1147,13 @@ fn test_buffer_view_isolation() {
     encoder.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 2 * 4];
-    pool_buf
-        .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+    pool_buf.read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
 
     // First half must be untouched
     for (i, &val) in result[..N].iter().enumerate() {
-        assert_eq!(
-            val, 100,
-            "sentinel[{}] was modified (expected 100, got {})",
-            i, val
-        );
+        assert_eq!(val, 100, "sentinel[{}] was modified (expected 100, got {})", i, val);
     }
 
     // Second half must be doubled
@@ -1254,9 +1186,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
 
     // Write source data into the backing buffer at the correct offset
     let src_data: Vec<u32> = (1..=N as u32).collect();
-    pool.backing_buffer()
-        .write_data(0, &src_data)
-        .expect("write src data");
+    pool.backing_buffer().write_data(0, &src_data).expect("write src data");
 
     // `COPY_SHADER` reads its source as `Scattered<uint>` (UAV), so bind the UAV index.
     // `ResourceAccess::Read` would yield the SRV index, which only matches `BufRO<T>` params.
@@ -1286,14 +1216,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
     let dst_offset = 256usize;
     let dst_slice: &[u32] = bytemuck::cast_slice(&output[dst_offset..dst_offset + N * 4]);
     for (i, &val) in dst_slice.iter().enumerate() {
-        assert_eq!(
-            val,
-            (i + 1) as u32,
-            "pool dst[{}]: expected {}, got {}",
-            i,
-            i + 1,
-            val
-        );
+        assert_eq!(val, (i + 1) as u32, "pool dst[{}]: expected {}, got {}", i, i + 1, val);
     }
 
     assert!(pool.used() > 0);
@@ -1326,9 +1249,7 @@ fn test_buffer_pool_alloc_with_data() {
 fn test_buffer_pool_alloc_with_data_empty() {
     let device = make_device();
     let mut pool = BufferPool::new(&device, 1024).expect("create pool");
-    let view = pool
-        .alloc_with_data::<u32>(&[])
-        .expect("alloc_with_data empty");
+    let view = pool.alloc_with_data::<u32>(&[]).expect("alloc_with_data empty");
     assert_eq!(view.size(), 0);
 }
 
@@ -1532,12 +1453,7 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     }
     impl goldy::StructuredBufferElement for Pair {}
 
-    let input_data: Vec<Pair> = (0..8)
-        .map(|i| Pair {
-            a: i + 1,
-            b: i + 10,
-        })
-        .collect();
+    let input_data: Vec<Pair> = (0..8).map(|i| Pair { a: i + 1, b: i + 10 }).collect();
     let input_buf = device
         .alloc_buffer_with_data(&input_data, BufferKind::Scattered)
         .expect("input buffer");
@@ -1551,9 +1467,7 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
         pass.set_pipeline(&pipeline);
         pass.bind_resources_raw(&[
             input_buf.resource_index(ResourceAccess::Read).expect("srv"),
-            output_buf
-                .resource_index(ResourceAccess::Write)
-                .expect("uav"),
+            output_buf.resource_index(ResourceAccess::Write).expect("uav"),
         ]);
         pass.dispatch(1, 1, 1);
     }
@@ -1600,8 +1514,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
 
     let device = make_device();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, LARGE_COPY_SHADER).expect("compile large copy shader");
+    let shader = ShaderModule::from_slang(&device, LARGE_COPY_SHADER).expect("compile large copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     const BUF_SIZE: u64 = 8 * 1024 * 1024; // 8 MB each
@@ -1760,12 +1673,7 @@ fn test_cpu_readable_compute_write_and_read() {
 
     let result: &[u32] = bytemuck::cast_slice(&out);
     for (i, &val) in result.iter().enumerate() {
-        assert_eq!(
-            val,
-            (i as u32) * 2,
-            "element {i}: expected {} got {val}",
-            i * 2
-        );
+        assert_eq!(val, (i as u32) * 2, "element {i}: expected {} got {val}", i * 2);
     }
 }
 
@@ -1807,15 +1715,9 @@ fn test_write_buffer_reuse_across_submissions() {
         )
         .expect("out_b");
 
-    let idx_in = mid
-        .resource_index(ResourceAccess::Write)
-        .expect("mid bindless");
-    let idx_out_a = out_a
-        .resource_index(ResourceAccess::Write)
-        .expect("out_a bindless");
-    let idx_out_b = out_b
-        .resource_index(ResourceAccess::Write)
-        .expect("out_b bindless");
+    let idx_in = mid.resource_index(ResourceAccess::Write).expect("mid bindless");
+    let idx_out_a = out_a.resource_index(ResourceAccess::Write).expect("out_a bindless");
+    let idx_out_b = out_b.resource_index(ResourceAccess::Write).expect("out_b bindless");
 
     let data_a: Vec<u32> = (100..100 + N as u32).collect();
     let data_b: Vec<u32> = (900..900 + N as u32).collect();
@@ -1878,21 +1780,14 @@ fn test_cpu_readable_cpu_write_read_roundtrip() {
         .expect("create CPU_READABLE buffer");
 
     let new_values: Vec<u32> = (100..100 + N as u32).collect();
-    buffer
-        .write(0, bytemuck::cast_slice(&new_values))
-        .expect("write");
+    buffer.write(0, bytemuck::cast_slice(&new_values)).expect("write");
 
     let mut out = vec![0u8; N * size_of::<u32>()];
     buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&out);
     for (i, &val) in result.iter().enumerate() {
-        assert_eq!(
-            val,
-            100 + i as u32,
-            "element {i}: expected {} got {val}",
-            100 + i
-        );
+        assert_eq!(val, 100 + i as u32, "element {i}: expected {} got {val}", 100 + i);
     }
 }
 
@@ -1978,10 +1873,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
     let result: u32 = bytemuck::pod_read_unaligned(&raw);
-    assert_eq!(
-        result, 0,
-        "zero should pass through uniform uint param unchanged"
-    );
+    assert_eq!(result, 0, "zero should pass through uniform uint param unchanged");
 }
 
 /// Maximum u32 (0xFFFF_FFFF) passes through a `uniform uint` parameter unchanged.
@@ -2341,8 +2233,7 @@ fn stride_validation_matching_uint_passes() {
 
     let device = make_device_for_stride_tests();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
+    let shader = ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let initial: Vec<u32> = (0..64).collect();
@@ -2373,8 +2264,7 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
 
     let device = make_device_for_stride_tests();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
+    let shader = ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let data = vec![0u8; 64 * 16];
@@ -2395,10 +2285,7 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
     let err = result.expect_err("dispatch with wrong stride must fail");
     let msg = err.to_string();
     assert!(msg.contains("stride"), "error must mention 'stride': {msg}");
-    assert!(
-        msg.contains("slot 0"),
-        "error must identify the offending slot: {msg}"
-    );
+    assert!(msg.contains("slot 0"), "error must identify the offending slot: {msg}");
 }
 
 /// When layout validation is disabled, the same mismatch must NOT produce an
@@ -2411,8 +2298,7 @@ fn stride_validation_disabled_allows_mismatch() {
 
     let device = make_device_for_stride_tests();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
+    let shader = ShaderModule::from_slang(&device, STRIDE_UINT_SHADER).expect("compile stride shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let data = vec![0u8; 64 * 16];
@@ -2442,8 +2328,7 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
 
     let device = make_device_for_stride_tests();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
+    let shader = ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let params_data = vec![0u8; 16];
@@ -2484,8 +2369,7 @@ fn stride_validation_multi_binding_all_correct_passes() {
 
     let device = make_device_for_stride_tests();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
+    let shader = ShaderModule::from_slang(&device, STRIDE_STRUCT_SHADER).expect("compile struct shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let params_data = vec![0u8; 16];
@@ -2518,9 +2402,7 @@ fn stride_validation_multi_binding_all_correct_passes() {
 // real device. Each test uses a fresh device so they remain isolated.
 // ============================================================================
 
-use goldy::{
-    BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,
-};
+use goldy::{BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy};
 
 fn small_config() -> TransientAllocatorConfig {
     TransientAllocatorConfig {
@@ -2536,13 +2418,8 @@ fn small_config() -> TransientAllocatorConfig {
 fn transient_allocator_smoke_all_strategies() {
     let device = make_device();
     let ctx = submission_context(&device);
-    for strategy in [
-        TransientAllocatorStrategy::BumpReset,
-        TransientAllocatorStrategy::Heap,
-    ] {
-        let mut a = strategy
-            .create(&device, small_config())
-            .expect("create allocator");
+    for strategy in [TransientAllocatorStrategy::BumpReset, TransientAllocatorStrategy::Heap] {
+        let mut a = strategy.create(&device, small_config()).expect("create allocator");
         a.begin_frame(&device, 0).expect("begin");
         let view = a.alloc(&device, 256, Some(4)).expect("alloc");
         // Submit empty work to advance the timeline.
@@ -2558,10 +2435,7 @@ fn transient_allocator_smoke_all_strategies() {
 /// Strategy::default() is Heap, and parse handles all canonical names.
 #[test]
 fn transient_allocator_strategy_default_and_parse() {
-    assert_eq!(
-        TransientAllocatorStrategy::default(),
-        TransientAllocatorStrategy::Heap,
-    );
+    assert_eq!(TransientAllocatorStrategy::default(), TransientAllocatorStrategy::Heap,);
     assert_eq!(
         TransientAllocatorStrategy::parse("bump"),
         Some(TransientAllocatorStrategy::BumpReset),
@@ -2604,13 +2478,8 @@ fn bump_reset_blocks_on_prev_epoch() {
 fn transient_allocator_clear_resets_state() {
     let device = make_device();
     let ctx = submission_context(&device);
-    for strategy in [
-        TransientAllocatorStrategy::BumpReset,
-        TransientAllocatorStrategy::Heap,
-    ] {
-        let mut a = strategy
-            .create(&device, small_config())
-            .expect("create allocator");
+    for strategy in [TransientAllocatorStrategy::BumpReset, TransientAllocatorStrategy::Heap] {
+        let mut a = strategy.create(&device, small_config()).expect("create allocator");
         a.begin_frame(&device, 0).expect("begin");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
         let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
@@ -2672,10 +2541,8 @@ fn test_transient_buffer_write_then_copy() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let write_shader =
-        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
-    let write_pipeline =
-        ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
+    let write_shader = ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
@@ -2686,9 +2553,7 @@ fn test_transient_buffer_write_then_copy() {
     let output = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let output_uav = output
-        .resource_index(ResourceAccess::Write)
-        .expect("output UAV");
+    let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
 
     let mut graph = TaskGraph::new();
     let tid = graph.transient_buffer(byte_size);
@@ -2730,10 +2595,8 @@ fn test_regular_buffer_write_then_copy() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let write_shader =
-        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
-    let write_pipeline =
-        ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
+    let write_shader = ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile write shader");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("create write pipeline");
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
@@ -2744,16 +2607,12 @@ fn test_regular_buffer_write_then_copy() {
     let scratch = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("scratch buffer");
-    let scratch_uav = scratch
-        .resource_index(ResourceAccess::Write)
-        .expect("scratch UAV");
+    let scratch_uav = scratch.resource_index(ResourceAccess::Write).expect("scratch UAV");
 
     let output = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let output_uav = output
-        .resource_index(ResourceAccess::Write)
-        .expect("output UAV");
+    let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
 
     let mut graph = TaskGraph::new();
 
@@ -2779,11 +2638,7 @@ fn test_regular_buffer_write_then_copy() {
     let result: &[u32] = bytemuck::cast_slice(&raw);
 
     let expected: Vec<u32> = (1..=N as u32).collect();
-    assert_eq!(
-        result,
-        &expected[..],
-        "regular buffer path produced wrong data"
-    );
+    assert_eq!(result, &expected[..], "regular buffer path produced wrong data");
 }
 
 /// Scale each element: `data[id.x] = (id.x + 1) * 100`.
@@ -2807,14 +2662,11 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let iota_shader =
-        ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile iota shader");
+    let iota_shader = ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("compile iota shader");
     let iota_pipeline = ComputePipeline::new(&device, &iota_shader).expect("create iota pipeline");
 
-    let scale_shader =
-        ShaderModule::from_slang(&device, WRITE_SCALE_SHADER).expect("compile scale shader");
-    let scale_pipeline =
-        ComputePipeline::new(&device, &scale_shader).expect("create scale pipeline");
+    let scale_shader = ShaderModule::from_slang(&device, WRITE_SCALE_SHADER).expect("compile scale shader");
+    let scale_pipeline = ComputePipeline::new(&device, &scale_shader).expect("create scale pipeline");
 
     let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let copy_pipeline = ComputePipeline::new(&device, &copy_shader).expect("create copy pipeline");
@@ -2828,9 +2680,7 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     let output = device
         .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let output_uav = output
-        .resource_index(ResourceAccess::Write)
-        .expect("output UAV");
+    let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
 
     let mut graph = TaskGraph::new();
     let t0 = graph.transient_buffer(byte_size);
@@ -2861,9 +2711,7 @@ fn test_transient_buffer_aliased_disjoint_waves() {
         .bind_resources_raw_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
-    graph
-        .dispatch(&ctx)
-        .expect("dispatch aliased transient graph");
+    graph.dispatch(&ctx).expect("dispatch aliased transient graph");
 
     let mut raw = vec![0u8; byte_size as usize];
     output.read_to_cpu(&device, &mut raw).expect("read output");
@@ -3081,8 +2929,7 @@ void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
 fn test_wave_inclusive_scan_uniform_64() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_UNIFORM)
-        .expect("compile WAVE_SCAN_64_UNIFORM");
+    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_UNIFORM).expect("compile WAVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = device
@@ -3115,8 +2962,7 @@ fn test_wave_inclusive_scan_uniform_64() {
 fn test_wave_inclusive_scan_ramp_64() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
+    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = device
@@ -3139,10 +2985,7 @@ fn test_wave_inclusive_scan_ramp_64() {
     for (i, &val) in result.iter().enumerate() {
         let k = (i + 1) as u32;
         let expected = k * (k + 1) / 2;
-        assert_eq!(
-            val, expected,
-            "wave_scan_ramp_64[{i}]: expected {expected} got {val}"
-        );
+        assert_eq!(val, expected, "wave_scan_ramp_64[{i}]: expected {expected} got {val}");
     }
 }
 
@@ -3150,8 +2993,7 @@ fn test_wave_inclusive_scan_ramp_64() {
 fn test_wave_inclusive_scan_uniform_256() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_256_UNIFORM)
-        .expect("compile WAVE_SCAN_256_UNIFORM");
+    let shader = ShaderModule::from_slang(&device, WAVE_SCAN_256_UNIFORM).expect("compile WAVE_SCAN_256_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = device
@@ -3184,8 +3026,7 @@ fn test_wave_inclusive_scan_uniform_256() {
 fn test_workgroup_reduce_uint_correct() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let shader =
-        ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
+    let shader = ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = device
@@ -3216,8 +3057,8 @@ fn test_workgroup_reduce_uint_correct() {
 fn test_workgroup_inclusive_scan_uint_correct() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let shader = ShaderModule::from_slang(&device, INCLUSIVE_SCAN_64_UNIFORM)
-        .expect("compile INCLUSIVE_SCAN_64_UNIFORM");
+    let shader =
+        ShaderModule::from_slang(&device, INCLUSIVE_SCAN_64_UNIFORM).expect("compile INCLUSIVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let out = device
@@ -3299,10 +3140,7 @@ fn test_workgroup_upper_bound_linear() {
 
     // prefix_sums = [1, 2, ..., 64]; upper_bound(k) = k for k in [0, 63].
     for (i, &val) in result.iter().enumerate() {
-        assert_eq!(
-            val, i as u32,
-            "workgroup_upper_bound[{i}]: expected {i} got {val}"
-        );
+        assert_eq!(val, i as u32, "workgroup_upper_bound[{i}]: expected {i} got {val}");
     }
 }
 
@@ -3393,12 +3231,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     // Read pass (SRV + sampler).
     let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
     let out = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("out buffer");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");

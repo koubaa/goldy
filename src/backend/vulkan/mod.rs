@@ -55,24 +55,14 @@ fn render_reflection_data(
     shaders: &HashMap<ShaderHandle, ShaderState>,
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
-) -> (
-    Vec<Option<crate::types::ResourceCategory>>,
-    Vec<Option<u32>>,
-) {
+) -> (Vec<Option<crate::types::ResourceCategory>>, Vec<Option<u32>>) {
     let preferred = shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
         .filter(|r| !r.push_constant_categories.is_empty())
-        .or_else(|| {
-            shaders
-                .get(&vertex_shader)
-                .and_then(|s| s.reflection.as_ref())
-        });
+        .or_else(|| shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()));
     match preferred {
-        Some(r) => (
-            r.push_constant_categories.clone(),
-            r.binding_element_strides.clone(),
-        ),
+        Some(r) => (r.push_constant_categories.clone(), r.binding_element_strides.clone()),
         None => (Vec::new(), Vec::new()),
     }
 }
@@ -181,8 +171,7 @@ impl VulkanBackend {
 
         let instance = {
             let _guard = VK_INSTANCE_LOCK.lock().unwrap();
-            unsafe { entry.create_instance(&create_info, None) }
-                .context("Failed to create Vulkan instance")?
+            unsafe { entry.create_instance(&create_info, None) }.context("Failed to create Vulkan instance")?
         };
 
         if enable_validation {
@@ -190,8 +179,8 @@ impl VulkanBackend {
         }
 
         // Enumerate physical devices
-        let physical_devices_raw = unsafe { instance.enumerate_physical_devices() }
-            .context("Failed to enumerate physical devices")?;
+        let physical_devices_raw =
+            unsafe { instance.enumerate_physical_devices() }.context("Failed to enumerate physical devices")?;
 
         // Only keep devices that report Vulkan 1.4+
         let mut adapter_id = 0u32;
@@ -208,8 +197,8 @@ impl VulkanBackend {
                     let id = adapter_id;
                     adapter_id += 1;
                     let pdev_features = unsafe { instance.get_physical_device_features(handle) };
-                    let supports_sparse = pdev_features.sparse_binding != 0
-                        && pdev_features.sparse_residency_buffer != 0;
+                    let supports_sparse =
+                        pdev_features.sparse_binding != 0 && pdev_features.sparse_residency_buffer != 0;
                     tracing::info!(
                         "  [{}] {} ({:?}) - Vulkan {}.{}",
                         id,
@@ -223,10 +212,7 @@ impl VulkanBackend {
                         properties,
                         adapter_id: id,
                         supports_sparse_buffer: supports_sparse,
-                        vk_timestamp_compute_and_graphics: properties
-                            .limits
-                            .timestamp_compute_and_graphics
-                            != 0,
+                        vk_timestamp_compute_and_graphics: properties.limits.timestamp_compute_and_graphics != 0,
                         vk_timestamp_period_ns: properties.limits.timestamp_period,
                     })
                 } else {
@@ -240,10 +226,7 @@ impl VulkanBackend {
             tracing::info!("Skipped sub-1.4 devices: [{}]", rejected.join(", "));
         }
 
-        tracing::info!(
-            "Found {} Vulkan 1.4+ physical devices",
-            physical_devices.len()
-        );
+        tracing::info!("Found {} Vulkan 1.4+ physical devices", physical_devices.len());
 
         if physical_devices.is_empty() {
             anyhow::bail!(
@@ -253,8 +236,7 @@ impl VulkanBackend {
         }
 
         // Create per-backend Slang compiler (avoids global state issues)
-        let slang_compiler =
-            crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
+        let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         let state = VulkanState {
             entry,
@@ -343,8 +325,7 @@ impl GpuBackend for VulkanBackend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        unsafe { ld.device.device_wait_idle() }
-            .map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
+        unsafe { ld.device.device_wait_idle() }.map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
         Ok(())
     }
 
@@ -365,9 +346,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn is_device_lost(&self, _device: DeviceHandle) -> bool {
-        self.state
-            .device_lost
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.state.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_buffer(
@@ -396,12 +375,7 @@ impl GpuBackend for VulkanBackend {
         buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer_handle);
     }
 
-    fn write_buffer(
-        &mut self,
-        buffer_handle: BufferHandle,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<()> {
+    fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         buffer::write(
             &self.state.instance,
             &self.state.devices,
@@ -482,18 +456,10 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn hint_buffer_unused_above(&mut self, buffer_handle: BufferHandle, offset: u64) {
-        buffer::hint_unused_above(
-            &self.state.devices,
-            &mut self.state.buffers,
-            buffer_handle,
-            offset,
-        );
+        buffer::hint_unused_above(&self.state.devices, &mut self.state.buffers, buffer_handle, offset);
     }
 
-    fn device_capabilities(
-        &self,
-        device_handle: DeviceHandle,
-    ) -> crate::device::DeviceCapabilities {
+    fn device_capabilities(&self, device_handle: DeviceHandle) -> crate::device::DeviceCapabilities {
         let adapter_id = self
             .state
             .devices
@@ -637,17 +603,13 @@ impl GpuBackend for VulkanBackend {
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
         // Compile shaders on-demand
-        let vs_module =
-            self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
-        let fs_module =
-            self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (cats, strides) =
-            render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
+        let (cats, strides) = render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
         let handle = pipeline::create(pipeline::VulkanGraphicsPipelineCreateBundle {
             devices: &self.state.devices,
             pipelines: &mut self.state.pipelines,
@@ -667,11 +629,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_pipeline(&mut self, pipeline_handle: PipelineHandle) {
-        pipeline::destroy(
-            &self.state.devices,
-            &mut self.state.pipelines,
-            pipeline_handle,
-        );
+        pipeline::destroy(&self.state.devices, &mut self.state.pipelines, pipeline_handle);
     }
 
     fn create_render_target(
@@ -824,12 +782,7 @@ impl GpuBackend for VulkanBackend {
         Ok(())
     }
 
-    fn surface_resize(
-        &mut self,
-        surface_handle: SurfaceHandle,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         surface::resize(
             &self.state.entry,
             &self.state.instance,
@@ -874,19 +827,15 @@ impl GpuBackend for VulkanBackend {
         depth_stencil: Option<&crate::types::DepthStencilState>,
     ) -> Result<PipelineHandle> {
         // Compile shaders on-demand
-        let vs_module =
-            self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
-        let fs_module =
-            self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
+        let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
+        let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        let (cats, strides) =
-            render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
+        let (cats, strides) = render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
 
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
-                .with_depth_stencil(depth_stencil);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
+            .with_depth_stencil(depth_stencil);
         let handle = pipeline::create_with_depth(pipeline::VulkanGraphicsPipelineCreateBundle {
             devices: &self.state.devices,
             pipelines: &mut self.state.pipelines,
@@ -949,13 +898,7 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
-    fn write_texture(
-        &mut self,
-        texture_handle: TextureHandle,
-        data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn write_texture(&mut self, texture_handle: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
         texture::write(
             &self.state.instance,
             &self.state.devices,
@@ -990,18 +933,10 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
-        texture::destroy(
-            &self.state.devices,
-            &mut self.state.textures,
-            texture_handle,
-        );
+        texture::destroy(&self.state.devices, &mut self.state.textures, texture_handle);
     }
 
-    fn read_texture_to_cpu(
-        &mut self,
-        texture_handle: TextureHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
+    fn read_texture_to_cpu(&mut self, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
         texture::read_to_cpu(
             &self.state.instance,
             &self.state.devices,
@@ -1034,11 +969,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
-        sampler::destroy(
-            &self.state.devices,
-            &mut self.state.samplers,
-            sampler_handle,
-        );
+        sampler::destroy(&self.state.devices, &mut self.state.samplers, sampler_handle);
     }
 
     fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
@@ -1051,20 +982,14 @@ impl GpuBackend for VulkanBackend {
         compute_shader: ShaderHandle,
     ) -> Result<ComputePipelineHandle> {
         // Compile shader on-demand
-        let cs_module =
-            self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
+        let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
         let (cats, strides) = self
             .state
             .shaders
             .get(&compute_shader)
             .and_then(|s| s.reflection.as_ref())
-            .map(|r| {
-                (
-                    r.push_constant_categories.clone(),
-                    r.binding_element_strides.clone(),
-                )
-            })
+            .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
             .unwrap_or_default();
 
         let shader_debug_name = format!("compute_shader#{compute_shader}");
@@ -1086,11 +1011,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
-        compute::destroy(
-            &self.state.devices,
-            &mut self.state.compute_pipelines,
-            pipeline_handle,
-        );
+        compute::destroy(&self.state.devices, &mut self.state.compute_pipelines, pipeline_handle);
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
@@ -1109,11 +1030,7 @@ impl GpuBackend for VulkanBackend {
         context::device_retired(&self.state, device)
     }
 
-    fn device_wait_until(
-        &mut self,
-        device: DeviceHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> anyhow::Result<()> {
+    fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         context::wait_until_device_seq_at_least(&self.state, device, value);
         Ok(())
     }
@@ -1135,8 +1052,7 @@ impl GpuBackend for VulkanBackend {
             }
             surface.pending_swapchain_returns.retain(|&(idx, tv)| {
                 if progress >= tv {
-                    signal_queue
-                        .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    signal_queue.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
                     false
                 } else {
@@ -1166,11 +1082,7 @@ impl GpuBackend for VulkanBackend {
             .unwrap_or(0)
     }
 
-    fn wait_until(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         let _tz = crate::tracy_zone!("vk.wait_until");
         {
@@ -1190,9 +1102,7 @@ impl GpuBackend for VulkanBackend {
             let _wait = crate::tracy_zone!("vk.wait_until.wait_semaphores");
             if let Err(e) = unsafe { dev.wait_semaphores(&wait, u64::MAX) } {
                 if e == vk::Result::ERROR_DEVICE_LOST {
-                    self.state
-                        .device_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.state.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 return Err(anyhow::anyhow!("wait_semaphores: {:?}", e));
             }
@@ -1215,11 +1125,8 @@ impl GpuBackend for VulkanBackend {
                 for r in drained {
                     types::destroy_pending_deletion(ld, &mut ledger, r);
                 }
-                let completed_values = types::snapshot_context_completed_values(
-                    &ld.device,
-                    &self.state.contexts,
-                    device_handle,
-                );
+                let completed_values =
+                    types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
                 ledger.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -1251,21 +1158,14 @@ impl GpuBackend for VulkanBackend {
                 let retired = context::device_retired(&self.state, device_handle);
                 compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
-                    let drained = ld
-                        .deletion_queue
-                        .lock()
-                        .unwrap()
-                        .drain_up_to(value.min(retired));
+                    let drained = ld.deletion_queue.lock().unwrap().drain_up_to(value.min(retired));
                     let ledger_arc = std::sync::Arc::clone(&ld.ledger);
                     let mut ledger = ledger_arc.lock().unwrap();
                     for r in drained {
                         types::destroy_pending_deletion(ld, &mut ledger, r);
                     }
-                    let completed_values = types::snapshot_context_completed_values(
-                        &ld.device,
-                        &self.state.contexts,
-                        device_handle,
-                    );
+                    let completed_values =
+                        types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
                     ledger.drain_ready_slot_reclamations(&completed_values);
                 }
                 Ok(true)
@@ -1273,9 +1173,7 @@ impl GpuBackend for VulkanBackend {
             Err(vk::Result::TIMEOUT) => Ok(false),
             Err(e) => {
                 if e == vk::Result::ERROR_DEVICE_LOST {
-                    self.state
-                        .device_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.state.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(anyhow::anyhow!("wait_semaphores: {:?}", e))
             }
@@ -1353,21 +1251,11 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn available_bindless_slots(
-        &self,
-        device_handle: DeviceHandle,
-        category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn available_bindless_slots(&self, device_handle: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| {
-                ld.ledger
-                    .lock()
-                    .unwrap()
-                    .resource_registry
-                    .available_slots(category)
-            })
+            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 
@@ -1396,11 +1284,8 @@ impl GpuBackend for VulkanBackend {
                 for r in ctx_batch {
                     types::destroy_pending_deletion(ld, &mut ledger, r);
                 }
-                let completed_values = types::snapshot_context_completed_values(
-                    &ld.device,
-                    &self.state.contexts,
-                    device_handle,
-                );
+                let completed_values =
+                    types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
                 ledger.drain_ready_slot_reclamations(&completed_values);
             }
             // Device-level queue: user-destroyed resources without context attribution.

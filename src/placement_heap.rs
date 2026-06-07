@@ -205,12 +205,7 @@ impl PlacementHeap {
     ///
     /// Call this once per submit when `transient_heap_size_and_layout` returns a
     /// stable size; afterwards use [`Self::advance_page`] to get each frame's offset.
-    pub fn configure_pages(
-        &mut self,
-        alloc_size: u64,
-        depth: usize,
-        device: &Device,
-    ) -> Result<()> {
+    pub fn configure_pages(&mut self, alloc_size: u64, depth: usize, device: &Device) -> Result<()> {
         let depth = depth.max(1);
         let page_alloc_size = round_up(alloc_size.max(1), self.page_size);
         let required_cap = page_alloc_size
@@ -229,12 +224,7 @@ impl PlacementHeap {
 
         if required_cap > self.buffer.allocated_size() {
             self.buffer = device
-                .alloc_buffer(
-                    required_cap,
-                    BufferKind::Scattered,
-                    None,
-                    BufferFlags::empty(),
-                )
+                .alloc_buffer(required_cap, BufferKind::Scattered, None, BufferFlags::empty())
                 .context("PlacementHeap::configure_pages: failed to grow backing buffer")?;
         }
 
@@ -320,14 +310,8 @@ impl PlacementHeap {
 
         if is_hit {
             let entry = self.view_cache.get(&slot_id).unwrap();
-            let uav = entry
-                .view
-                .resource_index(ResourceAccess::Write)
-                .unwrap_or(u32::MAX);
-            let srv = entry
-                .view
-                .resource_index(ResourceAccess::Read)
-                .unwrap_or(uav);
+            let uav = entry.view.resource_index(ResourceAccess::Write).unwrap_or(u32::MAX);
+            let srv = entry.view.resource_index(ResourceAccess::Read).unwrap_or(uav);
             tracy_plot!("goldy.transient_resolve.cache_hit", 1.0_f64);
             return Ok((uav, srv, true));
         }
@@ -343,9 +327,7 @@ impl PlacementHeap {
         // Create a fresh view and cache it.
         let view = self.buffer.create_view(base_offset, size, Some(stride))?;
         self.view_create_count += 1;
-        let uav = view
-            .resource_index(ResourceAccess::Write)
-            .unwrap_or(u32::MAX);
+        let uav = view.resource_index(ResourceAccess::Write).unwrap_or(u32::MAX);
         let srv = view.resource_index(ResourceAccess::Read).unwrap_or(uav);
         self.view_cache.insert(
             slot_id,
@@ -399,9 +381,7 @@ impl PlacementHeap {
 
         for (i, key) in color_keys.iter().enumerate() {
             // Potential cache hit check.
-            if i < self.texture_cache[page_slot].len()
-                && self.texture_cache[page_slot][i].key == *key
-            {
+            if i < self.texture_cache[page_slot].len() && self.texture_cache[page_slot][i].key == *key {
                 // Verify the previous occupant of this page slot has been retired.
                 // When two concurrent renderers share the same heap they advance to
                 // different page slots, but once the counter wraps the slot may still
@@ -560,12 +540,7 @@ impl PlacementHeap {
         }
         self.invalidate_all(device);
         self.buffer = device
-            .alloc_buffer(
-                aligned_cap,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .alloc_buffer(aligned_cap, BufferKind::Scattered, None, BufferFlags::empty())
             .context("PlacementHeap::grow: failed to allocate new backing buffer")?;
         if let Some(ref mut p) = self.pages {
             p.frame_counter = 0;
@@ -634,11 +609,7 @@ mod tests {
 
         let specs: Vec<(u32, u64, u32)> = vec![(0, 256, 4), (1, 512, 4), (2, 128, 4)];
         let base_offset = 0u64;
-        let offsets: Vec<u64> = specs
-            .iter()
-            .enumerate()
-            .map(|(i, _)| i as u64 * 512)
-            .collect();
+        let offsets: Vec<u64> = specs.iter().enumerate().map(|(i, _)| i as u64 * 512).collect();
 
         for (i, &(id, size, stride)) in specs.iter().enumerate() {
             heap.get_or_create_view(id, base_offset + offsets[i], size, stride, &device)
@@ -669,11 +640,7 @@ mod tests {
         assert_eq!(heap.view_create_count(), 1);
 
         heap.get_or_create_view(0, 0, 512, 4, &device).unwrap();
-        assert_eq!(
-            heap.view_create_count(),
-            2,
-            "shape change caused a new create"
-        );
+        assert_eq!(heap.view_create_count(), 2, "shape change caused a new create");
     }
 
     /// Growing the heap must invalidate all cached views (they reference the old buffer).
@@ -686,17 +653,10 @@ mod tests {
         assert_eq!(heap.view_create_count(), 1);
 
         heap.grow(&device, 8 * 1024 * 1024).unwrap();
-        assert!(
-            heap.view_cache.is_empty(),
-            "view cache must be empty after grow"
-        );
+        assert!(heap.view_cache.is_empty(), "view cache must be empty after grow");
 
         heap.get_or_create_view(0, 0, 256, 4, &device).unwrap();
-        assert_eq!(
-            heap.view_create_count(),
-            2,
-            "post-grow frame creates a new view"
-        );
+        assert_eq!(heap.view_create_count(), 2, "post-grow frame creates a new view");
     }
 
     /// Minimum-size slots should not panic or pollute the cache.
@@ -803,9 +763,7 @@ mod tests {
         const SLOT_EPOCH: TimelineValue = 10;
 
         let _ = heap.advance_page();
-        let handles_initial = heap
-            .get_or_create_textures(&device, &keys, slot, 0)
-            .unwrap();
+        let handles_initial = heap.get_or_create_textures(&device, &keys, slot, 0).unwrap();
         assert_eq!(heap.texture_create_count(), 1);
         heap.stamp_pending(SLOT_EPOCH);
 
@@ -827,9 +785,7 @@ mod tests {
         );
 
         // Once retired_timeline catches up, the cached texture is safe to hand back.
-        let handles_retired = heap
-            .get_or_create_textures(&device, &keys, slot, SLOT_EPOCH)
-            .unwrap();
+        let handles_retired = heap.get_or_create_textures(&device, &keys, slot, SLOT_EPOCH).unwrap();
         assert_eq!(
             heap.texture_create_count(),
             2,
