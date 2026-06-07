@@ -1,7 +1,6 @@
 //! Device management logic.
 
 use super::super::DeviceHandle;
-use super::staging::{StagingBelt, TextureStagingPool, DEFAULT_STAGING_CHUNK_SIZE};
 use super::types::{
     DeletionQueue, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, ResourceRegistry,
     TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
@@ -124,8 +123,6 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             timeline_scheduled_max: AtomicU64::new(0),
             retired_floor: AtomicU64::new(0),
             deletion_queue: DeletionQueue::new(),
-            staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
-            texture_staging_pool: TextureStagingPool::new(),
         },
     );
 
@@ -276,8 +273,6 @@ pub(super) fn create_argument_encoders(
 /// Destroy a logical device and clean up resources owned by it.
 pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
     if let Some(mut ld) = state.devices.remove(&device_handle) {
-        ld.staging_belt.destroy_all();
-        ld.texture_staging_pool.destroy_all();
         ld.deletion_queue.flush_all();
         state
             .buffers

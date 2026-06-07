@@ -2,7 +2,7 @@
 
 use super::super::shared;
 use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle};
-use super::staging::{StagingBelt, TextureStagingEntry, TextureStagingPool};
+use super::staging::TextureStagingEntry;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
@@ -863,13 +863,11 @@ fn stage_uploads(
 
     // Reclaim: return completed in-flight resources to the free lists.
     {
-        let completed = super::context::device_retired(state, device_handle);
-        let ld = state
-            .devices
-            .get_mut(&device_handle)
-            .context("stage_uploads: invalid device handle")?;
-        ld.staging_belt.reclaim(completed);
-        ld.texture_staging_pool.reclaim(completed);
+        if let Some(sc) = state.contexts.get_mut(&ctx) {
+            let completed = sc.timeline_event.as_ref().signaled_value();
+            sc.staging_belt.reclaim(completed);
+            sc.texture_staging_pool.reclaim(completed);
+        }
     }
 
     // Pre-pass: stage data for every command that will need the slow path.
@@ -919,13 +917,11 @@ fn stage_uploads(
                     // Fast path will do a direct CPU memcpy; no staging needed.
                     // The fast path does NOT open an encoder, so would_have_gpu_work stays as-is.
                 } else {
-                    let ld = state
-                        .devices
-                        .get_mut(&device_handle)
-                        .context("stage_uploads: invalid device handle")?;
-                    // Split borrow: device and staging_belt are distinct fields.
-                    let belt: &mut StagingBelt = &mut ld.staging_belt;
-                    let (buf, off) = belt.write(&device_mtl, data)?;
+                    let sc = state
+                        .contexts
+                        .get_mut(&ctx)
+                        .context("stage_uploads: invalid context handle")?;
+                    let (buf, off) = sc.staging_belt.write(&device_mtl, data)?;
                     belt_slices.push((buf, off));
                     // Slow-path WriteBuffer opens a blit encoder.
                     would_have_gpu_work = true;
@@ -935,12 +931,13 @@ fn stage_uploads(
                 if data.is_empty() {
                     continue;
                 }
-                let ld = state
-                    .devices
-                    .get_mut(&device_handle)
-                    .context("stage_uploads: invalid device handle")?;
-                let pool: &mut TextureStagingPool = &mut ld.texture_staging_pool;
-                let entry = pool.acquire(&device_mtl, data.len() as u64)?;
+                let sc = state
+                    .contexts
+                    .get_mut(&ctx)
+                    .context("stage_uploads: invalid context handle")?;
+                let entry = sc
+                    .texture_staging_pool
+                    .acquire(&device_mtl, data.len() as u64)?;
                 unsafe {
                     std::ptr::copy_nonoverlapping(data.as_ptr(), entry.mapped_ptr(), data.len());
                 }
@@ -1086,12 +1083,10 @@ pub(super) fn submit(
     command_buffer_ref.commit();
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.staging_belt.finish(signal_value);
-        ld.texture_staging_pool
-            .release(signal_value, texture_scratches);
-    }
     if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.staging_belt.finish(signal_value);
+        sc.texture_staging_pool
+            .release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
@@ -1302,12 +1297,10 @@ pub(super) fn submit_graph(
     command_buffer_ref.commit();
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.staging_belt.finish(signal_value);
-        ld.texture_staging_pool
-            .release(signal_value, texture_scratches);
-    }
     if let Some(sc) = state.contexts.get_mut(&ctx) {
+        sc.staging_belt.finish(signal_value);
+        sc.texture_staging_pool
+            .release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));

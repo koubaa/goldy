@@ -1,5 +1,6 @@
 //! Per-context submission stream lifecycle (Metal).
 
+use super::staging::{StagingBelt, TextureStagingPool, DEFAULT_STAGING_CHUNK_SIZE};
 use super::types::{MetalState, MetalSubmissionContext, TimelineWaiter};
 use super::{ContextHandle, DeviceHandle};
 use ::metal as mtl;
@@ -54,6 +55,8 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             reclamation_context: None,
             pending_swapchain_returns: Arc::new(Mutex::new(Vec::new())),
             last_committed_timeline: None,
+            staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
+            texture_staging_pool: TextureStagingPool::new(),
         },
     );
     Ok(id)
@@ -69,6 +72,8 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
         ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
 
+    sc.staging_belt.destroy_all();
+    sc.texture_staging_pool.destroy_all();
     for (_, cb) in sc.in_flight_command_buffers.drain(..) {
         cb.wait_until_completed();
     }

@@ -651,6 +651,10 @@ pub(crate) struct MetalSubmissionContext {
     pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
     /// Most recently committed timeline on this context (WriteBuffer fast-path gate).
     pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
+    /// Per-context staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
+    pub staging_belt: super::staging::StagingBelt,
+    /// Per-context staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
 }
 
 /// A logical Metal device with associated resources.
@@ -703,10 +707,6 @@ pub(crate) struct LogicalDevice {
     pub retired_floor: AtomicU64,
     /// Deferred GPU resource teardown until device timeline reaches the queued barrier.
     pub deletion_queue: DeletionQueue,
-    /// Pooled staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
-    pub staging_belt: super::staging::StagingBelt,
-    /// Pooled staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
-    pub texture_staging_pool: super::staging::TextureStagingPool,
 }
 
 impl LogicalDevice {
