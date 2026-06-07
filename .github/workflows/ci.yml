@@ -16,6 +16,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  LAVAPIPE_CI_IMAGE: ghcr.io/koubaa/goldy/lavapipe-ci:latest
 
 jobs:
   # Fast checks that don't need GPU
@@ -80,32 +81,17 @@ jobs:
         run: cargo test --lib backend::mock
 
   # Full GPU tests using lavapipe (software Vulkan)
-  # Requires Mesa 25.0+ for Vulkan 1.4 support
+  # Requires Mesa 25.0+ for Vulkan 1.4 support (provided by LAVAPIPE_CI_IMAGE)
   test-vulkan:
     name: Vulkan Tests (lavapipe)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ env.LAVAPIPE_CI_IMAGE }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Vulkan dependencies (Mesa 25.0+ for Vulkan 1.4)
-        run: |
-          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
-          sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
-          sudo apt-get install -y \
-            libvulkan1 \
-            libvulkan-dev \
-            vulkan-tools \
-            vulkan-validationlayers \
-            mesa-vulkan-drivers \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev
 
       - name: Download Slang compiler
         run: |
@@ -120,28 +106,8 @@ jobs:
           echo "Slang libraries:"
           ls -la "$SLANG_DIR" || echo "Directory not found"
 
-      - name: Verify lavapipe installation
-        run: |
-          # Find lavapipe ICD
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            echo "Lavapipe ICD not found, searching..."
-            find /usr -name "*lvp*" -o -name "*lavapipe*" 2>/dev/null || true
-            # Try common locations
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then
-                LAVAPIPE_ICD="$path"
-                break
-              fi
-            done
-          fi
-          
-          echo "Using Lavapipe ICD: $LAVAPIPE_ICD"
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
-          
-          # Verify Vulkan works with lavapipe
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || echo "vulkaninfo failed, continuing anyway"
+      - name: Verify lavapipe
+        run: DISPLAY= vulkaninfo --summary | head -30
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -158,20 +124,12 @@ jobs:
 
       - name: Run all tests
         env:
-          # Force lavapipe as the only Vulkan driver
-          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
-          # Disable GPU validation layers for CI
-          VK_LAYER_PATH: ""
-          # Point to downloaded Slang library (full path to .so file)
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          # LD_LIBRARY_PATH needs the directory for dependent libraries
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --features vulkan
 
       - name: Run integration tests
         env:
-          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
-          VK_LAYER_PATH: ""
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --features vulkan --test '*'
@@ -347,7 +305,9 @@ jobs:
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
     name: Python Bindings (Linux)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ env.LAVAPIPE_CI_IMAGE }}
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6
@@ -360,41 +320,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Vulkan dependencies (Mesa 25.0+ for Vulkan 1.4)
-        run: |
-          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
-          sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
-          sudo apt-get install -y \
-            libvulkan1 \
-            libvulkan-dev \
-            vulkan-tools \
-            mesa-vulkan-drivers \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev
-
       - name: Download and bundle Slang
         run: |
           cd slang && chmod +x download.sh && ./download.sh
           cd ../python && python build-slang.py
 
-      - name: Verify lavapipe installation
-        run: |
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then
-                LAVAPIPE_ICD="$path"
-                break
-              fi
-            done
-          fi
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || true
+      - name: Verify lavapipe
+        run: DISPLAY= vulkaninfo --summary | head -30
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -415,9 +347,6 @@ jobs:
 
       - name: Install and test Python bindings
         working-directory: python
-        env:
-          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
-          VK_LAYER_PATH: ""
         run: |
           pip install .
           pytest tests/ -v
@@ -425,8 +354,6 @@ jobs:
       - name: Run Python examples
         working-directory: python
         env:
-          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
-          VK_LAYER_PATH: ""
           PYTHONUNBUFFERED: "1"
         run: |
           python examples/adapter_info.py
@@ -533,7 +460,9 @@ jobs:
   # C++ bindings build and test (Linux with lavapipe)
   cpp-linux:
     name: C++ Bindings (Linux)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ env.LAVAPIPE_CI_IMAGE }}
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6
@@ -541,41 +470,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install build dependencies (Mesa 25.0+ for Vulkan 1.4)
-        run: |
-          # Upgrade Mesa to get Vulkan 1.4 support in lavapipe
-          sudo apt-get update
-          sudo apt-get upgrade -y mesa-vulkan-drivers libgl1-mesa-dri
-          sudo apt-get install -y \
-            cmake \
-            ninja-build \
-            libvulkan1 \
-            libvulkan-dev \
-            vulkan-tools \
-            mesa-vulkan-drivers \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev
-
       - name: Download Slang
         run: cd slang && chmod +x download.sh && ./download.sh
 
-      - name: Verify lavapipe installation
-        run: |
-          LAVAPIPE_ICD=$(find /usr -name "lvp_icd*.json" 2>/dev/null | head -1)
-          if [ -z "$LAVAPIPE_ICD" ]; then
-            for path in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-                        /usr/share/vulkan/icd.d/lvp_icd.json; do
-              if [ -f "$path" ]; then
-                LAVAPIPE_ICD="$path"
-                break
-              fi
-            done
-          fi
-          echo "LAVAPIPE_ICD=$LAVAPIPE_ICD" >> $GITHUB_ENV
-          VK_ICD_FILENAMES="$LAVAPIPE_ICD" vulkaninfo --summary || true
+      - name: Verify lavapipe
+        run: DISPLAY= vulkaninfo --summary | head -30
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -607,9 +506,6 @@ jobs:
 
       - name: Run triangle example
         working-directory: cpp/build/examples
-        env:
-          VK_ICD_FILENAMES: ${{ env.LAVAPIPE_ICD }}
-          VK_LAYER_PATH: ""
         run: |
           ./triangle
           # Verify output file was created
