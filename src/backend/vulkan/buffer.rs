@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::Ordering;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
@@ -78,7 +79,7 @@ fn submit_copy(
 /// Create a buffer with the given size and access pattern.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     next_buffer_handle: &mut BufferHandle,
     instance: &ash::Instance,
@@ -196,8 +197,11 @@ pub(super) fn create(
 
     // Register buffer in bindless descriptor set (UNIFORM or STORAGE)
     let bindless_index = {
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_buffer(handle, is_storage);
 
@@ -285,7 +289,7 @@ fn align_sparse_capacity(cap: u64, block: u64) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_sparse_with_capacity(
     _instance: &ash::Instance,
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     next_buffer_handle: &mut BufferHandle,
     device_handle: DeviceHandle,
@@ -295,12 +299,8 @@ pub(super) fn create_sparse_with_capacity(
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     let ld = devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
-    let pool = ld
-        .sparse_page_pool
-        .as_mut()
-        .context("internal: sparse page pool missing")?;
     let block = ld.sparse_buffer_block_size;
     anyhow::ensure!(block > 0, "sparse block size not initialized");
 
@@ -333,6 +333,11 @@ pub(super) fn create_sparse_with_capacity(
     let bind_queue = ld.sparse_binding_queue;
     let dev = &ld.device;
 
+    let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
+    let pool = pool_guard
+        .as_mut()
+        .context("internal: sparse page pool missing")?;
+
     for (i, sparse_page) in sparse_pages.iter_mut().enumerate().take(initial_pages) {
         let (mem, mem_off) = pool.alloc_page(dev)?;
         let resource_offset = (i as u64).saturating_mul(block);
@@ -348,13 +353,19 @@ pub(super) fn create_sparse_with_capacity(
     }
 
     sparse::queue_bind_sparse_sync(dev, bind_queue, buffer, &binds)?;
+    drop(pool_guard);
 
     let bindless_descriptor_set = ld.bindless_descriptor_set;
     let handle = *next_buffer_handle;
     *next_buffer_handle += 1;
 
     let bindless_index = {
-        let index = ld.resource_registry.register_buffer(handle, true);
+        let index = ld
+            .ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_buffer(handle, true);
         if let Some(descriptor_set) = bindless_descriptor_set {
             let buffer_info = vk::DescriptorBufferInfo::default()
                 .buffer(buffer)
@@ -404,7 +415,7 @@ pub(super) fn create_sparse_with_capacity(
 
 /// Hint unused sparse pages at and above `offset` (bytes).
 pub(super) fn hint_unused_above(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
     offset: u64,
@@ -429,10 +440,7 @@ pub(super) fn hint_unused_above(
     }
 
     {
-        let Some(ld) = devices.get_mut(&device_handle) else {
-            return;
-        };
-        let Some(pool) = ld.sparse_page_pool.as_mut() else {
+        let Some(ld) = devices.get(&device_handle) else {
             return;
         };
         let bind_queue = ld.sparse_binding_queue;
@@ -465,8 +473,11 @@ pub(super) fn hint_unused_above(
             tracing::warn!(?e, "hint_unused_above sparse unbind failed");
             return;
         }
-        for (mem, off) in to_free {
-            pool.free_page(mem, off);
+        let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
+        if let Some(pool) = pool_guard.as_mut() {
+            for (mem, off) in to_free {
+                pool.free_page(mem, off);
+            }
         }
     }
 }
@@ -483,7 +494,7 @@ pub(super) fn capacity(
 }
 
 pub(super) fn set_logical_size(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
@@ -539,9 +550,9 @@ pub(super) fn set_logical_size(
             (buf.staging_buffer.take(), buf.staging_memory.take())
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
-            let ld = devices.get_mut(&device_handle).unwrap();
-            let barrier = ld.timeline_next.saturating_sub(1);
-            ld.deletion_queue.queue(
+            let ld = devices.get(&device_handle).unwrap();
+            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            ld.deletion_queue.lock().unwrap().queue(
                 barrier,
                 types::PendingDeletion::ReplacedBufferGpu {
                     buffer: stg_buf,
@@ -577,7 +588,7 @@ pub(super) fn set_logical_size(
             vk::DescriptorType::UNIFORM_BUFFER
         };
 
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         let write = vk::WriteDescriptorSet::default()
             .dst_set(descriptor_set)
             .dst_binding(binding)
@@ -595,7 +606,7 @@ pub(super) fn set_logical_size(
 }
 
 fn set_logical_size_sparse(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
@@ -638,12 +649,8 @@ fn set_logical_size_sparse(
 
     {
         let ld = devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
-        let pool = ld
-            .sparse_page_pool
-            .as_mut()
-            .context("internal: sparse pool missing")?;
         let bind_queue = ld.sparse_binding_queue;
         let dev: &ash::Device = &ld.device;
 
@@ -651,6 +658,11 @@ fn set_logical_size_sparse(
             .get_mut(&buffer_handle)
             .context("buffer disappeared")?
             .sparse_pages;
+
+        let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
+        let pool = pool_guard
+            .as_mut()
+            .context("internal: sparse pool missing")?;
 
         if new_pages > old_pages {
             let mut binds = Vec::with_capacity(new_pages - old_pages);
@@ -707,9 +719,9 @@ fn set_logical_size_sparse(
             (buf.staging_buffer.take(), buf.staging_memory.take())
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
-            let ld = devices.get_mut(&device_handle).unwrap();
-            let barrier = ld.timeline_next.saturating_sub(1);
-            ld.deletion_queue.queue(
+            let ld = devices.get(&device_handle).unwrap();
+            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            ld.deletion_queue.lock().unwrap().queue(
                 barrier,
                 types::PendingDeletion::ReplacedBufferGpu {
                     buffer: stg_buf,
@@ -745,7 +757,7 @@ fn set_logical_size_sparse(
             vk::DescriptorType::UNIFORM_BUFFER
         };
 
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         let write = vk::WriteDescriptorSet::default()
             .dst_set(descriptor_set)
             .dst_binding(binding)
@@ -765,7 +777,7 @@ fn set_logical_size_sparse(
 /// Allocate VkBuffer + memory (no bindless registration). Matches [`create`] rules.
 fn allocate_vk_buffer_memory(
     instance: &ash::Instance,
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     device_handle: DeviceHandle,
     size: u64,
     is_storage: bool,
@@ -980,7 +992,7 @@ fn submit_resize_transfer(
 /// Resize a root buffer in place. [`BufferHandle`] and bindless slot stay stable.
 pub(super) fn resize(
     instance: &ash::Instance,
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
@@ -1075,7 +1087,7 @@ pub(super) fn resize(
             vk::DescriptorType::UNIFORM_BUFFER
         };
 
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         let write = vk::WriteDescriptorSet::default()
             .dst_set(descriptor_set)
             .dst_binding(binding)
@@ -1090,7 +1102,7 @@ pub(super) fn resize(
     }
 
     if old_state.host_mapped.is_some() && !old_state.is_sparse {
-        let dev = devices.get_mut(&device_handle).unwrap();
+        let dev = devices.get(&device_handle).unwrap();
         if let Err(e) = unsafe { dev.unmap_memory2(old_state.memory) } {
             tracing::warn!(?e, "unmap_memory2 failed for old buffer during resize");
         }
@@ -1100,6 +1112,7 @@ pub(super) fn resize(
         .get(&device_handle)
         .unwrap()
         .timeline_next
+        .load(Ordering::Relaxed)
         .saturating_sub(1);
     let pending = if old_state.is_sparse {
         let binds = sparse::collect_sparse_binds_for_teardown(
@@ -1123,9 +1136,11 @@ pub(super) fn resize(
         }
     };
     devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .unwrap()
         .deletion_queue
+        .lock()
+        .unwrap()
         .queue(barrier, pending);
 
     let old_parent_vk = old_state.buffer;
@@ -1172,7 +1187,7 @@ pub(super) fn resize(
                 .buffer(new_buffer)
                 .offset(off)
                 .range(range);
-            let logical_device = devices.get_mut(&device_handle).unwrap();
+            let logical_device = devices.get(&device_handle).unwrap();
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(types::bindless_bindings::STORAGE_BUFFERS)
@@ -1200,16 +1215,19 @@ pub(super) fn resize(
 /// For views, only the descriptor index is deferred — the underlying VkBuffer/memory
 /// belongs to the parent and is not freed.
 pub(super) fn destroy(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
 ) {
     if let Some(buffer) = buffers.remove(&buffer_handle) {
-        if let Some(device) = devices.get_mut(&buffer.device_handle) {
-            let barrier = device.timeline_next.saturating_sub(1);
+        if let Some(device) = devices.get(&buffer.device_handle) {
+            let barrier = device
+                .timeline_next
+                .load(Ordering::Relaxed)
+                .saturating_sub(1);
 
             if buffer.is_view {
-                device.deletion_queue.queue(
+                device.deletion_queue.lock().unwrap().queue(
                     barrier,
                     types::PendingDeletion::BufferView { buffer_handle },
                 );
@@ -1217,7 +1235,11 @@ pub(super) fn destroy(
             }
 
             if buffer.transient_heap_suballoc {
-                device.reclaim_buffer_slots(buffer_handle);
+                device
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .reclaim_buffer_slots(buffer_handle);
                 unsafe {
                     device.device.destroy_buffer(buffer.buffer, None);
                 }
@@ -1243,7 +1265,7 @@ pub(super) fn destroy(
             } else {
                 None
             };
-            device.deletion_queue.queue(
+            device.deletion_queue.lock().unwrap().queue(
                 barrier,
                 types::PendingDeletion::Buffer {
                     buffer_handle,
@@ -1267,7 +1289,7 @@ pub(super) fn destroy(
 /// The view gets its own bindless descriptor at `[offset, offset+size)` of the parent.
 /// It shares the parent's VkBuffer and staging resources.
 pub(super) fn create_view(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     next_buffer_handle: &mut BufferHandle,
     parent_handle: BufferHandle,
@@ -1298,7 +1320,7 @@ pub(super) fn create_view(
     let parent_flags = parent.flags;
 
     let logical_device = devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
@@ -1312,6 +1334,9 @@ pub(super) fn create_view(
     } else {
         let handle_for_registry = *next_buffer_handle;
         let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_buffer(handle_for_registry, is_storage);
 
@@ -1380,7 +1405,7 @@ pub(super) fn create_view(
 /// Lazily create the HOST_VISIBLE staging buffer for a DEVICE_LOCAL storage buffer.
 pub(super) fn ensure_staging(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
 ) -> Result<()> {
@@ -1439,7 +1464,7 @@ pub(super) fn ensure_staging(
 /// copies via GPU. For HOST_VISIBLE uniform buffers, maps directly.
 pub(super) fn write(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
     offset: u64,
@@ -1541,7 +1566,7 @@ pub(super) fn bindless_index(
 /// a GPU copy and maps. For HOST_VISIBLE uniform buffers, maps directly.
 pub(super) fn read_to_cpu(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &mut HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
@@ -1632,7 +1657,7 @@ pub(super) fn read_to_cpu(
 
 /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
 pub(super) fn clear(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
@@ -1644,7 +1669,7 @@ pub(super) fn clear(
         .context("Invalid buffer handle")?;
 
     let device = devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     if buffer.device_handle != device_handle {

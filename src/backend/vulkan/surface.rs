@@ -55,6 +55,7 @@ use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
 use ash::{khr, vk, Entry, Instance};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "windows")]
 use raw_window_handle::RawWindowHandle;
@@ -135,7 +136,7 @@ pub(super) fn create_platform_surface(
 pub(super) fn create(
     entry: &Entry,
     instance: &Instance,
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     next_surface_handle: &mut SurfaceHandle,
@@ -456,15 +457,15 @@ pub(super) fn create(
 }
 
 enum DestroyDeviceRef<'a> {
-    Owned(&'a mut LogicalDevice),
-    Map(&'a mut HashMap<DeviceHandle, LogicalDevice>),
+    Owned(&'a types::LogicalDevice),
+    Map(&'a HashMap<DeviceHandle, types::SharedLogicalDevice>),
 }
 
 impl<'a> DestroyDeviceRef<'a> {
-    fn get_mut(&mut self, device_handle: DeviceHandle) -> Option<&mut LogicalDevice> {
+    fn get_ld(&self, device_handle: DeviceHandle) -> Option<&types::LogicalDevice> {
         match self {
             Self::Owned(ld) => Some(ld),
-            Self::Map(map) => map.get_mut(&device_handle),
+            Self::Map(map) => map.get(&device_handle).map(|arc| arc.as_ref()),
         }
     }
 }
@@ -474,7 +475,7 @@ impl<'a> DestroyDeviceRef<'a> {
 pub(super) fn destroy(
     entry: &Entry,
     instance: &Instance,
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
@@ -495,8 +496,8 @@ pub(super) fn destroy(
 pub(super) fn destroy_with_logical_device(
     entry: &Entry,
     instance: &Instance,
-    logical_device: &mut LogicalDevice,
-    _devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    logical_device: &types::LogicalDevice,
+    _devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
@@ -515,7 +516,7 @@ pub(super) fn destroy_with_logical_device(
 fn destroy_impl(
     entry: &Entry,
     instance: &Instance,
-    mut device_ref: DestroyDeviceRef<'_>,
+    device_ref: DestroyDeviceRef<'_>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
@@ -535,7 +536,7 @@ fn destroy_impl(
         .map(|s| std::mem::take(&mut s.swapchain_texture_handles))
     {
         for th in handles {
-            if let Some(logical_device) = device_ref.get_mut(device_handle) {
+            if let Some(logical_device) = device_ref.get_ld(device_handle) {
                 unregister_swapchain_texture_with_device(logical_device, textures, th);
             }
         }
@@ -550,7 +551,7 @@ fn destroy_impl(
         .into_iter()
         .flatten()
         .map(|slot| {
-            if let Some(logical_device) = device_ref.get_mut(device_handle) {
+            if let Some(logical_device) = device_ref.get_ld(device_handle) {
                 unregister_swapchain_texture_with_device(
                     logical_device,
                     textures,
@@ -562,7 +563,7 @@ fn destroy_impl(
         .collect();
 
     if let Some(mut surface_state) = surfaces.remove(&surface_handle) {
-        if let Some(logical_device) = device_ref.get_mut(surface_state.device_handle) {
+        if let Some(logical_device) = device_ref.get_ld(surface_state.device_handle) {
             unsafe {
                 let _ = logical_device.device.device_wait_idle();
 
@@ -670,7 +671,7 @@ pub(super) fn acquire(
         state
             .devices
             .get(&device_handle)
-            .map(|d| d.deletion_queue.len())
+            .map(|d| d.deletion_queue.lock().unwrap().len())
             .unwrap_or(0)
     };
 
@@ -780,7 +781,7 @@ pub(super) fn acquire(
         let ctxs: Vec<_> = state
             .contexts
             .iter()
-            .filter(|(_, sc)| sc.device == device_handle)
+            .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
             .collect();
         for ctx in ctxs {
@@ -802,11 +803,19 @@ pub(super) fn acquire(
         let _dz = crate::tracy_zone!("vk.surface.deferred_deletions");
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let drained = logical_device.deletion_queue.drain_up_to(completed);
-        for r in drained {
-            types::destroy_pending_deletion(logical_device, r);
+        let drained = logical_device
+            .deletion_queue
+            .lock()
+            .unwrap()
+            .drain_up_to(completed);
+        if !drained.is_empty() {
+            let ledger_arc = std::sync::Arc::clone(&logical_device.ledger);
+            let mut ledger = ledger_arc.lock().unwrap();
+            for r in drained {
+                types::destroy_pending_deletion(logical_device, &mut ledger, r);
+            }
         }
     }
 
@@ -855,8 +864,11 @@ pub(super) fn acquire(
                     surface_state.pending_acquire_count.saturating_add(1);
             }
 
-            if let Some(sc) = state.contexts.get_mut(&ctx) {
-                sc.signal_queue
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .signal_queue
                     .push(crate::signal::Signal::SwapchainAcquired { image_index });
             }
 
@@ -896,7 +908,7 @@ pub(super) fn frame_texture(
 /// Render commands to the surface's current swapchain image.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render<F>(
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
@@ -1201,7 +1213,7 @@ where
         let ld = devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
     let wait_acq = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_available_semaphore)
@@ -1225,19 +1237,19 @@ where
     let logical_device = devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
+    let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
 
-    unsafe {
-        logical_device.device.queue_submit2(
-            logical_device.queue,
-            std::slice::from_ref(&submit),
-            in_flight_fence,
-        )
+    {
+        let _queue_guard = queue_lock.lock().unwrap();
+        unsafe {
+            logical_device.device.queue_submit2(
+                logical_device.queue,
+                std::slice::from_ref(&submit),
+                in_flight_fence,
+            )
+        }
     }
     .context("Failed to submit render command buffer")?;
-
-    if let Some(ld) = devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_timeline_value.saturating_add(1);
-    }
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[current_frame];
@@ -1276,7 +1288,7 @@ pub(super) fn submit_frame(
         .devices
         .get(&dh)
         .context("Surface's device is invalid")?;
-    Ok(ld.timeline_next.saturating_sub(1))
+    Ok(ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
 }
 
 pub(super) fn present_frame(
@@ -1510,13 +1522,15 @@ pub(super) fn present(
                 .devices
                 .get(&device_handle)
                 .context("Surface's device is invalid")?;
-            ld.timeline_next
+            ld.timeline_next.fetch_add(1, Ordering::Relaxed)
         };
 
         let timeline_sem = state
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_semaphore;
 
         // WSI submit: [copy_cb]
@@ -1553,9 +1567,11 @@ pub(super) fn present(
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
+        let queue_lock = std::sync::Arc::clone(&submit_ld.queue_lock);
 
         let r = {
             let _sz = crate::tracy_zone!("vk.present.queue_submit2_copy");
+            let _queue_guard = queue_lock.lock().unwrap();
             unsafe {
                 submit_ld.device.queue_submit2(
                     submit_ld.queue,
@@ -1578,10 +1594,8 @@ pub(super) fn present(
 
         {
             let _bk = crate::tracy_zone!("vk.present.post_submit");
-            let ld_timeline = state.devices.get_mut(&device_handle).unwrap();
-            ld_timeline.timeline_next = signal_timeline_value.saturating_add(1);
-            if let Some(sc) = state.contexts.get_mut(&ctx) {
-                sc.last_submitted_seq = signal_timeline_value;
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc.lock().unwrap().last_submitted_seq = signal_timeline_value;
             }
 
             // Expose the *compute* timeline value to callers (not the copy's).
@@ -1672,8 +1686,11 @@ pub(super) fn present(
         }
     } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
-        if let Some(sc) = state.contexts.get(&ctx) {
-            sc.signal_queue
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .signal_queue
                 .push(crate::signal::Signal::SwapchainReturned {
                     image_index: image_idx_for_return,
                 });
@@ -1704,7 +1721,7 @@ pub(super) fn present(
 pub(super) fn resize(
     entry: &Entry,
     instance: &Instance,
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     next_texture_handle: &mut TextureHandle,
@@ -2084,7 +2101,7 @@ pub(super) fn set_present_mode(
     resize(
         &state.entry,
         &state.instance,
-        &mut state.devices,
+        &state.devices,
         &mut state.surfaces,
         &mut state.textures,
         &mut state.next_texture_handle,
@@ -2209,7 +2226,7 @@ fn ensure_scratch_texture_slot(
         .and_then(|s| s.scratch_texture_slots.get_mut(frame_slot))
         .and_then(|slot| slot.take())
     {
-        unregister_surface_texture(&mut state.devices, &mut state.textures, old.texture_handle);
+        unregister_surface_texture(&state.devices, &mut state.textures, old.texture_handle);
         let ld = state
             .devices
             .get(&device_handle)
@@ -2276,6 +2293,7 @@ fn ensure_scratch_texture_slot(
             .devices
             .get(&device_handle)
             .context("Device invalid")?;
+        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         unsafe {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(ld.command_pool)
@@ -2318,12 +2336,16 @@ fn ensure_scratch_texture_slot(
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
             let submit =
                 vk::SubmitInfo2::default().command_buffer_infos(std::slice::from_ref(&cb_info));
+            // Hold queue_lock across both submit and wait_idle: vkQueueWaitIdle
+            // is also externally synchronized on the queue (Vulkan spec).
+            let _queue_guard = queue_lock.lock().unwrap();
             ld.device
                 .queue_submit2(ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
                 .context("Failed to submit scratch texture init")?;
             ld.device
                 .queue_wait_idle(ld.queue)
                 .context("queue_wait_idle after scratch init")?;
+            drop(_queue_guard);
             ld.device
                 .free_command_buffers(ld.command_pool, std::slice::from_ref(&cb));
         }
@@ -2331,7 +2353,7 @@ fn ensure_scratch_texture_slot(
 
     // Register as a bindless storage-image texture.
     let texture_handle = register_surface_texture(
-        &mut state.devices,
+        &state.devices,
         &mut state.textures,
         &mut state.next_texture_handle,
         device_handle,
@@ -2369,7 +2391,7 @@ fn ensure_scratch_texture_slot(
 /// stores in `SurfaceState::current_texture_handle`.
 #[allow(clippy::too_many_arguments)]
 fn register_surface_texture(
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     next_texture_handle: &mut TextureHandle,
     device_handle: DeviceHandle,
@@ -2383,7 +2405,7 @@ fn register_surface_texture(
     *next_texture_handle += 1;
 
     let logical_device = devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Device no longer valid")?;
 
     // Create an image view for compute storage access
@@ -2405,6 +2427,9 @@ fn register_surface_texture(
     // Register as a storage image in the bindless descriptor set
     let is_storage_image = true;
     let bindless_index = logical_device
+        .ledger
+        .lock()
+        .unwrap()
         .resource_registry
         .register_texture(handle, is_storage_image);
 
@@ -2449,7 +2474,7 @@ fn register_surface_texture(
             staging_memory: None,
             bindless_index: Some(bindless_index),
             sampled_bindless_index: None,
-            current_layout: vk::ImageLayout::GENERAL,
+            current_layout: std::sync::atomic::AtomicI32::new(vk::ImageLayout::GENERAL.as_raw()),
             transient_heap_suballoc: false,
         },
     );
@@ -2468,12 +2493,16 @@ fn register_surface_texture(
 /// Unregister a swapchain image texture (destroy view + bindless slot).
 /// Does NOT destroy the VkImage — it is owned by the swapchain.
 fn unregister_swapchain_texture_with_device(
-    logical_device: &mut LogicalDevice,
+    logical_device: &types::LogicalDevice,
     textures: &mut HashMap<TextureHandle, TextureState>,
     tex_handle: TextureHandle,
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
-        logical_device.reclaim_texture_slots(tex_handle);
+        logical_device
+            .ledger
+            .lock()
+            .unwrap()
+            .reclaim_texture_slots(tex_handle);
         unsafe {
             logical_device
                 .device
@@ -2486,13 +2515,17 @@ fn unregister_swapchain_texture_with_device(
 /// Unregister a swapchain image texture (destroy view + bindless slot).
 /// Does NOT destroy the VkImage — it is owned by the swapchain.
 fn unregister_swapchain_texture(
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     tex_handle: TextureHandle,
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
-        if let Some(device) = devices.get_mut(&tex_state.device_handle) {
-            device.reclaim_texture_slots(tex_handle);
+        if let Some(device) = devices.get(&tex_state.device_handle) {
+            device
+                .ledger
+                .lock()
+                .unwrap()
+                .reclaim_texture_slots(tex_handle);
             unsafe {
                 device.device.destroy_image_view(tex_state.view, None);
             }
@@ -2505,7 +2538,7 @@ fn unregister_swapchain_texture(
 /// same name used before the rename.  Delegates to `unregister_swapchain_texture`.
 #[inline(always)]
 fn unregister_surface_texture(
-    devices: &mut HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     tex_handle: TextureHandle,
 ) {

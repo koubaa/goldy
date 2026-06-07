@@ -18,6 +18,8 @@ use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Maximum number of descriptors per resource type in the global bindless set
 pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
@@ -37,6 +39,145 @@ pub(crate) struct PendingSlotReclamation {
     pub slot: SlotKey,
     /// `(context_handle, min_seq_that_must_retire)`
     pub requirements: Vec<(super::ContextHandle, u64)>,
+}
+
+/// Device-shared descriptor-heap ledger.
+///
+/// Contains the irreducible shared state for bindless slot allocation: the
+/// `ResourceRegistry` (descriptor slot allocator), the per-context
+/// `slot_last_seen` reference table, and the `pending_slot_reclamations`
+/// list.  Wrapped in `Arc<Mutex<DeviceLedger>>` on `LogicalDevice` so that
+/// submit paths can hold the ledger lock independently of the global backend
+/// mutex (Phase 4), and can clone the `Arc` before dropping the global lock
+/// (Phase 5).
+pub(crate) struct DeviceLedger {
+    /// Registry tracking resource indices in the global descriptor set.
+    pub resource_registry: ResourceRegistry,
+    /// Maps bindless slot → per-context last-submitted seq that referenced it.
+    /// Updated at every submit. Entry removed when the slot is queued for reclamation.
+    pub slot_last_seen: HashMap<SlotKey, HashMap<super::ContextHandle, u64>>,
+    /// Slots waiting for referencing contexts to retire before returning to free lists.
+    pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
+}
+
+impl DeviceLedger {
+    pub(crate) fn new() -> Self {
+        Self {
+            resource_registry: ResourceRegistry::new(),
+            slot_last_seen: HashMap::new(),
+            pending_slot_reclamations: Vec::new(),
+        }
+    }
+
+    /// Record that `ctx` submitted `seq` referencing each bindless slot in `slots`.
+    pub(crate) fn record_slot_usage(
+        &mut self,
+        ctx: super::ContextHandle,
+        seq: u64,
+        slots: impl IntoIterator<Item = SlotKey>,
+    ) {
+        for slot in slots {
+            self.slot_last_seen
+                .entry(slot)
+                .or_default()
+                .entry(ctx)
+                .and_modify(|v| *v = (*v).max(seq))
+                .or_insert(seq);
+        }
+    }
+
+    /// Queue a slot for deferred reclamation once all referencing contexts retire.
+    pub(crate) fn queue_slot_reclamation(&mut self, slot: SlotKey) {
+        let requirements: Vec<_> = self
+            .slot_last_seen
+            .remove(&slot)
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default();
+        if requirements.is_empty() {
+            self.resource_registry.free_slot(slot);
+        } else {
+            self.pending_slot_reclamations
+                .push(PendingSlotReclamation { slot, requirements });
+        }
+    }
+
+    /// Reclaim all descriptor slots for a destroyed buffer handle.
+    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) {
+        let slots = self.resource_registry.extract_buffer_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(slot);
+        }
+    }
+
+    /// Reclaim all descriptor slots for a destroyed texture handle.
+    pub(crate) fn reclaim_texture_slots(&mut self, handle: TextureHandle) {
+        let slots = self.resource_registry.extract_texture_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(slot);
+        }
+    }
+
+    /// Reclaim all descriptor slots for a destroyed sampler handle.
+    pub(crate) fn reclaim_sampler_slots(&mut self, handle: SamplerHandle) {
+        let slots = self.resource_registry.extract_sampler_slots(handle);
+        for slot in slots {
+            self.queue_slot_reclamation(slot);
+        }
+    }
+
+    /// Return pending slots to the free list once every referencing context has retired.
+    ///
+    /// Takes a pre-snapshotted map of `(context_handle → completed_timeline_value)` rather
+    /// than querying semaphores directly, so this method is safe to call while holding the
+    /// ledger lock without creating a semaphore-query → ledger-lock ordering hazard.
+    /// A missing entry means the context has been destroyed and is considered fully retired.
+    pub(crate) fn drain_ready_slot_reclamations(
+        &mut self,
+        completed_values: &HashMap<super::ContextHandle, u64>,
+    ) {
+        let mut i = 0;
+        while i < self.pending_slot_reclamations.len() {
+            let ready = self.pending_slot_reclamations[i].requirements.iter().all(
+                |(ctx_id, required_seq)| {
+                    completed_values
+                        .get(ctx_id)
+                        .is_none_or(|&v| v >= *required_seq)
+                },
+            );
+            if ready {
+                let entry = self.pending_slot_reclamations.swap_remove(i);
+                self.resource_registry.free_slot(entry.slot);
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Snapshot the completed timeline value for every context belonging to `for_device`.
+///
+/// Call this **before** locking the ledger so `drain_ready_slot_reclamations` has the
+/// retirement data it needs without touching live context state while the ledger is locked.
+pub(super) fn snapshot_context_completed_values(
+    device: &ash::Device,
+    contexts: &HashMap<super::ContextHandle, SharedSubmissionContext>,
+    for_device: super::DeviceHandle,
+) -> HashMap<super::ContextHandle, u64> {
+    contexts
+        .iter()
+        .filter_map(|(&id, sc_arc)| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device != for_device {
+                return None;
+            }
+            let v = unsafe {
+                device
+                    .get_semaphore_counter_value(sc.timeline_semaphore)
+                    .unwrap_or(0)
+            };
+            Some((id, v))
+        })
+        .collect()
 }
 
 /// Binding indices within the global bindless descriptor set
@@ -462,6 +603,26 @@ pub(crate) struct SubmissionContext {
     pub retained_compute_cb: Option<RetainedVkCb>,
     /// Command buffers to free once this context's timeline reaches the key.
     pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
+    /// Per-context staging belt for DEVICE_LOCAL WriteBuffer uploads.
+    /// Pools HOST_VISIBLE chunks across submits so no staging memory is reused
+    /// before its GPU copy finishes (keyed by this context's timeline values).
+    pub staging_belt: super::staging::StagingBelt,
+    /// Per-context pool for texture-upload staging buffers.
+    /// Eliminates per-frame vkAllocateMemory / vkFreeMemory for WriteTexture.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Per-context deferred deletion queue.
+    ///
+    /// Holds resources whose GPU lifetime is bounded exclusively by **this**
+    /// context's timeline semaphore (e.g. submit-internal temporaries).  Drained
+    /// on each submit using `ctx_completed_value` — never via `device_retired` —
+    /// so no other context's progress can block reclaim here.
+    ///
+    /// User-destroyed resources (buffers, textures, …) whose context is unknown
+    /// at destroy time still go to `LogicalDevice::deletion_queue` and are drained
+    /// in the explicit-wait paths (`wait_until`, `flush_deferred_deletions`,
+    /// surface acquire).  As a result the submit hot path no longer touches the
+    /// device-level queue at all, which is required for Phase 5 (lock-free submit).
+    pub deletion_queue: DeletionQueue,
 }
 
 /// A logical Vulkan device with associated resources.
@@ -484,7 +645,8 @@ pub(crate) struct LogicalDevice {
     #[allow(dead_code)] // captured at device init for diagnostics / future use
     pub sparse_memory_type_index: u32,
     /// Sub-allocated DEVICE_LOCAL pages for [`super::sparse::SparsePagePool`].
-    pub sparse_page_pool: Option<super::sparse::SparsePagePool>,
+    /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a).
+    pub sparse_page_pool: Mutex<Option<super::sparse::SparsePagePool>>,
 
     // Vulkan 1.4 core via KHR extension loaders (ash 0.38 doesn't have core 1.4 wrappers yet)
     pub map_memory2: ash::khr::map_memory2::Device,
@@ -498,21 +660,46 @@ pub(crate) struct LogicalDevice {
     pub bindless_descriptor_set: Option<vk::DescriptorSet>,
     /// Pipeline layout for bindless rendering (includes the global set)
     pub bindless_pipeline_layout: Option<vk::PipelineLayout>,
-    /// Registry tracking resource indices in the global descriptor set
-    pub resource_registry: ResourceRegistry,
-    /// Deferred deletion queue for resources that are still in-flight
-    pub deletion_queue: DeletionQueue,
-    /// Maps bindless slot → per-context last-submitted seq that referenced it.
-    pub slot_last_seen: HashMap<SlotKey, HashMap<super::ContextHandle, u64>>,
-    /// Slots waiting for referencing contexts to retire before returning to free lists.
-    pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
+    /// Descriptor-heap ledger: `ResourceRegistry` + slot reference-tracking.
+    /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
+    /// global backend lock.
+    pub ledger: Arc<Mutex<DeviceLedger>>,
+    /// Deferred deletion queue for resources that are still in-flight.
+    /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a): callers that
+    /// previously took `&mut LogicalDevice` now lock this field individually.
+    pub deletion_queue: Mutex<DeletionQueue>,
     /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
-    pub timeline_next: u64,
+    /// `Arc` allows submit paths to clone the counter out before dropping device/state borrows
+    /// (required for Phase 5 lock-free submit).
+    pub timeline_next: Arc<AtomicU64>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
-    pub retired_floor: u64,
+    /// `AtomicU64` so `LogicalDevice` can be `Arc`-wrapped; updated with `fetch_max`.
+    pub retired_floor: AtomicU64,
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
+
+    /// Serialises all `vkQueueSubmit2` calls on this device's queue.
+    ///
+    /// The Vulkan spec marks `vkQueueSubmit2`'s `queue` parameter as externally
+    /// synchronized (VUID-vkQueueSubmit2-queue-parameter): concurrent calls from
+    /// different threads on the same `VkQueue` are undefined behaviour.  The outer
+    /// `Arc<Mutex<Box<dyn GpuBackend>>>` currently provides this serialisation as a
+    /// side-effect, but Phase 5c will replace that coarse lock with fine-grained
+    /// per-context/device locks, leaving the queue unprotected unless we insert an
+    /// explicit guard here.
+    ///
+    /// Each submit call clones this `Arc`, locks it for the duration of
+    /// `vkQueueSubmit2`, then drops the guard — so only the GPU call itself
+    /// serialises; recording and post-submit bookkeeping run concurrently.
+    ///
+    /// NOTE (Phase 5d — intentionally deferred): giving each `SubmissionContext`
+    /// its own `VkQueue` (requested from the same family) would let submits from
+    /// different contexts proceed in parallel without ever touching this lock.
+    /// That approach is deferred because queue count is a driver resource and the
+    /// practical benefit over this per-device lock is small with today's single-
+    /// context-per-device workloads.
+    pub queue_lock: Arc<Mutex<()>>,
 
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
@@ -675,7 +862,7 @@ pub(crate) struct RenderTargetState {
     /// Command buffer for rendering
     pub command_buffer: vk::CommandBuffer,
     /// Track if we've rendered (for readback validation)
-    pub has_rendered: bool,
+    pub has_rendered: AtomicBool,
 }
 
 /// GPU texture state.
@@ -697,9 +884,20 @@ pub(crate) struct TextureState {
     /// For `TextureKind::DirectInterpolated` textures, the sampled-texture (SRV) slot.
     pub sampled_bindless_index: Option<u32>,
     /// Current image layout (for subregion writes / transitions)
-    pub current_layout: vk::ImageLayout,
+    pub current_layout: AtomicI32,
     /// Sub-allocated from a transient heap; `memory` is shared with the heap.
     pub transient_heap_suballoc: bool,
+}
+
+impl TextureState {
+    pub fn image_layout(&self) -> vk::ImageLayout {
+        vk::ImageLayout::from_raw(self.current_layout.load(Ordering::Relaxed))
+    }
+
+    pub fn set_image_layout(&self, layout: vk::ImageLayout) {
+        self.current_layout
+            .store(layout.as_raw(), Ordering::Relaxed);
+    }
 }
 
 /// GPU sampler state.
@@ -925,20 +1123,31 @@ impl DeletionQueue {
 }
 
 /// Deferred-delete one entry ([`SparseBufferTeardown`] needs [`LogicalDevice`] for the page pool).
-pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: PendingDeletion) {
+///
+/// `ledger` must be the already-locked `DeviceLedger` from `ld.ledger`; passing it separately
+/// avoids holding the ledger lock while the caller re-locks it (double-lock hazard).
+pub(crate) fn destroy_pending_deletion(
+    ld: &LogicalDevice,
+    ledger: &mut DeviceLedger,
+    resource: PendingDeletion,
+) {
     match &resource {
         PendingDeletion::Buffer { buffer_handle, .. }
         | PendingDeletion::BufferView { buffer_handle } => {
-            ld.reclaim_buffer_slots(*buffer_handle);
+            ledger.reclaim_buffer_slots(*buffer_handle);
         }
         PendingDeletion::Texture { texture_handle, .. } => {
-            ld.reclaim_texture_slots(*texture_handle);
+            ledger.reclaim_texture_slots(*texture_handle);
         }
         _ => {}
     }
 
     let device = &ld.device;
     let bind_queue = ld.sparse_binding_queue;
+    // Lock sparse_page_pool once for the duration of this call (needed when freeing
+    // sparse memory pages). Held only here; no other code path holds it concurrently
+    // while the outer backend lock serialises all submits.
+    let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
 
     unsafe {
         match resource {
@@ -972,7 +1181,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
                             tracing::warn!(?e, "sparse unbind on buffer destroy failed");
                         }
                         for (_res_off, mem, mem_off) in &td.binds {
-                            if let Some(pool) = ld.sparse_page_pool.as_mut() {
+                            if let Some(pool) = pool_guard.as_mut() {
                                 pool.free_page(*mem, *mem_off);
                             }
                         }
@@ -1034,7 +1243,7 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
                         tracing::warn!(?e, "sparse unbind on replaced buffer failed");
                     }
                     for (_res_off, mem, mem_off) in &binds {
-                        if let Some(pool) = ld.sparse_page_pool.as_mut() {
+                        if let Some(pool) = pool_guard.as_mut() {
                             pool.free_page(*mem, *mem_off);
                         }
                     }
@@ -1073,91 +1282,50 @@ pub(crate) fn destroy_pending_deletion(ld: &mut LogicalDevice, resource: Pending
 }
 
 impl LogicalDevice {
-    pub(crate) fn record_slot_usage(
-        &mut self,
-        ctx: super::ContextHandle,
-        seq: u64,
-        slots: impl IntoIterator<Item = SlotKey>,
-    ) {
-        for slot in slots {
-            self.slot_last_seen
-                .entry(slot)
-                .or_default()
-                .entry(ctx)
-                .and_modify(|v| *v = (*v).max(seq))
-                .or_insert(seq);
+    /// Drop deferred resources whose timeline barrier is `<= completed`.
+    ///
+    /// Locks the deletion queue and ledger internally; takes `&self` so this
+    /// can be called through an `Arc<LogicalDevice>` (Phase 5a).
+    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+        let drained = self.deletion_queue.lock().unwrap().drain_up_to(completed);
+        if drained.is_empty() {
+            return;
         }
-    }
-
-    pub(crate) fn queue_slot_reclamation(&mut self, slot: SlotKey) {
-        let requirements: Vec<_> = self
-            .slot_last_seen
-            .remove(&slot)
-            .map(|m| m.into_iter().collect())
-            .unwrap_or_default();
-        if requirements.is_empty() {
-            self.resource_registry.free_slot(slot);
-        } else {
-            self.pending_slot_reclamations
-                .push(PendingSlotReclamation { slot, requirements });
-        }
-    }
-
-    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) {
-        let slots = self.resource_registry.extract_buffer_slots(handle);
-        for slot in slots {
-            self.queue_slot_reclamation(slot);
-        }
-    }
-
-    pub(crate) fn reclaim_texture_slots(&mut self, handle: TextureHandle) {
-        let slots = self.resource_registry.extract_texture_slots(handle);
-        for slot in slots {
-            self.queue_slot_reclamation(slot);
-        }
-    }
-
-    /// Reclaim all descriptor slots for a destroyed sampler handle.
-    pub(crate) fn reclaim_sampler_slots(&mut self, handle: SamplerHandle) {
-        let slots = self.resource_registry.extract_sampler_slots(handle);
-        for slot in slots {
-            self.queue_slot_reclamation(slot);
-        }
-    }
-
-    pub(crate) fn drain_ready_slot_reclamations(
-        &mut self,
-        contexts: &HashMap<super::ContextHandle, SubmissionContext>,
-    ) {
-        let mut i = 0;
-        while i < self.pending_slot_reclamations.len() {
-            let ready = self.pending_slot_reclamations[i].requirements.iter().all(
-                |(ctx_id, required_seq)| {
-                    contexts.get(ctx_id).is_none_or(|ctx| unsafe {
-                        self.device
-                            .get_semaphore_counter_value(ctx.timeline_semaphore)
-                            .unwrap_or(0)
-                            >= *required_seq
-                    })
-                },
-            );
-            if ready {
-                let entry = self.pending_slot_reclamations.swap_remove(i);
-                self.resource_registry.free_slot(entry.slot);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
-    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
-        let drained = self.deletion_queue.drain_up_to(completed);
+        let ledger_arc = Arc::clone(&self.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
         for r in drained {
-            destroy_pending_deletion(self, r);
+            destroy_pending_deletion(self, &mut ledger, r);
+        }
+    }
+
+    /// Drain all pending deletions (device teardown).
+    pub(crate) fn flush_deletion_queue(&self) {
+        let batch = self.deletion_queue.lock().unwrap().flush_all_drain();
+        if batch.is_empty() {
+            return;
+        }
+        let ledger_arc = Arc::clone(&self.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
+        for r in batch {
+            destroy_pending_deletion(self, &mut ledger, r);
         }
     }
 }
+
+/// `Arc`-wrapped logical device — cloned out of `VulkanState` before dropping the
+/// global backend lock so submit paths can hold per-device state without borrowing
+/// all of `VulkanState` (Phase 5).
+pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
+/// `Arc<Mutex>`-wrapped per-context state — allows submit paths to lock only the
+/// submitting context rather than all of `VulkanState` (Phase 5).
+pub(crate) type SharedSubmissionContext = Arc<Mutex<SubmissionContext>>;
+
+/// Per-submit fence and optional command-buffer kept alive until completion.
+pub(super) type ComputeFencePoolEntry = (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>);
+
+/// Per-backend non-blocking compute fence pool keyed by submission token.
+pub(super) type ComputeFencePool = Mutex<HashMap<u64, ComputeFencePoolEntry>>;
 
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
@@ -1165,9 +1333,9 @@ pub(super) struct VulkanState {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub physical_devices: Vec<PhysicalDeviceInfo>,
-    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<super::ContextHandle, SubmissionContext>,
+    pub contexts: HashMap<super::ContextHandle, SharedSubmissionContext>,
     pub next_context_id: super::ContextHandle,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
@@ -1189,14 +1357,7 @@ pub(super) struct VulkanState {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
-    pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
-    /// Per-device pools that recycle texture-upload staging buffers across frames.
-    /// Entries are released with a GPU timeline value and reclaimed once that
-    /// timeline completes, avoiding per-frame vkAllocateMemory / vkFreeMemory.
-    pub texture_staging_pools:
-        HashMap<DeviceHandle, crate::backend::vulkan::staging::TextureStagingPool>,
-    /// Per-device staging belts for batched WriteBuffer uploads.
-    pub(super) staging_belts: HashMap<DeviceHandle, crate::backend::vulkan::staging::StagingBelt>,
+    pub compute_fence_pool: ComputeFencePool,
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::atomic::AtomicBool,

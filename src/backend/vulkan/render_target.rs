@@ -32,7 +32,7 @@ fn find_memory_type(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: &mut RenderTargetHandle,
     device_handle: DeviceHandle,
@@ -141,7 +141,7 @@ pub(super) fn create(
             staging_buffer: None,
             staging_memory: None,
             command_buffer: command_buffers[0],
-            has_rendered: false,
+            has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
 
@@ -158,7 +158,7 @@ pub(super) fn create(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: &mut RenderTargetHandle,
     device_handle: DeviceHandle,
@@ -333,7 +333,7 @@ pub(super) fn create_with_depth(
             staging_buffer: None,
             staging_memory: None,
             command_buffer: command_buffers[0],
-            has_rendered: false,
+            has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
 
@@ -349,7 +349,7 @@ pub(super) fn create_with_depth(
 
 /// Destroy a render target and free GPU resources.
 pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     target: RenderTargetHandle,
 ) {
@@ -391,7 +391,7 @@ pub(super) fn destroy(
 /// (COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL) into `cmd`.
 /// Does NOT begin/end the command buffer and does NOT submit.
 pub(super) fn record_render_pass_to_buffer<F>(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -587,7 +587,7 @@ where
 }
 
 pub(super) fn render_to<F>(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -646,8 +646,9 @@ where
     unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
         .context("Failed to wait for queue")?;
 
-    if let Some(rt) = render_targets.get_mut(&target) {
-        rt.has_rendered = true;
+    if let Some(rt) = render_targets.get(&target) {
+        rt.has_rendered
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     Ok(())
@@ -657,7 +658,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_to_cpu(
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     target: RenderTargetHandle,
     output: &mut [u8],
@@ -668,7 +669,10 @@ pub(super) fn read_to_cpu(
             .get(&target)
             .context("Invalid render target handle")?;
 
-        if !render_target.has_rendered {
+        if !render_target
+            .has_rendered
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             anyhow::bail!("Cannot read from render target that hasn't been rendered to");
         }
 

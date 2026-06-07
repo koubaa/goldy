@@ -368,7 +368,7 @@ fn vulkan_decode_duration_ns(start: u64, end: u64, valid_bits: u32, period_ns: f
 }
 
 unsafe fn vulkan_finish_gpu_profile(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     device: &ash::Device,
     timeline_sem: vk::Semaphore,
@@ -428,6 +428,31 @@ unsafe fn vulkan_finish_gpu_profile(
     Ok(())
 }
 
+/// Returns the GPU-completed timeline value for a single context by reading its
+/// timeline semaphore counter directly, without consulting any other context.
+///
+/// Used on the submit hot path to replace `device_retired` (max-over-contexts)
+/// as the reclaim gate. Because all contexts submit to the same `vk::Queue`,
+/// when this context's semaphore reaches V every submit with a global timeline
+/// value ≤ V — including those from other contexts — has already completed on
+/// that queue. Draining with V is therefore safe and never creates a
+/// cross-context dependency.
+pub(super) fn ctx_completed_value(
+    state: &super::types::VulkanState,
+    ctx: super::ContextHandle,
+    device_handle: super::DeviceHandle,
+) -> u64 {
+    let sem = state
+        .contexts
+        .get(&ctx)
+        .map(|sc| sc.lock().unwrap().timeline_semaphore);
+    let dev = state.devices.get(&device_handle).map(|ld| &ld.device);
+    match (dev, sem) {
+        (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
+        _ => 0,
+    }
+}
+
 /// Reap fences that have already signaled from the compute fence pool.
 ///
 /// Without this, every `submit_graph` that doesn't have a paired `wait_fence`
@@ -438,24 +463,26 @@ unsafe fn vulkan_finish_gpu_profile(
 /// fall over, the device is lost (`ERROR_DEVICE_LOST` on the next
 /// `queue_submit`), and the unbounded HashMap teardown corrupts the heap on
 /// shutdown.
-fn reap_signaled_fences(state: &mut super::types::VulkanState) {
-    let signaled: Vec<u64> = state
-        .compute_fence_pool
-        .iter()
-        .filter_map(|(token, (device_handle, fence, _))| {
-            let logical_device = state.devices.get(device_handle)?;
-            let signaled =
-                unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
-            if signaled {
-                Some(*token)
-            } else {
-                None
-            }
-        })
-        .collect();
+fn reap_signaled_fences(state: &super::types::VulkanState) {
+    let signaled: Vec<u64> = {
+        let pool = state.compute_fence_pool.lock().unwrap();
+        pool.iter()
+            .filter_map(|(token, (device_handle, fence, _))| {
+                let logical_device = state.devices.get(device_handle)?;
+                let signaled =
+                    unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
+                if signaled {
+                    Some(*token)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
 
+    let mut pool = state.compute_fence_pool.lock().unwrap();
     for token in signaled {
-        if let Some((device_handle, fence, cmd_buf)) = state.compute_fence_pool.remove(&token) {
+        if let Some((device_handle, fence, cmd_buf)) = pool.remove(&token) {
             if let Some(logical_device) = state.devices.get(&device_handle) {
                 unsafe {
                     if let Some(cb) = cmd_buf {
@@ -475,7 +502,7 @@ fn reap_signaled_fences(state: &mut super::types::VulkanState) {
 
 /// Create a compute pipeline.
 pub(super) fn create(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: &mut ComputePipelineHandle,
     device_handle: DeviceHandle,
@@ -541,7 +568,7 @@ pub(super) fn create(
 
 /// Destroy a compute pipeline.
 pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
     pipeline_handle: ComputePipelineHandle,
 ) {
@@ -566,7 +593,7 @@ pub(super) fn destroy(
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
 /// Submit a batch of GPU commands as a single compute submission.
 pub(super) fn submit(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
@@ -574,6 +601,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("vk.submit");
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
@@ -599,11 +628,11 @@ pub(super) fn submit(
 
     if has_write_buffer || has_write_texture {
         let _rz = tracy_zone!("vk.submit.belt_reclaim");
-        let completed_timeline = super::context::device_retired(state, device_handle);
+        let completed_timeline = ctx_completed_value(state, ctx, device_handle);
 
         if has_write_buffer {
-            for belt in state.staging_belts.values_mut() {
-                belt.reclaim(
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc.lock().unwrap().staging_belt.reclaim(
                     &state.compute_fence_pool,
                     &state.devices,
                     completed_timeline,
@@ -613,8 +642,12 @@ pub(super) fn submit(
         }
 
         if has_write_texture {
-            if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-                pool.reclaim(completed_timeline);
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -622,7 +655,7 @@ pub(super) fn submit(
     // Belt slices for DEVICE_LOCAL WriteBuffer copies (same iteration order as command loop).
     let mut belt_slices: Vec<(vk::Buffer, u64)> = Vec::new();
 
-    // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable buffer
+    // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable belt
     // access before we borrow state immutably for the command loop).
     if has_write_buffer {
         for command in commands {
@@ -632,11 +665,21 @@ pub(super) fn submit(
                 data,
             } = command
             {
-                let buf = state
-                    .buffers
-                    .get(buf_handle)
-                    .context("WriteBuffer: invalid buffer handle")?;
-                if let Some(base) = buf.host_mapped {
+                // Extract Copy fields from the buffer state so the borrow ends
+                // before we take a mutable borrow of state.contexts for the belt.
+                let (host_mapped, is_storage, buf_device, buf_memory) = {
+                    let buf = state
+                        .buffers
+                        .get(buf_handle)
+                        .context("WriteBuffer: invalid buffer handle")?;
+                    (
+                        buf.host_mapped,
+                        buf.is_storage,
+                        buf.device_handle,
+                        buf.memory,
+                    )
+                };
+                if let Some(base) = host_mapped {
                     let p = base as *mut u8;
                     unsafe {
                         std::ptr::copy_nonoverlapping(
@@ -645,29 +688,27 @@ pub(super) fn submit(
                             data.len(),
                         );
                     }
-                } else if !buf.is_storage {
-                    let dev = state
-                        .devices
-                        .get(&buf.device_handle)
-                        .context("WriteBuffer: device invalid")?;
-                    unsafe {
-                        let ptr = dev
-                            .map_memory2(buf.memory, *offset, data.len() as u64)
-                            .context("WriteBuffer: map failed")?;
-                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-                        dev.unmap_memory2(buf.memory)
-                            .context("WriteBuffer: unmap failed")?;
-                    }
-                } else {
-                    let buf_device = buf.device_handle;
+                } else if !is_storage {
                     let dev = state
                         .devices
                         .get(&buf_device)
                         .context("WriteBuffer: device invalid")?;
-                    let belt_entry = state.staging_belts.entry(buf_device).or_insert_with(|| {
-                        staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                    });
-                    let (stg_buf, stg_off) = belt_entry.write(&state.instance, dev, data)?;
+                    unsafe {
+                        let ptr = dev
+                            .map_memory2(buf_memory, *offset, data.len() as u64)
+                            .context("WriteBuffer: map failed")?;
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                        dev.unmap_memory2(buf_memory)
+                            .context("WriteBuffer: unmap failed")?;
+                    }
+                } else {
+                    let dev = state
+                        .devices
+                        .get(&buf_device)
+                        .context("WriteBuffer: device invalid")?;
+                    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                    let mut sc = sc_arc.lock().unwrap();
+                    let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
                     belt_slices.push((stg_buf, stg_off));
                 }
             }
@@ -679,40 +720,55 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?
-            .timeline_next;
+            .timeline_next
+            .fetch_add(1, Ordering::Relaxed);
         let timeline_sem = state
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_semaphore;
         let ld = state
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
         let queue = ld.queue;
+        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         let signal_info = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let submit_info2 =
             vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
-        let r = unsafe {
-            ld.device.queue_submit2(
-                queue,
-                std::slice::from_ref(&submit_info2),
-                vk::Fence::null(),
-            )
+        let r = {
+            let _queue_guard = queue_lock.lock().unwrap();
+            unsafe {
+                ld.device.queue_submit2(
+                    queue,
+                    std::slice::from_ref(&submit_info2),
+                    vk::Fence::null(),
+                )
+            }
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
         {
-            let retired = super::context::device_retired(state, device_handle);
-            if let Some(ld) = state.devices.get_mut(&device_handle) {
-                ld.timeline_next = signal_value.saturating_add(1);
-                ld.process_deletion_queue_up_to(retired);
+            let completed = ctx_completed_value(state, ctx, device_handle);
+            let ctx_batch: Vec<_> = state
+                .contexts
+                .get(&ctx)
+                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
+                .unwrap_or_default();
+            if let Some(ld) = state.devices.get(&device_handle) {
+                let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+                let mut ledger = ledger_arc.lock().unwrap();
+                for r in ctx_batch {
+                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                }
             }
         }
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.last_submitted_seq = signal_value;
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().last_submitted_seq = signal_value;
         }
         return Ok(signal_value);
     }
@@ -721,14 +777,6 @@ pub(super) fn submit(
     let buffers = &state.buffers;
 
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
-    if has_write_texture {
-        // Ensure a pool exists for this device before the upload loop so we can
-        // hold a mutable reference to just the pool while borrowing other fields.
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new);
-    }
     for command in commands {
         match command {
             GpuCommand::WriteTexture {
@@ -737,7 +785,9 @@ pub(super) fn submit(
                 width,
                 height,
             } => {
-                let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                let mut sc_guard = sc_arc.lock().unwrap();
+                let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
@@ -759,7 +809,9 @@ pub(super) fn submit(
                 height,
                 data,
             } => {
-                let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                let mut sc_guard = sc_arc.lock().unwrap();
+                let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
@@ -793,11 +845,9 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        let sc = state
-            .contexts
-            .get_mut(&ctx)
-            .context("Invalid context handle")?;
-        let cb = acquire_cmd_buffer(ld, sc)?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let mut sc = sc_arc.lock().unwrap();
+        let cb = acquire_cmd_buffer(ld, &mut sc)?;
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
@@ -1218,7 +1268,7 @@ pub(super) fn submit(
                     texture_upload_idx += 1;
                     super::texture::record_compute_texture_upload(
                         &state.devices,
-                        &mut state.textures,
+                        &state.textures,
                         cmd,
                         scratch,
                     )?;
@@ -1367,24 +1417,30 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
     let used_slots =
         collect_slot_keys_from_gpu_commands(commands, &state.compute_pipelines, &state.buffers);
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, signal_value, used_slots);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, signal_value, used_slots);
     }
 
     let timeline_sem = state
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_semaphore;
     let submit_device_core = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+    let queue_lock = std::sync::Arc::clone(&submit_device_core.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -1396,6 +1452,7 @@ pub(super) fn submit(
 
     let queue_submit_result = {
         let _tz = tracy_zone!("vk.queue_submit2");
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             submit_device_core.device.queue_submit2(
                 submit_device_core.queue,
@@ -1409,6 +1466,8 @@ pub(super) fn submit(
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .command_pool;
         unsafe {
             submit_device_core
@@ -1426,10 +1485,8 @@ pub(super) fn submit(
         ));
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_value.saturating_add(1);
-    }
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         sc.timeline_cmd_buffers
             .entry(signal_value)
@@ -1442,18 +1499,18 @@ pub(super) fn submit(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new)
-            .release(signal_value, entries);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(signal_value, entries);
+        }
     }
 
-    state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(signal_value);
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().staging_belt.finish(signal_value);
+    }
 
     debug_assert_eq!(
         belt_idx,
@@ -1471,6 +1528,8 @@ pub(super) fn submit(
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_semaphore;
             (ld.device.clone(), sem)
         };
@@ -1488,10 +1547,26 @@ pub(super) fn submit(
     }
 
     {
-        let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
-            ld.drain_ready_slot_reclamations(&state.contexts);
+        let completed = ctx_completed_value(state, ctx, device_handle);
+        let ctx_batch: Vec<_> = state
+            .contexts
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
+        if let Some(ld) = state.devices.get(&device_handle) {
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            {
+                let mut ledger = ledger_arc.lock().unwrap();
+                for r in ctx_batch {
+                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                }
+                let completed_values = super::types::snapshot_context_completed_values(
+                    &ld.device,
+                    &state.contexts,
+                    device_handle,
+                );
+                ledger.drain_ready_slot_reclamations(&completed_values);
+            }
         }
     }
 
@@ -1504,7 +1579,7 @@ pub(super) fn submit(
 /// everything into one `VkCommandBuffer` and performing a single
 /// `queue_submit2` with a timeline semaphore signal at the end.
 pub(super) fn submit_graph(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
 ) -> Result<TimelineValue> {
@@ -1523,7 +1598,7 @@ pub(super) fn submit_graph(
 /// - the CB is recorded with `ONE_TIME_SUBMIT`
 /// - after submit it is stored in `timeline_cmd_buffers` and freed once the GPU retires it
 fn submit_graph_impl(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
@@ -1532,6 +1607,8 @@ fn submit_graph_impl(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("vk.submit_graph");
     // --- Same housekeeping as `submit` ---
@@ -1558,32 +1635,31 @@ fn submit_graph_impl(
 
     if has_upload {
         let _rz = tracy_zone!("vk.submit_graph.belt_reclaim");
-        let completed_timeline = super::context::device_retired(state, device_handle);
+        let completed_timeline = ctx_completed_value(state, ctx, device_handle);
 
-        for belt in state.staging_belts.values_mut() {
-            belt.reclaim(
-                &state.compute_fence_pool,
-                &state.devices,
-                completed_timeline,
-            )?;
+        {
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc.lock().unwrap().staging_belt.reclaim(
+                    &state.compute_fence_pool,
+                    &state.devices,
+                    completed_timeline,
+                )?;
+            }
         }
         reap_signaled_fences(state);
 
         if has_write_texture_graph {
-            if let Some(pool) = state.texture_staging_pools.get_mut(&device_handle) {
-                pool.reclaim(completed_timeline);
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
 
-    if has_write_texture_graph {
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new);
-    }
-
-    // --- Pre-pass: stage CPU data for WriteBuffer in compute segments ---
+    // --- Pre-pass: stage CPU data for WriteBuffer/WriteTexture in compute segments ---
     let mut belt_slices: Vec<(vk::Buffer, u64)> = Vec::new();
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
 
@@ -1596,11 +1672,21 @@ fn submit_graph_impl(
                         offset,
                         data,
                     } => {
-                        let buf = state
-                            .buffers
-                            .get(buf_handle)
-                            .context("WriteBuffer: invalid buffer handle")?;
-                        if let Some(base) = buf.host_mapped {
+                        // Extract Copy fields so the state.buffers borrow ends
+                        // before we take &mut state.contexts for the belt.
+                        let (host_mapped, is_storage, buf_device, buf_memory) = {
+                            let buf = state
+                                .buffers
+                                .get(buf_handle)
+                                .context("WriteBuffer: invalid buffer handle")?;
+                            (
+                                buf.host_mapped,
+                                buf.is_storage,
+                                buf.device_handle,
+                                buf.memory,
+                            )
+                        };
+                        if let Some(base) = host_mapped {
                             let p = base as *mut u8;
                             unsafe {
                                 std::ptr::copy_nonoverlapping(
@@ -1609,35 +1695,33 @@ fn submit_graph_impl(
                                     data.len(),
                                 );
                             }
-                        } else if !buf.is_storage {
+                        } else if !is_storage {
                             let dev = state
                                 .devices
-                                .get(&buf.device_handle)
+                                .get(&buf_device)
                                 .context("WriteBuffer: device invalid")?;
                             unsafe {
                                 let ptr = dev
-                                    .map_memory2(buf.memory, *offset, data.len() as u64)
+                                    .map_memory2(buf_memory, *offset, data.len() as u64)
                                     .context("WriteBuffer: map failed")?;
                                 std::ptr::copy_nonoverlapping(
                                     data.as_ptr(),
                                     ptr as *mut u8,
                                     data.len(),
                                 );
-                                dev.unmap_memory2(buf.memory)
+                                dev.unmap_memory2(buf_memory)
                                     .context("WriteBuffer: unmap failed")?;
                             }
                         } else {
-                            let buf_device = buf.device_handle;
                             let dev = state
                                 .devices
                                 .get(&buf_device)
                                 .context("WriteBuffer: device invalid")?;
-                            let belt_entry =
-                                state.staging_belts.entry(buf_device).or_insert_with(|| {
-                                    staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE)
-                                });
+                            let sc_arc =
+                                state.contexts.get(&ctx).context("Invalid context handle")?;
+                            let mut sc = sc_arc.lock().unwrap();
                             let (stg_buf, stg_off) =
-                                belt_entry.write(&state.instance, dev, data)?;
+                                sc.staging_belt.write(&state.instance, dev, data)?;
                             belt_slices.push((stg_buf, stg_off));
                         }
                     }
@@ -1647,7 +1731,9 @@ fn submit_graph_impl(
                         width,
                         height,
                     } => {
-                        let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -1671,7 +1757,9 @@ fn submit_graph_impl(
                         height,
                         data,
                     } => {
-                        let pool = state.texture_staging_pools.get_mut(&device_handle).unwrap();
+                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -1699,11 +1787,9 @@ fn submit_graph_impl(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        let sc = state
-            .contexts
-            .get_mut(&ctx)
-            .context("Invalid context handle")?;
-        let cb = acquire_cmd_buffer(ld, sc)?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let mut sc = sc_arc.lock().unwrap();
+        let cb = acquire_cmd_buffer(ld, &mut sc)?;
         // Use ONE_TIME_SUBMIT for normal submits (driver hint for optimization).
         // When retaining, omit the flag so the CB stays executable after GPU completion
         // and can be resubmitted on the next frame.
@@ -2127,7 +2213,7 @@ fn submit_graph_impl(
                     texture_upload_idx += 1;
                     super::texture::record_compute_texture_upload(
                         &state.devices,
-                        &mut state.textures,
+                        &state.textures,
                         cmd,
                         scratch,
                     )?;
@@ -2339,7 +2425,7 @@ fn submit_graph_impl(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
     let used_slots = collect_slot_keys_from_graph_commands(
@@ -2348,19 +2434,25 @@ fn submit_graph_impl(
         &state.pipelines,
         &state.buffers,
     );
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, signal_value, used_slots.iter().copied());
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
     }
 
     let timeline_sem = state
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_semaphore;
     let submit_device = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+    let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -2372,6 +2464,7 @@ fn submit_graph_impl(
 
     let queue_submit_result = {
         let _tz = tracy_zone!("vk.queue_submit2");
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             submit_device.device.queue_submit2(
                 submit_device.queue,
@@ -2385,6 +2478,8 @@ fn submit_graph_impl(
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .command_pool;
         unsafe {
             submit_device.device.free_command_buffers(ctx_pool, &[cmd]);
@@ -2398,12 +2493,9 @@ fn submit_graph_impl(
         ));
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.timeline_next = signal_value.saturating_add(1);
-    }
-
     // Post-submit: store the CB for lifecycle management.
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         if let Some(key) = retain_key {
             sc.retained_compute_cb = Some(super::types::RetainedVkCb {
@@ -2424,18 +2516,18 @@ fn submit_graph_impl(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        state
-            .texture_staging_pools
-            .entry(device_handle)
-            .or_insert_with(staging::TextureStagingPool::new)
-            .release(signal_value, entries);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(signal_value, entries);
+        }
     }
 
-    state
-        .staging_belts
-        .entry(device_handle)
-        .or_insert_with(|| staging::StagingBelt::new(staging::DEFAULT_STAGING_CHUNK_SIZE))
-        .finish(signal_value);
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().staging_belt.finish(signal_value);
+    }
 
     if let Some(prof) = vk_gpu_profile {
         let (device_clone, timeline_sem) = {
@@ -2447,6 +2539,8 @@ fn submit_graph_impl(
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_semaphore;
             (ld.device.clone(), sem)
         };
@@ -2465,16 +2559,32 @@ fn submit_graph_impl(
 
     // Mark rendered targets
     for t in rendered_targets {
-        if let Some(rt) = state.render_targets.get_mut(&t) {
-            rt.has_rendered = true;
+        if let Some(rt) = state.render_targets.get(&t) {
+            rt.has_rendered.store(true, Ordering::Relaxed);
         }
     }
 
     {
-        let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
-            ld.drain_ready_slot_reclamations(&state.contexts);
+        let completed = ctx_completed_value(state, ctx, device_handle);
+        let ctx_batch: Vec<_> = state
+            .contexts
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
+        if let Some(ld) = state.devices.get(&device_handle) {
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            {
+                let mut ledger = ledger_arc.lock().unwrap();
+                for r in ctx_batch {
+                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                }
+                let completed_values = super::types::snapshot_context_completed_values(
+                    &ld.device,
+                    &state.contexts,
+                    device_handle,
+                );
+                ledger.drain_ready_slot_reclamations(&completed_values);
+            }
         }
     }
 
@@ -2490,7 +2600,7 @@ fn submit_graph_impl(
 /// If commands contain any WriteBuffer/WriteTexture nodes the call falls back to a normal
 /// (non-retained) submit via [`submit_graph`].
 pub(super) fn submit_graph_and_retain(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     key: u64,
@@ -2508,17 +2618,18 @@ pub(super) fn submit_graph_and_retain(
 /// Safety: The caller must have confirmed that the GPU has completed the previous
 /// submission of this CB (e.g. by `wait_until`) so it is in executable state.
 pub(super) fn try_resubmit_retained(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     key: u64,
 ) -> Result<Option<TimelineValue>> {
-    let device_handle = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .device;
+    let (device_handle, timeline_sem) = {
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc = sc_arc.lock().unwrap();
+        (sc.device, sc.timeline_semaphore)
+    };
     let retained = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc = sc_arc.lock().unwrap();
         match sc.retained_compute_cb.as_ref() {
             Some(r) if r.fingerprint == key => Some((r.command_buffer, r.used_slots.clone())),
             _ => None,
@@ -2534,18 +2645,13 @@ pub(super) fn try_resubmit_retained(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.timeline_next
+        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
-
-    let timeline_sem = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .timeline_semaphore;
     let submit_device = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?;
+    let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
@@ -2557,6 +2663,7 @@ pub(super) fn try_resubmit_retained(
 
     {
         let _tz = tracy_zone!("vk.resubmit_retained");
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             submit_device.device.queue_submit2(
                 submit_device.queue,
@@ -2567,20 +2674,38 @@ pub(super) fn try_resubmit_retained(
         .context("Failed to queue_submit2 retained dispatch CB")?;
     }
 
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.record_slot_usage(ctx, signal_value, used_slots);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        ld.ledger
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, signal_value, used_slots);
     }
 
     {
-        let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
-            ld.timeline_next = signal_value.saturating_add(1);
-            ld.process_deletion_queue_up_to(retired);
-            ld.drain_ready_slot_reclamations(&state.contexts);
+        let completed = ctx_completed_value(state, ctx, device_handle);
+        let ctx_batch: Vec<_> = state
+            .contexts
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
+            .unwrap_or_default();
+        if let Some(ld) = state.devices.get(&device_handle) {
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            {
+                let mut ledger = ledger_arc.lock().unwrap();
+                for r in ctx_batch {
+                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                }
+                let completed_values = super::types::snapshot_context_completed_values(
+                    &ld.device,
+                    &state.contexts,
+                    device_handle,
+                );
+                ledger.drain_ready_slot_reclamations(&completed_values);
+            }
         }
     }
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
-        sc.last_submitted_seq = signal_value;
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().last_submitted_seq = signal_value;
     }
 
     Ok(Some(signal_value))
@@ -2589,11 +2714,12 @@ pub(super) fn try_resubmit_retained(
 /// Evict the retained dispatch CB for `key` (or any retained CB if `key` doesn't match),
 /// returning the `VkCommandBuffer` to `free_cmd_buffers` for pool reuse.
 pub(super) fn evict_retained(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     _key: u64,
 ) {
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_compute_cb.take() {
             sc.free_cmd_buffers.push(old.command_buffer);
         }
@@ -2601,15 +2727,16 @@ pub(super) fn evict_retained(
 }
 
 pub(super) fn reap_timeline_cmd_buffers_up_to(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     max_completed_value: u64,
 ) {
     let (device, pool, keys): (DeviceHandle, vk::CommandPool, Vec<u64>) = {
-        let sc = match state.contexts.get(&ctx) {
+        let sc_arc = match state.contexts.get(&ctx) {
             Some(s) => s,
             None => return,
         };
+        let sc = sc_arc.lock().unwrap();
         if sc.timeline_cmd_buffers.is_empty() {
             return;
         }
@@ -2625,7 +2752,8 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
         return;
     }
     let cbs_to_free: Vec<vk::CommandBuffer> = {
-        let sc = state.contexts.get_mut(&ctx).expect("context");
+        let sc_arc = state.contexts.get(&ctx).expect("context");
+        let mut sc = sc_arc.lock().unwrap();
         keys.iter()
             .filter_map(|k| sc.timeline_cmd_buffers.remove(k))
             .flatten()

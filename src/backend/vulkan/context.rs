@@ -4,13 +4,15 @@ use super::types::{SubmissionContext, VulkanState};
 use super::{ContextHandle, DeviceHandle};
 use anyhow::{Context as _, Result};
 use ash::vk;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 /// Latest device-global seq retired on `device` (max over live context semaphores, floored).
 pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
     let floor = state
         .devices
         .get(&device)
-        .map(|d| d.retired_floor)
+        .map(|d| d.retired_floor.load(Ordering::Relaxed))
         .unwrap_or(0);
     let Some(ld) = state.devices.get(&device) else {
         return floor;
@@ -18,11 +20,16 @@ pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
     let max_ctx = state
         .contexts
         .values()
-        .filter(|c| c.device == device)
-        .map(|c| unsafe {
-            ld.device
-                .get_semaphore_counter_value(c.timeline_semaphore)
-                .unwrap_or(0)
+        .filter_map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device != device {
+                return None;
+            }
+            Some(unsafe {
+                ld.device
+                    .get_semaphore_counter_value(sc.timeline_semaphore)
+                    .unwrap_or(0)
+            })
         })
         .max()
         .unwrap_or(0);
@@ -71,7 +78,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
     state.next_context_id = state.next_context_id.saturating_add(1);
     state.contexts.insert(
         id,
-        SubmissionContext {
+        Arc::new(Mutex::new(SubmissionContext {
             device,
             timeline_semaphore,
             last_submitted_seq: 0,
@@ -82,15 +89,21 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             free_cmd_buffers: Vec::new(),
             retained_compute_cb: None,
             timeline_cmd_buffers: std::collections::HashMap::new(),
-        },
+            staging_belt: super::staging::StagingBelt::new(
+                super::staging::DEFAULT_STAGING_CHUNK_SIZE,
+            ),
+            texture_staging_pool: super::staging::TextureStagingPool::new(),
+            deletion_queue: super::types::DeletionQueue::new(),
+        })),
     );
     Ok(id)
 }
 
 pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
-    let Some(mut sc) = state.contexts.remove(&ctx) else {
+    let Some(sc_arc) = state.contexts.remove(&ctx) else {
         return;
     };
+    let mut sc = sc_arc.lock().unwrap();
     let device = sc.device;
     let completed = unsafe {
         state
@@ -103,24 +116,45 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
             })
             .unwrap_or(0)
     };
-    if let Some(ld) = state.devices.get_mut(&device) {
-        ld.retired_floor = ld.retired_floor.max(completed);
+    if let Some(ld) = state.devices.get(&device) {
+        ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
 
-    crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
+    let fence_thread = sc.fence_thread.take();
+    crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, fence_thread);
+
+    let ctx_batch = sc.deletion_queue.flush_all_drain();
+
+    {
+        let Some(ld) = state.devices.get(&device) else {
+            return;
+        };
+        unsafe {
+            let _ = ld.device.device_wait_idle();
+        }
+        if !ctx_batch.is_empty() {
+            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            let mut ledger = ledger_arc.lock().unwrap();
+            for r in ctx_batch {
+                super::types::destroy_pending_deletion(ld, &mut ledger, r);
+            }
+        }
+    }
 
     let Some(ld) = state.devices.get(&device) else {
         return;
     };
     unsafe {
-        let _ = ld.device.device_wait_idle();
+        sc.staging_belt.destroy_all(ld);
+        sc.texture_staging_pool.destroy_all(ld);
+        let command_pool = sc.command_pool;
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {
             for cb in cbs {
-                ld.device.free_command_buffers(sc.command_pool, &[cb]);
+                ld.device.free_command_buffers(command_pool, &[cb]);
             }
         }
         for cb in sc.free_cmd_buffers.drain(..) {
-            ld.device.free_command_buffers(sc.command_pool, &[cb]);
+            ld.device.free_command_buffers(command_pool, &[cb]);
         }
         if let Some(retained) = sc.retained_compute_cb.take() {
             ld.device
@@ -147,11 +181,14 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
 
     // Find a context on this device whose last_submitted_seq covers `seq`.
     // In the unified-context model there is typically exactly one such context.
-    let sem = state
-        .contexts
-        .values()
-        .find(|c| c.device == device && c.last_submitted_seq >= seq)
-        .map(|c| c.timeline_semaphore);
+    let sem = state.contexts.values().find_map(|sc_arc| {
+        let sc = sc_arc.lock().unwrap();
+        if sc.device == device && sc.last_submitted_seq >= seq {
+            Some(sc.timeline_semaphore)
+        } else {
+            None
+        }
+    });
 
     if let Some(sem) = sem {
         let wait = vk::SemaphoreWaitInfo::default()
@@ -172,12 +209,14 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
                 );
                 return;
             }
-            if let Some(sem) = state
-                .contexts
-                .values()
-                .find(|c| c.device == device && c.last_submitted_seq >= seq)
-                .map(|c| c.timeline_semaphore)
-            {
+            if let Some(sem) = state.contexts.values().find_map(|sc_arc| {
+                let sc = sc_arc.lock().unwrap();
+                if sc.device == device && sc.last_submitted_seq >= seq {
+                    Some(sc.timeline_semaphore)
+                } else {
+                    None
+                }
+            }) {
                 let wait = vk::SemaphoreWaitInfo::default()
                     .semaphores(std::slice::from_ref(&sem))
                     .values(std::slice::from_ref(&seq));
@@ -199,5 +238,7 @@ pub(super) fn context_device(state: &VulkanState, ctx: ContextHandle) -> DeviceH
         .contexts
         .get(&ctx)
         .expect("invalid context handle")
+        .lock()
+        .unwrap()
         .device
 }

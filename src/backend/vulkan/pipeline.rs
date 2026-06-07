@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 /// Shader modules plus raster state for Vulkan graphics pipeline creation.
 pub(super) struct VulkanGraphicsPipelineCreateBundle<'a> {
-    pub devices: &'a HashMap<DeviceHandle, types::LogicalDevice>,
+    pub devices: &'a HashMap<DeviceHandle, types::SharedLogicalDevice>,
     pub pipelines: &'a mut HashMap<PipelineHandle, PipelineState>,
     pub next_pipeline_handle: &'a mut PipelineHandle,
     pub device_handle: DeviceHandle,
@@ -392,7 +392,7 @@ pub(super) fn create_with_depth(
 
 /// Destroy a graphics pipeline and clean up GPU resources.
 pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     pipelines: &mut HashMap<PipelineHandle, PipelineState>,
     pipeline_handle: PipelineHandle,
 ) {

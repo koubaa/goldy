@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 /// Create a sampler with the given description.
 pub(super) fn create(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     samplers: &mut HashMap<SamplerHandle, SamplerState>,
     next_sampler_handle: &mut SamplerHandle,
     device_handle: DeviceHandle,
@@ -50,8 +50,13 @@ pub(super) fn create(
     *next_sampler_handle += 1;
 
     let bindless_index = {
-        let logical_device = devices.get_mut(&device_handle).unwrap();
-        let index = logical_device.resource_registry.register_sampler(handle);
+        let logical_device = devices.get(&device_handle).unwrap();
+        let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_sampler(handle);
 
         // Update the global descriptor set with this sampler
         if let Some(descriptor_set) = bindless_descriptor_set {
@@ -91,15 +96,19 @@ pub(super) fn create(
 
 /// Destroy a sampler, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     samplers: &mut HashMap<SamplerHandle, SamplerState>,
     sampler_handle: SamplerHandle,
 ) {
     if let Some(sampler) = samplers.remove(&sampler_handle) {
-        if let Some(logical_device) = devices.get_mut(&sampler.device_handle) {
+        if let Some(logical_device) = devices.get(&sampler.device_handle) {
             // Defer reclamation: sampler slot must not be reused until all
             // in-flight submissions that referenced it have retired.
-            logical_device.reclaim_sampler_slots(sampler_handle);
+            logical_device
+                .ledger
+                .lock()
+                .unwrap()
+                .reclaim_sampler_slots(sampler_handle);
 
             unsafe {
                 logical_device.device.device_wait_idle().ok();

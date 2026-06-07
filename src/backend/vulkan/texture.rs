@@ -7,13 +7,14 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::manual_find)]
 pub(super) fn create(
     instance: &ash::Instance,
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     next_texture_handle: &mut TextureHandle,
     device_handle: DeviceHandle,
@@ -143,8 +144,11 @@ pub(super) fn create(
     let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
 
     let bindless_index = {
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_texture(handle, is_storage_image);
 
@@ -198,9 +202,12 @@ pub(super) fn create(
 
     // For DirectInterpolated, also register a sampled-texture (SRV) slot.
     let sampled_bindless_index = if is_dual_access {
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         // Register in the sampled pool (is_storage_image = false).
         let index = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_texture(handle, false);
 
@@ -253,7 +260,7 @@ pub(super) fn create(
             staging_memory: None,
             bindless_index,
             sampled_bindless_index,
-            current_layout: initial_layout,
+            current_layout: std::sync::atomic::AtomicI32::new(initial_layout.as_raw()),
             transient_heap_suballoc: false,
         },
     );
@@ -267,7 +274,7 @@ pub(super) fn create(
 #[allow(clippy::manual_find)]
 pub(super) fn write(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     data: &[u8],
@@ -279,7 +286,7 @@ pub(super) fn write(
         .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
-    let old_layout = texture.current_layout;
+    let old_layout = texture.image_layout();
     let image = texture.image;
     let tex_width = texture.width;
     let tex_height = texture.height;
@@ -510,8 +517,8 @@ pub(super) fn write(
         logical_device.device.free_memory(staging_memory, None);
     }
 
-    if let Some(tex) = textures.get_mut(&texture_handle) {
-        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    if let Some(tex) = textures.get(&texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
     tracing::debug!(
@@ -527,7 +534,7 @@ pub(super) fn write(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_region(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     x: u32,
@@ -544,7 +551,7 @@ pub(super) fn write_region(
     let image = texture.image;
     let tex_width = texture.width;
     let tex_height = texture.height;
-    let old_layout = texture.current_layout;
+    let old_layout = texture.image_layout();
 
     if x + width > tex_width || y + height > tex_height {
         anyhow::bail!(
@@ -767,8 +774,8 @@ pub(super) fn write_region(
         logical_device.device.free_memory(staging_memory, None);
     }
 
-    if let Some(tex) = textures.get_mut(&texture_handle) {
-        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    if let Some(tex) = textures.get(&texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
     tracing::debug!(
@@ -787,7 +794,7 @@ pub(super) fn write_region(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_to_cpu(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     output: &mut [u8],
@@ -802,7 +809,7 @@ pub(super) fn read_to_cpu(
             texture.height,
             texture.format,
             texture.image,
-            texture.current_layout,
+            texture.image_layout(),
             texture.staging_buffer,
             texture.staging_memory,
         )
@@ -993,8 +1000,8 @@ pub(super) fn read_to_cpu(
             .context("Failed to unmap staging buffer")?;
     }
 
-    if let Some(tex) = textures.get_mut(&texture_handle) {
-        tex.current_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+    if let Some(tex) = textures.get(&texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
     }
 
     Ok(())
@@ -1002,14 +1009,18 @@ pub(super) fn read_to_cpu(
 
 /// Destroy a texture, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
 ) {
     if let Some(texture) = textures.remove(&texture_handle) {
-        if let Some(logical_device) = devices.get_mut(&texture.device_handle) {
+        if let Some(logical_device) = devices.get(&texture.device_handle) {
             if texture.transient_heap_suballoc {
-                logical_device.reclaim_texture_slots(texture_handle);
+                logical_device
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .reclaim_texture_slots(texture_handle);
                 unsafe {
                     logical_device.device.destroy_image_view(texture.view, None);
                     logical_device.device.destroy_image(texture.image, None);
@@ -1017,8 +1028,11 @@ pub(super) fn destroy(
                 return;
             }
 
-            let barrier = logical_device.timeline_next.saturating_sub(1);
-            logical_device.deletion_queue.queue(
+            let barrier = logical_device
+                .timeline_next
+                .load(Ordering::Relaxed)
+                .saturating_sub(1);
+            logical_device.deletion_queue.lock().unwrap().queue(
                 barrier,
                 types::PendingDeletion::Texture {
                     texture_handle,
@@ -1160,7 +1174,7 @@ pub(super) struct ComputeTextureScratch {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn allocate_compute_texture_staging(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &HashMap<TextureHandle, TextureState>,
     pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
@@ -1221,8 +1235,8 @@ pub(super) fn allocate_compute_texture_staging(
 
 /// Record buffer→image copy + layout transitions into an open command buffer.
 pub(super) fn record_compute_texture_upload(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    textures: &HashMap<TextureHandle, TextureState>,
     cmd: vk::CommandBuffer,
     scratch: &ComputeTextureScratch,
 ) -> Result<()> {
@@ -1236,7 +1250,7 @@ pub(super) fn record_compute_texture_upload(
             texture.height,
             texture.format,
             texture.image,
-            texture.current_layout,
+            texture.image_layout(),
         )
     };
 
@@ -1344,8 +1358,8 @@ pub(super) fn record_compute_texture_upload(
         .image_memory_barriers(std::slice::from_ref(&barrier_to_shader));
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2) };
 
-    if let Some(tex) = textures.get_mut(&scratch.texture_handle) {
-        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    if let Some(tex) = textures.get(&scratch.texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
     let _ = format;

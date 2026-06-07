@@ -6,8 +6,9 @@ use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
-use std::collections::HashMap;
 use std::ffi::CStr;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
 /// Enumerate available physical devices/adapters.
 pub(super) fn enumerate(physical_devices: &[PhysicalDeviceInfo]) -> Vec<AdapterInfo> {
@@ -467,7 +468,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     state.devices.insert(
         handle,
-        types::LogicalDevice {
+        Arc::new(types::LogicalDevice {
             device,
             physical_device: physical_device_handle,
             adapter_id,
@@ -478,22 +479,21 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             supports_sparse_buffer: supports_sparse,
             sparse_buffer_block_size,
             sparse_memory_type_index,
-            sparse_page_pool,
+            sparse_page_pool: Mutex::new(sparse_page_pool),
             map_memory2: map_memory2_loader,
             bindless_descriptor_pool,
             bindless_descriptor_set_layout,
             bindless_descriptor_set,
             bindless_pipeline_layout,
-            resource_registry: types::ResourceRegistry::new(),
-            deletion_queue: types::DeletionQueue::new(),
-            slot_last_seen: HashMap::new(),
-            pending_slot_reclamations: Vec::new(),
-            timeline_next: 1,
-            retired_floor: 0,
+            ledger: Arc::new(Mutex::new(types::DeviceLedger::new())),
+            deletion_queue: Mutex::new(types::DeletionQueue::new()),
+            timeline_next: Arc::new(AtomicU64::new(1)),
+            retired_floor: AtomicU64::new(0),
+            queue_lock: Arc::new(Mutex::new(())),
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
-        },
+        }),
     );
 
     tracing::info!(
@@ -519,7 +519,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         samplers = state.samplers.len(),
         "destroying Vulkan device"
     );
-    if let Some(mut logical_device) = state.devices.remove(&device_handle) {
+    if let Some(logical_device) = state.devices.remove(&device_handle) {
         unsafe {
             let wait_result = logical_device.device.device_wait_idle();
 
@@ -528,7 +528,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // always valid and implicitly reclaims all child objects, so skip
             // individual cleanup and jump straight to it.
             if matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
-                let pending = logical_device.deletion_queue.len();
+                let pending = logical_device.deletion_queue.lock().unwrap().len();
                 tracing::warn!(
                     %device_handle,
                     pending_deferred = pending,
@@ -558,22 +558,37 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     .retain(|_, s| s.device_handle != device_handle);
                 state
                     .compute_fence_pool
+                    .lock()
+                    .unwrap()
                     .retain(|_, (dh, _, _)| *dh != device_handle);
-                // Texture staging pool: device is being lost so just drop entries
-                // without Vulkan destroy calls (handles are invalid after device loss).
-                state.texture_staging_pools.remove(&device_handle);
+                // Per-context staging belt and texture pool: device is being lost so just
+                // drop entries without Vulkan destroy calls (handles are invalid after
+                // device loss). Drop the entire context entries for this device.
+                state
+                    .contexts
+                    .retain(|_, sc| sc.lock().unwrap().device != device_handle);
                 logical_device.device.destroy_device(None);
                 return;
             }
 
-            // Flush any pending deferred deletions
-            let pending = logical_device.deletion_queue.flush_all_drain();
-            for r in pending {
-                types::destroy_pending_deletion(&mut logical_device, r);
-            }
+            // Flush any pending deferred deletions via the new &self helper.
+            logical_device.flush_deletion_queue();
 
-            if let Some(mut belt) = state.staging_belts.remove(&device_handle) {
-                belt.destroy_all(&logical_device);
+            // Destroy per-context staging belt and texture pool for this device.
+            // Command pools/semaphores in the context are intentionally NOT destroyed
+            // here — they are child objects of the device and reclaimed by vkDestroyDevice.
+            let ctx_keys: Vec<_> = state
+                .contexts
+                .iter()
+                .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
+                .map(|(k, _)| *k)
+                .collect();
+            for key in ctx_keys {
+                if let Some(sc_arc) = state.contexts.remove(&key) {
+                    let mut sc = sc_arc.lock().unwrap();
+                    sc.staging_belt.destroy_all(&logical_device);
+                    sc.texture_staging_pool.destroy_all(&logical_device);
+                }
             }
 
             // Destroy buffers owned by this device
@@ -740,8 +755,8 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 super::surface::destroy_with_logical_device(
                     &state.entry,
                     &state.instance,
-                    &mut logical_device,
-                    &mut state.devices,
+                    &logical_device,
+                    &state.devices,
                     &mut state.surfaces,
                     &mut state.textures,
                     handle,
@@ -786,12 +801,15 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // fences in the pool; they must be destroyed before vkDestroyDevice.
             let fence_tokens: Vec<u64> = state
                 .compute_fence_pool
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|(_, (dh, _, _))| *dh == device_handle)
                 .map(|(tok, _)| *tok)
                 .collect();
+            let mut fence_pool = state.compute_fence_pool.lock().unwrap();
             for tok in fence_tokens {
-                if let Some((_, fence, cmd_buf)) = state.compute_fence_pool.remove(&tok) {
+                if let Some((_, fence, cmd_buf)) = fence_pool.remove(&tok) {
                     if let Some(cb) = cmd_buf {
                         logical_device
                             .device
@@ -801,11 +819,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 }
                 // Texture staging for fence pool tokens is now handled via the
                 // TextureStagingPool; it will be destroyed below.
-            }
-
-            // Destroy all pooled texture staging resources for this device.
-            if let Some(mut pool) = state.texture_staging_pools.remove(&device_handle) {
-                pool.destroy_all(&logical_device);
             }
 
             if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
@@ -829,7 +842,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // Free all VkDeviceMemory chunks held by the sparse page pool.
             // All sparse buffers have already been unbound and destroyed above,
             // so the memories are no longer bound to any VkBuffer sparse region.
-            if let Some(pool) = logical_device.sparse_page_pool.take() {
+            if let Some(pool) = logical_device.sparse_page_pool.lock().unwrap().take() {
                 pool.destroy(&logical_device.device);
             }
 
