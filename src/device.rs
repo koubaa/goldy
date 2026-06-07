@@ -587,8 +587,11 @@ impl Device {
     /// Install an [`AllocationPolicy`](crate::allocation_policy::AllocationPolicy) on the
     /// device's [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
     ///
-    /// Returns `true` when the policy was accepted.
-    pub fn set_allocation_policy(&self, policy: Arc<dyn crate::allocation_policy::AllocationPolicy>) -> bool {
+    /// Fails if a policy is already installed.
+    pub fn set_allocation_policy(
+        &self,
+        policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
+    ) -> anyhow::Result<()> {
         self.inner.vram_allocator.set_allocation_policy(policy)
     }
 

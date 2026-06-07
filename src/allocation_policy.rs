@@ -2,6 +2,12 @@
 //!
 //! Policies run on the allocator path *before* backend allocation (`before_alloc` may fail)
 //! and record commits/frees for accounting.
+//!
+//! # Test coverage
+//!
+//! Byte-level tracking and budget enforcement are tested here and in
+//! [`goldy::vram_allocator`](crate::vram_allocator) (see the `allocation_policy` test
+//! module).
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -75,6 +81,14 @@ pub trait AllocationPolicy: Send + Sync {
     fn budget(&self) -> Option<u64> {
         None
     }
+
+    /// `true` when this is the default no-op policy ([`NoPolicy`]).
+    ///
+    /// Used by [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator) to
+    /// reject a second [`Device::set_allocation_policy`](crate::device::Device::set_allocation_policy).
+    fn is_noop(&self) -> bool {
+        false
+    }
 }
 
 /// No-op policy installed by default. Zero overhead on the hot path.
@@ -88,6 +102,10 @@ impl AllocationPolicy for NoPolicy {
     fn after_alloc(&self, _: &AllocCommit) {}
 
     fn on_freed(&self, _: &AllocFreeEvent) {}
+
+    fn is_noop(&self) -> bool {
+        true
+    }
 }
 
 /// Byte-level tracking with an optional budget enforced before GPU allocation.
@@ -166,13 +184,46 @@ impl AllocationPolicy for BudgetPolicy {
 pub fn set_on_default(
     allocator: &Arc<dyn crate::vram_allocator::VramAllocator>,
     policy: Arc<dyn AllocationPolicy>,
-) -> bool {
+) -> Result<()> {
     allocator.set_allocation_policy(policy)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use super::*;
+
+    struct RecordingPolicy {
+        before: AtomicU32,
+        after: AtomicU32,
+        freed: AtomicU32,
+    }
+
+    impl RecordingPolicy {
+        fn new() -> Self {
+            Self {
+                before: AtomicU32::new(0),
+                after: AtomicU32::new(0),
+                freed: AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl AllocationPolicy for RecordingPolicy {
+        fn before_alloc(&self, _: &AllocRequest) -> Result<()> {
+            self.before.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn after_alloc(&self, _: &AllocCommit) {
+            self.after.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn on_freed(&self, _: &AllocFreeEvent) {
+            self.freed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[test]
     fn budget_policy_enforces_cap() {
@@ -205,5 +256,42 @@ mod tests {
             kind: ParcelType::Buffer,
         });
         assert_eq!(policy.allocated_bytes(), 0);
+    }
+
+    #[test]
+    fn device_alloc_path_invokes_policy_hooks_in_order() {
+        use std::sync::Arc;
+
+        use crate::backend::mock::MockBackend;
+        use crate::device::Device;
+        use crate::types::{BufferFlags, BufferKind, TextureFlags, TextureFormat, TextureKind};
+
+        let device = Device::from_backend(Box::new(MockBackend::new())).unwrap();
+        let policy = Arc::new(RecordingPolicy::new());
+        device.set_allocation_policy(policy.clone()).unwrap();
+
+        let buf = device
+            .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
+            .unwrap();
+        assert_eq!(policy.before.load(Ordering::Relaxed), 1);
+        assert_eq!(policy.after.load(Ordering::Relaxed), 1);
+        assert_eq!(policy.freed.load(Ordering::Relaxed), 0);
+
+        drop(buf);
+        assert_eq!(policy.freed.load(Ordering::Relaxed), 1);
+
+        let tex = device
+            .alloc_texture(
+                8,
+                8,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Interpolated,
+                TextureFlags::COPY_DST,
+            )
+            .unwrap();
+        assert_eq!(policy.before.load(Ordering::Relaxed), 2);
+        assert_eq!(policy.after.load(Ordering::Relaxed), 2);
+        drop(tex);
+        assert_eq!(policy.freed.load(Ordering::Relaxed), 2);
     }
 }

@@ -306,9 +306,12 @@ pub trait VramAllocator: Send + Sync {
 
     /// Install an [`AllocationPolicy`] when the implementation supports it.
     ///
-    /// Returns `true` when the policy was accepted (e.g. on [`DefaultVramAllocator`]).
-    fn set_allocation_policy(&self, _policy: Arc<dyn AllocationPolicy>) -> bool {
-        false
+    /// The default implementation always fails: most [`VramAllocator`] types (e.g.
+    /// [`TrackingVramAllocator`]) do not expose a policy slot. Only
+    /// [`DefaultVramAllocator`] overrides this; it rejects a second install when a
+    /// non-[`NoPolicy`](crate::allocation_policy::NoPolicy) is already set.
+    fn set_allocation_policy(&self, _policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        anyhow::bail!("this VramAllocator does not support allocation policies")
     }
 }
 
@@ -351,9 +354,14 @@ impl DefaultVramAllocator {
         }
     }
 
-    /// Replace the installed allocation policy.
-    pub fn set_policy(&self, policy: Arc<dyn AllocationPolicy>) {
-        *self.policy.write().unwrap() = policy;
+    /// Install a custom allocation policy. Fails if one is already installed.
+    pub fn set_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        let mut guard = self.policy.write().unwrap();
+        if !guard.is_noop() {
+            anyhow::bail!("allocation policy already installed");
+        }
+        *guard = policy;
+        Ok(())
     }
 
     fn with_policy_read<R>(&self, f: impl FnOnce(&dyn AllocationPolicy) -> R) -> R {
@@ -452,9 +460,8 @@ impl VramAllocator for DefaultVramAllocator {
         self.with_policy_read(|policy| policy.budget())
     }
 
-    fn set_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> bool {
-        self.set_policy(policy);
-        true
+    fn set_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        self.set_policy(policy)
     }
 
     fn name(&self) -> &'static str {
@@ -680,10 +687,70 @@ pub(crate) fn bytesize(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allocation_policy::BudgetPolicy;
     use crate::backend::mock::MockBackend;
 
     fn test_device() -> Device {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    /// Device with a byte budget policy installed once for the test body.
+    fn device_with_budget_policy(budget_bytes: u64) -> (Device, Arc<BudgetPolicy>) {
+        let device = test_device();
+        let policy = Arc::new(BudgetPolicy::with_budget(budget_bytes));
+        device
+            .set_allocation_policy(policy.clone())
+            .expect("install budget policy in test fixture");
+        (device, policy)
+    }
+
+    mod allocation_policy {
+        use super::*;
+
+        #[test]
+        fn budget_rejects_over_cap() {
+            let (device, policy) = device_with_budget_policy(8192);
+
+            let buf = device
+                .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+                .unwrap();
+            assert_eq!(policy.allocated_bytes(), 4096);
+
+            let err = device.alloc_buffer(8192, BufferKind::Scattered, None, BufferFlags::empty());
+            assert!(err.is_err(), "allocation policy budget should reject second alloc");
+            assert_eq!(policy.allocated_bytes(), 4096);
+
+            drop(buf);
+            assert_eq!(policy.allocated_bytes(), 0);
+        }
+
+        #[test]
+        fn second_install_fails_on_default_allocator() {
+            let device = test_device();
+            device
+                .set_allocation_policy(Arc::new(BudgetPolicy::new()))
+                .expect("first policy install");
+            let err = device.set_allocation_policy(Arc::new(BudgetPolicy::new()));
+            assert!(err.is_err(), "second policy install should fail");
+            assert!(
+                err.unwrap_err().to_string().contains("already installed"),
+                "expected duplicate-install error, got different failure"
+            );
+        }
+
+        #[test]
+        fn unsupported_on_tracking_allocator_alias() {
+            let (base, device, _tracking) = super::device_with_tracking();
+            let _keep_base = base;
+            let err = device.set_allocation_policy(Arc::new(BudgetPolicy::new()));
+            assert!(err.is_err(), "TrackingVramAllocator alias should not accept policies");
+            assert!(
+                err.unwrap_err()
+                    .to_string()
+                    .contains("does not support allocation policies"),
+                "expected trait-default unsupported error"
+            );
+        }
     }
 
     /// Returns `(base, device, tracking)`. Keep `base` alive for the test body so the
@@ -825,23 +892,6 @@ mod tests {
         assert!(tracking.allocated_bytes() >= 2048);
         drop(buf);
         assert_eq!(tracking.allocated_bytes(), 0);
-    }
-
-    #[test]
-    fn device_allocation_policy_budget_rejects_alloc() {
-        use std::sync::Arc;
-
-        use crate::allocation_policy::BudgetPolicy;
-
-        let device = test_device();
-        let policy = Arc::new(BudgetPolicy::with_budget(8192));
-        assert!(device.set_allocation_policy(policy));
-
-        let _buf = device
-            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
-            .unwrap();
-        let err = device.alloc_buffer(8192, BufferKind::Scattered, None, BufferFlags::empty());
-        assert!(err.is_err(), "allocation policy budget should reject second alloc");
     }
 
     #[test]
