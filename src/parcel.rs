@@ -215,7 +215,11 @@ impl Parcel {
     /// Last recorded referencing timeline, if any.
     pub fn last_referenced(&self) -> Option<TimelineValue> {
         let v = self.last_referenced.load(Ordering::Relaxed);
-        if v == 0 { None } else { Some(v) }
+        if v == 0 {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.

@@ -22,7 +22,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{atomic::AtomicU64, Arc};
 
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
