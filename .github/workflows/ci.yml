@@ -360,12 +360,12 @@ jobs:
 
       - name: Install maturin and dependencies
         run: |
-          pip install maturin numpy pillow pytest
+          python -m pip install maturin numpy pillow pytest
 
       - name: Install and test Python bindings
         working-directory: python
         run: |
-          pip install .
+          python -m pip install .
           pytest tests/ -v
 
       - name: Run Python examples
