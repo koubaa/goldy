@@ -7,9 +7,10 @@
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
-use crate::vram_allocator::{ParcelType, VramAllocator};
+use crate::vram_allocator::ParcelType;
+use crate::vram_observer::{ParcelDeed, VramFreeEvent};
 use anyhow::Result;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// A GPU texture that can be sampled in shaders.
 ///
@@ -26,13 +27,13 @@ pub struct Texture {
     access: TextureKind,
     flags: TextureFlags,
     owned: bool,
-    /// Allocator deed for accounting on drop; set only when allocated via [`Device::alloc_texture`].
-    deed: Option<Weak<dyn VramAllocator>>,
+    /// Accounting deed for observer + allocator notification on drop.
+    deed: Option<ParcelDeed>,
 }
 
 impl Texture {
-    /// Attach the allocator deed (called from [`Device::alloc_texture`] only).
-    pub(crate) fn set_deed(&mut self, deed: Weak<dyn VramAllocator>) {
+    /// Attach the accounting deed (called from [`Device::alloc_texture`] only).
+    pub(crate) fn set_deed(&mut self, deed: ParcelDeed) {
         self.deed = Some(deed);
     }
 
@@ -381,9 +382,13 @@ impl Drop for Texture {
         if let Ok(mut backend) = self.backend.lock() {
             backend.destroy_texture(self.handle);
         }
-        if let Some(allocator) = self.deed.as_ref().and_then(Weak::upgrade) {
+        if let Some(deed) = self.deed.as_ref() {
             let byte_size = self.byte_size() as u64;
-            allocator.notify_freed(byte_size, byte_size, ParcelType::Texture);
+            deed.notify_freed(&VramFreeEvent {
+                reserved: byte_size,
+                committed: byte_size,
+                kind: ParcelType::Texture,
+            });
         }
     }
 }

@@ -300,6 +300,7 @@ impl Adapter {
                 adapter: self.clone(),
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                resource_hub: crate::vram_observer::ResourceHub::new(),
                 owns_backend_device: true,
             }),
         })
@@ -425,6 +426,7 @@ pub(crate) struct DeviceInner {
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
+    resource_hub: Arc<crate::vram_observer::ResourceHub>,
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
@@ -579,9 +581,60 @@ impl Device {
                 adapter: self.inner.adapter.clone(),
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
+                resource_hub: Arc::clone(&self.inner.resource_hub),
                 owns_backend_device: false,
             }),
         }
+    }
+
+    /// Register an opt-in VRAM observer (telemetry, budget enforcement, etc.).
+    ///
+    /// When no observers are registered, [`Device::alloc_buffer`] / [`Device::alloc_texture`]
+    /// skip observer notification on the hot path.
+    pub fn add_vram_observer(
+        &self,
+        observer: Arc<dyn crate::vram_observer::VramObserver>,
+    ) -> crate::vram_observer::VramObserverId {
+        self.inner.resource_hub.add_observer(observer)
+    }
+
+    /// Remove a previously registered VRAM observer. Returns `false` if `id` was not found.
+    pub fn remove_vram_observer(&self, id: crate::vram_observer::VramObserverId) -> bool {
+        self.inner.resource_hub.remove_observer(id)
+    }
+
+    /// Returns `true` when at least one VRAM observer is registered.
+    pub fn has_vram_observers(&self) -> bool {
+        self.inner.resource_hub.has_observers()
+    }
+
+    fn parcel_deed(&self) -> crate::vram_observer::ParcelDeed {
+        crate::vram_observer::ParcelDeed {
+            hub: Arc::downgrade(&self.inner.resource_hub),
+            allocator: Arc::downgrade(&self.inner.vram_allocator),
+        }
+    }
+
+    fn finish_buffer_alloc(&self, mut buf: crate::buffer::Buffer) -> anyhow::Result<crate::buffer::Buffer> {
+        if self.inner.resource_hub.has_observers() {
+            let event = crate::vram_observer::VramAllocEvent::from_buffer(&buf);
+            if let Err(e) = self.inner.resource_hub.notify_allocated(&event) {
+                return Err(e);
+            }
+        }
+        buf.set_deed(self.parcel_deed());
+        Ok(buf)
+    }
+
+    fn finish_texture_alloc(&self, mut tex: crate::texture::Texture) -> anyhow::Result<crate::texture::Texture> {
+        if self.inner.resource_hub.has_observers() {
+            let event = crate::vram_observer::VramAllocEvent::from_texture(&tex);
+            if let Err(e) = self.inner.resource_hub.notify_allocated(&event) {
+                return Err(e);
+            }
+        }
+        tex.set_deed(self.parcel_deed());
+        Ok(tex)
     }
 
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
@@ -599,12 +652,11 @@ impl Device {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        let mut buf = self
+        let buf = self
             .inner
             .vram_allocator
             .alloc_buffer(self, size, access, element_stride, flags)?;
-        buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
-        Ok(buf)
+        self.finish_buffer_alloc(buf)
     }
 
     /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
@@ -617,12 +669,11 @@ impl Device {
         access: BufferKind,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        let mut buf =
+        let buf =
             self.inner
                 .vram_allocator
                 .alloc_buffer_with_capacity(self, initial_size, expected_max, access, flags)?;
-        buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
-        Ok(buf)
+        self.finish_buffer_alloc(buf)
     }
 
     /// Allocate a buffer initialized with typed data (element stride from `T`).
@@ -679,12 +730,11 @@ impl Device {
         access: TextureKind,
         flags: TextureFlags,
     ) -> anyhow::Result<crate::texture::Texture> {
-        let mut tex = self
+        let tex = self
             .inner
             .vram_allocator
             .alloc_texture(self, width, height, format, access, flags)?;
-        tex.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
-        Ok(tex)
+        self.finish_texture_alloc(tex)
     }
 
     // =======================================================================
@@ -1022,6 +1072,7 @@ impl Device {
                 adapter,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
+                resource_hub: crate::vram_observer::ResourceHub::new(),
                 owns_backend_device: true,
             }),
         })

@@ -3,9 +3,10 @@
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
-use crate::vram_allocator::{ParcelType, VramAllocator};
+use crate::vram_allocator::ParcelType;
+use crate::vram_observer::{ParcelDeed, VramFreeEvent};
 use anyhow::Result;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// Types allowed as elements in [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data) and [`BufferPool::alloc_with_data`].
 ///
@@ -45,8 +46,8 @@ pub struct Buffer {
     peak_committed_bytes: u64,
     /// Number of completed [`Self::resize_to`] / [`Self::resize_to_uninitialized`] calls.
     resize_count: u32,
-    /// Allocator deed for accounting on drop; set only when allocated via [`Device::alloc_buffer`].
-    deed: Option<Weak<dyn VramAllocator>>,
+    /// Accounting deed for observer + allocator notification on drop.
+    deed: Option<ParcelDeed>,
 }
 
 #[allow(dead_code)]
@@ -56,8 +57,8 @@ impl Buffer {
         self.handle
     }
 
-    /// Attach the allocator deed (called from [`Device::alloc_buffer`] paths only).
-    pub(crate) fn set_deed(&mut self, deed: Weak<dyn VramAllocator>) {
+    /// Attach the accounting deed (called from [`Device::alloc_buffer`] paths only).
+    pub(crate) fn set_deed(&mut self, deed: ParcelDeed) {
         self.deed = Some(deed);
     }
 
@@ -480,8 +481,12 @@ impl Drop for Buffer {
         tracing::trace!(size = self.size, access = ?self.access, "Destroying buffer");
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_buffer(self.handle);
-        if let Some(allocator) = self.deed.as_ref().and_then(Weak::upgrade) {
-            allocator.notify_freed(self.allocated_size, self.size, ParcelType::Buffer);
+        if let Some(deed) = self.deed.as_ref() {
+            deed.notify_freed(&VramFreeEvent {
+                reserved: self.allocated_size,
+                committed: self.size,
+                kind: ParcelType::Buffer,
+            });
         }
     }
 }

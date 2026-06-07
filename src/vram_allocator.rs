@@ -73,10 +73,10 @@ use crate::device::Device;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::*;
+use crate::vram_observer::VramByteTracker;
 use anyhow::Result;
 use std::any::Any;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 // -----------------------------------------------------------------------
@@ -384,10 +384,7 @@ impl VramAllocator for DefaultVramAllocator {
 /// ```
 pub struct TrackingVramAllocator {
     inner: Arc<dyn VramAllocator>,
-    /// Signed to handle potential over-decrement from mismatched free notifications
-    /// without panicking. Steady-state value is non-negative.
-    live_bytes: AtomicI64,
-    budget_bytes: Option<u64>,
+    tracker: Arc<VramByteTracker>,
 }
 
 impl TrackingVramAllocator {
@@ -395,8 +392,7 @@ impl TrackingVramAllocator {
     pub fn new(inner: Arc<dyn VramAllocator>) -> Self {
         Self {
             inner,
-            live_bytes: AtomicI64::new(0),
-            budget_bytes: None,
+            tracker: Arc::new(VramByteTracker::new()),
         }
     }
 
@@ -404,24 +400,18 @@ impl TrackingVramAllocator {
     pub fn with_budget(inner: Arc<dyn VramAllocator>, budget_bytes: u64) -> Self {
         Self {
             inner,
-            live_bytes: AtomicI64::new(0),
-            budget_bytes: Some(budget_bytes),
+            tracker: Arc::new(VramByteTracker::with_budget(budget_bytes)),
         }
     }
 
-    fn check_budget(&self, additional: u64) -> Result<()> {
-        if let Some(cap) = self.budget_bytes {
-            let current = self.live_bytes.load(Ordering::Relaxed) as u64;
-            if current.saturating_add(additional) > cap {
-                anyhow::bail!(
-                    "VramAllocator budget exceeded: {current} + {additional} > {cap} \
-                     (allocator={}, budget={})",
-                    self.inner.name(),
-                    bytesize(cap),
-                );
-            }
-        }
-        Ok(())
+    /// Shared byte tracker used for accounting (also implements [`VramObserver`](crate::vram_observer::VramObserver)).
+    pub fn tracker(&self) -> &VramByteTracker {
+        &self.tracker
+    }
+
+    /// Net bytes allocated through this wrapper (allocations minus frees).
+    pub fn allocated_bytes(&self) -> u64 {
+        self.tracker.allocated_bytes()
     }
 }
 
@@ -434,10 +424,9 @@ impl VramAllocator for TrackingVramAllocator {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> Result<Buffer> {
-        self.check_budget(size)?;
+        self.tracker.check_budget_for_alloc(size)?;
         let buf = self.inner.alloc_buffer(device, size, access, element_stride, flags)?;
-        self.live_bytes
-            .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
+        self.tracker.add_allocated(buf.allocated_size());
         Ok(buf)
     }
 
@@ -449,12 +438,11 @@ impl VramAllocator for TrackingVramAllocator {
         access: BufferKind,
         flags: BufferFlags,
     ) -> Result<Buffer> {
-        self.check_budget(expected_max.max(initial_size))?;
+        self.tracker.check_budget_for_alloc(expected_max.max(initial_size))?;
         let buf = self
             .inner
             .alloc_buffer_with_capacity(device, initial_size, expected_max, access, flags)?;
-        self.live_bytes
-            .fetch_add(buf.allocated_size() as i64, Ordering::Relaxed);
+        self.tracker.add_allocated(buf.allocated_size());
         Ok(buf)
     }
 
@@ -468,23 +456,23 @@ impl VramAllocator for TrackingVramAllocator {
         flags: TextureFlags,
     ) -> Result<Texture> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
-        self.check_budget(estimated)?;
+        self.tracker.check_budget_for_alloc(estimated)?;
         let tex = self.inner.alloc_texture(device, width, height, format, access, flags)?;
-        self.live_bytes.fetch_add(tex.byte_size() as i64, Ordering::Relaxed);
+        self.tracker.add_allocated(tex.byte_size() as u64);
         Ok(tex)
     }
 
     fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
-        self.live_bytes.fetch_sub(reserved as i64, Ordering::Relaxed);
+        self.tracker.sub_freed(reserved);
         self.inner.notify_freed(reserved, committed, kind);
     }
 
     fn allocated_bytes(&self) -> u64 {
-        self.live_bytes.load(Ordering::Relaxed).max(0) as u64
+        self.tracker.allocated_bytes()
     }
 
     fn budget(&self) -> Option<u64> {
-        self.budget_bytes
+        self.tracker.budget()
     }
 
     fn name(&self) -> &'static str {
@@ -516,7 +504,7 @@ impl VramAllocator for TrackingVramAllocator {
 // Helpers
 // -----------------------------------------------------------------------
 
-fn bytesize(bytes: u64) -> String {
+pub(crate) fn bytesize(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024 * 1024 {
@@ -680,6 +668,47 @@ mod tests {
         assert!(tracking.allocated_bytes() >= 2048);
         drop(buf);
         assert_eq!(tracking.allocated_bytes(), 0);
+    }
+
+    #[test]
+    fn device_vram_observer_tracks_device_alloc_path() {
+        use std::sync::Arc;
+
+        use crate::vram_observer::VramByteTracker;
+
+        let device = test_device();
+        assert!(!device.has_vram_observers());
+
+        let tracker = Arc::new(VramByteTracker::new());
+        let id = device.add_vram_observer(tracker.clone());
+        assert!(device.has_vram_observers());
+
+        let buf = device
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+            .unwrap();
+        assert!(tracker.allocated_bytes() >= 4096);
+        drop(buf);
+        assert_eq!(tracker.allocated_bytes(), 0);
+
+        assert!(device.remove_vram_observer(id));
+        assert!(!device.has_vram_observers());
+    }
+
+    #[test]
+    fn device_vram_observer_budget_rejects_alloc() {
+        use std::sync::Arc;
+
+        use crate::vram_observer::VramByteTracker;
+
+        let device = test_device();
+        let tracker = Arc::new(VramByteTracker::with_budget(8192));
+        device.add_vram_observer(tracker);
+
+        let _buf = device
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+            .unwrap();
+        let err = device.alloc_buffer(8192, BufferKind::Scattered, None, BufferFlags::empty());
+        assert!(err.is_err(), "observer budget should reject second alloc");
     }
 
     #[test]
