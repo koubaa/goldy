@@ -310,7 +310,7 @@ pub trait VramAllocator: Send + Sync {
     /// The default implementation always fails: custom [`VramAllocator`] wrappers do
     /// not expose a policy slot. Only [`DefaultVramAllocator`] overrides this; it
     /// rejects a second install when a
-    /// non-[`NoPolicy`](crate::allocation_policy::NoPolicy) is already set.
+    /// non-[`NoPolicy`] is already set.
     fn set_allocation_policy(&self, _policy: Arc<dyn AllocationPolicy>) -> Result<()> {
         anyhow::bail!("this VramAllocator does not support allocation policies")
     }
