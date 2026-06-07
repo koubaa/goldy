@@ -16,7 +16,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  LAVAPIPE_CI_IMAGE: ghcr.io/koubaa/goldy/lavapipe-ci:latest
+  # Lavapipe CI image (ghcr.io/koubaa/goldy/lavapipe-ci:latest) is inlined in
+  # container.image below — workflow env cannot be referenced there.
 
 jobs:
   # Fast checks that don't need GPU
@@ -86,7 +87,7 @@ jobs:
     name: Vulkan Tests (lavapipe)
     runs-on: ubuntu-latest
     container:
-      image: ${{ env.LAVAPIPE_CI_IMAGE }}
+      image: ghcr.io/koubaa/goldy/lavapipe-ci:latest
     steps:
       - uses: actions/checkout@v6
 
@@ -307,7 +308,7 @@ jobs:
     name: Python Bindings (Linux)
     runs-on: ubuntu-latest
     container:
-      image: ${{ env.LAVAPIPE_CI_IMAGE }}
+      image: ghcr.io/koubaa/goldy/lavapipe-ci:latest
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6
@@ -462,7 +463,7 @@ jobs:
     name: C++ Bindings (Linux)
     runs-on: ubuntu-latest
     container:
-      image: ${{ env.LAVAPIPE_CI_IMAGE }}
+      image: ghcr.io/koubaa/goldy/lavapipe-ci:latest
     needs: [check, test-mock]
     steps:
       - uses: actions/checkout@v6
