@@ -2474,7 +2474,7 @@ fn register_surface_texture(
             staging_memory: None,
             bindless_index: Some(bindless_index),
             sampled_bindless_index: None,
-            current_layout: vk::ImageLayout::GENERAL,
+            current_layout: std::sync::atomic::AtomicI32::new(vk::ImageLayout::GENERAL.as_raw()),
             transient_heap_suballoc: false,
         },
     );

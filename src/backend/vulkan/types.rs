@@ -18,7 +18,7 @@ use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Maximum number of descriptors per resource type in the global bindless set
@@ -862,7 +862,7 @@ pub(crate) struct RenderTargetState {
     /// Command buffer for rendering
     pub command_buffer: vk::CommandBuffer,
     /// Track if we've rendered (for readback validation)
-    pub has_rendered: bool,
+    pub has_rendered: AtomicBool,
 }
 
 /// GPU texture state.
@@ -884,9 +884,20 @@ pub(crate) struct TextureState {
     /// For `TextureKind::DirectInterpolated` textures, the sampled-texture (SRV) slot.
     pub sampled_bindless_index: Option<u32>,
     /// Current image layout (for subregion writes / transitions)
-    pub current_layout: vk::ImageLayout,
+    pub current_layout: AtomicI32,
     /// Sub-allocated from a transient heap; `memory` is shared with the heap.
     pub transient_heap_suballoc: bool,
+}
+
+impl TextureState {
+    pub fn image_layout(&self) -> vk::ImageLayout {
+        vk::ImageLayout::from_raw(self.current_layout.load(Ordering::Relaxed))
+    }
+
+    pub fn set_image_layout(&self, layout: vk::ImageLayout) {
+        self.current_layout
+            .store(layout.as_raw(), Ordering::Relaxed);
+    }
 }
 
 /// GPU sampler state.
@@ -1310,6 +1321,12 @@ pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
 /// submitting context rather than all of `VulkanState` (Phase 5).
 pub(crate) type SharedSubmissionContext = Arc<Mutex<SubmissionContext>>;
 
+/// Per-submit fence and optional command-buffer kept alive until completion.
+pub(super) type ComputeFencePoolEntry = (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>);
+
+/// Per-backend non-blocking compute fence pool keyed by submission token.
+pub(super) type ComputeFencePool = Mutex<HashMap<u64, ComputeFencePoolEntry>>;
+
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
 pub(super) struct VulkanState {
@@ -1340,7 +1357,7 @@ pub(super) struct VulkanState {
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
-    pub compute_fence_pool: HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
+    pub compute_fence_pool: ComputeFencePool,
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::atomic::AtomicBool,

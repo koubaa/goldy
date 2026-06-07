@@ -141,7 +141,7 @@ pub(super) fn create(
             staging_buffer: None,
             staging_memory: None,
             command_buffer: command_buffers[0],
-            has_rendered: false,
+            has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
 
@@ -333,7 +333,7 @@ pub(super) fn create_with_depth(
             staging_buffer: None,
             staging_memory: None,
             command_buffer: command_buffers[0],
-            has_rendered: false,
+            has_rendered: std::sync::atomic::AtomicBool::new(false),
         },
     );
 
@@ -646,8 +646,9 @@ where
     unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
         .context("Failed to wait for queue")?;
 
-    if let Some(rt) = render_targets.get_mut(&target) {
-        rt.has_rendered = true;
+    if let Some(rt) = render_targets.get(&target) {
+        rt.has_rendered
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     Ok(())
@@ -668,7 +669,10 @@ pub(super) fn read_to_cpu(
             .get(&target)
             .context("Invalid render target handle")?;
 
-        if !render_target.has_rendered {
+        if !render_target
+            .has_rendered
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             anyhow::bail!("Cannot read from render target that hasn't been rendered to");
         }
 

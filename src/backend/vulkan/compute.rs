@@ -368,7 +368,7 @@ fn vulkan_decode_duration_ns(start: u64, end: u64, valid_bits: u32, period_ns: f
 }
 
 unsafe fn vulkan_finish_gpu_profile(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     device: &ash::Device,
     timeline_sem: vk::Semaphore,
@@ -463,24 +463,26 @@ pub(super) fn ctx_completed_value(
 /// fall over, the device is lost (`ERROR_DEVICE_LOST` on the next
 /// `queue_submit`), and the unbounded HashMap teardown corrupts the heap on
 /// shutdown.
-fn reap_signaled_fences(state: &mut super::types::VulkanState) {
-    let signaled: Vec<u64> = state
-        .compute_fence_pool
-        .iter()
-        .filter_map(|(token, (device_handle, fence, _))| {
-            let logical_device = state.devices.get(device_handle)?;
-            let signaled =
-                unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
-            if signaled {
-                Some(*token)
-            } else {
-                None
-            }
-        })
-        .collect();
+fn reap_signaled_fences(state: &super::types::VulkanState) {
+    let signaled: Vec<u64> = {
+        let pool = state.compute_fence_pool.lock().unwrap();
+        pool.iter()
+            .filter_map(|(token, (device_handle, fence, _))| {
+                let logical_device = state.devices.get(device_handle)?;
+                let signaled =
+                    unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
+                if signaled {
+                    Some(*token)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
 
+    let mut pool = state.compute_fence_pool.lock().unwrap();
     for token in signaled {
-        if let Some((device_handle, fence, cmd_buf)) = state.compute_fence_pool.remove(&token) {
+        if let Some((device_handle, fence, cmd_buf)) = pool.remove(&token) {
             if let Some(logical_device) = state.devices.get(&device_handle) {
                 unsafe {
                     if let Some(cb) = cmd_buf {
@@ -591,7 +593,7 @@ pub(super) fn destroy(
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
 /// Submit a batch of GPU commands as a single compute submission.
 pub(super) fn submit(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
@@ -1266,7 +1268,7 @@ pub(super) fn submit(
                     texture_upload_idx += 1;
                     super::texture::record_compute_texture_upload(
                         &state.devices,
-                        &mut state.textures,
+                        &state.textures,
                         cmd,
                         scratch,
                     )?;
@@ -1577,7 +1579,7 @@ pub(super) fn submit(
 /// everything into one `VkCommandBuffer` and performing a single
 /// `queue_submit2` with a timeline semaphore signal at the end.
 pub(super) fn submit_graph(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
 ) -> Result<TimelineValue> {
@@ -1596,7 +1598,7 @@ pub(super) fn submit_graph(
 /// - the CB is recorded with `ONE_TIME_SUBMIT`
 /// - after submit it is stored in `timeline_cmd_buffers` and freed once the GPU retires it
 fn submit_graph_impl(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
@@ -2211,7 +2213,7 @@ fn submit_graph_impl(
                     texture_upload_idx += 1;
                     super::texture::record_compute_texture_upload(
                         &state.devices,
-                        &mut state.textures,
+                        &state.textures,
                         cmd,
                         scratch,
                     )?;
@@ -2557,8 +2559,8 @@ fn submit_graph_impl(
 
     // Mark rendered targets
     for t in rendered_targets {
-        if let Some(rt) = state.render_targets.get_mut(&t) {
-            rt.has_rendered = true;
+        if let Some(rt) = state.render_targets.get(&t) {
+            rt.has_rendered.store(true, Ordering::Relaxed);
         }
     }
 
@@ -2598,7 +2600,7 @@ fn submit_graph_impl(
 /// If commands contain any WriteBuffer/WriteTexture nodes the call falls back to a normal
 /// (non-retained) submit via [`submit_graph`].
 pub(super) fn submit_graph_and_retain(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     key: u64,
@@ -2616,7 +2618,7 @@ pub(super) fn submit_graph_and_retain(
 /// Safety: The caller must have confirmed that the GPU has completed the previous
 /// submission of this CB (e.g. by `wait_until`) so it is in executable state.
 pub(super) fn try_resubmit_retained(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     key: u64,
 ) -> Result<Option<TimelineValue>> {
@@ -2712,7 +2714,7 @@ pub(super) fn try_resubmit_retained(
 /// Evict the retained dispatch CB for `key` (or any retained CB if `key` doesn't match),
 /// returning the `VkCommandBuffer` to `free_cmd_buffers` for pool reuse.
 pub(super) fn evict_retained(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     _key: u64,
 ) {
@@ -2725,7 +2727,7 @@ pub(super) fn evict_retained(
 }
 
 pub(super) fn reap_timeline_cmd_buffers_up_to(
-    state: &mut super::types::VulkanState,
+    state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     max_completed_value: u64,
 ) {

@@ -558,6 +558,8 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     .retain(|_, s| s.device_handle != device_handle);
                 state
                     .compute_fence_pool
+                    .lock()
+                    .unwrap()
                     .retain(|_, (dh, _, _)| *dh != device_handle);
                 // Per-context staging belt and texture pool: device is being lost so just
                 // drop entries without Vulkan destroy calls (handles are invalid after
@@ -799,12 +801,15 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // fences in the pool; they must be destroyed before vkDestroyDevice.
             let fence_tokens: Vec<u64> = state
                 .compute_fence_pool
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|(_, (dh, _, _))| *dh == device_handle)
                 .map(|(tok, _)| *tok)
                 .collect();
+            let mut fence_pool = state.compute_fence_pool.lock().unwrap();
             for tok in fence_tokens {
-                if let Some((_, fence, cmd_buf)) = state.compute_fence_pool.remove(&tok) {
+                if let Some((_, fence, cmd_buf)) = fence_pool.remove(&tok) {
                     if let Some(cb) = cmd_buf {
                         logical_device
                             .device

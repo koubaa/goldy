@@ -260,7 +260,7 @@ pub(super) fn create(
             staging_memory: None,
             bindless_index,
             sampled_bindless_index,
-            current_layout: initial_layout,
+            current_layout: std::sync::atomic::AtomicI32::new(initial_layout.as_raw()),
             transient_heap_suballoc: false,
         },
     );
@@ -286,7 +286,7 @@ pub(super) fn write(
         .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
-    let old_layout = texture.current_layout;
+    let old_layout = texture.image_layout();
     let image = texture.image;
     let tex_width = texture.width;
     let tex_height = texture.height;
@@ -517,8 +517,8 @@ pub(super) fn write(
         logical_device.device.free_memory(staging_memory, None);
     }
 
-    if let Some(tex) = textures.get_mut(&texture_handle) {
-        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    if let Some(tex) = textures.get(&texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
     tracing::debug!(
@@ -551,7 +551,7 @@ pub(super) fn write_region(
     let image = texture.image;
     let tex_width = texture.width;
     let tex_height = texture.height;
-    let old_layout = texture.current_layout;
+    let old_layout = texture.image_layout();
 
     if x + width > tex_width || y + height > tex_height {
         anyhow::bail!(
@@ -774,8 +774,8 @@ pub(super) fn write_region(
         logical_device.device.free_memory(staging_memory, None);
     }
 
-    if let Some(tex) = textures.get_mut(&texture_handle) {
-        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    if let Some(tex) = textures.get(&texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
     tracing::debug!(
@@ -809,7 +809,7 @@ pub(super) fn read_to_cpu(
             texture.height,
             texture.format,
             texture.image,
-            texture.current_layout,
+            texture.image_layout(),
             texture.staging_buffer,
             texture.staging_memory,
         )
@@ -1000,8 +1000,8 @@ pub(super) fn read_to_cpu(
             .context("Failed to unmap staging buffer")?;
     }
 
-    if let Some(tex) = textures.get_mut(&texture_handle) {
-        tex.current_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+    if let Some(tex) = textures.get(&texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
     }
 
     Ok(())
@@ -1236,7 +1236,7 @@ pub(super) fn allocate_compute_texture_staging(
 /// Record buffer→image copy + layout transitions into an open command buffer.
 pub(super) fn record_compute_texture_upload(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &HashMap<TextureHandle, TextureState>,
     cmd: vk::CommandBuffer,
     scratch: &ComputeTextureScratch,
 ) -> Result<()> {
@@ -1250,7 +1250,7 @@ pub(super) fn record_compute_texture_upload(
             texture.height,
             texture.format,
             texture.image,
-            texture.current_layout,
+            texture.image_layout(),
         )
     };
 
@@ -1358,8 +1358,8 @@ pub(super) fn record_compute_texture_upload(
         .image_memory_barriers(std::slice::from_ref(&barrier_to_shader));
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2) };
 
-    if let Some(tex) = textures.get_mut(&scratch.texture_handle) {
-        tex.current_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+    if let Some(tex) = textures.get(&scratch.texture_handle) {
+        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
     let _ = format;

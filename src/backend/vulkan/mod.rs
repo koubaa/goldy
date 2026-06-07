@@ -99,7 +99,7 @@ impl Drop for VulkanBackend {
         tracing::info!(
             devices = self.state.devices.len(),
             surfaces = self.state.surfaces.len(),
-            compute_fences = self.state.compute_fence_pool.len(),
+            compute_fences = self.state.compute_fence_pool.lock().unwrap().len(),
             "VulkanBackend drop"
         );
 
@@ -281,7 +281,7 @@ impl VulkanBackend {
             samplers: HashMap::new(),
             next_sampler_handle: 1,
             slang_compiler,
-            compute_fence_pool: HashMap::new(),
+            compute_fence_pool: Mutex::new(HashMap::new()),
             device_lost: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -1200,7 +1200,7 @@ impl GpuBackend for VulkanBackend {
         let retired = context::device_retired(&self.state, device_handle);
         {
             let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
-            compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
+            compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
         }
         if let Some(ld) = self.state.devices.get(&device_handle) {
             let drain_to = value.min(retired);
@@ -1249,7 +1249,7 @@ impl GpuBackend for VulkanBackend {
         match unsafe { dev.wait_semaphores(&wait, timeout_ns) } {
             Ok(()) => {
                 let retired = context::device_retired(&self.state, device_handle);
-                compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
+                compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
                     let drained = ld
                         .deletion_queue
@@ -1287,7 +1287,7 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         commands: &[GpuCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&mut self.state, ctx, commands)
+        compute::submit(&self.state, ctx, commands)
     }
 
     fn submit_graph(
@@ -1295,7 +1295,7 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, ctx, commands)
+        compute::submit_graph(&self.state, ctx, commands)
     }
 
     fn submit_graph_and_retain(
@@ -1304,7 +1304,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[GraphCommand],
         key: u64,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph_and_retain(&mut self.state, ctx, commands, key)
+        compute::submit_graph_and_retain(&self.state, ctx, commands, key)
     }
 
     fn try_resubmit_retained(
@@ -1312,11 +1312,11 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         key: u64,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        compute::try_resubmit_retained(&mut self.state, ctx, key)
+        compute::try_resubmit_retained(&self.state, ctx, key)
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
-        compute::evict_retained(&mut self.state, ctx, key);
+        compute::evict_retained(&self.state, ctx, key);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {

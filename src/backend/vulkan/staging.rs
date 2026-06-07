@@ -9,7 +9,7 @@
 
 use super::super::shared::{BeltChunk as BeltChunkTrait, StagingBeltCore};
 use super::super::DeviceHandle;
-use super::types::LogicalDevice;
+use super::types::{ComputeFencePool, LogicalDevice};
 use super::utils::find_memory_type;
 use anyhow::{Context, Result};
 use ash::{vk, Instance};
@@ -70,14 +70,15 @@ impl StagingBelt {
     /// once the corresponding `VkFence` signals (if any remain in the pool).
     pub fn reclaim(
         &mut self,
-        compute_fence_pool: &HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
+        compute_fence_pool: &ComputeFencePool,
         devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
         completed_timeline: u64,
     ) -> Result<()> {
+        let fence_pool = compute_fence_pool.lock().unwrap();
         let mut i = 0;
         while i < self.core.in_flight.len() {
             let (token, _) = &self.core.in_flight[i];
-            let done = if let Some((device_handle, fence, _)) = compute_fence_pool.get(token) {
+            let done = if let Some((device_handle, fence, _)) = fence_pool.get(token) {
                 let logical_device = devices
                     .get(device_handle)
                     .context("StagingBelt::reclaim: device missing")?;
