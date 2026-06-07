@@ -94,6 +94,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Slang download deps
+        run: |
+          if ! command -v unzip >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends unzip
+            rm -rf /var/lib/apt/lists/*
+          fi
+
       - name: Download Slang compiler
         run: |
           cd slang
@@ -321,6 +329,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install Slang download deps
+        run: |
+          if ! command -v unzip >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends unzip
+            rm -rf /var/lib/apt/lists/*
+          fi
+
       - name: Download and bundle Slang
         run: |
           cd slang && chmod +x download.sh && ./download.sh
@@ -470,6 +486,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Slang download deps
+        run: |
+          if ! command -v unzip >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends unzip
+            rm -rf /var/lib/apt/lists/*
+          fi
 
       - name: Download Slang
         run: cd slang && chmod +x download.sh && ./download.sh

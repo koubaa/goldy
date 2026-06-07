@@ -25,6 +25,7 @@ RUN apt-get update \
         mesa-vulkan-drivers \
         ninja-build \
         pkg-config \
+        unzip \
         vulkan-tools \
         vulkan-validationlayers \
     && rm -rf /var/lib/apt/lists/*
