@@ -1028,9 +1028,8 @@ pub(super) fn submit(
             .devices
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
         v
     };
 
@@ -1256,9 +1255,8 @@ pub(super) fn submit_graph(
             .devices
             .get_mut(&device_handle)
             .context("Invalid device handle")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
         v
     };
 

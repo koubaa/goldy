@@ -386,7 +386,9 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     if let Some(texture) = state.textures.remove(&texture_handle) {
         if let Some(device) = state.devices.get_mut(&texture.device_handle) {
             device.resource_registry.unregister_texture(texture_handle);
-            let barrier = device.timeline_scheduled_max;
+            let barrier = device
+                .timeline_scheduled_max
+                .load(std::sync::atomic::Ordering::Relaxed);
             let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             if !texture.slot_owned_externally {
                 if texture.is_storage_image {

@@ -523,7 +523,9 @@ pub(super) fn resize(
         }
     }
 
-    let barrier = logical_device.timeline_scheduled_max;
+    let barrier = logical_device
+        .timeline_scheduled_max
+        .load(std::sync::atomic::Ordering::Relaxed);
     logical_device.deletion_queue.queue(
         barrier,
         super::types::PendingDeletion::Buffer {

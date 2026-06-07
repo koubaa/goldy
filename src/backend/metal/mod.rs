@@ -34,8 +34,13 @@ use types::MetalState;
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     state.devices.iter().all(|(device, ld)| {
-        ld.timeline_scheduled_max == 0
-            || context::device_retired(state, *device) >= ld.timeline_scheduled_max
+        ld.timeline_scheduled_max
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+            || context::device_retired(state, *device)
+                >= ld
+                    .timeline_scheduled_max
+                    .load(std::sync::atomic::Ordering::Relaxed)
     })
 }
 
@@ -75,7 +80,9 @@ pub(in crate::backend::metal) fn wait_device_idle(
         .devices
         .get(&device)
         .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
-    let target = ld.timeline_scheduled_max;
+    let target = ld
+        .timeline_scheduled_max
+        .load(std::sync::atomic::Ordering::Relaxed);
     if target == 0 {
         return Ok(());
     }

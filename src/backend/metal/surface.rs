@@ -52,6 +52,7 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+use std::sync::atomic::Ordering;
 
 /// Create a surface for window presentation.
 /// When `depth_format` is `Some`, a depth buffer is created for 3D rendering.
@@ -169,7 +170,9 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let (Some(dev), Some(slot_arr)) = (device_handle, slots) {
         if let Some(logical_device) = state.devices.get_mut(&dev) {
-            let barrier = logical_device.timeline_scheduled_max;
+            let barrier = logical_device
+                .timeline_scheduled_max
+                .load(std::sync::atomic::Ordering::Relaxed);
             let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             for &local in &slot_arr {
                 logical_device
@@ -483,9 +486,8 @@ pub(super) fn present(
             .devices
             .get_mut(&device_handle)
             .context("Device no longer valid")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
         v
     };
 

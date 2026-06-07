@@ -9,6 +9,8 @@ use super::types::{
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 /// Initial heap size for both the buffer and texture heaps.
 ///
@@ -118,9 +120,9 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             storage_image_encoder,
             sampler_encoder,
             resource_registry: ResourceRegistry::new(),
-            timeline_next: 1,
-            timeline_scheduled_max: 0,
-            retired_floor: 0,
+            timeline_next: Arc::new(AtomicU64::new(1)),
+            timeline_scheduled_max: AtomicU64::new(0),
+            retired_floor: AtomicU64::new(0),
             deletion_queue: DeletionQueue::new(),
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),

@@ -696,11 +696,11 @@ pub(crate) struct LogicalDevice {
     /// Registry tracking resource indices in the argument buffer
     pub resource_registry: ResourceRegistry,
     /// Device-global submission sequence (contexts signal their own shared events).
-    pub timeline_next: u64,
+    pub timeline_next: Arc<AtomicU64>,
     /// Highest device-global seq scheduled on the GPU queue (used for idle / flush).
-    pub timeline_scheduled_max: u64,
+    pub timeline_scheduled_max: AtomicU64,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
-    pub retired_floor: u64,
+    pub retired_floor: AtomicU64,
     /// Deferred GPU resource teardown until device timeline reaches the queued barrier.
     pub deletion_queue: DeletionQueue,
     /// Pooled staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).

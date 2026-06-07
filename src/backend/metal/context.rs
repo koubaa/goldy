@@ -5,6 +5,7 @@ use super::{ContextHandle, DeviceHandle};
 use ::metal as mtl;
 use anyhow::{Context as _, Result};
 use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// Latest device-global seq retired on `device` (max over live context shared events, floored).
@@ -17,7 +18,7 @@ pub(super) fn device_retired(state: &MetalState, device: DeviceHandle) -> u64 {
     let floor = state
         .devices
         .get(&device)
-        .map(|d| d.retired_floor)
+        .map(|d| d.retired_floor.load(Ordering::Relaxed))
         .unwrap_or(0);
     let max_ctx = state
         .contexts
@@ -65,7 +66,7 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
     let device = sc.device;
     let completed = sc.timeline_event.as_ref().signaled_value();
     if let Some(ld) = state.devices.get_mut(&device) {
-        ld.retired_floor = ld.retired_floor.max(completed);
+        ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
 
     for (_, cb) in sc.in_flight_command_buffers.drain(..) {
@@ -140,6 +141,6 @@ pub(super) fn reclamation_barrier(state: &MetalState, device: DeviceHandle, gpu_
     state
         .devices
         .get(&device)
-        .map(|d| d.timeline_scheduled_max)
+        .map(|d| d.timeline_scheduled_max.load(Ordering::Relaxed))
         .unwrap_or(0)
 }
