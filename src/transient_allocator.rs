@@ -108,12 +108,7 @@ pub trait TransientAllocator: Send {
     ///
     /// Implementations should be lock-free on the steady-state hot path. Allocation failure
     /// (capacity exhaustion that cannot be remedied by growth or reclamation) returns `Err`.
-    fn alloc(
-        &mut self,
-        device: &Device,
-        size: u64,
-        element_stride: Option<u32>,
-    ) -> Result<BufferView>;
+    fn alloc(&mut self, device: &Device, size: u64, element_stride: Option<u32>) -> Result<BufferView>;
 
     /// Called once per frame after submitting all GPU work, with the timeline value the GPU
     /// will signal when that work completes.
@@ -205,11 +200,7 @@ impl TransientAllocatorStrategy {
     }
 
     /// Construct a fresh allocator of this strategy.
-    pub fn create(
-        self,
-        device: &Device,
-        config: TransientAllocatorConfig,
-    ) -> Result<Box<dyn TransientAllocator>> {
+    pub fn create(self, device: &Device, config: TransientAllocatorConfig) -> Result<Box<dyn TransientAllocator>> {
         match self {
             Self::BumpReset => Ok(Box::new(BumpResetAllocator::new(device, config)?)),
             Self::Heap => Ok(Box::new(HeapTransientAllocator::new(device, config)?)),
@@ -246,10 +237,7 @@ impl BumpResetAllocator {
             config.alignment,
             config.flags,
         )?;
-        Ok(Self {
-            pool,
-            last_epoch: None,
-        })
+        Ok(Self { pool, last_epoch: None })
     }
 }
 
@@ -265,9 +253,7 @@ impl TransientAllocator for BumpResetAllocator {
             // We use device-level primitives here because `tv` may have been
             // produced by any context on this device, not necessarily one we own.
             if device.timeline_retired() < tv {
-                device
-                    .wait_until_retired(tv)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                device.wait_until_retired(tv).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
 
@@ -282,12 +268,7 @@ impl TransientAllocator for BumpResetAllocator {
         Ok(())
     }
 
-    fn alloc(
-        &mut self,
-        _device: &Device,
-        size: u64,
-        element_stride: Option<u32>,
-    ) -> Result<BufferView> {
+    fn alloc(&mut self, _device: &Device, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
         let used = self.pool.used();
         if used.saturating_add(size) > self.pool.capacity() {
             let target = used
@@ -392,10 +373,7 @@ impl HeapTransientAllocator {
         let progress = device.timeline_retired();
         let mut i = 0;
         while i < self.deferred.len() {
-            if self.deferred[i]
-                .epoch
-                .is_some_and(|epoch| epoch <= progress)
-            {
+            if self.deferred[i].epoch.is_some_and(|epoch| epoch <= progress) {
                 let d = self.deferred.swap_remove(i);
                 self.insert_free(d.offset, d.size);
             } else {
@@ -521,12 +499,7 @@ impl TransientAllocator for HeapTransientAllocator {
         Ok(())
     }
 
-    fn alloc(
-        &mut self,
-        _device: &Device,
-        size: u64,
-        element_stride: Option<u32>,
-    ) -> Result<BufferView> {
+    fn alloc(&mut self, _device: &Device, size: u64, element_stride: Option<u32>) -> Result<BufferView> {
         let stride = element_stride.unwrap_or(4) as u64;
         let alloc_align = lcm(self.alignment, stride);
 
@@ -536,10 +509,7 @@ impl TransientAllocator for HeapTransientAllocator {
             if self.live_bytes > self.peak_live_bytes {
                 self.peak_live_bytes = self.live_bytes;
             }
-            return self
-                .pool
-                .backing_buffer()
-                .create_view(offset, size, element_stride);
+            return self.pool.backing_buffer().create_view(offset, size, element_stride);
         }
 
         // Grow the pool and retry. Deferred frees are only drained in begin_frame
@@ -552,10 +522,7 @@ impl TransientAllocator for HeapTransientAllocator {
             if self.live_bytes > self.peak_live_bytes {
                 self.peak_live_bytes = self.live_bytes;
             }
-            return self
-                .pool
-                .backing_buffer()
-                .create_view(offset, size, element_stride);
+            return self.pool.backing_buffer().create_view(offset, size, element_stride);
         }
 
         anyhow::bail!(
@@ -569,11 +536,7 @@ impl TransientAllocator for HeapTransientAllocator {
 
     fn free(&mut self, offset: u64, size: u64, epoch: Option<TimelineValue>) {
         self.live_bytes = self.live_bytes.saturating_sub(size);
-        self.deferred.push(DeferredFree {
-            offset,
-            size,
-            epoch,
-        });
+        self.deferred.push(DeferredFree { offset, size, epoch });
     }
 
     fn end_frame(&mut self, _device: &Device, epoch: TimelineValue) {
@@ -670,10 +633,7 @@ mod tests {
 
     #[test]
     fn strategy_default_is_heap() {
-        assert_eq!(
-            TransientAllocatorStrategy::default(),
-            TransientAllocatorStrategy::Heap
-        );
+        assert_eq!(TransientAllocatorStrategy::default(), TransientAllocatorStrategy::Heap);
     }
 
     #[test]
@@ -797,11 +757,7 @@ mod tests {
 
         let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         // v3 should reuse the first range (v1_off) which is now retired.
-        assert_eq!(
-            v3.offset(),
-            v1_off,
-            "epoch retired — should reuse freed range"
-        );
+        assert_eq!(v3.offset(), v1_off, "epoch retired — should reuse freed range");
     }
 
     #[test]
@@ -829,11 +785,7 @@ mod tests {
         // Now we should be able to allocate a contiguous 768-byte region
         // from the coalesced free block.
         let big = alloc.alloc(&device, 768, Some(4)).unwrap();
-        assert_eq!(
-            big.offset(),
-            v1_off,
-            "coalesced range should start at v1's offset"
-        );
+        assert_eq!(big.offset(), v1_off, "coalesced range should start at v1's offset");
     }
 
     #[test]
@@ -852,11 +804,7 @@ mod tests {
         // drain_retired should NOT recycle it — epoch is None.
         alloc.begin_frame(&device, 0).unwrap();
         let v2 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_ne!(
-            v2.offset(),
-            v1_off,
-            "None-epoch range must not be reused before stamp"
-        );
+        assert_ne!(v2.offset(), v1_off, "None-epoch range must not be reused before stamp");
 
         // Stamp with epoch=1 via end_frame.
         alloc.end_frame(&device, 1);
@@ -864,21 +812,13 @@ mod tests {
         // Still not available — GPU progress is 0, epoch is 1.
         alloc.begin_frame(&device, 0).unwrap();
         let v3 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_ne!(
-            v3.offset(),
-            v1_off,
-            "range should not be reused before epoch retires"
-        );
+        assert_ne!(v3.offset(), v1_off, "range should not be reused before epoch retires");
 
         // Advance past epoch=1.
         device.create_context().unwrap().wait_until(1).unwrap();
         alloc.begin_frame(&device, 0).unwrap();
         let v4 = alloc.alloc(&device, 1024, Some(4)).unwrap();
-        assert_eq!(
-            v4.offset(),
-            v1_off,
-            "range should be reused after epoch retires"
-        );
+        assert_eq!(v4.offset(), v1_off, "range should be reused after epoch retires");
     }
 
     #[test]
@@ -893,11 +833,7 @@ mod tests {
         assert_eq!(alloc.peak_live_bytes(), 4096 + 8192);
 
         alloc.free(v1.offset(), v1.size(), None);
-        assert_eq!(
-            alloc.peak_live_bytes(),
-            4096 + 8192,
-            "peak should not decrease on free"
-        );
+        assert_eq!(alloc.peak_live_bytes(), 4096 + 8192, "peak should not decrease on free");
 
         alloc.free(v2.offset(), v2.size(), None);
         assert_eq!(alloc.used_this_frame(), 0);
@@ -914,10 +850,7 @@ mod tests {
             TransientAllocatorStrategy::parse("freelist"),
             Some(TransientAllocatorStrategy::Heap)
         );
-        assert_eq!(
-            TransientAllocatorStrategy::default(),
-            TransientAllocatorStrategy::Heap
-        );
+        assert_eq!(TransientAllocatorStrategy::default(), TransientAllocatorStrategy::Heap);
     }
 
     #[test]
@@ -951,29 +884,15 @@ mod tests {
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
         let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device
-            .create_context()
-            .unwrap()
-            .submit(&mut graph)
-            .expect("submit");
+        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
 
         alloc.free(offset, 1024, Some(tv));
         alloc.end_frame(&device, tv);
 
-        device
-            .create_context()
-            .unwrap()
-            .wait_until(tv)
-            .expect("wait");
+        device.create_context().unwrap().wait_until(tv).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
-        let v2 = alloc
-            .alloc(&device, 1024, Some(4))
-            .expect("alloc after reclaim");
-        assert_eq!(
-            v2.offset(),
-            offset,
-            "freed range should be reused after epoch retires"
-        );
+        let v2 = alloc.alloc(&device, 1024, Some(4)).expect("alloc after reclaim");
+        assert_eq!(v2.offset(), offset, "freed range should be reused after epoch retires");
     }
 
     #[test]
@@ -985,18 +904,10 @@ mod tests {
         a.begin_frame(&device, 0).expect("begin 1");
         let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
         let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device
-            .create_context()
-            .unwrap()
-            .submit(&mut graph)
-            .expect("submit");
+        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
-        device
-            .create_context()
-            .unwrap()
-            .wait_until(tv)
-            .expect("wait");
+        device.create_context().unwrap().wait_until(tv).expect("wait");
         a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
 
@@ -1051,12 +962,8 @@ mod tests {
         alloc.end_frame(&device, tv);
 
         // Do not wait — begin_frame should internally wait for tv before reset.
-        alloc
-            .begin_frame(&device, 0)
-            .expect("begin 2 blocks then resets");
-        let v2 = alloc
-            .alloc(&device, 512, Some(4))
-            .expect("alloc after reset");
+        alloc.begin_frame(&device, 0).expect("begin 2 blocks then resets");
+        let v2 = alloc.alloc(&device, 512, Some(4)).expect("alloc after reset");
         assert_eq!(
             v2.offset(),
             v1_off,

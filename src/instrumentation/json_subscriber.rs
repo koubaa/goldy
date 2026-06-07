@@ -34,15 +34,9 @@ impl JsonFileLayer {
     ///
     /// The file is created if it doesn't exist, or truncated if it does.
     pub fn new(path: &str) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
 
-        Ok(Self {
-            file: Mutex::new(file),
-        })
+        Ok(Self { file: Mutex::new(file) })
     }
 
     /// Create a new JSON file layer that appends to the specified path.
@@ -51,9 +45,7 @@ impl JsonFileLayer {
     pub fn new_append(path: &str) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
 
-        Ok(Self {
-            file: Mutex::new(file),
-        })
+        Ok(Self { file: Mutex::new(file) })
     }
 
     fn write_event(&self, json: &str) {
@@ -122,18 +114,15 @@ impl Visit for JsonVisitor {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.fields.push((field.name().to_string(), value.to_string()));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.fields.push((field.name().to_string(), value.to_string()));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.fields.push((field.name().to_string(), value.to_string()));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
@@ -153,8 +142,7 @@ impl Visit for JsonVisitor {
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.fields
-            .push((field.name().to_string(), value.to_string()));
+        self.fields.push((field.name().to_string(), value.to_string()));
     }
 }
 

@@ -48,10 +48,7 @@ impl SparsePagePool {
         }
     }
 
-    fn push_chunk_and_take_first_page(
-        &mut self,
-        device: &ash::Device,
-    ) -> Result<(vk::DeviceMemory, vk::DeviceSize)> {
+    fn push_chunk_and_take_first_page(&mut self, device: &ash::Device) -> Result<(vk::DeviceMemory, vk::DeviceSize)> {
         let chunk_bytes = self.page_size * vk::DeviceSize::from(PAGES_PER_CHUNK);
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(chunk_bytes)
@@ -76,10 +73,7 @@ impl SparsePagePool {
         Ok((memory, 0))
     }
 
-    pub fn alloc_page(
-        &mut self,
-        device: &ash::Device,
-    ) -> Result<(vk::DeviceMemory, vk::DeviceSize)> {
+    pub fn alloc_page(&mut self, device: &ash::Device) -> Result<(vk::DeviceMemory, vk::DeviceSize)> {
         for ch in &mut self.chunks {
             if let Some(idx) = ch.free_indices.pop() {
                 let offset = vk::DeviceSize::from(idx) * ch.page_size;
@@ -99,11 +93,7 @@ impl SparsePagePool {
                 return;
             }
         }
-        tracing::warn!(
-            ?memory,
-            offset,
-            "SparsePagePool::free_page: unknown chunk (leak?)"
-        );
+        tracing::warn!(?memory, offset, "SparsePagePool::free_page: unknown chunk (leak?)");
     }
 }
 
@@ -143,13 +133,8 @@ pub(crate) fn sparse_storage_memory_type(
         let req = device.get_buffer_memory_requirements(probe);
         device.destroy_buffer(probe, None);
         let bits = req.memory_type_bits;
-        let index = find_memory_type(
-            instance,
-            physical_device,
-            bits,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        )
-        .context("no DEVICE_LOCAL memory type for sparse buffer")?;
+        let index = find_memory_type(instance, physical_device, bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .context("no DEVICE_LOCAL memory type for sparse buffer")?;
         Ok((index, bits))
     }
 }
@@ -178,18 +163,12 @@ pub(crate) fn queue_bind_sparse_sync(
     if binds.is_empty() {
         return Ok(());
     }
-    let buffer_bind = vk::SparseBufferMemoryBindInfo::default()
-        .buffer(buffer)
-        .binds(binds);
+    let buffer_bind = vk::SparseBufferMemoryBindInfo::default().buffer(buffer).binds(binds);
 
     let bind_info = vk::BindSparseInfo::default().buffer_binds(std::slice::from_ref(&buffer_bind));
 
     let fence_info = vk::FenceCreateInfo::default();
-    let fence = unsafe {
-        device
-            .create_fence(&fence_info, None)
-            .context("sparse fence")?
-    };
+    let fence = unsafe { device.create_fence(&fence_info, None).context("sparse fence")? };
 
     unsafe {
         device

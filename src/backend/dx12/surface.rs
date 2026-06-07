@@ -60,10 +60,7 @@ pub(super) fn create(
     _display: &dyn raw_window_handle::HasDisplayHandle,
     depth_format: Option<DepthFormat>,
 ) -> Result<SurfaceHandle> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let window_handle = window
         .window_handle()
@@ -97,10 +94,7 @@ pub(super) fn create(
         Height: height,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
         Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: MAX_FRAMES_IN_FLIGHT as u32,
         Scaling: DXGI_SCALING_STRETCH,
@@ -110,13 +104,9 @@ pub(super) fn create(
     };
 
     let swapchain: IDXGISwapChain1 = unsafe {
-        state.factory.CreateSwapChainForHwnd(
-            &logical_device.command_queue,
-            hwnd,
-            &swap_chain_desc,
-            None,
-            None,
-        )
+        state
+            .factory
+            .CreateSwapChainForHwnd(&logical_device.command_queue, hwnd, &swap_chain_desc, None, None)
     }
     .context("Failed to create swapchain")?;
 
@@ -162,9 +152,7 @@ pub(super) fn create(
         };
 
         unsafe {
-            logical_device
-                .device
-                .CreateRenderTargetView(&buffer, None, rtv_handle);
+            logical_device.device.CreateRenderTargetView(&buffer, None, rtv_handle);
         }
 
         render_targets.push(buffer);
@@ -189,10 +177,7 @@ pub(super) fn create(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: depth_format_to_dxgi(df),
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
             Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
         };
@@ -200,10 +185,7 @@ pub(super) fn create(
         let depth_clear = D3D12_CLEAR_VALUE {
             Format: depth_format_to_dxgi(df),
             Anonymous: D3D12_CLEAR_VALUE_0 {
-                DepthStencil: D3D12_DEPTH_STENCIL_VALUE {
-                    Depth: 1.0,
-                    Stencil: 0,
-                },
+                DepthStencil: D3D12_DEPTH_STENCIL_VALUE { Depth: 1.0, Stencil: 0 },
             },
         };
 
@@ -251,16 +233,12 @@ pub(super) fn create(
         .context("Failed to create command allocator")?;
 
         let command_list: ID3D12GraphicsCommandList = unsafe {
-            logical_device.device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &command_allocator,
-                None,
-            )
+            logical_device
+                .device
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &command_allocator, None)
         }
         .context("Failed to create command list")?;
-        let command_list: ID3D12GraphicsCommandList7 =
-            command_list.cast().context("ID3D12GraphicsCommandList7")?;
+        let command_list: ID3D12GraphicsCommandList7 = command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
         unsafe { command_list.Close() }.ok();
 
@@ -310,12 +288,7 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
     let scratch_handles: Vec<TextureHandle> = state
         .surfaces
         .get(&surface_handle)
-        .map(|s| {
-            s.compute_scratch_textures
-                .iter()
-                .filter_map(|x| *x)
-                .collect()
-        })
+        .map(|s| s.compute_scratch_textures.iter().filter_map(|x| *x).collect())
         .unwrap_or_default();
 
     if state
@@ -324,9 +297,7 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
         .and_then(|s| s.current_texture_handle)
         .is_some()
     {
-        tracing::warn!(
-            "Surface destroyed with an acquired frame; scratch textures freed separately"
-        );
+        tracing::warn!("Surface destroyed with an acquired frame; scratch textures freed separately");
     }
 
     for h in scratch_handles {
@@ -370,10 +341,7 @@ pub(super) fn acquire(
 
     // Extract values needed before the pre-acquire blocking waits.
     let (cf, device_handle, waitable, prev_fence) = {
-        let surface = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let cf = surface.current_frame;
         (
             cf,
@@ -433,15 +401,8 @@ pub(super) fn acquire(
     let goldy_format = dxgi_to_format(dxgi_format).unwrap_or(TextureFormat::Bgra8Unorm);
     let idx = image_index as usize;
 
-    let tex_handle = ensure_compute_scratch_texture(
-        state,
-        surface_handle,
-        idx,
-        width,
-        height,
-        goldy_format,
-        device_handle,
-    )?;
+    let tex_handle =
+        ensure_compute_scratch_texture(state, surface_handle, idx, width, height, goldy_format, device_handle)?;
 
     {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
@@ -502,11 +463,7 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
         .saturating_sub(1))
 }
 
-pub(super) fn present_frame(
-    state: &mut Dx12State,
-    frame: FrameToken,
-    _submit_tv: u64,
-) -> Result<u64> {
+pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, _submit_tv: u64) -> Result<u64> {
     present(state, frame.surface, frame.image, frame.context)?;
     let device_handle = state
         .surfaces
@@ -524,10 +481,7 @@ pub(super) fn present_frame(
 }
 
 /// Get the texture handle for the currently acquired surface frame.
-pub(super) fn frame_texture(
-    state: &Dx12State,
-    surface_handle: SurfaceHandle,
-) -> Option<super::TextureHandle> {
+pub(super) fn frame_texture(state: &Dx12State, surface_handle: SurfaceHandle) -> Option<super::TextureHandle> {
     state
         .surfaces
         .get(&surface_handle)
@@ -542,10 +496,7 @@ pub(super) fn render(
     _image: SwapchainImageHandle,
     commands: &[RenderCommand],
 ) -> Result<()> {
-    let surface = state
-        .surfaces
-        .get(&surface_handle)
-        .context("Invalid surface handle")?;
+    let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
 
     let image_index = surface
         .current_image_index
@@ -569,8 +520,7 @@ pub(super) fn render(
 
     // Reset command allocator and list
     unsafe { frame.command_allocator.Reset() }.context("Failed to reset command allocator")?;
-    unsafe { cmd_gfx.Reset(&frame.command_allocator, None) }
-        .context("Failed to reset command list")?;
+    unsafe { cmd_gfx.Reset(&frame.command_allocator, None) }.context("Failed to reset command list")?;
 
     // PRESENT -> RENDER_TARGET (enhanced barrier, per MS DirectX-Graphics-Samples).
     // SYNC_NONE + NO_ACCESS: no preceding work on this resource in this command list.
@@ -667,10 +617,7 @@ pub(super) fn render(
     }
 
     // Bind descriptor heaps for bindless rendering
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     unsafe {
         cmd_gfx.SetDescriptorHeaps(&[
@@ -712,21 +659,15 @@ pub(super) fn render(
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
     // Signal fence for this frame
     let fence_value = logical_device
         .timeline_next
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal fence")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal fence")?;
 
     // Update fence value for next operation
 
@@ -748,30 +689,13 @@ pub(super) fn present(
     _image: SwapchainImageHandle,
     ctx: super::ContextHandle,
 ) -> Result<()> {
-    let (
-        device_handle,
-        _image_index,
-        current_frame,
-        scratch_handle,
-        backbuffer,
-        render_pass_submitted,
-    ) = {
-        let surface = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+    let (device_handle, _image_index, current_frame, scratch_handle, backbuffer, render_pass_submitted) = {
+        let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let image_index = surface
             .current_image_index
-            .context("No image to present - call surface_acquire first")?
-            as usize;
-        let scratch_handle = surface
-            .current_texture_handle
-            .context("No acquired surface texture")?;
-        let expected = surface
-            .compute_scratch_textures
-            .get(image_index)
-            .copied()
-            .flatten();
+            .context("No image to present - call surface_acquire first")? as usize;
+        let scratch_handle = surface.current_texture_handle.context("No acquired surface texture")?;
+        let expected = surface.compute_scratch_textures.get(image_index).copied().flatten();
         if expected != Some(scratch_handle) {
             anyhow::bail!("DX12 surface present: scratch texture handle mismatch");
         }
@@ -811,11 +735,9 @@ pub(super) fn present(
             (frame.command_list.clone(), frame.command_allocator.clone())
         };
 
-        unsafe { cmd_alloc.Reset() }
-            .context("Failed to reset command allocator for present copy")?;
+        unsafe { cmd_alloc.Reset() }.context("Failed to reset command allocator for present copy")?;
         let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&cmd7) };
-        unsafe { cmd_gfx.Reset(&cmd_alloc, None) }
-            .context("Failed to reset command list for present copy")?;
+        unsafe { cmd_gfx.Reset(&cmd_alloc, None) }.context("Failed to reset command list for present copy")?;
 
         // Flip-discard swapchain: the acquired buffer's contents are undefined until written.
         // `D3D12_BARRIER_LAYOUT_PRESENT` and `COMMON` share the same numeric value in windows-rs
@@ -874,20 +796,14 @@ pub(super) fn present(
 
         let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
         unsafe {
-            logical_device
-                .command_queue
-                .ExecuteCommandLists(&[Some(cmd_list)]);
+            logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
         }
 
         let fence_value = logical_device
             .timeline_next
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        unsafe {
-            logical_device
-                .command_queue
-                .Signal(&logical_device.fence, fence_value)
-        }
-        .context("Failed to signal fence after present copy")?;
+        unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+            .context("Failed to signal fence after present copy")?;
 
         // Record the fence so acquire() can wait for it before reusing this slot.
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
@@ -918,8 +834,7 @@ pub(super) fn present(
 
     if return_fence > 0 {
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.pending_swapchain_returns
-                .push((return_image, return_fence));
+            surf.pending_swapchain_returns.push((return_image, return_fence));
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
@@ -939,18 +854,10 @@ pub(super) fn present(
 
 /// Resize a surface.
 #[allow(clippy::too_many_lines)]
-pub(super) fn resize(
-    state: &mut Dx12State,
-    surface_handle: SurfaceHandle,
-    width: u32,
-    height: u32,
-) -> Result<()> {
+pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
     // Get device handle and surface format first
     let (device_handle, surface_format) = {
-        let surface = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         (surface.device_handle, surface.format)
     };
 
@@ -999,13 +906,9 @@ pub(super) fn resize(
         };
         // Resize swapchain
         unsafe {
-            surface.swapchain.ResizeBuffers(
-                MAX_FRAMES_IN_FLIGHT as u32,
-                width,
-                height,
-                surface_format,
-                resize_flags,
-            )
+            surface
+                .swapchain
+                .ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, width, height, surface_format, resize_flags)
         }
         .context("Failed to resize swapchain")?;
 
@@ -1030,8 +933,8 @@ pub(super) fn resize(
     // Recreate render targets
     for i in 0..MAX_FRAMES_IN_FLIGHT {
         let surface = state.surfaces.get(&surface_handle).unwrap();
-        let buffer: ID3D12Resource = unsafe { surface.swapchain.GetBuffer(i as u32) }
-            .context("Failed to get swapchain buffer")?;
+        let buffer: ID3D12Resource =
+            unsafe { surface.swapchain.GetBuffer(i as u32) }.context("Failed to get swapchain buffer")?;
 
         let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
             let off = state.next_rtv_offset;
@@ -1079,10 +982,7 @@ pub(super) fn resize(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: depth_format_to_dxgi(df),
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
             Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
         };
@@ -1090,10 +990,7 @@ pub(super) fn resize(
         let depth_clear = D3D12_CLEAR_VALUE {
             Format: depth_format_to_dxgi(df),
             Anonymous: D3D12_CLEAR_VALUE_0 {
-                DepthStencil: D3D12_DEPTH_STENCIL_VALUE {
-                    Depth: 1.0,
-                    Stencil: 0,
-                },
+                DepthStencil: D3D12_DEPTH_STENCIL_VALUE { Depth: 1.0, Stencil: 0 },
             },
         };
 
@@ -1156,10 +1053,7 @@ fn ensure_compute_scratch_texture(
     device_handle: DeviceHandle,
 ) -> Result<TextureHandle> {
     let reuse = {
-        let surface = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let slot = surface.compute_scratch_textures.get(idx).copied().flatten();
         if let Some(h) = slot {
             if let Some(tex) = state.textures.get(&h) {
@@ -1214,21 +1108,16 @@ pub(super) fn format(state: &Dx12State, surface_handle: SurfaceHandle) -> Textur
 // Helper functions
 
 fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    let event =
-        unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
-    unsafe { fence.SetEventOnCompletion(value, event) }
-        .context("Failed to set event on completion")?;
+    let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+    unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
     unsafe { WaitForSingleObject(event, INFINITE) };
     unsafe { CloseHandle(event) }.ok();
     Ok(())
 }
 
 fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
-    let fence_value = device
-        .timeline_next
-        .load(std::sync::atomic::Ordering::Relaxed);
-    unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-        .context("Failed to signal fence")?;
+    let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)
 }
 
@@ -1265,10 +1154,7 @@ pub(super) fn set_present_mode(
 }
 
 /// Get the current present mode of a surface.
-pub(super) fn get_present_mode(
-    state: &Dx12State,
-    surface_handle: SurfaceHandle,
-) -> crate::types::PresentMode {
+pub(super) fn get_present_mode(state: &Dx12State, surface_handle: SurfaceHandle) -> crate::types::PresentMode {
     state
         .surfaces
         .get(&surface_handle)

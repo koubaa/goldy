@@ -16,9 +16,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     desc: &SamplerDesc,
 ) -> Result<SamplerHandle> {
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let sampler_info = vk::SamplerCreateInfo::default()
         .mag_filter(filter_to_vk(desc.mag_filter))
@@ -31,18 +29,14 @@ pub(super) fn create(
         .anisotropy_enable(desc.max_anisotropy > 1.0)
         .max_anisotropy(desc.max_anisotropy)
         .compare_enable(desc.compare.is_some())
-        .compare_op(
-            desc.compare
-                .map(compare_to_vk)
-                .unwrap_or(vk::CompareOp::ALWAYS),
-        )
+        .compare_op(desc.compare.map(compare_to_vk).unwrap_or(vk::CompareOp::ALWAYS))
         .min_lod(desc.lod_min_clamp)
         .max_lod(desc.lod_max_clamp)
         .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
         .unnormalized_coordinates(false);
 
-    let sampler = unsafe { logical_device.device.create_sampler(&sampler_info, None) }
-        .context("Failed to create sampler")?;
+    let sampler =
+        unsafe { logical_device.device.create_sampler(&sampler_info, None) }.context("Failed to create sampler")?;
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 

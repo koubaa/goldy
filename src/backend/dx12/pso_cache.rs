@@ -141,10 +141,7 @@ pub(super) fn compute_pso_key(cs: &[u8]) -> u64 {
 pub(super) type PsoBlobMaps = (HashMap<u64, Vec<u8>>, HashMap<u64, Vec<u8>>);
 
 pub(super) fn load_maps(path: &Path) -> PsoBlobMaps {
-    let empty = (
-        HashMap::<u64, Vec<u8>>::new(),
-        HashMap::<u64, Vec<u8>>::new(),
-    );
+    let empty = (HashMap::<u64, Vec<u8>>::new(), HashMap::<u64, Vec<u8>>::new());
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(_) => return empty,
@@ -258,8 +255,8 @@ pub(super) fn save_maps(
 mod tests {
     use super::*;
     use crate::types::{
-        CompareFunction, DepthFormat, DepthStencilState, PrimitiveTopology, TextureFormat,
-        VertexAttribute, VertexBufferLayout, VertexFormat,
+        CompareFunction, DepthFormat, DepthStencilState, PrimitiveTopology, TextureFormat, VertexAttribute,
+        VertexBufferLayout, VertexFormat,
     };
     use tempfile::TempDir;
 
@@ -315,20 +312,14 @@ mod tests {
     fn graphics_pso_key_sensitive_to_vs() {
         let (_, fs, vl, topo, tf, ds) = base_gfx_key_args();
         let k0 = graphics_pso_key(b"vs_a", fs, &vl, topo, tf, ds.as_ref());
-        assert_ne!(
-            k0,
-            graphics_pso_key(b"vs_b", fs, &vl, topo, tf, ds.as_ref()),
-        );
+        assert_ne!(k0, graphics_pso_key(b"vs_b", fs, &vl, topo, tf, ds.as_ref()),);
     }
 
     #[test]
     fn graphics_pso_key_sensitive_to_fs() {
         let (vs, _, vl, topo, tf, ds) = base_gfx_key_args();
         let k0 = graphics_pso_key(vs, b"fs_a", &vl, topo, tf, ds.as_ref());
-        assert_ne!(
-            k0,
-            graphics_pso_key(vs, b"fs_b", &vl, topo, tf, ds.as_ref()),
-        );
+        assert_ne!(k0, graphics_pso_key(vs, b"fs_b", &vl, topo, tf, ds.as_ref()),);
     }
 
     #[test]

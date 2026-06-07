@@ -6,12 +6,11 @@
 use goldy_ffi::{
     goldy_buffer_create_with_data, goldy_buffer_destroy, goldy_compute_encoder_bind_resources,
     goldy_compute_encoder_create, goldy_compute_encoder_destroy, goldy_compute_encoder_dispatch,
-    goldy_compute_encoder_execute, goldy_compute_encoder_set_pipeline,
-    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy,
-    goldy_get_last_error, goldy_instance_adapter_count, goldy_instance_create,
-    goldy_instance_create_device_for_adapter, goldy_instance_destroy, goldy_instance_get_adapter,
-    goldy_shader_create, goldy_shader_destroy, GoldyAdapterInfo, GoldyBuffer, GoldyBufferKind,
-    GoldyComputeEncoder, GoldyComputePipeline, GoldyDevice, GoldyDeviceType, GoldyInstance,
+    goldy_compute_encoder_execute, goldy_compute_encoder_set_pipeline, goldy_compute_pipeline_create,
+    goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_get_last_error, goldy_instance_adapter_count,
+    goldy_instance_create, goldy_instance_create_device_for_adapter, goldy_instance_destroy,
+    goldy_instance_get_adapter, goldy_shader_create, goldy_shader_destroy, GoldyAdapterInfo, GoldyBuffer,
+    GoldyBufferKind, GoldyComputeEncoder, GoldyComputePipeline, GoldyDevice, GoldyDeviceType, GoldyInstance,
     GoldyResult, GoldyShaderModule,
 };
 use std::ffi::{CStr, CString};

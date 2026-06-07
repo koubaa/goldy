@@ -208,10 +208,7 @@ impl<T> FrameOrchestrator<T> {
     /// - **All other strategies**: always [`crate::Context::submit_pipelined`].  Retention would be
     ///   unsafe at pipeline depth > 1 because the same CB can still be in-flight from the
     ///   previous frame when a new submission begins.
-    fn submit_with_retention(
-        &mut self,
-        graph: &mut TaskGraph,
-    ) -> Result<TimelineValue, GoldyError> {
+    fn submit_with_retention(&mut self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         if !self.retains_command_buffers() {
             return self.context.submit_pipelined(graph);
         }
@@ -301,9 +298,7 @@ impl<T> FrameOrchestrator<T> {
         let frame = if graph.is_empty() {
             frame
         } else {
-            surface
-                .submit_graph_to_frame(graph, frame)
-                .map_err(GoldyError::from)?
+            surface.submit_graph_to_frame(graph, frame).map_err(GoldyError::from)?
         };
         self.ring.push_back(FrameSlot {
             timeline: None,
@@ -335,10 +330,7 @@ impl<T> FrameOrchestrator<T> {
         while let Some(slot) = self.ring.pop_front() {
             let timeline = match slot.timeline {
                 Some(t) => t,
-                None => self
-                    .context
-                    .high_water_timeline()
-                    .max(self.context.gpu_progress()),
+                None => self.context.high_water_timeline().max(self.context.gpu_progress()),
             };
             if self.context.gpu_progress() < timeline {
                 self.context.wait_until(timeline)?;

@@ -36,6 +36,5 @@ fn orchestrator_reclaim_empty_is_ok() {
     let ctx = device.create_context().expect("context");
 
     let mut orch: FrameOrchestrator<()> = FrameOrchestrator::new(&ctx, 2);
-    orch.reclaim(|_d, _r| Ok::<_, std::convert::Infallible>(()))
-        .unwrap();
+    orch.reclaim(|_d, _r| Ok::<_, std::convert::Infallible>(())).unwrap();
 }

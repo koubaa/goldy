@@ -10,8 +10,7 @@ use windows::Win32::{
 };
 
 use crate::types::{
-    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
-    TextureFormat, VertexFormat,
+    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology, TextureFormat, VertexFormat,
 };
 use windows::Win32::Graphics::{Direct3D, Direct3D12, Dxgi};
 
@@ -70,14 +69,10 @@ pub fn topology_to_d3d12(topology: PrimitiveTopology) -> Direct3D::D3D_PRIMITIVE
 }
 
 /// Convert Goldy PrimitiveTopology to D3D12 topology type for PSO.
-pub fn topology_type_to_d3d12(
-    topology: PrimitiveTopology,
-) -> Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE {
+pub fn topology_type_to_d3d12(topology: PrimitiveTopology) -> Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE {
     match topology {
         PrimitiveTopology::PointList => Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
-        PrimitiveTopology::LineList | PrimitiveTopology::LineStrip => {
-            Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
-        }
+        PrimitiveTopology::LineList | PrimitiveTopology::LineStrip => Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE,
         PrimitiveTopology::TriangleList | PrimitiveTopology::TriangleStrip => {
             Direct3D12::D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
         }
@@ -143,15 +138,9 @@ pub fn compare_to_d3d12(compare: CompareFunction) -> Direct3D12::D3D12_COMPARISO
 }
 
 /// Convert Goldy FilterMode to D3D12 filter.
-pub fn filter_to_d3d12(
-    min: FilterMode,
-    mag: FilterMode,
-    mip: FilterMode,
-) -> Direct3D12::D3D12_FILTER {
+pub fn filter_to_d3d12(min: FilterMode, mag: FilterMode, mip: FilterMode) -> Direct3D12::D3D12_FILTER {
     match (min, mag, mip) {
-        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Nearest) => {
-            Direct3D12::D3D12_FILTER_MIN_MAG_MIP_POINT
-        }
+        (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Nearest) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_POINT,
         (FilterMode::Nearest, FilterMode::Nearest, FilterMode::Linear) => {
             Direct3D12::D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR
         }
@@ -170,9 +159,7 @@ pub fn filter_to_d3d12(
         (FilterMode::Linear, FilterMode::Linear, FilterMode::Nearest) => {
             Direct3D12::D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT
         }
-        (FilterMode::Linear, FilterMode::Linear, FilterMode::Linear) => {
-            Direct3D12::D3D12_FILTER_MIN_MAG_MIP_LINEAR
-        }
+        (FilterMode::Linear, FilterMode::Linear, FilterMode::Linear) => Direct3D12::D3D12_FILTER_MIN_MAG_MIP_LINEAR,
     }
 }
 
@@ -189,11 +176,9 @@ pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADD
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     if unsafe { fence.GetCompletedValue() } < value {
-        let event =
-            unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+        let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
-        unsafe { fence.SetEventOnCompletion(value, event) }
-            .context("Failed to set event on completion")?;
+        unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
 
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe { CloseHandle(event) }.ok();
@@ -202,19 +187,13 @@ pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 }
 
 /// Wait for a fence with timeout. Returns true if signaled, false if timeout elapsed.
-pub(super) fn wait_for_fence_timeout(
-    fence: &ID3D12Fence,
-    value: u64,
-    timeout_ms: u32,
-) -> Result<bool> {
+pub(super) fn wait_for_fence_timeout(fence: &ID3D12Fence, value: u64, timeout_ms: u32) -> Result<bool> {
     if unsafe { fence.GetCompletedValue() } >= value {
         return Ok(true);
     }
-    let event =
-        unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+    let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
-    unsafe { fence.SetEventOnCompletion(value, event) }
-        .context("Failed to set event on completion")?;
+    unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
 
     let result = unsafe { WaitForSingleObject(event, timeout_ms) };
     unsafe { CloseHandle(event) }.ok();

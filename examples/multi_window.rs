@@ -8,9 +8,8 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 // Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
@@ -269,11 +268,7 @@ struct WindowState {
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 impl WindowState {
-    fn new(
-        window: Arc<Window>,
-        device: &Arc<goldy::Device>,
-        effect_type: EffectType,
-    ) -> anyhow::Result<Self> {
+    fn new(window: Arc<Window>, device: &Arc<goldy::Device>, effect_type: EffectType) -> anyhow::Result<Self> {
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
@@ -407,11 +402,7 @@ impl App {
             instance: Instance::new()?,
             device: None,
             windows: HashMap::new(),
-            effects_to_create: vec![
-                EffectType::Plasma,
-                EffectType::Tunnel,
-                EffectType::Starfield,
-            ],
+            effects_to_create: vec![EffectType::Plasma, EffectType::Tunnel, EffectType::Starfield],
             frame_count: 0,
             start_time: std::time::Instant::now(),
         })
@@ -476,12 +467,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
         // Get the specific window state
         let state = match self.windows.get_mut(&window_id) {
             Some(s) => s,

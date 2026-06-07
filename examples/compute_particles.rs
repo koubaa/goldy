@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor,
-    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ShaderModule,
+    Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -86,12 +86,10 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for particle simulation
-        let compute_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/particle_update.slang"))?;
+        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_update.slang"))?;
 
         // Render shader for visualization
-        let render_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/particle_render.slang"))?;
+        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_render.slang"))?;
 
         // Create particle buffer with initial scattered positions
         let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
@@ -110,10 +108,7 @@ impl RenderState {
                     radius * angle.cos() + noise_x * 0.1,
                     radius * angle.sin() + noise_y * 0.1,
                 ],
-                velocity: [
-                    angle.sin() * 0.3 + noise_x * 0.2,
-                    -angle.cos() * 0.3 + noise_y * 0.2,
-                ],
+                velocity: [angle.sin() * 0.3 + noise_x * 0.2, -angle.cos() * 0.3 + noise_y * 0.2],
             });
         }
 
@@ -143,10 +138,7 @@ impl RenderState {
             },
         )?;
 
-        println!(
-            "Created compute particles example with {} particles",
-            NUM_PARTICLES
-        );
+        println!("Created compute particles example with {} particles", NUM_PARTICLES);
         println!("Press Escape or close window to exit");
 
         Ok(Self {
@@ -168,8 +160,7 @@ impl RenderState {
 
         let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
         self.last_frame_time = std::time::Instant::now();
-        self.params_buffer
-            .write_data(0, &[SimParams { delta_time: dt }])?;
+        self.params_buffer.write_data(0, &[SimParams { delta_time: dt }])?;
 
         // Run compute pass to update particles
         let workgroups = NUM_PARTICLES.div_ceil(64);
@@ -179,12 +170,8 @@ impl RenderState {
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
-                self.particle_buffer
-                    .resource_index(ResourceAccess::Write)
-                    .unwrap(),
-                self.params_buffer
-                    .resource_index(ResourceAccess::Read)
-                    .unwrap(),
+                self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
+                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
             ])
             .dispatch(workgroups, 1, 1);
         graph.dispatch(&self.context)?;

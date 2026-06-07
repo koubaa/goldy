@@ -7,11 +7,9 @@
 //! Run with: cargo run --example digital_clock
 
 use goldy::{
-    examples::digital_clock::{
-        generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE,
-    },
-    Buffer, BufferKind, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
+    examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
+    Buffer, BufferKind, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, ShaderModule, Surface,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -204,14 +202,12 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                match event.logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Named(NamedKey::Space) => self.toggle_pause(),
-                    Key::Character(ref c) if c == "c" || c == "C" => self.clock_state.next_color(),
-                    _ => {}
-                }
-            }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => match event.logical_key {
+                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                Key::Named(NamedKey::Space) => self.toggle_pause(),
+                Key::Character(ref c) if c == "c" || c == "C" => self.clock_state.next_color(),
+                _ => {}
+            },
             WindowEvent::MouseInput { state, .. } if state.is_pressed() => {
                 self.clock_state.next_color();
             }

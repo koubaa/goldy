@@ -11,9 +11,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState,
-    DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -65,16 +65,7 @@ fn depth_vertex_layout() -> VertexBufferLayout {
 
 /// Build 6 vertices for a screen-space quad (two triangles, CCW).
 #[allow(clippy::too_many_arguments)]
-fn quad_verts(
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-    z: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-) -> [DepthVertex; 6] {
+fn quad_verts(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, r: f32, g: f32, b: f32) -> [DepthVertex; 6] {
     let tl = DepthVertex::new(x0, y1, z, r, g, b);
     let bl = DepthVertex::new(x0, y0, z, r, g, b);
     let br = DepthVertex::new(x1, y0, z, r, g, b);
@@ -119,11 +110,9 @@ impl App {
         let ctx = device.create_context()?;
 
         // Surface with a depth buffer for 3D depth testing
-        let surface =
-            Surface::new_with_depth(&ctx, window.as_ref(), Some(DepthFormat::Depth32Float))?;
+        let surface = Surface::new_with_depth(&ctx, window.as_ref(), Some(DepthFormat::Depth32Float))?;
 
-        let shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
+        let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
 
         let pipeline = RenderPipeline::new(
             &device,
@@ -175,11 +164,7 @@ impl App {
 
         // Update window title with live depth values so it is easy to reason
         // about what is happening.
-        let winner = if warm_z < cool_z {
-            "WARM wins"
-        } else {
-            "COOL wins"
-        };
+        let winner = if warm_z < cool_z { "WARM wins" } else { "COOL wins" };
         if let Some(window) = &self.window {
             window.set_title(&format!(
                 "Depth Quads  |  warm z={:.3}  cool z={:.3}  →  {}",

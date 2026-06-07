@@ -53,10 +53,7 @@ mod tests {
     /// Verify all shaders are non-empty and contain expected Slang syntax
     #[test]
     fn test_all_shaders_non_empty() {
-        assert!(
-            !VERTEX_COLOR_2D.is_empty(),
-            "VERTEX_COLOR_2D shader is empty"
-        );
+        assert!(!VERTEX_COLOR_2D.is_empty(), "VERTEX_COLOR_2D shader is empty");
         assert!(!TRIANGLE.is_empty(), "TRIANGLE shader is empty");
         assert!(!DIGITAL_CLOCK.is_empty(), "DIGITAL_CLOCK shader is empty");
         assert!(!PLASMA.is_empty(), "PLASMA shader is empty");
@@ -112,16 +109,8 @@ mod tests {
         ];
 
         for (name, source) in shaders {
-            assert!(
-                source.contains("vs_main"),
-                "{} missing vs_main function",
-                name
-            );
-            assert!(
-                source.contains("fs_main"),
-                "{} missing fs_main function",
-                name
-            );
+            assert!(source.contains("vs_main"), "{} missing vs_main function", name);
+            assert!(source.contains("fs_main"), "{} missing fs_main function", name);
         }
     }
 
@@ -159,11 +148,7 @@ mod tests {
             &[],
             OptimizationLevel::Default,
         );
-        assert!(
-            result.is_ok(),
-            "PLASMA failed to compile for SPIRV: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "PLASMA failed to compile for SPIRV: {:?}", result.err());
 
         // Only run on Windows since DXC compiler is not available on other platforms
         #[cfg(windows)]
@@ -177,11 +162,7 @@ mod tests {
                 &[],
                 OptimizationLevel::Default,
             );
-            assert!(
-                result.is_ok(),
-                "PLASMA failed to compile for DXIL: {:?}",
-                result.err()
-            );
+            assert!(result.is_ok(), "PLASMA failed to compile for DXIL: {:?}", result.err());
         }
 
         #[cfg(target_os = "macos")]
@@ -195,11 +176,7 @@ mod tests {
                 &[],
                 OptimizationLevel::Default,
             );
-            assert!(
-                result.is_ok(),
-                "PLASMA failed to compile for Metal: {:?}",
-                result.err()
-            );
+            assert!(result.is_ok(), "PLASMA failed to compile for Metal: {:?}", result.err());
         }
     }
 
@@ -422,8 +399,8 @@ mod tests {
         let shader_path = manifest_dir.join("shaders");
         let shader_path_str = shader_path.to_string_lossy();
 
-        let test_shader = std::fs::read_to_string(shader_path.join("test_algebra.slang"))
-            .expect("Failed to read test_algebra.slang");
+        let test_shader =
+            std::fs::read_to_string(shader_path.join("test_algebra.slang")).expect("Failed to read test_algebra.slang");
 
         let entry = &[("cs_main", SlangStage::Compute)];
 

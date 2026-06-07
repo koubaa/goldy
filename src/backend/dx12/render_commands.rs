@@ -40,30 +40,20 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::SetVertexBuffer {
-                slot,
-                buffer,
-                offset,
-            } => {
+            RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
                 if let Some(buf_state) = state.buffers.get(buffer) {
                     let view = D3D12_VERTEX_BUFFER_VIEW {
-                        BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() }
-                            + offset,
+                        BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
                         SizeInBytes: (buf_state.size - offset) as u32,
                         StrideInBytes: current_vertex_stride,
                     };
                     unsafe { cmd.IASetVertexBuffers(*slot, Some(&[view])) };
                 }
             }
-            RenderCommand::SetIndexBuffer {
-                buffer,
-                offset,
-                format,
-            } => {
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 if let Some(buf_state) = state.buffers.get(buffer) {
                     let view = D3D12_INDEX_BUFFER_VIEW {
-                        BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() }
-                            + offset,
+                        BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
                         SizeInBytes: (buf_state.size - offset) as u32,
                         Format: index_format_to_dxgi(*format),
                     };
@@ -72,9 +62,7 @@ pub(super) fn record(
             }
             RenderCommand::BindResources { buffers } => {
                 if crate::slang::layout_validation_enabled() {
-                    if let Some(pipeline) =
-                        current_pipeline_handle.and_then(|h| state.pipelines.get(&h))
-                    {
+                    if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
                         if !pipeline.binding_element_strides.is_empty() {
                             let actual: Vec<Option<u32>> = buffers
                                 .iter()
@@ -91,13 +79,9 @@ pub(super) fn record(
                 let mut layout = types::PushLayout::default();
                 shared::fill_bindless(
                     &mut layout,
-                    buffers.iter().map(|h| {
-                        state
-                            .buffers
-                            .get(h)
-                            .and_then(|b| b.bindless_offset)
-                            .unwrap_or(0)
-                    }),
+                    buffers
+                        .iter()
+                        .map(|h| state.buffers.get(h).and_then(|b| b.bindless_offset).unwrap_or(0)),
                 );
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
@@ -123,12 +107,8 @@ pub(super) fn record(
                     );
                 }
             }
-            RenderCommand::BindResourcesTyped {
-                handles: typed_handles,
-            } => {
-                if let Some(pipeline) =
-                    current_pipeline_handle.and_then(|h| state.pipelines.get(&h))
-                {
+            RenderCommand::BindResourcesTyped { handles: typed_handles } => {
+                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
                         &pipeline.push_constant_categories,
@@ -153,12 +133,7 @@ pub(super) fn record(
                 first_instance,
             } => unsafe {
                 // Topology is now set in SetPipeline, not hardcoded here
-                cmd.DrawInstanced(
-                    *vertex_count,
-                    *instance_count,
-                    *first_vertex,
-                    *first_instance,
-                );
+                cmd.DrawInstanced(*vertex_count, *instance_count, *first_vertex, *first_instance);
             },
             RenderCommand::DrawIndexed {
                 index_count,

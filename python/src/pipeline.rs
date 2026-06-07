@@ -3,9 +3,7 @@
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
 use crate::shader::PyShaderModule;
-use crate::types::{
-    PyDepthStencilState, PyPrimitiveTopology, PyTextureFormat, PyVertexBufferLayout,
-};
+use crate::types::{PyDepthStencilState, PyPrimitiveTopology, PyTextureFormat, PyVertexBufferLayout};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -99,13 +97,9 @@ impl PyRenderPipeline {
             depth_stencil: desc.depth_stencil.as_ref().map(|ds| ds.inner.clone()),
         };
 
-        let pipeline = goldy::RenderPipeline::new(
-            &device.inner,
-            &vertex_shader.inner,
-            &fragment_shader.inner,
-            &rust_desc,
-        )
-        .into_py_result()?;
+        let pipeline =
+            goldy::RenderPipeline::new(&device.inner, &vertex_shader.inner, &fragment_shader.inner, &rust_desc)
+                .into_py_result()?;
 
         Ok(PyRenderPipeline {
             inner: Arc::new(pipeline),

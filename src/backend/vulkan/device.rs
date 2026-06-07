@@ -87,11 +87,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .map(|(idx, _)| idx as u32)
         .context("No graphics queue family found")?;
 
-    let pdev_features = unsafe {
-        state
-            .instance
-            .get_physical_device_features(physical_device_handle)
-    };
+    let pdev_features = unsafe { state.instance.get_physical_device_features(physical_device_handle) };
     let supports_sparse = physical_device.supports_sparse_buffer;
     debug_assert_eq!(
         supports_sparse,
@@ -115,15 +111,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     const KHR_COMPUTE_DERIVATIVES: &CStr = c"VK_KHR_compute_shader_derivatives";
     const NV_COMPUTE_DERIVATIVES: &CStr = c"VK_NV_compute_shader_derivatives";
-    let has_khr_compute_derivatives =
-        available_device_exts.contains("VK_KHR_compute_shader_derivatives");
-    let has_nv_compute_derivatives =
-        available_device_exts.contains("VK_NV_compute_shader_derivatives");
-    let supports_compute_derivative_quads = if has_khr_compute_derivatives
-        || has_nv_compute_derivatives
-    {
-        let mut supported_compute_derivatives =
-            vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default();
+    let has_khr_compute_derivatives = available_device_exts.contains("VK_KHR_compute_shader_derivatives");
+    let has_nv_compute_derivatives = available_device_exts.contains("VK_NV_compute_shader_derivatives");
+    let supports_compute_derivative_quads = if has_khr_compute_derivatives || has_nv_compute_derivatives {
+        let mut supported_compute_derivatives = vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default();
         let mut supported_features2 =
             vk::PhysicalDeviceFeatures2::default().push_next(&mut supported_compute_derivatives);
         unsafe {
@@ -183,8 +174,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     // Vulkan 1.1 features: shaderDrawParameters is needed for SV_InstanceID
     // (SPIR-V DrawParameters capability) in vertex shaders.
-    let mut vulkan_11_features =
-        vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+    let mut vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
     let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
@@ -197,8 +187,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     // Texture sampling in compute shaders requires Slang to emit SPV_KHR_compute_shader_derivatives.
     let mut compute_derivatives_features =
-        vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default()
-            .compute_derivative_group_quads(true);
+        vk::PhysicalDeviceComputeShaderDerivativesFeaturesNV::default().compute_derivative_group_quads(true);
 
     let core_features = vk::PhysicalDeviceFeatures {
         vertex_pipeline_stores_and_atomics: vk::TRUE,
@@ -271,21 +260,11 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         vk::Queue::default()
     };
 
-    let (sparse_buffer_block_size, sparse_memory_type_index, sparse_page_pool) = if supports_sparse
-    {
-        let bs = super::sparse::query_sparse_buffer_block_size(&device)
-            .context("query_sparse_buffer_block_size")?;
-        let (mt_idx, _) = super::sparse::sparse_storage_memory_type(
-            &state.instance,
-            physical_device_handle,
-            &device,
-        )
-        .context("sparse_storage_memory_type")?;
-        (
-            bs,
-            mt_idx,
-            Some(super::sparse::SparsePagePool::new(bs, mt_idx)),
-        )
+    let (sparse_buffer_block_size, sparse_memory_type_index, sparse_page_pool) = if supports_sparse {
+        let bs = super::sparse::query_sparse_buffer_block_size(&device).context("query_sparse_buffer_block_size")?;
+        let (mt_idx, _) = super::sparse::sparse_storage_memory_type(&state.instance, physical_device_handle, &device)
+            .context("sparse_storage_memory_type")?;
+        (bs, mt_idx, Some(super::sparse::SparsePagePool::new(bs, mt_idx)))
     } else {
         (0u64, 0u32, None)
     };
@@ -306,29 +285,19 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .queue_family_index(queue_family_index)
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-    let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
-        .context("Failed to create command pool")?;
+    let command_pool =
+        unsafe { device.create_command_pool(&pool_info, None) }.context("Failed to create command pool")?;
 
     // Create descriptor infrastructure for resource binding
-    let (
-        bindless_descriptor_pool,
-        bindless_descriptor_set_layout,
-        bindless_descriptor_set,
-        bindless_pipeline_layout,
-    ) = {
+    let (bindless_descriptor_pool, bindless_descriptor_set_layout, bindless_descriptor_set, bindless_pipeline_layout) = {
         // Create descriptor set layout with update-after-bind flag
         // Bindings organized by ACCESS PATTERN (see types.rs::bindless_bindings)
         let binding_flags = [
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
         ];
 
         let mut binding_flags_info =
@@ -372,9 +341,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
             .push_next(&mut binding_flags_info);
 
-        let descriptor_set_layout =
-            unsafe { device.create_descriptor_set_layout(&layout_info, None) }
-                .context("Failed to create bindless descriptor set layout")?;
+        let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+            .context("Failed to create bindless descriptor set layout")?;
 
         // Create descriptor pool with update-after-bind flag
         let pool_sizes = [
@@ -452,14 +420,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     };
 
     let initial_pipeline_cache_bytes = dirs::cache_dir()
-        .map(|d| {
-            d.join("goldy")
-                .join(format!("pipeline_cache_{adapter_id}.bin"))
-        })
+        .map(|d| d.join("goldy").join(format!("pipeline_cache_{adapter_id}.bin")))
         .and_then(|path| std::fs::read(path).ok())
         .unwrap_or_default();
-    let pipeline_cache_ci =
-        vk::PipelineCacheCreateInfo::default().initial_data(&initial_pipeline_cache_bytes);
+    let pipeline_cache_ci = vk::PipelineCacheCreateInfo::default().initial_data(&initial_pipeline_cache_bytes);
     let pipeline_cache = unsafe { device.create_pipeline_cache(&pipeline_cache_ci, None) }
         .context("Failed to create VkPipelineCache")?;
 
@@ -496,11 +460,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         }),
     );
 
-    tracing::info!(
-        "Created Vulkan device {} for adapter {}",
-        handle,
-        adapter_id
-    );
+    tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
     Ok(handle)
 }
 
@@ -535,27 +495,13 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     "lost Vulkan device — skipping per-object destroy, calling vkDestroyDevice only (driver may be in an invalid state)"
                 );
                 // Drop map entries without calling Vulkan (handles become invalid).
-                state
-                    .buffers
-                    .retain(|_, b| b.device_handle != device_handle);
-                state
-                    .shaders
-                    .retain(|_, s| s.device_handle != device_handle);
-                state
-                    .pipelines
-                    .retain(|_, p| p.device_handle != device_handle);
-                state
-                    .compute_pipelines
-                    .retain(|_, p| p.device_handle != device_handle);
-                state
-                    .render_targets
-                    .retain(|_, t| t.device_handle != device_handle);
-                state
-                    .textures
-                    .retain(|_, t| t.device_handle != device_handle);
-                state
-                    .samplers
-                    .retain(|_, s| s.device_handle != device_handle);
+                state.buffers.retain(|_, b| b.device_handle != device_handle);
+                state.shaders.retain(|_, s| s.device_handle != device_handle);
+                state.pipelines.retain(|_, p| p.device_handle != device_handle);
+                state.compute_pipelines.retain(|_, p| p.device_handle != device_handle);
+                state.render_targets.retain(|_, t| t.device_handle != device_handle);
+                state.textures.retain(|_, t| t.device_handle != device_handle);
+                state.samplers.retain(|_, s| s.device_handle != device_handle);
                 state
                     .compute_fence_pool
                     .lock()
@@ -645,15 +591,11 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             for handle in pipeline_handles {
                 if let Some(pipeline) = state.pipelines.remove(&handle) {
                     if pipeline.pipeline != vk::Pipeline::null() {
-                        logical_device
-                            .device
-                            .destroy_pipeline(pipeline.pipeline, None);
+                        logical_device.device.destroy_pipeline(pipeline.pipeline, None);
                     }
                     // Only destroy layout if we own it (not the global bindless layout)
                     if pipeline.owns_layout && pipeline.layout != vk::PipelineLayout::null() {
-                        logical_device
-                            .device
-                            .destroy_pipeline_layout(pipeline.layout, None);
+                        logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
                     }
                 }
             }
@@ -668,15 +610,11 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             for handle in compute_pipeline_handles {
                 if let Some(pipeline) = state.compute_pipelines.remove(&handle) {
                     if pipeline.pipeline != vk::Pipeline::null() {
-                        logical_device
-                            .device
-                            .destroy_pipeline(pipeline.pipeline, None);
+                        logical_device.device.destroy_pipeline(pipeline.pipeline, None);
                     }
                     // Only destroy layout if we own it (not the global bindless layout)
                     if pipeline.owns_layout && pipeline.layout != vk::PipelineLayout::null() {
-                        logical_device
-                            .device
-                            .destroy_pipeline_layout(pipeline.layout, None);
+                        logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
                     }
                 }
             }
@@ -717,9 +655,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 .collect();
             for handle in target_handles {
                 if let Some(target) = state.render_targets.remove(&handle) {
-                    logical_device
-                        .device
-                        .destroy_image_view(target.image_view, None);
+                    logical_device.device.destroy_image_view(target.image_view, None);
                     logical_device.device.destroy_image(target.image, None);
                     logical_device.device.free_memory(target.image_memory, None);
                     // Clean up depth buffer if present
@@ -822,17 +758,13 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             if let Some(pipeline_layout) = logical_device.bindless_pipeline_layout {
-                logical_device
-                    .device
-                    .destroy_pipeline_layout(pipeline_layout, None);
+                logical_device.device.destroy_pipeline_layout(pipeline_layout, None);
             }
             if let Some(pool) = logical_device.bindless_descriptor_pool {
                 logical_device.device.destroy_descriptor_pool(pool, None);
             }
             if let Some(layout) = logical_device.bindless_descriptor_set_layout {
-                logical_device
-                    .device
-                    .destroy_descriptor_set_layout(layout, None);
+                logical_device.device.destroy_descriptor_set_layout(layout, None);
             }
 
             logical_device

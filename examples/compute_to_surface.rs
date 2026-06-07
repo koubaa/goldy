@@ -8,9 +8,8 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance,
-    PresentMode, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, SurfaceConfig,
-    TaskGraph, SWAPCHAIN_SLOT_PLACEHOLDER,
+    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance, PresentMode,
+    RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, SurfaceConfig, TaskGraph, SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 use std::sync::Arc;
 use winit::{
@@ -200,29 +199,27 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                match event.logical_key.as_ref() {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Character("v") => {
-                        state.vsync = !state.vsync;
-                        let mode = if state.vsync {
-                            PresentMode::Fifo
-                        } else {
-                            PresentMode::Immediate
-                        };
-                        if let Err(e) = state.surface.set_present_mode(mode) {
-                            eprintln!("Failed to set present mode: {e}");
-                        } else {
-                            println!(
-                                "Vsync: {} (present mode: {:?})",
-                                if state.vsync { "ON" } else { "OFF" },
-                                mode
-                            );
-                        }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => match event.logical_key.as_ref() {
+                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                Key::Character("v") => {
+                    state.vsync = !state.vsync;
+                    let mode = if state.vsync {
+                        PresentMode::Fifo
+                    } else {
+                        PresentMode::Immediate
+                    };
+                    if let Err(e) = state.surface.set_present_mode(mode) {
+                        eprintln!("Failed to set present mode: {e}");
+                    } else {
+                        println!(
+                            "Vsync: {} (present mode: {:?})",
+                            if state.vsync { "ON" } else { "OFF" },
+                            mode
+                        );
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
                 let _ = state.surface.resize(new_size.width, new_size.height);
                 state.window.request_redraw();

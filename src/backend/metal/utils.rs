@@ -3,14 +3,13 @@
 //! Format conversion and helper functions for Metal types.
 
 use crate::types::{
-    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology,
-    TextureFormat, VertexFormat,
+    AddressMode, CompareFunction, DepthFormat, FilterMode, IndexFormat, PrimitiveTopology, TextureFormat, VertexFormat,
 };
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
-    MTLCompareFunction, MTLIndexType, MTLPixelFormat, MTLPrimitiveType, MTLSamplerAddressMode,
-    MTLSamplerMinMagFilter, MTLVertexFormat,
+    MTLCompareFunction, MTLIndexType, MTLPixelFormat, MTLPrimitiveType, MTLSamplerAddressMode, MTLSamplerMinMagFilter,
+    MTLVertexFormat,
 };
 
 /// Convert goldy TextureFormat to Metal MTLPixelFormat.

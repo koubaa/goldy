@@ -8,10 +8,7 @@ pub(super) fn create_with_checks(
     state: &mut Dx12State,
     desc: crate::backend::shared::ShaderDesc<'_>,
 ) -> Result<ShaderHandle> {
-    let _ = state
-        .devices
-        .get(&desc.device)
-        .context("Invalid device handle")?;
+    let _ = state.devices.get(&desc.device).context("Invalid device handle")?;
 
     let handle = state.next_shader_handle;
     state.next_shader_handle += 1;
@@ -55,10 +52,7 @@ pub(super) fn ensure_stage_compiled(
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,
 ) -> Result<Vec<u8>> {
-    let shader = state
-        .shaders
-        .get_mut(&shader_handle)
-        .context("Invalid shader handle")?;
+    let shader = state.shaders.get_mut(&shader_handle).context("Invalid shader handle")?;
 
     // Check if already compiled for this stage
     let cached_bytecode = match stage {
@@ -110,32 +104,19 @@ pub(super) fn ensure_stage_compiled(
         )
     };
 
-    let result = compile_result.with_context(|| {
-        format!(
-            "Failed to compile {} shader to DXIL (bindless)",
-            entry_point_name
-        )
-    })?;
+    let result =
+        compile_result.with_context(|| format!("Failed to compile {} shader to DXIL (bindless)", entry_point_name))?;
 
-    let bytecode = result
-        .shader
-        .as_dxil()
-        .context("Invalid DXIL output")?
-        .to_vec();
+    let bytecode = result.shader.as_dxil().context("Invalid DXIL output")?.to_vec();
     let new_reflection = {
         let mut r = result.reflection;
         if r.push_constant_categories.is_empty() {
-            r.push_constant_categories =
-                crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+            r.push_constant_categories = crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
         }
         r
     };
 
-    tracing::debug!(
-        "Compiled {} to DXIL ({} bytes)",
-        entry_point_name,
-        bytecode.len(),
-    );
+    tracing::debug!("Compiled {} to DXIL ({} bytes)", entry_point_name, bytecode.len(),);
 
     // Dump DXIL for debugging when GOLDY_DUMP_SHADERS is set
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {

@@ -4,10 +4,9 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState,
-    DeviceDescriptor, IndexFormat, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat,
+    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
+    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 fn create_device() -> Option<goldy::Device> {
@@ -26,8 +25,8 @@ fn test_vulkan_render_target_creation() {
         return;
     };
 
-    let target = RenderTarget::new(&device, 800, 600, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target =
+        RenderTarget::new(&device, 800, 600, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     assert_eq!(target.width(), 800);
     assert_eq!(target.height(), 600);
@@ -42,8 +41,8 @@ fn test_vulkan_render_and_readback() {
         return;
     };
 
-    let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target =
+        RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     // Create a simple shader
     let shader_source = r#"
@@ -115,10 +114,7 @@ fn test_vulkan_render_and_readback() {
     // The center of the image should have some non-black pixels (the triangle)
     // Check that not all pixels are black
     let has_non_black = pixels.chunks(4).any(|p| p[0] > 0 || p[1] > 0 || p[2] > 0);
-    assert!(
-        has_non_black,
-        "Expected rendered triangle to have non-black pixels"
-    );
+    assert!(has_non_black, "Expected rendered triangle to have non-black pixels");
 }
 
 #[test]
@@ -128,8 +124,7 @@ fn test_render_target_clear_only() {
         return;
     };
 
-    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     // Just clear to a solid color
     let clear_color = Color::from_rgb(128, 64, 32);
@@ -160,10 +155,8 @@ fn test_multiple_render_targets() {
     };
 
     // Create multiple render targets
-    let target1 = RenderTarget::new(&device, 10, 10, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create target 1");
-    let target2 = RenderTarget::new(&device, 20, 20, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create target 2");
+    let target1 = RenderTarget::new(&device, 10, 10, TextureFormat::Rgba8Unorm).expect("Failed to create target 1");
+    let target2 = RenderTarget::new(&device, 20, 20, TextureFormat::Rgba8Unorm).expect("Failed to create target 2");
 
     // Render to both with different colors
     let mut encoder1 = CommandEncoder::new();
@@ -171,18 +164,14 @@ fn test_multiple_render_targets() {
         let mut pass = encoder1.begin_render_pass();
         pass.clear(Color::RED);
     }
-    target1
-        .render(encoder1)
-        .expect("Failed to render to target 1");
+    target1.render(encoder1).expect("Failed to render to target 1");
 
     let mut encoder2 = CommandEncoder::new();
     {
         let mut pass = encoder2.begin_render_pass();
         pass.clear(Color::BLUE);
     }
-    target2
-        .render(encoder2)
-        .expect("Failed to render to target 2");
+    target2.render(encoder2).expect("Failed to render to target 2");
 
     // Read back and verify
     let pixels1 = target1.read_to_cpu().expect("Failed to read target 1");
@@ -206,8 +195,8 @@ fn test_indexed_drawing() {
         return;
     };
 
-    let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target =
+        RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     // Create a simple shader
     let shader_source = r#"
@@ -289,10 +278,7 @@ fn test_indexed_drawing() {
 
     // The quad should cover a significant portion of the image
     // Check that we have non-black pixels (the quad was drawn)
-    let non_black_count = pixels
-        .chunks(4)
-        .filter(|p| p[0] > 0 || p[1] > 0 || p[2] > 0)
-        .count();
+    let non_black_count = pixels.chunks(4).filter(|p| p[0] > 0 || p[1] > 0 || p[2] > 0).count();
     assert!(
         non_black_count > 1000,
         "Expected quad to cover at least 1000 pixels, got {}",
@@ -307,8 +293,7 @@ fn test_indexed_drawing_uint32() {
         return;
     };
 
-    let target = RenderTarget::new(&device, 50, 50, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
+    let target = RenderTarget::new(&device, 50, 50, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     let shader_source = r#"
         struct VertexInput {
@@ -451,8 +436,7 @@ fn test_depth_occlusion_red_beats_green() {
     .expect("Failed to create render target with depth");
 
     let shader_source = include_str!("../shaders/depth_test.slang");
-    let shader =
-        ShaderModule::from_slang(&device, shader_source).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("Failed to compile shader");
 
     let pipeline = RenderPipeline::new(
         &device,
@@ -561,8 +545,7 @@ fn test_depth_occlusion_green_beats_red() {
     .expect("Failed to create render target with depth");
 
     let shader_source = include_str!("../shaders/depth_test.slang");
-    let shader =
-        ShaderModule::from_slang(&device, shader_source).expect("Failed to compile shader");
+    let shader = ShaderModule::from_slang(&device, shader_source).expect("Failed to compile shader");
 
     let pipeline = RenderPipeline::new(
         &device,
@@ -709,8 +692,7 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
 
     let shader = ShaderModule::from_slang(&device, shader_source).expect("compile bindless shader");
 
-    let target =
-        RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("create target");
+    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("create target");
 
     let pipeline = RenderPipeline::new(
         &device,

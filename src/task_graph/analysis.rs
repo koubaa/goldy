@@ -25,10 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::ir::{
-    BarrierSet, BarrierUsage, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, UsageKindFlags,
-    Wave,
-};
+use super::ir::{BarrierSet, BarrierUsage, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, UsageKindFlags, Wave};
 // NodeAccess is used in the test module via `super::*`
 #[cfg(test)]
 use super::ir::NodeAccess;
@@ -175,12 +172,10 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
                 if edge_set.contains(&(i, j)) {
                     continue;
                 }
-                let conflict = ir.nodes[i].bindings.iter().any(|bi| {
-                    ir.nodes[j]
-                        .bindings
-                        .iter()
-                        .any(|bj| bindings_conflict(bi, bj))
-                });
+                let conflict = ir.nodes[i]
+                    .bindings
+                    .iter()
+                    .any(|bi| ir.nodes[j].bindings.iter().any(|bj| bindings_conflict(bi, bj)));
                 if conflict {
                     edge_set.insert((i, j));
                 }
@@ -231,10 +226,7 @@ pub(crate) fn node_to_wave_map(schedule: &CompiledSchedule, n: usize) -> Vec<u32
 ///
 /// Used to pack transient heap allocations: non-overlapping wave intervals may
 /// alias the same memory.
-pub(crate) fn transient_wave_intervals(
-    ir: &GraphIR,
-    node_waves: &[u32],
-) -> Result<HashMap<u32, (u32, u32)>> {
+pub(crate) fn transient_wave_intervals(ir: &GraphIR, node_waves: &[u32]) -> Result<HashMap<u32, (u32, u32)>> {
     if ir.nodes.is_empty() {
         return Ok(HashMap::new());
     }
@@ -245,10 +237,7 @@ pub(crate) fn transient_wave_intervals(
         for b in &node.bindings {
             if let ResourceId::TransientBuffer(tid) = b.resource {
                 let id = tid.0;
-                first
-                    .entry(id)
-                    .and_modify(|e| *e = (*e).min(w))
-                    .or_insert(w);
+                first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
                 last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);
             }
         }
@@ -265,10 +254,7 @@ pub(crate) fn transient_wave_intervals(
 ///
 /// `node_waves[i]` is the wave index of IR node `i`. Use [`node_to_wave_map`]
 /// to derive this from a [`CompiledSchedule`] without re-running the scheduler.
-pub(crate) fn transient_texture_wave_intervals(
-    ir: &GraphIR,
-    node_waves: &[u32],
-) -> Result<HashMap<u32, (u32, u32)>> {
+pub(crate) fn transient_texture_wave_intervals(ir: &GraphIR, node_waves: &[u32]) -> Result<HashMap<u32, (u32, u32)>> {
     if ir.nodes.is_empty() {
         return Ok(HashMap::new());
     }
@@ -279,10 +265,7 @@ pub(crate) fn transient_texture_wave_intervals(
         for b in &node.bindings {
             if let ResourceId::TransientTexture(tid) = b.resource {
                 let id = tid.0;
-                first
-                    .entry(id)
-                    .and_modify(|e| *e = (*e).min(w))
-                    .or_insert(w);
+                first.entry(id).and_modify(|e| *e = (*e).min(w)).or_insert(w);
                 last.entry(id).and_modify(|e| *e = (*e).max(w)).or_insert(w);
             }
         }
@@ -461,11 +444,7 @@ fn compute_barriers(
 ///
 /// If any wave contains a [`NodeKind::RenderPass`] node.  Use
 /// [`emit_graph_commands`] for graphs that include render passes.
-pub(crate) fn emit_waves_to_commands(
-    ir: &GraphIR,
-    waves: &[Wave],
-    resolver: Option<&SlotResolver>,
-) -> Vec<GpuCommand> {
+pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
     let mut commands = Vec::new();
 
     for wave in waves {
@@ -494,22 +473,14 @@ pub(crate) fn emit_waves_to_commands(
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
-                NodeKind::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
+                NodeKind::ClearBuffer { buffer, offset, size } => {
                     commands.push(GpuCommand::ClearBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         size: *size,
                     });
                 }
-                NodeKind::WriteBuffer {
-                    buffer,
-                    offset,
-                    data,
-                } => {
+                NodeKind::WriteBuffer { buffer, offset, data } => {
                     commands.push(GpuCommand::WriteBuffer {
                         buffer: *buffer,
                         offset: *offset,
@@ -598,9 +569,7 @@ pub(crate) fn emit_waves_to_commands(
                 } = &node.kind
                 {
                     let slots = match resolver {
-                        Some(r) => {
-                            SlotData::Resolved(r.resolve_slots(resource_slots, &node.bindings))
-                        }
+                        Some(r) => SlotData::Resolved(r.resolve_slots(resource_slots, &node.bindings)),
                         None => SlotData::Borrowed(resource_slots),
                     };
                     pending.push(PendingDispatch {
@@ -656,22 +625,14 @@ pub(crate) fn emit_waves_to_commands(
             let mut i = 0;
             while i < pending.len() {
                 let cur_pipeline = pending[i].pipeline;
-                let run_end = pending[i..]
-                    .iter()
-                    .take_while(|d| d.pipeline == cur_pipeline)
-                    .count();
+                let run_end = pending[i..].iter().take_while(|d| d.pipeline == cur_pipeline).count();
                 let run = &pending[i..i + run_end];
 
                 if run.len() > 1 {
-                    let mut arg_data: Vec<u8> =
-                        Vec::with_capacity(run.len() * DISPATCH_BATCH_STRIDE);
+                    let mut arg_data: Vec<u8> = Vec::with_capacity(run.len() * DISPATCH_BATCH_STRIDE);
                     for d in run {
                         let mut layout = crate::backend::shared::PushLayout::default();
-                        crate::backend::shared::fill_raw(
-                            &mut layout,
-                            d.resource_slots.as_slice(),
-                            d.user_slots,
-                        );
+                        crate::backend::shared::fill_raw(&mut layout, d.resource_slots.as_slice(), d.user_slots);
                         arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
                         arg_data.extend_from_slice(&d.x.to_ne_bytes());
                         arg_data.extend_from_slice(&d.y.to_ne_bytes());
@@ -730,11 +691,7 @@ pub(crate) fn emit_waves_to_commands(
 /// # Panics
 ///
 /// If the graph contains [`NodeKind::RenderPass`], use [`emit_graph_commands`] instead.
-pub fn emit_commands(
-    ir: &GraphIR,
-    schedule: &CompiledSchedule,
-    resolver: Option<&SlotResolver>,
-) -> Vec<GpuCommand> {
+pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
     emit_waves_to_commands(ir, &schedule.waves, resolver)
 }
 
@@ -806,12 +763,7 @@ pub fn emit_partitioned_commands(
         .iter()
         .enumerate()
         .skip(1)
-        .map(|(idx, w)| {
-            (
-                idx,
-                w.barriers_before.buffers.len() + w.barriers_before.textures.len(),
-            )
-        })
+        .map(|(idx, w)| (idx, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
         .max_by_key(|&(_, cost)| cost)
         .unwrap(); // safe: waves.len() >= 3
 
@@ -858,22 +810,14 @@ pub fn emit_graph_commands(
         for &idx in &wave.node_indices {
             let node = &ir.nodes[idx];
             match &node.kind {
-                NodeKind::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
+                NodeKind::ClearBuffer { buffer, offset, size } => {
                     commands.push(GraphCommand::Compute(GpuCommand::ClearBuffer {
                         buffer: *buffer,
                         offset: *offset,
                         size: *size,
                     }));
                 }
-                NodeKind::WriteBuffer {
-                    buffer,
-                    offset,
-                    data,
-                } => {
+                NodeKind::WriteBuffer { buffer, offset, data } => {
                     commands.push(GraphCommand::Compute(GpuCommand::WriteBuffer {
                         buffer: *buffer,
                         offset: *offset,
@@ -912,10 +856,7 @@ pub fn emit_graph_commands(
                 }
                 NodeKind::CopyTexture { src, dst } => {
                     let dst = resolve_texture_resource(*dst, resolver);
-                    commands.push(GraphCommand::Compute(GpuCommand::CopyTexture {
-                        src: *src,
-                        dst,
-                    }));
+                    commands.push(GraphCommand::Compute(GpuCommand::CopyTexture { src: *src, dst }));
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
             }
@@ -988,12 +929,7 @@ mod tests {
     }
 
     /// Build a dispatch `TaskNode` — the workhorse helper for analysis tests.
-    fn dispatch_node(
-        label: &'static str,
-        pipeline: u64,
-        bindings: Vec<(ResourceId, NodeAccess)>,
-        wg: u32,
-    ) -> TaskNode {
+    fn dispatch_node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         TaskNode {
             label,
             bindings: bindings
@@ -1010,12 +946,7 @@ mod tests {
     }
 
     /// Short alias used by the bulk of tests.
-    fn node(
-        label: &'static str,
-        pipeline: u64,
-        bindings: Vec<(ResourceId, NodeAccess)>,
-        wg: u32,
-    ) -> TaskNode {
+    fn node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         dispatch_node(label, pipeline, bindings, wg)
     }
 
@@ -1200,24 +1131,9 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node(
-                    "B",
-                    2,
-                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "C",
-                    3,
-                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "D",
-                    4,
-                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
-                    1,
-                ),
+                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
         };
         let edges = build_edges(&ir);
@@ -1261,12 +1177,7 @@ mod tests {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
                 node("B", 2, vec![(buf(1), NodeAccess::Write)], 1),
-                node(
-                    "C",
-                    3,
-                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Read)],
-                    1,
-                ),
+                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Read)], 1),
             ],
         };
         let edges = build_edges(&ir);
@@ -1329,9 +1240,7 @@ mod tests {
 
         // Single wave, no barriers
         assert_eq!(cmds.len(), 4);
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
@@ -1357,9 +1266,7 @@ mod tests {
 
         assert_eq!(cmds.len(), 3);
         assert!(matches!(cmds[0], GpuCommand::SetPipeline(10)));
-        assert!(
-            matches!(cmds[1], GpuCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7])
-        );
+        assert!(matches!(cmds[1], GpuCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7]));
         assert!(matches!(
             cmds[2],
             GpuCommand::Dispatch {
@@ -1441,15 +1348,9 @@ mod tests {
         assert_eq!(schedule.waves.len(), 1);
 
         let cmds = emit_commands(&ir, &schedule, None);
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ClearBuffer { .. })));
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::Dispatch { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, GpuCommand::ClearBuffer { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, GpuCommand::Dispatch { .. })));
     }
 
     #[test]
@@ -1488,9 +1389,7 @@ mod tests {
         assert_eq!(schedule.waves.len(), 1);
 
         let cmds = emit_commands(&ir, &schedule, None);
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
@@ -1540,19 +1439,14 @@ mod tests {
         assert_eq!(schedule.waves.len(), 1);
 
         let cmds = emit_commands(&ir, &schedule, None);
-        assert!(!cmds
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
     #[test]
     fn multiple_clears_independent_same_wave() {
         // Two clears on different buffers → independent → wave 0, no barrier
         let ir = GraphIR {
-            nodes: vec![
-                clear_node("clear_a", buf(0), 0),
-                clear_node("clear_b", buf(1), 1),
-            ],
+            nodes: vec![clear_node("clear_a", buf(0), 0), clear_node("clear_b", buf(1), 1)],
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -1570,24 +1464,9 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 clear_node("clear_x", buf(0), 0),
-                node(
-                    "B",
-                    2,
-                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "C",
-                    3,
-                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "D",
-                    4,
-                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
-                    1,
-                ),
+                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
         };
         let edges = build_edges(&ir);
@@ -1602,11 +1481,7 @@ mod tests {
         assert_eq!(schedule.waves[2].node_indices, vec![3]);
 
         // Two barriers: before wave 1 (clear→B,C) and before wave 2 (B,C→D)
-        let barrier_count = schedule
-            .waves
-            .iter()
-            .filter(|w| !w.barriers_before.is_empty())
-            .count();
+        let barrier_count = schedule.waves.iter().filter(|w| !w.barriers_before.is_empty()).count();
         assert_eq!(barrier_count, 2);
     }
 
@@ -1669,11 +1544,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn range(parent: u64, offset: u64, len: u64) -> ResourceId {
-        ResourceId::BufferRange {
-            parent,
-            offset,
-            len,
-        }
+        ResourceId::BufferRange { parent, offset, len }
     }
 
     fn tex(id: u64) -> ResourceId {
@@ -1842,14 +1713,7 @@ mod tests {
     fn edges_n_disjoint_views_all_writing_no_edges() {
         // 6 nodes, each writing a non-overlapping 256-byte region of parent 0
         let nodes: Vec<TaskNode> = (0..6)
-            .map(|i| {
-                node(
-                    "dispatch",
-                    i,
-                    vec![(range(0, i * 256, 256), NodeAccess::Write)],
-                    1,
-                )
-            })
+            .map(|i| node("dispatch", i, vec![(range(0, i * 256, 256), NodeAccess::Write)], 1))
             .collect();
         let ir = GraphIR { nodes };
         assert!(build_edges(&ir).is_empty());
@@ -1935,14 +1799,7 @@ mod tests {
     fn waves_8_disjoint_views_independent_writes_one_wave() {
         // 8 nodes, each writing a distinct 128-byte window of parent 0 — all independent
         let nodes: Vec<TaskNode> = (0..8)
-            .map(|i| {
-                node(
-                    "write",
-                    i,
-                    vec![(range(0, i * 128, 128), NodeAccess::Write)],
-                    1,
-                )
-            })
+            .map(|i| node("write", i, vec![(range(0, i * 128, 128), NodeAccess::Write)], 1))
             .collect();
         let ir = GraphIR { nodes };
         let edges = build_edges(&ir);
@@ -2076,12 +1933,7 @@ mod tests {
     #[test]
     fn waves_single_node_with_buffer_range() {
         let ir = GraphIR {
-            nodes: vec![node(
-                "A",
-                1,
-                vec![(range(0, 0, 256), NodeAccess::ReadWrite)],
-                1,
-            )],
+            nodes: vec![node("A", 1, vec![(range(0, 0, 256), NodeAccess::ReadWrite)], 1)],
         };
         let edges = build_edges(&ir);
         assert!(edges.is_empty());
@@ -2335,24 +2187,9 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node(
-                    "B",
-                    2,
-                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "C",
-                    3,
-                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "D",
-                    4,
-                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
-                    1,
-                ),
+                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
         };
         let parts = partitions(&ir);
@@ -2442,11 +2279,7 @@ mod tests {
             ],
         };
         let parts = partitions(&ir);
-        assert_eq!(
-            parts.len(),
-            2,
-            "coarse/fine graph must produce two partitions"
-        );
+        assert_eq!(parts.len(), 2, "coarse/fine graph must produce two partitions");
 
         // Second partition must begin with a ResourceBarrier.
         assert!(
@@ -2470,9 +2303,7 @@ mod tests {
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 1, "all-independent graph must not be split");
         // No barrier anywhere.
-        let has_barrier = parts[0]
-            .iter()
-            .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. }));
+        let has_barrier = parts[0].iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. }));
         assert!(!has_barrier);
     }
 
@@ -2484,24 +2315,9 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node(
-                    "B",
-                    2,
-                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "C",
-                    3,
-                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "D",
-                    4,
-                    vec![(buf(2), NodeAccess::Read), (buf(3), NodeAccess::Write)],
-                    1,
-                ),
+                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node("C", 3, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node("D", 4, vec![(buf(2), NodeAccess::Read), (buf(3), NodeAccess::Write)], 1),
                 node("E", 5, vec![(buf(3), NodeAccess::Read)], 1),
             ],
         };
@@ -2557,24 +2373,9 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node(
-                    "B",
-                    2,
-                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "C",
-                    3,
-                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
-                    1,
-                ),
-                node(
-                    "D",
-                    4,
-                    vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)],
-                    1,
-                ),
+                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
         };
 
@@ -2584,10 +2385,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let new_map = node_to_wave_map(&schedule, ir.nodes.len());
 
-        assert_eq!(
-            old_map, new_map,
-            "node_to_wave_map must equal graph_node_waves"
-        );
+        assert_eq!(old_map, new_map, "node_to_wave_map must equal graph_node_waves");
         // Sanity: wave 0 is A, wave 1 is B and C, wave 2 is D
         assert_eq!(new_map[0], 0);
         assert_eq!(new_map[1], 1);

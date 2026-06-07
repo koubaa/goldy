@@ -53,10 +53,7 @@ fn buffer_heap_stats_available_on_metal() {
 fn texture_heap_stats_available_on_metal() {
     let device = make_device();
     let stats = device.texture_heap_stats();
-    assert!(
-        stats.is_some(),
-        "texture_heap_stats should be Some on Metal"
-    );
+    assert!(stats.is_some(), "texture_heap_stats should be Some on Metal");
     let s = stats.unwrap();
     assert_eq!(s.texture_count, 0);
     assert_eq!(s.overflow_count, 0);
@@ -90,10 +87,7 @@ fn gpu_only_buffer_does_not_use_heap() {
         .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::GPU_ONLY)
         .unwrap();
     let after = device.buffer_heap_stats().unwrap().buffer_count;
-    assert_eq!(
-        before, after,
-        "GPU_ONLY buffers bypass the heap (device-allocated)"
-    );
+    assert_eq!(before, after, "GPU_ONLY buffers bypass the heap (device-allocated)");
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -116,20 +110,12 @@ fn buffer_drop_frees_heap_space_after_flush() {
     let big_bufs: Vec<Buffer> = (0..3)
         .map(|_| {
             device
-                .alloc_buffer(
-                    alloc_size,
-                    BufferKind::Scattered,
-                    None,
-                    BufferFlags::empty(),
-                )
+                .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap()
         })
         .collect();
     let overflow_during = device.buffer_heap_stats().unwrap().overflow_count;
-    assert!(
-        overflow_during > 0,
-        "should have overflow with 3×32MB buffers"
-    );
+    assert!(overflow_during > 0, "should have overflow with 3×32MB buffers");
 
     // Drop the big buffers.
     drop(big_bufs);
@@ -164,12 +150,7 @@ fn many_buffers_create_overflow_heaps() {
     let mut buffers = Vec::new();
     let alloc_size = 8 * 1024 * 1024;
     for _ in 0..12 {
-        match device.alloc_buffer(
-            alloc_size,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        ) {
+        match device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty()) {
             Ok(buf) => buffers.push(buf),
             Err(_) => break,
         }
@@ -195,12 +176,7 @@ fn compact_overflow_removes_empty_heaps() {
     // Fill primary + create overflow
     let mut buffers = Vec::new();
     for _ in 0..12 {
-        match device.alloc_buffer(
-            alloc_size,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        ) {
+        match device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty()) {
             Ok(buf) => buffers.push(buf),
             Err(_) => break,
         }
@@ -246,12 +222,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
     let held_buffers: Vec<Buffer> = (0..8)
         .map(|_| {
             device
-                .alloc_buffer(
-                    alloc_size,
-                    BufferKind::Scattered,
-                    None,
-                    BufferFlags::empty(),
-                )
+                .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap()
         })
         .collect();
@@ -268,12 +239,7 @@ fn allocation_survives_heap_pressure_with_gpu_work() {
 
     // Now allocating should succeed because we reclaimed the deferred buffers.
     let _fresh = device
-        .alloc_buffer(
-            alloc_size,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("allocation should succeed after reclaiming deferred buffers");
 }
 
@@ -290,12 +256,7 @@ fn multi_frame_pipelined_allocation_does_not_exhaust_heap() {
         let buffers: Vec<Buffer> = (0..4)
             .map(|_| {
                 device
-                    .alloc_buffer(
-                        alloc_size,
-                        BufferKind::Scattered,
-                        None,
-                        BufferFlags::empty(),
-                    )
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap_or_else(|e| panic!("frame {frame}: allocation failed: {e}"))
             })
             .collect();
@@ -341,12 +302,7 @@ fn steady_state_overflow_stays_bounded() {
         let buffers: Vec<Buffer> = (0..3)
             .map(|_| {
                 device
-                    .alloc_buffer(
-                        alloc_size,
-                        BufferKind::Scattered,
-                        None,
-                        BufferFlags::empty(),
-                    )
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap()
             })
             .collect();
@@ -376,12 +332,7 @@ fn steady_state_overflow_stays_bounded() {
         let buffers: Vec<Buffer> = (0..3)
             .map(|_| {
                 device
-                    .alloc_buffer(
-                        alloc_size,
-                        BufferKind::Scattered,
-                        None,
-                        BufferFlags::empty(),
-                    )
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap()
             })
             .collect();
@@ -747,12 +698,7 @@ fn rapid_submit_without_explicit_wait_survives_50_frames() {
         let buffers: Vec<Buffer> = (0..3)
             .map(|_| {
                 device
-                    .alloc_buffer(
-                        alloc_size,
-                        BufferKind::Scattered,
-                        None,
-                        BufferFlags::empty(),
-                    )
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap_or_else(|e| panic!("frame {frame}: alloc failed: {e}"))
             })
             .collect();
@@ -787,12 +733,7 @@ fn rapid_submit_large_buffers_50_frames() {
         let buffers: Vec<Buffer> = (0..2)
             .map(|_| {
                 device
-                    .alloc_buffer(
-                        alloc_size,
-                        BufferKind::Scattered,
-                        None,
-                        BufferFlags::empty(),
-                    )
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap_or_else(|e| panic!("frame {frame}: alloc failed: {e}"))
             })
             .collect();
@@ -827,12 +768,7 @@ fn overflow_count_never_exceeds_16() {
     let alloc_size = 8 * 1024 * 1024u64;
     let mut buffers = Vec::new();
     for _ in 0..200 {
-        match device.alloc_buffer(
-            alloc_size,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        ) {
+        match device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty()) {
             Ok(buf) => buffers.push(buf),
             Err(_) => break, // Expected: heap exhaustion
         }
@@ -1001,10 +937,7 @@ fn deferred_buffers_returned_to_caller_after_flush() {
     ctx.flush_deferred_deletions();
 
     let returned = pending.lock().unwrap().len();
-    assert_eq!(
-        returned, 3,
-        "all 3 buffers should be returned to pending after flush"
-    );
+    assert_eq!(returned, 3, "all 3 buffers should be returned to pending after flush");
 }
 
 // ===========================================================================
@@ -1047,8 +980,5 @@ fn wait_until_timeout_returns_error_on_far_future() {
     let result = ctx.wait_until_timeout(u64::MAX / 2, 10);
     // Should either succeed (if GPU is actually idle at that value) or timeout.
     // On a fresh device with no work, timeline is 0 so this should timeout.
-    assert!(
-        result.is_err(),
-        "waiting for far-future timeline should timeout"
-    );
+    assert!(result.is_err(), "waiting for far-future timeline should timeout");
 }

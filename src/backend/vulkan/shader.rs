@@ -74,9 +74,7 @@ pub(super) fn ensure_stage_compiled(
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,
 ) -> Result<vk::ShaderModule> {
-    let shader = shaders
-        .get_mut(&shader_handle)
-        .context("Invalid shader handle")?;
+    let shader = shaders.get_mut(&shader_handle).context("Invalid shader handle")?;
 
     // Check if already compiled for this stage
     let cached_module = match stage {
@@ -101,11 +99,7 @@ pub(super) fn ensure_stage_compiled(
     // Clone source, search paths, and defines to avoid borrow issues
     let slang_source = shader.slang_source.clone();
     let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
-    let extra_defines: Vec<(&str, &str)> = shader
-        .defines
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let extra_defines: Vec<(&str, &str)> = shader.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let device_handle = shader.device_handle;
     let optimization_level = shader.optimization_level;
     let layout_checks_snapshot = shader.layout_checks.clone();
@@ -123,51 +117,33 @@ pub(super) fn ensure_stage_compiled(
         )
         .with_context(|| format!("Failed to compile {} shader", entry_point_name))?;
 
-    let spirv_data = result
-        .shader
-        .as_spirv()
-        .context("Invalid SPIR-V output")?
-        .to_vec();
+    let spirv_data = result.shader.as_spirv().context("Invalid SPIR-V output")?.to_vec();
     let reflection = {
         let mut r = result.reflection;
         if r.push_constant_categories.is_empty() {
-            r.push_constant_categories =
-                crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
+            r.push_constant_categories = crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
         }
         Some(r)
     };
 
     // Get device
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Shader's device no longer valid")?;
+    let logical_device = devices.get(&device_handle).context("Shader's device no longer valid")?;
 
     // Create Vulkan shader module
     // Convert Vec<u8> to &[u32] for SPIR-V
     let spirv_u32: &[u32] = bytemuck::cast_slice(&spirv_data);
     let create_info = vk::ShaderModuleCreateInfo::default().code(spirv_u32);
-    let module = unsafe {
-        logical_device
-            .device
-            .create_shader_module(&create_info, None)
-    }
-    .context("Failed to create Vulkan shader module")?;
+    let module = unsafe { logical_device.device.create_shader_module(&create_info, None) }
+        .context("Failed to create Vulkan shader module")?;
 
-    tracing::debug!(
-        "Compiled {} ({} SPIR-V words)",
-        entry_point_name,
-        spirv_u32.len()
-    );
+    tracing::debug!("Compiled {} ({} SPIR-V words)", entry_point_name, spirv_u32.len());
 
     // Dump SPIR-V for debugging when GOLDY_DUMP_SHADERS is set
     if let Ok(dump_dir) = std::env::var("GOLDY_DUMP_SHADERS") {
         use std::io::Write;
         let dir = std::path::Path::new(&dump_dir);
         let _ = std::fs::create_dir_all(dir);
-        let path = dir.join(format!(
-            "{}_h{}_vulkan.spv",
-            entry_point_name, shader_handle
-        ));
+        let path = dir.join(format!("{}_h{}_vulkan.spv", entry_point_name, shader_handle));
         if let Ok(mut file) = std::fs::File::create(&path) {
             let spirv_bytes: &[u8] = bytemuck::cast_slice(spirv_u32);
             let _ = file.write_all(spirv_bytes);

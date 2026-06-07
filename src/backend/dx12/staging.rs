@@ -68,14 +68,8 @@ impl StagingBelt {
     }
 
     /// Copy `data` into belt memory; return Upload resource + source offset for `CopyBufferRegion`.
-    pub fn write(
-        &mut self,
-        logical_device: &LogicalDevice,
-        data: &[u8],
-    ) -> Result<(ID3D12Resource, u64)> {
-        let (idx, start) = self
-            .core
-            .write(data, |size| allocate_chunk(logical_device, size))?;
+    pub fn write(&mut self, logical_device: &LogicalDevice, data: &[u8]) -> Result<(ID3D12Resource, u64)> {
+        let (idx, start) = self.core.write(data, |size| allocate_chunk(logical_device, size))?;
         Ok((self.core.active[idx].resource.clone(), start))
     }
 
@@ -113,10 +107,7 @@ fn allocate_chunk(logical_device: &LogicalDevice, size: u64) -> Result<Dx12BeltC
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -137,8 +128,7 @@ fn allocate_chunk(logical_device: &LogicalDevice, size: u64) -> Result<Dx12BeltC
 
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
-        .context("StagingBelt: Map failed")?;
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("StagingBelt: Map failed")?;
 
     Ok(Dx12BeltChunk {
         resource,
@@ -202,11 +192,7 @@ impl TextureStagingPool {
     ///
     /// Returns a recycled free entry on a pool hit. On a miss, allocates a new
     /// permanently-mapped entry. The entry's mapped memory is ready for `memcpy`.
-    pub fn acquire(
-        &mut self,
-        logical_device: &LogicalDevice,
-        size: u64,
-    ) -> Result<TextureStagingEntry> {
+    pub fn acquire(&mut self, logical_device: &LogicalDevice, size: u64) -> Result<TextureStagingEntry> {
         if let Some(pos) = self.free.iter().rposition(|e| e.capacity >= size) {
             let _tz = tracy_zone!("dx12.texture_staging.acquire.hit");
             return Ok(self.free.swap_remove(pos));
@@ -257,10 +243,7 @@ impl TextureStagingPool {
     }
 }
 
-fn allocate_texture_staging_entry(
-    logical_device: &LogicalDevice,
-    size: u64,
-) -> Result<TextureStagingEntry> {
+fn allocate_texture_staging_entry(logical_device: &LogicalDevice, size: u64) -> Result<TextureStagingEntry> {
     let upload_heap = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_UPLOAD,
         CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
@@ -277,10 +260,7 @@ fn allocate_texture_staging_entry(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -301,8 +281,7 @@ fn allocate_texture_staging_entry(
 
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
-        .context("TextureStagingPool: Map failed")?;
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("TextureStagingPool: Map failed")?;
 
     Ok(TextureStagingEntry {
         resource,

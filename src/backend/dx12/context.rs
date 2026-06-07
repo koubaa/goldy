@@ -29,19 +29,14 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
 }
 
 pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<ContextHandle> {
-    let ld = state
-        .devices
-        .get(&device)
-        .context("Invalid device handle")?;
+    let ld = state.devices.get(&device).context("Invalid device handle")?;
 
     let fence: ID3D12Fence = unsafe { ld.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create per-context DX12 fence")?;
 
-    let compute_initial_allocator: ID3D12CommandAllocator = unsafe {
-        ld.device
-            .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-    }
-    .context("Failed to create per-context compute command allocator")?;
+    let compute_initial_allocator: ID3D12CommandAllocator =
+        unsafe { ld.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+            .context("Failed to create per-context compute command allocator")?;
     let compute_allocator_pool = vec![super::types::ComputeAllocatorSlot {
         allocator: compute_initial_allocator,
         fence_value: 0,
@@ -59,9 +54,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             shutdown: shutdown_poll,
             signal_queue: signal_queue_poll,
             last_emitted_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            gpu_completed: std::sync::Arc::new(move || unsafe {
-                fence_for_poll.GetCompletedValue()
-            }),
+            gpu_completed: std::sync::Arc::new(move || unsafe { fence_for_poll.GetCompletedValue() }),
         },
     ));
 
@@ -83,9 +76,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence_thread,
             compute_allocator_pool,
             retained_graph: None,
-            staging_belt: super::staging::StagingBelt::new(
-                super::staging::DEFAULT_STAGING_CHUNK_SIZE,
-            ),
+            staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
         })),

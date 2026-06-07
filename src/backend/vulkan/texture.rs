@@ -26,9 +26,7 @@ pub(super) fn create(
 ) -> Result<TextureHandle> {
     // Get physical device for memory type lookup
     let physical_device = {
-        let logical_device = devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.physical_device
     };
 
@@ -45,9 +43,7 @@ pub(super) fn create(
         None
     };
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Map access pattern and flags to Vulkan image usage
     let mut vk_usage = vk::ImageUsageFlags::TRANSFER_DST;
@@ -90,15 +86,12 @@ pub(super) fn create(
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
 
-    let image = unsafe { logical_device.device.create_image(&image_info, None) }
-        .context("Failed to create texture image")?;
+    let image =
+        unsafe { logical_device.device.create_image(&image_info, None) }.context("Failed to create texture image")?;
 
     let mem_reqs = unsafe { logical_device.device.get_image_memory_requirements(image) };
-    let memory_type = find_mem_type(
-        mem_reqs.memory_type_bits,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )
-    .context("Failed to find memory type for texture")?;
+    let memory_type = find_mem_type(mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        .context("Failed to find memory type for texture")?;
 
     let alloc_info = vk::MemoryAllocateInfo::default()
         .allocation_size(mem_reqs.size)
@@ -113,8 +106,7 @@ pub(super) fn create(
         })
         .context("Failed to allocate texture memory")?;
 
-    unsafe { logical_device.device.bind_image_memory(image, memory, 0) }
-        .context("Failed to bind texture memory")?;
+    unsafe { logical_device.device.bind_image_memory(image, memory, 0) }.context("Failed to bind texture memory")?;
 
     // Create image view
     let view_info = vk::ImageViewCreateInfo::default()
@@ -137,10 +129,7 @@ pub(super) fn create(
     let handle = *next_texture_handle;
     *next_texture_handle += 1;
 
-    let is_storage_image = matches!(
-        access,
-        TextureKind::Direct | TextureKind::DirectInterpolated
-    );
+    let is_storage_image = matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated);
     let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
 
     let bindless_index = {
@@ -281,9 +270,7 @@ pub(super) fn write(
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let texture = textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let old_layout = texture.image_layout();
@@ -304,9 +291,7 @@ pub(super) fn write(
 
     // Get physical device for memory type lookup
     let physical_device = {
-        let logical_device = devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.physical_device
     };
 
@@ -323,9 +308,7 @@ pub(super) fn write(
         None
     };
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Create staging buffer
     let buffer_size = data.len() as u64;
@@ -334,18 +317,10 @@ pub(super) fn write(
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let staging_buffer = unsafe {
-        logical_device
-            .device
-            .create_buffer(&staging_buffer_info, None)
-    }
-    .context("Failed to create staging buffer")?;
+    let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
+        .context("Failed to create staging buffer")?;
 
-    let staging_mem_reqs = unsafe {
-        logical_device
-            .device
-            .get_buffer_memory_requirements(staging_buffer)
-    };
+    let staging_mem_reqs = unsafe { logical_device.device.get_buffer_memory_requirements(staging_buffer) };
     let staging_memory_type = find_mem_type(
         staging_mem_reqs.memory_type_bits,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -356,12 +331,8 @@ pub(super) fn write(
         .allocation_size(staging_mem_reqs.size)
         .memory_type_index(staging_memory_type);
 
-    let staging_memory = unsafe {
-        logical_device
-            .device
-            .allocate_memory(&staging_alloc_info, None)
-    }
-    .context("Failed to allocate staging memory")?;
+    let staging_memory = unsafe { logical_device.device.allocate_memory(&staging_alloc_info, None) }
+        .context("Failed to allocate staging memory")?;
 
     unsafe {
         logical_device
@@ -392,8 +363,7 @@ pub(super) fn write(
     let cmd_buffer = cmd_buffers[0];
 
     // Record commands
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         logical_device
@@ -403,22 +373,15 @@ pub(super) fn write(
 
         // Transition image to transfer dst
         let (src_stage, src_access) = match old_layout {
-            vk::ImageLayout::UNDEFINED => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
                 vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_READ,
             ),
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_WRITE,
-            ),
-            _ => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => {
+                (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE)
+            }
+            _ => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
         };
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src_stage)
@@ -436,11 +399,8 @@ pub(super) fn write(
                 layer_count: 1,
             });
 
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-        logical_device
-            .device
-            .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
 
         // Copy buffer to image
         let region = vk::BufferImageCopy::default()
@@ -485,11 +445,8 @@ pub(super) fn write(
                 layer_count: 1,
             });
 
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-        logical_device
-            .device
-            .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
 
         logical_device
             .device
@@ -521,12 +478,7 @@ pub(super) fn write(
         tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 
-    tracing::debug!(
-        "Wrote {}x{} texture data ({} bytes)",
-        width,
-        height,
-        data.len()
-    );
+    tracing::debug!("Wrote {}x{} texture data ({} bytes)", width, height, data.len());
     Ok(())
 }
 
@@ -543,9 +495,7 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let texture = textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let image = texture.image;
@@ -575,9 +525,7 @@ pub(super) fn write_region(
         );
     }
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let physical_device = logical_device.physical_device;
     let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
@@ -594,18 +542,10 @@ pub(super) fn write_region(
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let staging_buffer = unsafe {
-        logical_device
-            .device
-            .create_buffer(&staging_buffer_info, None)
-    }
-    .context("Failed to create staging buffer")?;
+    let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
+        .context("Failed to create staging buffer")?;
 
-    let staging_mem_reqs = unsafe {
-        logical_device
-            .device
-            .get_buffer_memory_requirements(staging_buffer)
-    };
+    let staging_mem_reqs = unsafe { logical_device.device.get_buffer_memory_requirements(staging_buffer) };
     let staging_memory_type = find_mem_type(
         staging_mem_reqs.memory_type_bits,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -616,12 +556,8 @@ pub(super) fn write_region(
         .allocation_size(staging_mem_reqs.size)
         .memory_type_index(staging_memory_type);
 
-    let staging_memory = unsafe {
-        logical_device
-            .device
-            .allocate_memory(&staging_alloc_info, None)
-    }
-    .context("Failed to allocate staging memory")?;
+    let staging_memory = unsafe { logical_device.device.allocate_memory(&staging_alloc_info, None) }
+        .context("Failed to allocate staging memory")?;
 
     unsafe {
         logical_device
@@ -649,8 +585,7 @@ pub(super) fn write_region(
         .context("Failed to allocate command buffer")?;
     let cmd_buffer = cmd_buffers[0];
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         logical_device
@@ -659,22 +594,15 @@ pub(super) fn write_region(
             .context("Failed to begin command buffer")?;
 
         let (src_stage, src_access) = match old_layout {
-            vk::ImageLayout::UNDEFINED => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
                 vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_READ,
             ),
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_WRITE,
-            ),
-            _ => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => {
+                (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE)
+            }
+            _ => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
         };
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src_stage)
@@ -691,11 +619,8 @@ pub(super) fn write_region(
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-        logical_device
-            .device
-            .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
 
         let region = vk::BufferImageCopy::default()
             .buffer_offset(0)
@@ -728,9 +653,7 @@ pub(super) fn write_region(
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-            )
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
             .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -742,11 +665,8 @@ pub(super) fn write_region(
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
-        logical_device
-            .device
-            .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
 
         logical_device
             .device
@@ -800,9 +720,7 @@ pub(super) fn read_to_cpu(
     output: &mut [u8],
 ) -> Result<()> {
     let (device_handle, width, height, format, image, old_layout, existing_sb, existing_sm) = {
-        let texture = textures
-            .get(&texture_handle)
-            .context("Invalid texture handle")?;
+        let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
         (
             texture.device_handle,
             texture.width,
@@ -817,16 +735,10 @@ pub(super) fn read_to_cpu(
 
     let expected_size = (width * height * format.bytes_per_pixel()) as usize;
     if output.len() < expected_size {
-        anyhow::bail!(
-            "Output buffer too small: {} < {}",
-            output.len(),
-            expected_size
-        );
+        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
     }
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let physical_device = logical_device.physical_device;
     let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
@@ -884,8 +796,7 @@ pub(super) fn read_to_cpu(
         .context("Failed to allocate command buffer")?;
     let cmd = cmd_buffers[0];
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         logical_device
@@ -895,26 +806,19 @@ pub(super) fn read_to_cpu(
 
         // Transition image to transfer src
         let (src_stage, src_access) = match old_layout {
-            vk::ImageLayout::UNDEFINED => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
                 vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_READ,
             ),
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_WRITE,
-            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => {
+                (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE)
+            }
             vk::ImageLayout::GENERAL => (
                 vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
             ),
-            _ => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            _ => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
         };
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src_stage)
@@ -932,8 +836,7 @@ pub(super) fn read_to_cpu(
                 layer_count: 1,
             });
 
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
         // Copy image to staging buffer
@@ -978,8 +881,7 @@ pub(super) fn read_to_cpu(
     }
     .context("Failed to submit command buffer")?;
 
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
-        .context("Failed to wait for queue")?;
+    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
     unsafe {
         logical_device
@@ -1028,10 +930,7 @@ pub(super) fn destroy(
                 return;
             }
 
-            let barrier = logical_device
-                .timeline_next
-                .load(Ordering::Relaxed)
-                .saturating_sub(1);
+            let barrier = logical_device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
             logical_device.deletion_queue.lock().unwrap().queue(
                 barrier,
                 types::PendingDeletion::Texture {
@@ -1063,8 +962,7 @@ pub(super) fn transition_image_layout(
         .context("Failed to allocate command buffer for layout transition")?;
     let cmd = cmd_buffers[0];
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         logical_device
@@ -1073,18 +971,14 @@ pub(super) fn transition_image_layout(
             .context("Failed to begin command buffer")?;
 
         let (src_stage, src_access) = match old_layout {
-            vk::ImageLayout::UNDEFINED => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::AccessFlags2::empty(),
-            ),
+            vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
             vk::ImageLayout::GENERAL => (
                 vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
             ),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_READ,
-            ),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => {
+                (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_READ)
+            }
             _ => (
                 vk::PipelineStageFlags2::ALL_COMMANDS,
                 vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
@@ -1096,10 +990,9 @@ pub(super) fn transition_image_layout(
                 vk::PipelineStageFlags2::COMPUTE_SHADER,
                 vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
             ),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_READ,
-            ),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => {
+                (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_READ)
+            }
             _ => (
                 vk::PipelineStageFlags2::ALL_COMMANDS,
                 vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
@@ -1122,8 +1015,7 @@ pub(super) fn transition_image_layout(
                 layer_count: 1,
             });
 
-        let dep_info =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
         logical_device
@@ -1133,11 +1025,9 @@ pub(super) fn transition_image_layout(
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
-        let sub = logical_device.device.queue_submit(
-            logical_device.queue,
-            &[submit_info],
-            vk::Fence::null(),
-        );
+        let sub = logical_device
+            .device
+            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null());
         sub.context("Failed to submit layout transition")?;
         let wait = logical_device.device.queue_wait_idle(logical_device.queue);
         wait.context("Failed to wait for layout transition")?;
@@ -1209,9 +1099,7 @@ pub(super) fn allocate_compute_texture_staging(
     }
 
     let device_handle = texture.device_handle;
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let buffer_size = data.len() as u64;
     let entry = pool
@@ -1258,31 +1146,20 @@ pub(super) fn record_compute_texture_upload(
         anyhow::bail!("record_compute_texture_upload: scratch region out of bounds");
     }
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let (src_stage, src_access) = match old_layout {
-        vk::ImageLayout::UNDEFINED => (
-            vk::PipelineStageFlags2::TOP_OF_PIPE,
-            vk::AccessFlags2::empty(),
-        ),
+        vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
             vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
             vk::AccessFlags2::SHADER_READ,
         ),
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-            vk::PipelineStageFlags2::TRANSFER,
-            vk::AccessFlags2::TRANSFER_WRITE,
-        ),
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
         vk::ImageLayout::GENERAL => (
             vk::PipelineStageFlags2::COMPUTE_SHADER,
             vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
         ),
-        _ => (
-            vk::PipelineStageFlags2::TOP_OF_PIPE,
-            vk::AccessFlags2::empty(),
-        ),
+        _ => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
     };
 
     let barrier_to_dst = vk::ImageMemoryBarrier2::default()
@@ -1301,8 +1178,7 @@ pub(super) fn record_compute_texture_upload(
             layer_count: 1,
         });
 
-    let dep_info =
-        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_dst));
+    let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_dst));
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
     let region = vk::BufferImageCopy::default()
@@ -1339,9 +1215,7 @@ pub(super) fn record_compute_texture_upload(
     let barrier_to_shader = vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
         .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-        .dst_stage_mask(
-            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-        )
+        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
         .dst_access_mask(vk::AccessFlags2::SHADER_READ)
         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
         .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1354,8 +1228,7 @@ pub(super) fn record_compute_texture_upload(
             layer_count: 1,
         });
 
-    let dep_info2 = vk::DependencyInfo::default()
-        .image_memory_barriers(std::slice::from_ref(&barrier_to_shader));
+    let dep_info2 = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_shader));
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2) };
 
     if let Some(tex) = textures.get(&scratch.texture_handle) {
@@ -1379,7 +1252,5 @@ pub(super) fn bindless_sampled_index(
     textures: &HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
 ) -> Option<u32> {
-    textures
-        .get(&texture_handle)
-        .and_then(|t| t.sampled_bindless_index)
+    textures.get(&texture_handle).and_then(|t| t.sampled_bindless_index)
 }

@@ -38,10 +38,7 @@ pub(super) fn create_with_depth(
     color_format: TextureFormat,
     depth_format: Option<DepthFormat>,
 ) -> Result<RenderTargetHandle> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Create color render target texture
     let heap_properties = D3D12_HEAP_PROPERTIES {
@@ -60,10 +57,7 @@ pub(super) fn create_with_depth(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: format_to_dxgi(color_format),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
         Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
     };
@@ -102,9 +96,7 @@ pub(super) fn create_with_depth(
         handle
     };
     unsafe {
-        logical_device
-            .device
-            .CreateRenderTargetView(&texture, None, rtv_handle);
+        logical_device.device.CreateRenderTargetView(&texture, None, rtv_handle);
     }
 
     // Create depth buffer if requested
@@ -117,10 +109,7 @@ pub(super) fn create_with_depth(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: depth_format_to_dxgi(df),
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
             Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
         };
@@ -128,10 +117,7 @@ pub(super) fn create_with_depth(
         let depth_clear = D3D12_CLEAR_VALUE {
             Format: depth_format_to_dxgi(df),
             Anonymous: D3D12_CLEAR_VALUE_0 {
-                DepthStencil: D3D12_DEPTH_STENCIL_VALUE {
-                    Depth: 1.0,
-                    Stencil: 0,
-                },
+                DepthStencil: D3D12_DEPTH_STENCIL_VALUE { Depth: 1.0, Stencil: 0 },
             },
         };
 
@@ -181,8 +167,7 @@ pub(super) fn create_with_depth(
         )
     }
     .context("Failed to create command list")?;
-    let command_list: ID3D12GraphicsCommandList7 =
-        command_list.cast().context("ID3D12GraphicsCommandList7")?;
+    let command_list: ID3D12GraphicsCommandList7 = command_list.cast().context("ID3D12GraphicsCommandList7")?;
 
     // Close the command list initially
     unsafe { command_list.Close() }.ok();
@@ -241,10 +226,7 @@ pub(super) fn record_render_pass_to_list(
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
 ) -> Result<()> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let render_target = state
         .render_targets
@@ -381,10 +363,7 @@ pub(super) fn render(
     target: RenderTargetHandle,
     commands: &[RenderCommand],
 ) -> Result<()> {
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Reset the single shared command allocator. This is safe only because we do
     // a blocking CPU wait at the end of every render_to_target call (see below);
@@ -392,8 +371,7 @@ pub(super) fn render(
     // The compute/submit_graph paths avoid this stall by using a pool of allocators
     // (ComputeAllocatorSlot) where each slot is reset only after its fence retires.
     // Upgrading render_to_target to a pool would eliminate the wait but is not yet done.
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("Failed to reset command allocator")?;
+    unsafe { logical_device.command_allocator.Reset() }.context("Failed to reset command allocator")?;
 
     let render_target = state
         .render_targets
@@ -407,35 +385,25 @@ pub(super) fn render(
     let cmd = &render_target.command_list;
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
 
-    unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }
-        .context("Failed to reset command list")?;
+    unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }.context("Failed to reset command list")?;
 
     record_render_pass_to_list(state, device_handle, target, commands, cmd)?;
 
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
     let fence_value = logical_device
         .timeline_next
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal fence")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal fence")?;
     // Blocking wait — required so the shared command_allocator can be safely
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;
@@ -449,11 +417,7 @@ pub(super) fn render(
 
 /// Read render target contents to CPU memory.
 #[allow(clippy::too_many_lines)]
-pub(super) fn read_to_cpu(
-    state: &mut Dx12State,
-    target: RenderTargetHandle,
-    output: &mut [u8],
-) -> Result<()> {
+pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
     let render_target = state
         .render_targets
         .get(&target)
@@ -469,18 +433,11 @@ pub(super) fn read_to_cpu(
     let expected_size = (width * height * format.bytes_per_pixel()) as usize;
 
     if output.len() < expected_size {
-        anyhow::bail!(
-            "Output buffer too small: {} < {}",
-            output.len(),
-            expected_size
-        );
+        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
     }
 
     let device_handle = render_target.device_handle;
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Ensure staging buffer exists
     let needs_staging = render_target.staging_buffer.is_none();
@@ -504,10 +461,7 @@ pub(super) fn read_to_cpu(
             DepthOrArraySize: 1,
             MipLevels: 1,
             Format: DXGI_FORMAT_UNKNOWN,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             Flags: D3D12_RESOURCE_FLAG_NONE,
         };
@@ -545,16 +499,13 @@ pub(super) fn read_to_cpu(
 
     // Copy texture to staging buffer
     let cmd = &render_target.command_list;
-    unsafe { cmd.Reset(&logical_device.command_allocator, None) }
-        .context("Failed to reset command list")?;
+    unsafe { cmd.Reset(&logical_device.command_allocator, None) }.context("Failed to reset command list")?;
 
     let row_pitch = ((width * format.bytes_per_pixel() + 255) & !255) as u64;
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
         pResource: unsafe { std::mem::transmute_copy(&render_target.texture) },
         Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            SubresourceIndex: 0,
-        },
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
     };
 
     let dst_location = D3D12_TEXTURE_COPY_LOCATION {
@@ -579,33 +530,21 @@ pub(super) fn read_to_cpu(
 
     let cmd_list: ID3D12CommandList = cmd.cast().context("Failed to cast command list")?;
     unsafe {
-        logical_device
-            .command_queue
-            .ExecuteCommandLists(&[Some(cmd_list)]);
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
     }
 
     // Wait for copy to complete
     let fence_value = logical_device
         .timeline_next
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal fence")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     // Map and copy data
     let mut mapped_data: *mut u8 = std::ptr::null_mut();
-    unsafe {
-        staging_buffer.Map(
-            0,
-            None,
-            Some(&mut mapped_data as *mut *mut u8 as *mut *mut _),
-        )
-    }
-    .context("Failed to map staging buffer")?;
+    unsafe { staging_buffer.Map(0, None, Some(&mut mapped_data as *mut *mut u8 as *mut *mut _)) }
+        .context("Failed to map staging buffer")?;
 
     // Copy row by row if there's padding
     let bytes_per_row = width * format.bytes_per_pixel();
@@ -639,10 +578,8 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
 
-    let event =
-        unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
-    unsafe { fence.SetEventOnCompletion(value, event) }
-        .context("Failed to set event on completion")?;
+    let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+    unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
     unsafe { WaitForSingleObject(event, INFINITE) };
     unsafe { CloseHandle(event) }.ok();
     Ok(())

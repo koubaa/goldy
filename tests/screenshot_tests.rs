@@ -27,9 +27,7 @@ use std::path::Path;
 
 use common::image::{compare_images, ComparisonType, ImageComparisonError};
 use goldy::{Color, Vertex2D};
-use render_fixtures::{
-    create_device, render_clear, render_depth_occlusion, render_game_of_life, render_triangle,
-};
+use render_fixtures::{create_device, render_clear, render_depth_occlusion, render_game_of_life, render_triangle};
 
 fn run_screenshot_test(
     name: &str,

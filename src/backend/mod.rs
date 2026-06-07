@@ -42,9 +42,8 @@ pub(crate) mod shared;
 pub(crate) mod signal_fence;
 
 use crate::types::{
-    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType,
-    IndexFormat, PresentMode, PrimitiveTopology, ResourceHandle, SamplerDesc, TextureFlags,
-    TextureFormat, TextureKind, VertexBufferLayout,
+    BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat, PresentMode,
+    PrimitiveTopology, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -336,10 +335,7 @@ pub enum GpuCommand {
     ///
     /// Both textures must have compatible formats and identical dimensions.
     /// The backend inserts appropriate layout transitions and memory barriers.
-    CopyTexture {
-        src: TextureHandle,
-        dst: TextureHandle,
-    },
+    CopyTexture { src: TextureHandle, dst: TextureHandle },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
     /// Each entry packs `[PushLayout bytes | wg_x u32 | wg_y u32 | wg_z u32]` into
@@ -457,25 +453,14 @@ pub trait GpuBackend: Send + Sync {
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
     /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
-    fn read_buffer_to_cpu(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        output: &mut [u8],
-    ) -> Result<()>;
+    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
     /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let _ = device;
         crate::device::DeviceCapabilities::default()
     }
     /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
-    fn clear_buffer(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    ) -> Result<()>;
+    fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()>;
     fn buffer_size(&self, buffer: BufferHandle) -> u64;
 
     /// Bytes reserved for this buffer (>= [`Self::buffer_size`]). Used for oversize reservations.
@@ -554,13 +539,7 @@ pub trait GpuBackend: Send + Sync {
         layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
     ) -> Result<ShaderHandle> {
         if layout_checks.is_empty() {
-            self.create_shader_with_paths(
-                device,
-                slang_source,
-                search_paths,
-                defines,
-                optimization_level,
-            )
+            self.create_shader_with_paths(device, slang_source, search_paths, defines, optimization_level)
         } else {
             anyhow::bail!("Layout validation requires the Vulkan, DX12, or Metal backend")
         }
@@ -629,13 +608,7 @@ pub trait GpuBackend: Send + Sync {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle>;
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<()>;
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()>;
     /// Write pixel data to a subregion of the texture.
     /// The data must match width*height*bpp for the texture's format.
     fn write_texture_region(
@@ -660,8 +633,7 @@ pub trait GpuBackend: Send + Sync {
     fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32>;
 
     // Sampler management
-    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc)
-        -> Result<SamplerHandle>;
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle>;
     fn destroy_sampler(&mut self, sampler: SamplerHandle);
     /// Get the sampler's index in the global bindless descriptor set.
     /// Returns None if the sampler is not registered.
@@ -694,11 +666,7 @@ pub trait GpuBackend: Send + Sync {
 
     /// Set the present mode for a surface.
     /// Returns an error if the mode is not supported by the backend.
-    fn surface_set_present_mode(
-        &mut self,
-        _surface: SurfaceHandle,
-        _mode: PresentMode,
-    ) -> Result<()> {
+    fn surface_set_present_mode(&mut self, _surface: SurfaceHandle, _mode: PresentMode) -> Result<()> {
         Ok(())
     }
 
@@ -725,11 +693,7 @@ pub trait GpuBackend: Send + Sync {
     /// `device` for the one that signaled `value` and waits on its native primitive. Use this
     /// when the `TimelineValue` was produced by an arbitrary context — e.g. from outside the
     /// allocator — so you don't need a matching `ContextHandle`.
-    fn device_wait_until(
-        &mut self,
-        device: DeviceHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()>;
+    fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;
@@ -740,11 +704,7 @@ pub trait GpuBackend: Send + Sync {
     /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
 
-    fn wait_until(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()>;
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
     fn wait_until_timeout(
         &mut self,
@@ -843,11 +803,7 @@ pub trait GpuBackend: Send + Sync {
     ///
     /// `ctx` is the submission context that owns this surface's timeline; frame
     /// submit/present and swapchain signals are routed through it.
-    fn begin_frame(
-        &mut self,
-        surface: SurfaceHandle,
-        ctx: ContextHandle,
-    ) -> Result<(FrameToken, TextureHandle)>;
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)>;
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()>;
 
@@ -926,22 +882,14 @@ pub trait GpuBackend: Send + Sync {
     /// timeline release) count as live until they are actually recycled.
     ///
     /// Returns `u32::MAX` by default (unlimited / not tracked).
-    fn available_bindless_slots(
-        &self,
-        _device: DeviceHandle,
-        _category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn available_bindless_slots(&self, _device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {
         u32::MAX
     }
 
     /// Maximum number of bindless descriptor slots per category for this backend.
     ///
     /// Returns `u32::MAX` by default (unlimited / not tracked).
-    fn max_bindless_slots_per_category(
-        &self,
-        _device: DeviceHandle,
-        _category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn max_bindless_slots_per_category(&self, _device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {
         u32::MAX
     }
 
@@ -958,12 +906,7 @@ pub trait GpuBackend: Send + Sync {
     /// Metal uses this so `Buffer::drop` during [`crate::Context::boundary_crossed`] queues heap
     /// frees with the already-retired epoch instead of `timeline_scheduled_max`. Only the
     /// installing thread observes the override; other threads keep conservative barriers.
-    fn set_reclamation_context(
-        &mut self,
-        _ctx: ContextHandle,
-        _epoch: Option<crate::timeline::TimelineValue>,
-    ) {
-    }
+    fn set_reclamation_context(&mut self, _ctx: ContextHandle, _epoch: Option<crate::timeline::TimelineValue>) {}
 
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
@@ -1037,10 +980,7 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
                 other
             ),
         };
-        tracing::info!(
-            "Using backend from GOLDY_BACKEND env var: {:?}",
-            backend_type
-        );
+        tracing::info!("Using backend from GOLDY_BACKEND env var: {:?}", backend_type);
         return create_backend(backend_type);
     }
 
@@ -1143,10 +1083,7 @@ mod push_constant_validation_tests {
             ResourceHandle::new(ResourceCategory::Scattered, 0),
             ResourceHandle::new(ResourceCategory::Broadcast, 1),
         ];
-        let expectations = vec![
-            Some(ResourceCategory::Scattered),
-            Some(ResourceCategory::Broadcast),
-        ];
+        let expectations = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
         validate_typed_push_constants(&handles, &expectations, "test_shader").unwrap();
     }
 
@@ -1181,10 +1118,7 @@ mod push_constant_validation_tests {
             err.contains("broadcast"),
             "error should mention expected category: {err}"
         );
-        assert!(
-            err.contains("scattered"),
-            "error should mention actual category: {err}"
-        );
+        assert!(err.contains("scattered"), "error should mention actual category: {err}");
     }
 
     #[test]
@@ -1193,18 +1127,12 @@ mod push_constant_validation_tests {
             ResourceHandle::new(ResourceCategory::Scattered, 0),
             ResourceHandle::new(ResourceCategory::Texture, 3),
         ];
-        let expectations = vec![
-            Some(ResourceCategory::Scattered),
-            Some(ResourceCategory::Scattered),
-        ];
+        let expectations = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Scattered)];
         let err = validate_typed_push_constants(&handles, &expectations, "compute_cs")
             .unwrap_err()
             .to_string();
         assert!(err.contains("slot 1"), "error should name slot 1: {err}");
-        assert!(
-            err.contains("texture"),
-            "error should mention actual: {err}"
-        );
+        assert!(err.contains("texture"), "error should mention actual: {err}");
     }
 
     #[test]
@@ -1213,10 +1141,7 @@ mod push_constant_validation_tests {
             ResourceHandle::new(ResourceCategory::Texture, 0),
             ResourceHandle::new(ResourceCategory::Sampler, 1),
         ];
-        let expectations = vec![
-            Some(ResourceCategory::Scattered),
-            Some(ResourceCategory::Broadcast),
-        ];
+        let expectations = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
         let err = validate_typed_push_constants(&handles, &expectations, "sh")
             .unwrap_err()
             .to_string();

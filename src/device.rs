@@ -69,10 +69,7 @@ impl Instance {
     /// Enumerate available GPU adapters.
     pub fn enumerate_adapters(&self) -> Vec<Adapter> {
         let infos = self.backend.lock().unwrap().enumerate_adapters();
-        let adapters: Vec<Adapter> = infos
-            .into_iter()
-            .map(|info| self.adapter_from_info(info))
-            .collect();
+        let adapters: Vec<Adapter> = infos.into_iter().map(|info| self.adapter_from_info(info)).collect();
         tracing::debug!(count = adapters.len(), "Enumerated GPU adapters");
         for adapter in &adapters {
             tracing::debug!(
@@ -104,16 +101,8 @@ impl Instance {
             PowerPreference::HighPerformance => adapters
                 .iter()
                 .find(|a| a.device_type() == DeviceType::DiscreteGpu)
-                .or_else(|| {
-                    adapters
-                        .iter()
-                        .find(|a| a.device_type() == DeviceType::IntegratedGpu)
-                })
-                .or_else(|| {
-                    adapters
-                        .iter()
-                        .find(|a| a.device_type() == DeviceType::Other)
-                })
+                .or_else(|| adapters.iter().find(|a| a.device_type() == DeviceType::IntegratedGpu))
+                .or_else(|| adapters.iter().find(|a| a.device_type() == DeviceType::Other))
                 .or(adapters.first()),
             PowerPreference::LowPower => adapters
                 .iter()
@@ -280,10 +269,7 @@ impl Adapter {
     /// Create a logical [`Device`] on this adapter.
     pub fn request_device(&self, desc: &DeviceDescriptor) -> Result<Device> {
         let _ = desc;
-        tracing::debug!(
-            adapter_id = self.inner.info.id,
-            "Creating device for adapter"
-        );
+        tracing::debug!(adapter_id = self.inner.info.id, "Creating device for adapter");
         let mut backend = self.inner.backend.lock().unwrap();
         let handle = backend.create_device(self.inner.info.id)?;
 
@@ -381,10 +367,7 @@ impl Default for DeviceCapabilities {
         Self {
             preferred_surface_format: TextureFormat::Bgra8UnormSrgb,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
-            supported_surface_formats: vec![
-                TextureFormat::Bgra8UnormSrgb,
-                TextureFormat::Bgra8Unorm,
-            ],
+            supported_surface_formats: vec![TextureFormat::Bgra8UnormSrgb, TextureFormat::Bgra8Unorm],
             supported_render_target_formats: vec![
                 TextureFormat::Rgba8Unorm,
                 TextureFormat::Rgba8UnormSrgb,
@@ -509,13 +492,8 @@ impl ShaderLibraryRegistry {
         // Create temp directory if needed
         if self.temp_dir.is_none() {
             let unique_id = REGISTRY_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let temp_dir = std::env::temp_dir().join(format!(
-                "goldy-shaders-{}-{}",
-                std::process::id(),
-                unique_id
-            ));
-            std::fs::create_dir_all(&temp_dir)
-                .context("Failed to create shader library temp directory")?;
+            let temp_dir = std::env::temp_dir().join(format!("goldy-shaders-{}-{}", std::process::id(), unique_id));
+            std::fs::create_dir_all(&temp_dir).context("Failed to create shader library temp directory")?;
             self.temp_dir = Some(temp_dir);
         }
 
@@ -534,8 +512,7 @@ impl ShaderLibraryRegistry {
 
                     // Ensure parent directories exist
                     if let Some(parent) = file_path.parent() {
-                        std::fs::create_dir_all(parent)
-                            .context("Failed to create module directory")?;
+                        std::fs::create_dir_all(parent).context("Failed to create module directory")?;
                     }
 
                     std::fs::write(&file_path, source)
@@ -564,11 +541,7 @@ impl Device {
     // VramAllocator
     // =======================================================================
 
-    pub(crate) fn defer_release(
-        &self,
-        epoch: TimelineValue,
-        payload: crate::vram_allocator::DeferredPayload,
-    ) {
+    pub(crate) fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
         self.inner.vram_allocator.defer_release(epoch, payload);
     }
 
@@ -598,10 +571,7 @@ impl Device {
     /// unaffected.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn with_vram_allocator(
-        &self,
-        allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
-    ) -> Self {
+    pub fn with_vram_allocator(&self, allocator: Arc<dyn crate::vram_allocator::VramAllocator>) -> Self {
         Self {
             inner: Arc::new(DeviceInner {
                 backend: Arc::clone(&self.inner.backend),
@@ -629,10 +599,10 @@ impl Device {
         element_stride: Option<u32>,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        let mut buf =
-            self.inner
-                .vram_allocator
-                .alloc_buffer(self, size, access, element_stride, flags)?;
+        let mut buf = self
+            .inner
+            .vram_allocator
+            .alloc_buffer(self, size, access, element_stride, flags)?;
         buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
         Ok(buf)
     }
@@ -647,13 +617,10 @@ impl Device {
         access: BufferKind,
         flags: BufferFlags,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        let mut buf = self.inner.vram_allocator.alloc_buffer_with_capacity(
-            self,
-            initial_size,
-            expected_max,
-            access,
-            flags,
-        )?;
+        let mut buf =
+            self.inner
+                .vram_allocator
+                .alloc_buffer_with_capacity(self, initial_size, expected_max, access, flags)?;
         buf.set_deed(std::sync::Arc::downgrade(&self.inner.vram_allocator));
         Ok(buf)
     }
@@ -670,11 +637,7 @@ impl Device {
     }
 
     /// Allocate a buffer initialized with raw bytes (element stride 1).
-    pub fn alloc_buffer_with_bytes(
-        &self,
-        data: &[u8],
-        access: BufferKind,
-    ) -> anyhow::Result<crate::buffer::Buffer> {
+    pub fn alloc_buffer_with_bytes(&self, data: &[u8], access: BufferKind) -> anyhow::Result<crate::buffer::Buffer> {
         self.alloc_buffer_with_bytes_stride(data, access, 1)
     }
 
@@ -685,12 +648,7 @@ impl Device {
         access: BufferKind,
         element_stride: u32,
     ) -> anyhow::Result<crate::buffer::Buffer> {
-        self.alloc_buffer_with_bytes_stride_and_flags(
-            data,
-            access,
-            element_stride,
-            BufferFlags::empty(),
-        )
+        self.alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride, BufferFlags::empty())
     }
 
     /// Like [`Self::alloc_buffer_with_bytes_stride`], with explicit [`BufferFlags`].
@@ -755,11 +713,7 @@ impl Device {
 
     /// Check if the device is still valid.
     pub fn is_valid(&self) -> bool {
-        self.inner
-            .backend
-            .lock()
-            .unwrap()
-            .is_device_valid(self.inner.handle)
+        self.inner.backend.lock().unwrap().is_device_valid(self.inner.handle)
     }
 
     /// Create a submission/timeline context bound to this device.
@@ -793,17 +747,12 @@ impl Device {
     /// from external contexts they do not own.
     ///
     /// [`Context::wait_until`]: crate::Context::wait_until
-    pub fn wait_until_retired(
-        &self,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<(), GoldyError> {
+    pub fn wait_until_retired(&self, value: crate::timeline::TimelineValue) -> Result<(), GoldyError> {
         let mut backend = self.inner.backend.lock().unwrap();
-        backend
-            .device_wait_until(self.inner.handle, value)
-            .map_err(|e| {
-                drop(backend);
-                GoldyError::Backend(e)
-            })
+        backend.device_wait_until(self.inner.handle, value).map_err(|e| {
+            drop(backend);
+            GoldyError::Backend(e)
+        })
     }
 
     /// Returns `true` if the device has been permanently lost.
@@ -811,11 +760,7 @@ impl Device {
     /// After this returns `true`, all further submit / wait calls will fail with
     /// [`GoldyError::DeviceLost`]. The device should be dropped and re-created.
     pub fn is_device_lost(&self) -> bool {
-        self.inner
-            .backend
-            .lock()
-            .unwrap()
-            .is_device_lost(self.inner.handle)
+        self.inner.backend.lock().unwrap().is_device_lost(self.inner.handle)
     }
 
     /// Number of bindless descriptor slots still available for allocation in
@@ -908,11 +853,7 @@ impl Device {
     /// ```
     pub fn register_library(&self, library: ShaderLibrary) -> Result<()> {
         tracing::debug!(library_name = %library.name(), "Registering shader library");
-        self.inner
-            .library_registry
-            .lock()
-            .unwrap()
-            .register(library)
+        self.inner.library_registry.lock().unwrap().register(library)
     }
 
     /// Unregister a shader library.
@@ -971,11 +912,7 @@ impl Device {
     /// long-lived pool backing buffer) or at a natural steady-state boundary
     /// such as a resize or scene change.
     pub fn reset_buffer_heaps(&self) {
-        self.inner
-            .backend
-            .lock()
-            .unwrap()
-            .reset_buffer_heaps(self.inner.handle);
+        self.inner.backend.lock().unwrap().reset_buffer_heaps(self.inner.handle);
     }
 
     /// Ensure the internal heap can accommodate at least `min_capacity` bytes
@@ -1008,11 +945,7 @@ impl Device {
     /// IR caches. Call after all pipelines you need are created; any later lazy
     /// compile will re-instantiate the compiler.
     pub fn release_idle_shader_compiler(&self) {
-        self.inner
-            .backend
-            .lock()
-            .unwrap()
-            .release_idle_shader_compiler();
+        self.inner.backend.lock().unwrap().release_idle_shader_compiler();
     }
 
     /// No-op: texture uploads are scheduled via [`crate::task_graph::TaskGraph`].
@@ -1026,11 +959,7 @@ impl Device {
 
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
-        self.inner
-            .library_registry
-            .lock()
-            .unwrap()
-            .get_search_paths()
+        self.inner.library_registry.lock().unwrap().get_search_paths()
     }
 
     /// Reflect the memory layout of a Slang `struct` by compiling `shader_source` once for reflection.
@@ -1042,10 +971,7 @@ impl Device {
     /// `shader_source` must declare a vertex entry point named **`vs_main`**.
     pub fn reflect_struct(&self, shader_source: &str, type_name: &str) -> Result<StructLayout> {
         let paths = self.get_shader_search_paths()?;
-        let path_strings: Vec<String> = paths
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
+        let path_strings: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         let path_refs: Vec<&str> = path_strings.iter().map(|s| s.as_str()).collect();
         let target = match self.inner.backend.lock().unwrap().backend_type() {
             BackendType::Vulkan => ShaderTarget::Spirv,
@@ -1055,8 +981,7 @@ impl Device {
                 anyhow::bail!("reflect_struct is not supported on the WebGPU backend yet");
             }
         };
-        let compiler =
-            SlangCompiler::new().context("Failed to create Slang compiler for reflect_struct")?;
+        let compiler = SlangCompiler::new().context("Failed to create Slang compiler for reflect_struct")?;
         compiler.reflect_struct_layout(shader_source, target, &path_refs, type_name)
     }
 
@@ -1066,21 +991,15 @@ impl Device {
         let backend = Arc::new(Mutex::new(backend));
         let adapter_info = {
             let b = backend.lock().unwrap();
-            b.enumerate_adapters()
-                .into_iter()
-                .next()
-                .unwrap_or(AdapterInfo {
-                    id: 0,
-                    name: "Test GPU".to_string(),
-                    vendor: "Goldy Test".to_string(),
-                    backend: BackendType::Vulkan,
-                    device_type: DeviceType::Other,
-                })
+            b.enumerate_adapters().into_iter().next().unwrap_or(AdapterInfo {
+                id: 0,
+                name: "Test GPU".to_string(),
+                vendor: "Goldy Test".to_string(),
+                backend: BackendType::Vulkan,
+                device_type: DeviceType::Other,
+            })
         };
-        let caps = backend
-            .lock()
-            .unwrap()
-            .adapter_capabilities(adapter_info.id);
+        let caps = backend.lock().unwrap().adapter_capabilities(adapter_info.id);
         let adapter = Adapter {
             inner: Arc::new(AdapterInner {
                 backend: Arc::clone(&backend),
@@ -1152,8 +1071,7 @@ mod tests {
         use std::sync::Arc;
 
         let device = test_device();
-        let alias = device
-            .with_vram_allocator(Arc::new(crate::vram_allocator::DefaultVramAllocator::new()));
+        let alias = device.with_vram_allocator(Arc::new(crate::vram_allocator::DefaultVramAllocator::new()));
         assert!(device.is_valid());
         drop(alias);
         assert!(
@@ -1189,10 +1107,7 @@ mod tests {
         let result = device.register_library(lib2);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("already registered"));
+        assert!(result.unwrap_err().to_string().contains("already registered"));
     }
 
     #[test]
@@ -1237,11 +1152,7 @@ mod tests {
 
         // Verify goldy_exp files were written
         let goldy_file = paths[0].join("goldy_exp.slang");
-        assert!(
-            goldy_file.exists(),
-            "goldy_exp.slang should exist at {:?}",
-            goldy_file
-        );
+        assert!(goldy_file.exists(), "goldy_exp.slang should exist at {:?}", goldy_file);
 
         let math_file = paths[0].join("goldy_exp/math.slang");
         assert!(

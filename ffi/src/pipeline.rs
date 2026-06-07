@@ -4,8 +4,7 @@ use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
 use crate::shader::GoldyShaderModule;
 use crate::types::{
-    GoldyCompareFunction, GoldyDepthFormat, GoldyPrimitiveTopology, GoldyTextureFormat,
-    GoldyVertexAttribute,
+    GoldyCompareFunction, GoldyDepthFormat, GoldyPrimitiveTopology, GoldyTextureFormat, GoldyVertexAttribute,
 };
 use std::ptr;
 use std::slice;

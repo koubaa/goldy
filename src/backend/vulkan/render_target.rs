@@ -42,17 +42,13 @@ pub(super) fn create(
 ) -> Result<RenderTargetHandle> {
     // Get physical device for memory type lookup
     let physical_device = {
-        let logical_device = devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.physical_device
     };
 
     let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Create render target image (GPU only - no staging yet)
     let image_info = vk::ImageCreateInfo::default()
@@ -89,12 +85,8 @@ pub(super) fn create(
     let image_memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
         .context("Failed to allocate render target memory")?;
 
-    unsafe {
-        logical_device
-            .device
-            .bind_image_memory(image, image_memory, 0)
-    }
-    .context("Failed to bind render target memory")?;
+    unsafe { logical_device.device.bind_image_memory(image, image_memory, 0) }
+        .context("Failed to bind render target memory")?;
 
     // Create image view
     let view_info = vk::ImageViewCreateInfo::default()
@@ -145,12 +137,7 @@ pub(super) fn create(
         },
     );
 
-    tracing::debug!(
-        "Created render target {}x{} (handle={})",
-        width,
-        height,
-        handle
-    );
+    tracing::debug!("Created render target {}x{} (handle={})", width, height, handle);
     Ok(handle)
 }
 
@@ -169,17 +156,13 @@ pub(super) fn create_with_depth(
 ) -> Result<RenderTargetHandle> {
     // Get physical device for memory type lookup
     let physical_device = {
-        let logical_device = devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.physical_device
     };
 
     let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Create color render target image
     let image_info = vk::ImageCreateInfo::default()
@@ -216,12 +199,8 @@ pub(super) fn create_with_depth(
     let image_memory = unsafe { logical_device.device.allocate_memory(&alloc_info, None) }
         .context("Failed to allocate render target memory")?;
 
-    unsafe {
-        logical_device
-            .device
-            .bind_image_memory(image, image_memory, 0)
-    }
-    .context("Failed to bind render target memory")?;
+    unsafe { logical_device.device.bind_image_memory(image, image_memory, 0) }
+        .context("Failed to bind render target memory")?;
 
     // Create color image view
     let view_info = vk::ImageViewCreateInfo::default()
@@ -277,12 +256,8 @@ pub(super) fn create_with_depth(
         let d_memory = unsafe { logical_device.device.allocate_memory(&d_alloc_info, None) }
             .context("Failed to allocate depth buffer memory")?;
 
-        unsafe {
-            logical_device
-                .device
-                .bind_image_memory(d_image, d_memory, 0)
-        }
-        .context("Failed to bind depth buffer memory")?;
+        unsafe { logical_device.device.bind_image_memory(d_image, d_memory, 0) }
+            .context("Failed to bind depth buffer memory")?;
 
         let d_view_info = vk::ImageViewCreateInfo::default()
             .image(d_image)
@@ -357,9 +332,7 @@ pub(super) fn destroy(
         if let Some(logical_device) = devices.get(&state.device_handle) {
             unsafe {
                 let _ = logical_device.device.device_wait_idle();
-                logical_device
-                    .device
-                    .destroy_image_view(state.image_view, None);
+                logical_device.device.destroy_image_view(state.image_view, None);
                 logical_device.device.destroy_image(state.image, None);
                 logical_device.device.free_memory(state.image_memory, None);
                 if let Some(depth_view) = state.depth_view {
@@ -400,20 +373,11 @@ pub(super) fn record_render_pass_to_buffer<F>(
     record_commands_fn: F,
 ) -> Result<()>
 where
-    F: FnOnce(
-        vk::CommandBuffer,
-        &[RenderCommand],
-        &LogicalDevice,
-        &mut Option<PipelineHandle>,
-    ) -> Result<()>,
+    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>) -> Result<()>,
 {
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
-    let render_target = render_targets
-        .get(&target)
-        .context("Invalid render target handle")?;
+    let render_target = render_targets.get(&target).context("Invalid render target handle")?;
 
     if render_target.device_handle != device_handle {
         anyhow::bail!("Render target belongs to a different device");
@@ -466,12 +430,10 @@ where
             .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
             .src_access_mask(vk::AccessFlags2::NONE)
             .dst_stage_mask(
-                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
             )
             .dst_access_mask(
-                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
-                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
             )
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -527,11 +489,7 @@ where
         rendering_info = rendering_info.depth_attachment(depth_att);
     }
 
-    unsafe {
-        logical_device
-            .device
-            .cmd_begin_rendering(cmd, &rendering_info)
-    };
+    unsafe { logical_device.device.cmd_begin_rendering(cmd, &rendering_info) };
 
     let viewport = vk::Viewport {
         x: 0.0,
@@ -579,8 +537,7 @@ where
             layer_count: 1,
         });
 
-    let dep_info =
-        vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+    let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info) };
 
     Ok(())
@@ -595,24 +552,16 @@ pub(super) fn render_to<F>(
     record_commands_fn: F,
 ) -> Result<()>
 where
-    F: FnOnce(
-        vk::CommandBuffer,
-        &[RenderCommand],
-        &LogicalDevice,
-        &mut Option<PipelineHandle>,
-    ) -> Result<()>,
+    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>) -> Result<()>,
 {
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let cmd = render_targets
         .get(&target)
         .context("Invalid render target handle")?
         .command_buffer;
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
 
@@ -626,12 +575,9 @@ where
         record_commands_fn,
     )?;
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
-    unsafe { logical_device.device.end_command_buffer(cmd) }
-        .context("Failed to end command buffer")?;
+    unsafe { logical_device.device.end_command_buffer(cmd) }.context("Failed to end command buffer")?;
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
     unsafe {
@@ -643,12 +589,10 @@ where
     }
     .context("Failed to submit command buffer")?;
 
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
-        .context("Failed to wait for queue")?;
+    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
     if let Some(rt) = render_targets.get(&target) {
-        rt.has_rendered
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        rt.has_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     Ok(())
@@ -665,14 +609,9 @@ pub(super) fn read_to_cpu(
 ) -> Result<()> {
     // Get render target info and device
     let (device_handle, width, height, format, image, physical_device) = {
-        let render_target = render_targets
-            .get(&target)
-            .context("Invalid render target handle")?;
+        let render_target = render_targets.get(&target).context("Invalid render target handle")?;
 
-        if !render_target
-            .has_rendered
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if !render_target.has_rendered.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("Cannot read from render target that hasn't been rendered to");
         }
 
@@ -692,11 +631,7 @@ pub(super) fn read_to_cpu(
 
     let expected_size = (width * height * format.bytes_per_pixel()) as usize;
     if output.len() < expected_size {
-        anyhow::bail!(
-            "Output buffer too small: {} < {}",
-            output.len(),
-            expected_size
-        );
+        anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
     }
 
     // Ensure staging buffer exists (lazy creation)
@@ -720,11 +655,7 @@ pub(super) fn read_to_cpu(
         let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_info, None) }
             .context("Failed to create staging buffer")?;
 
-        let staging_reqs = unsafe {
-            logical_device
-                .device
-                .get_buffer_memory_requirements(staging_buffer)
-        };
+        let staging_reqs = unsafe { logical_device.device.get_buffer_memory_requirements(staging_buffer) };
         let staging_memory_type = find_memory_type(
             &mem_props,
             staging_reqs.memory_type_bits,
@@ -769,8 +700,7 @@ pub(super) fn read_to_cpu(
     }
     .context("Failed to reset command buffer")?;
 
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
@@ -803,8 +733,7 @@ pub(super) fn read_to_cpu(
         );
     }
 
-    unsafe { logical_device.device.end_command_buffer(cmd) }
-        .context("Failed to end command buffer")?;
+    unsafe { logical_device.device.end_command_buffer(cmd) }.context("Failed to end command buffer")?;
 
     // Submit
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
@@ -818,8 +747,7 @@ pub(super) fn read_to_cpu(
     }
     .context("Failed to submit command buffer")?;
 
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }
-        .context("Failed to wait for queue")?;
+    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
     // Read from staging buffer
     unsafe {

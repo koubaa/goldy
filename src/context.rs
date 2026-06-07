@@ -124,11 +124,7 @@ impl Context {
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
-    pub fn wait_until_timeout(
-        &self,
-        value: TimelineValue,
-        timeout_ms: u32,
-    ) -> Result<(), GoldyError> {
+    pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<(), GoldyError> {
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
         match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
             Ok(true) => Ok(()),
@@ -162,9 +158,7 @@ impl Context {
         let _tz = crate::tracy_zone!("context.poll_signals_and_service");
         let signals = self.poll_signals();
         let latest_boundary = signals.iter().fold(None, |latest, signal| match signal {
-            crate::signal::Signal::BoundaryCrossed { epoch } => {
-                Some(latest.unwrap_or(0).max(*epoch))
-            }
+            crate::signal::Signal::BoundaryCrossed { epoch } => Some(latest.unwrap_or(0).max(*epoch)),
             _ => latest,
         });
         if let Some(epoch) = latest_boundary {
@@ -226,11 +220,7 @@ impl Context {
         self.device().vram_allocator().oldest_deferred_epoch()
     }
 
-    pub fn defer_release(
-        &self,
-        epoch: TimelineValue,
-        payload: crate::vram_allocator::DeferredPayload,
-    ) {
+    pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
         self.device().vram_allocator().defer_release(epoch, payload);
     }
 
@@ -262,18 +252,14 @@ impl Context {
                     drop(backend);
                     self.classify(e)
                 })?;
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
+            self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
 
         let tv = self
             .submit_with_placement_heap(graph, true)
             .map_err(|e| self.classify(e))?;
-        self.inner
-            .high_water_timeline
-            .fetch_max(tv, Ordering::Relaxed);
+        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
 
@@ -288,25 +274,18 @@ impl Context {
                     drop(backend);
                     self.classify(e)
                 })?;
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
+            self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
 
         let tv = self
             .submit_with_placement_heap(graph, false)
             .map_err(|e| self.classify(e))?;
-        self.inner
-            .high_water_timeline
-            .fetch_max(tv, Ordering::Relaxed);
+        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
 
-    pub fn submit_pipelined_and_retain(
-        &self,
-        graph: &mut TaskGraph,
-    ) -> Result<TimelineValue, GoldyError> {
+    pub fn submit_pipelined_and_retain(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         if graph.has_transient_resources() {
             return self.submit_pipelined(graph);
         }
@@ -317,24 +296,18 @@ impl Context {
                 drop(backend);
                 self.classify(e)
             })?;
-        self.inner
-            .high_water_timeline
-            .fetch_max(tv, Ordering::Relaxed);
+        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
 
     pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        let result = backend
-            .try_resubmit_retained(self.inner.handle, key)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+        let result = backend.try_resubmit_retained(self.inner.handle, key).map_err(|e| {
+            drop(backend);
+            self.classify(e)
+        })?;
         if let Some(tv) = result {
-            self.inner
-                .high_water_timeline
-                .fetch_max(tv, Ordering::Relaxed);
+            self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         }
         Ok(result)
     }
@@ -367,20 +340,14 @@ impl Context {
     /// heap view cache since initialization. Monotonically increasing.
     pub fn transient_view_create_count(&self) -> usize {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard
-            .as_ref()
-            .map(|h| h.view_create_count())
-            .unwrap_or(0)
+        heap_guard.as_ref().map(|h| h.view_create_count()).unwrap_or(0)
     }
 
     /// Total number of `Texture::new` calls made by this context's placement heap texture
     /// cache since initialization. Monotonically increasing.
     pub fn transient_texture_create_count(&self) -> usize {
         let heap_guard = self.inner.placement_heap.lock().unwrap();
-        heap_guard
-            .as_ref()
-            .map(|h| h.texture_create_count())
-            .unwrap_or(0)
+        heap_guard.as_ref().map(|h| h.texture_create_count()).unwrap_or(0)
     }
 
     pub(crate) const DEFAULT_PIPELINE_DEPTH: u64 = 4;
@@ -395,8 +362,7 @@ impl Context {
 
         let device = self.device();
         let (schedule, _) = graph.schedule_and_split_wave();
-        let node_waves =
-            crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
+        let node_waves = crate::task_graph::analysis::node_to_wave_map(&schedule, graph.ir().nodes.len());
 
         let has_buffers = graph.has_transient_buffers();
 
@@ -436,13 +402,8 @@ impl Context {
         // the same device get distinct page slots (0, 1, 2, 3, 0, …), so each
         // render writes to a different set of textures on the GPU.
         let tex_page_slot = heap.current_page_slot();
-        let tex_handles = graph.resolve_transient_textures_with_heap(
-            device,
-            heap,
-            &node_waves,
-            tex_page_slot,
-            retired_timeline,
-        )?;
+        let tex_handles =
+            graph.resolve_transient_textures_with_heap(device, heap, &node_waves, tex_page_slot, retired_timeline)?;
         for (id, handle) in &tex_handles {
             resolver
                 .textures
@@ -458,8 +419,7 @@ impl Context {
             for spec in graph.transient_specs() {
                 let offset = base_offset + layout[&spec.id];
                 let view_stride = spec.stride.max(1);
-                let (uav, srv, _hit) =
-                    heap.get_or_create_view(spec.id, offset, spec.size, view_stride, device)?;
+                let (uav, srv, _hit) = heap.get_or_create_view(spec.id, offset, spec.size, view_stride, device)?;
 
                 resolver.buffers.insert(
                     spec.id,
@@ -480,12 +440,7 @@ impl Context {
         // and evicts in-flight transient textures synchronously, causing GPU UAF.
         // Lock order is always heap → backend; no other code path reverses this.
         let mut backend = device.inner.backend.lock().unwrap();
-        let tv = graph.submit_ir_with_resolver(
-            self,
-            backend.as_mut(),
-            &resolver,
-            wait_for_transient_completion,
-        )?;
+        let tv = graph.submit_ir_with_resolver(self, backend.as_mut(), &resolver, wait_for_transient_completion)?;
         drop(backend);
 
         if let Some(heap) = heap_guard.as_mut() {
@@ -621,10 +576,7 @@ mod tests {
 
         drop(ctx);
         drop(device);
-        assert!(
-            weak.upgrade().is_none(),
-            "device drop should drain deferred resources"
-        );
+        assert!(weak.upgrade().is_none(), "device drop should drain deferred resources");
     }
 
     #[test]
@@ -639,11 +591,7 @@ mod tests {
         let tv_a = ctx_a.submit(&mut graph).unwrap();
         assert!(tv_a > 0);
         assert_eq!(ctx_a.gpu_progress(), tv_a);
-        assert_eq!(
-            ctx_b.gpu_progress(),
-            0,
-            "context B must not observe A's submit"
-        );
+        assert_eq!(ctx_b.gpu_progress(), 0, "context B must not observe A's submit");
     }
 
     #[test]

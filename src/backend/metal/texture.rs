@@ -20,12 +20,9 @@ fn allocate_mtl_texture(
     descriptor: &mtl::TextureDescriptorRef,
 ) -> Result<mtl::Texture> {
     {
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         // Attempt 1: fast path.
-        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        if let Some(tex) = logical_device.texture_heap.lock().unwrap().allocate(descriptor) {
             return Ok(tex);
         }
     }
@@ -34,19 +31,13 @@ fn allocate_mtl_texture(
     {
         let _tz = crate::tracy_zone!("mtl.texture_heap_allocator.drain_reclaim");
         let retired = super::context::device_retired(state, device_handle);
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.texture_heap.compact_overflow();
+        logical_device.texture_heap.lock().unwrap().compact_overflow();
     }
     {
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
-        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+        if let Some(tex) = logical_device.texture_heap.lock().unwrap().allocate(descriptor) {
             return Ok(tex);
         }
     }
@@ -63,13 +54,11 @@ fn allocate_mtl_texture(
         );
         cb.wait_until_completed();
         let retired = super::context::device_retired(state, device_handle);
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.texture_heap.compact_overflow();
-        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        let mut th = logical_device.texture_heap.lock().unwrap();
+        th.compact_overflow();
+        if let Some(tex) = th.allocate(descriptor) {
             return Ok(tex);
         }
     }
@@ -129,28 +118,35 @@ pub(super) fn create(
 
     let texture = allocate_mtl_texture(state, device_handle, &descriptor)?;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get_mut(&device_handle).context("Invalid device handle")?;
 
-    let is_storage_image = matches!(
-        access,
-        TextureKind::Direct | TextureKind::DirectInterpolated
-    );
+    let is_storage_image = matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated);
     let (arg_buffer_index, encoding_index) = if is_storage_image {
         let local = logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .register_storage_image(handle);
         (local, ResourceRegistry::storage_image_global_index(local))
     } else {
-        let local = logical_device.resource_registry.register_texture(handle);
+        let local = logical_device
+            .ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_texture(handle);
         (local, ResourceRegistry::texture_global_index(local))
     };
 
     // For DirectInterpolated, additionally register in the sampled-texture pool.
     let sampled_arg_buffer_index = if matches!(access, TextureKind::DirectInterpolated) {
-        let local = logical_device.resource_registry.register_texture(handle);
+        let local = logical_device
+            .ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_texture(handle);
         let global = ResourceRegistry::texture_global_index(local);
         let enc = &logical_device.texture_encoder;
         let encoded_length = enc.encoded_length();
@@ -208,13 +204,7 @@ pub(super) fn create(
         },
     );
 
-    tracing::debug!(
-        "Created texture {} ({}x{}, {:?})",
-        handle,
-        width,
-        height,
-        format
-    );
+    tracing::debug!("Created texture {} ({}x{}, {:?})", handle, width, height, format);
     Ok(handle)
 }
 
@@ -226,10 +216,7 @@ pub(super) fn write(
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
 
     let bytes_per_pixel = texture.format.bytes_per_pixel();
     let bytes_per_row = width * bytes_per_pixel;
@@ -247,12 +234,7 @@ pub(super) fn write(
         .texture
         .replace_region(region, 0, data.as_ptr() as *const _, bytes_per_row as u64);
 
-    tracing::debug!(
-        "Wrote {}x{} texture data ({} bytes)",
-        width,
-        height,
-        data.len()
-    );
+    tracing::debug!("Wrote {}x{} texture data ({} bytes)", width, height, data.len());
     Ok(())
 }
 
@@ -266,10 +248,7 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+    let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
 
     let bytes_per_pixel = texture.format.bytes_per_pixel();
     let bytes_per_row = width * bytes_per_pixel;
@@ -304,15 +283,8 @@ pub(super) fn write_region(
 
 /// Read texture contents to CPU memory.
 /// The texture must have been created with TextureFlags::COPY_SRC.
-pub(super) fn read_to_cpu(
-    state: &MetalState,
-    texture_handle: TextureHandle,
-    output: &mut [u8],
-) -> Result<()> {
-    let texture = state
-        .textures
-        .get(&texture_handle)
-        .context("Invalid texture handle")?;
+pub(super) fn read_to_cpu(state: &MetalState, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
+    let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
 
     let logical_device = state
         .devices
@@ -333,10 +305,9 @@ pub(super) fn read_to_cpu(
         );
     }
 
-    let staging_buffer = logical_device.device.new_buffer(
-        expected_size as u64,
-        mtl::MTLResourceOptions::StorageModeShared,
-    );
+    let staging_buffer = logical_device
+        .device
+        .new_buffer(expected_size as u64, mtl::MTLResourceOptions::StorageModeShared);
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let blit_encoder = command_buffer.new_blit_command_encoder();
@@ -384,45 +355,54 @@ pub(super) fn read_to_cpu(
 pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(texture) = state.textures.remove(&texture_handle) {
-        if let Some(device) = state.devices.get_mut(&texture.device_handle) {
-            device.resource_registry.unregister_texture(texture_handle);
-            let barrier = device.timeline_scheduled_max;
-            let slot_barrier = if gpu_idle { None } else { Some(barrier) };
+        let device_handle = texture.device_handle;
+        // Use the same reclamation_barrier logic as buffer::destroy so that
+        // in-reclamation destroys get the tighter epoch rather than the wider
+        // timeline_scheduled_max.
+        let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+        let slot_barrier = if gpu_idle { None } else { Some(barrier) };
+        if let Some(device) = state.devices.get(&device_handle) {
+            let mut ledger = device.ledger.lock().unwrap();
+            ledger.resource_registry.unregister_texture(texture_handle);
             if !texture.slot_owned_externally {
                 if texture.is_storage_image {
-                    device
+                    ledger
                         .resource_registry
                         .release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
                 } else {
-                    device
+                    ledger
                         .resource_registry
                         .release_texture_slot(texture.arg_buffer_index, slot_barrier);
                 }
             }
-            device.deletion_queue.queue(
-                barrier,
-                super::types::PendingDeletion::Texture {
-                    texture: texture.texture,
-                },
-            );
+        }
+        let deletion = super::types::PendingDeletion::Texture {
+            texture: texture.texture,
+        };
+        // Hot path: route to the owning context's per-context deletion queue.
+        // Falls back to device-level queue (async GC safety net) when no
+        // reclamation context is installed on the current thread.
+        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+        if let Some(h) = ctx_h {
+            if let Some(sc_arc) = state.contexts.get(&h) {
+                sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
+                return;
+            }
+        }
+        if let Some(device) = state.devices.get(&device_handle) {
+            device.deletion_queue.lock().unwrap().queue(barrier, deletion);
         }
     }
 }
 
 /// Get the bindless index for a texture.
 pub(super) fn bindless_index(state: &MetalState, texture_handle: TextureHandle) -> Option<u32> {
-    state
-        .textures
-        .get(&texture_handle)
-        .map(|t| t.arg_buffer_index)
+    state.textures.get(&texture_handle).map(|t| t.arg_buffer_index)
 }
 
 /// Return the LOCAL sampled-texture-pool index for a `DirectInterpolated` texture.
 /// Returns `None` for textures that don't have a secondary sampled-SRV slot.
-pub(super) fn bindless_sampled_index(
-    state: &MetalState,
-    texture_handle: TextureHandle,
-) -> Option<u32> {
+pub(super) fn bindless_sampled_index(state: &MetalState, texture_handle: TextureHandle) -> Option<u32> {
     state
         .textures
         .get(&texture_handle)

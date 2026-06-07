@@ -310,8 +310,7 @@ impl GpuBackend for MockBackend {
         self.buffers.retain(|_, b| b.device_handle != device);
         self.shaders.retain(|_, s| s.device_handle != device);
         self.pipelines.retain(|_, p| p.device_handle != device);
-        self.compute_pipelines
-            .retain(|_, p| p.device_handle != device);
+        self.compute_pipelines.retain(|_, p| p.device_handle != device);
         self.render_targets.retain(|_, t| t.device_handle != device);
         self.textures.retain(|_, t| t.device_handle != device);
         self.samplers.retain(|_, s| s.device_handle != device);
@@ -494,10 +493,7 @@ impl GpuBackend for MockBackend {
         _element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         self.buffer_view_create_count += 1;
-        let parent_buf = self
-            .buffers
-            .get(&parent)
-            .context("Invalid parent buffer handle")?;
+        let parent_buf = self.buffers.get(&parent).context("Invalid parent buffer handle")?;
         if offset + size > parent_buf.size {
             anyhow::bail!("View exceeds parent buffer size");
         }
@@ -548,12 +544,7 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn read_buffer_to_cpu(
-        &mut self,
-        _device: DeviceHandle,
-        buffer: BufferHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
+    fn read_buffer_to_cpu(&mut self, _device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
         let buf = self
             .buffers
             .get(&buffer)
@@ -568,13 +559,7 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn clear_buffer(
-        &mut self,
-        _device: DeviceHandle,
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    ) -> Result<()> {
+    fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         let buf = self
             .buffers
             .get_mut(&buffer)
@@ -638,12 +623,7 @@ impl GpuBackend for MockBackend {
         let handle = self.next_pipeline_handle;
         self.next_pipeline_handle += 1;
 
-        self.pipelines.insert(
-            handle,
-            MockPipeline {
-                device_handle: device,
-            },
-        );
+        self.pipelines.insert(handle, MockPipeline { device_handle: device });
 
         Ok(handle)
     }
@@ -786,11 +766,7 @@ impl GpuBackend for MockBackend {
 
         let expected_size = render_target.data.len();
         if output.len() < expected_size {
-            anyhow::bail!(
-                "Output buffer too small: {} < {}",
-                output.len(),
-                expected_size
-            );
+            anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
         }
 
         output[..expected_size].copy_from_slice(&render_target.data);
@@ -836,11 +812,7 @@ impl GpuBackend for MockBackend {
         self.surface_pending_acquire.remove(&surface);
     }
 
-    fn begin_frame(
-        &mut self,
-        surface: SurfaceHandle,
-        ctx: ContextHandle,
-    ) -> Result<(FrameToken, TextureHandle)> {
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
         let surf = self
             .surfaces
             .get_mut(&surface)
@@ -975,13 +947,7 @@ impl GpuBackend for MockBackend {
         Ok(handle)
     }
 
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
         let tex = self
             .textures
             .get_mut(&texture)
@@ -999,11 +965,7 @@ impl GpuBackend for MockBackend {
 
         let expected_size = (width * height * tex.format.bytes_per_pixel()) as usize;
         if data.len() != expected_size {
-            anyhow::bail!(
-                "Data size mismatch: expected {}, got {}",
-                expected_size,
-                data.len()
-            );
+            anyhow::bail!("Data size mismatch: expected {}, got {}", expected_size, data.len());
         }
 
         tex.data.copy_from_slice(data);
@@ -1039,11 +1001,7 @@ impl GpuBackend for MockBackend {
         let bpp = tex.format.bytes_per_pixel() as usize;
         let expected_size = (width * height) as usize * bpp;
         if data.len() != expected_size {
-            anyhow::bail!(
-                "Data size mismatch: expected {}, got {}",
-                expected_size,
-                data.len()
-            );
+            anyhow::bail!("Data size mismatch: expected {}, got {}", expected_size, data.len());
         }
 
         let tex_row_bytes = (tex.width * tex.format.bytes_per_pixel()) as usize;
@@ -1051,8 +1009,7 @@ impl GpuBackend for MockBackend {
             let src_offset = row * (width as usize) * bpp;
             let dst_offset = ((y as usize + row) * tex_row_bytes) + (x as usize * bpp);
             let row_bytes = (width as usize) * bpp;
-            tex.data[dst_offset..dst_offset + row_bytes]
-                .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+            tex.data[dst_offset..dst_offset + row_bytes].copy_from_slice(&data[src_offset..src_offset + row_bytes]);
         }
         Ok(())
     }
@@ -1069,11 +1026,7 @@ impl GpuBackend for MockBackend {
 
         let expected_size = tex.data.len();
         if output.len() < expected_size {
-            anyhow::bail!(
-                "Output buffer too small: {} < {}",
-                output.len(),
-                expected_size
-            );
+            anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
         }
         output[..expected_size].copy_from_slice(&tex.data);
         Ok(())
@@ -1084,17 +1037,11 @@ impl GpuBackend for MockBackend {
     }
 
     fn texture_bindless_sampled_index(&self, texture: TextureHandle) -> Option<u32> {
-        self.textures
-            .get(&texture)
-            .and_then(|t| t.sampled_bindless_index)
+        self.textures.get(&texture).and_then(|t| t.sampled_bindless_index)
     }
 
     // Sampler management
-    fn create_sampler(
-        &mut self,
-        device: DeviceHandle,
-        desc: &SamplerDesc,
-    ) -> Result<SamplerHandle> {
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
@@ -1134,11 +1081,7 @@ impl GpuBackend for MockBackend {
         self.device_retired(device)
     }
 
-    fn device_wait_until(
-        &mut self,
-        device: DeviceHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> anyhow::Result<()> {
+    fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         // On the mock, advance every context on this device to at least `value`
         // so that device_retired() >= value after the call.
         let ctx_ids: Vec<_> = self
@@ -1170,17 +1113,10 @@ impl GpuBackend for MockBackend {
     }
 
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
-        self.surface_pending_acquire
-            .get(&surface)
-            .copied()
-            .unwrap_or(0)
+        self.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
     }
 
-    fn wait_until(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         self.wait_until_count += 1;
         let cur = self.gpu_progress(ctx);
         if value > cur {
@@ -1316,10 +1252,7 @@ impl GpuBackend for MockBackend {
         self.surface_present_count += 1;
 
         let image_index = frame.image as u32;
-        self.push_context_signal(
-            frame.context,
-            crate::signal::Signal::SwapchainReturned { image_index },
-        );
+        self.push_context_signal(frame.context, crate::signal::Signal::SwapchainReturned { image_index });
         if let Some(count) = self.surface_pending_acquire.get_mut(&frame.surface) {
             *count = count.saturating_sub(1);
         }
@@ -1328,10 +1261,7 @@ impl GpuBackend for MockBackend {
         *next += 1;
         let tv = *next;
         self.complete_context_seq(frame.context, tv);
-        self.push_context_signal(
-            frame.context,
-            crate::signal::Signal::BoundaryCrossed { epoch: tv },
-        );
+        self.push_context_signal(frame.context, crate::signal::Signal::BoundaryCrossed { epoch: tv });
         Ok(tv)
     }
 
@@ -1348,12 +1278,8 @@ impl GpuBackend for MockBackend {
         let handle = self.next_compute_pipeline_handle;
         self.next_compute_pipeline_handle += 1;
 
-        self.compute_pipelines.insert(
-            handle,
-            MockComputePipeline {
-                device_handle: device,
-            },
-        );
+        self.compute_pipelines
+            .insert(handle, MockComputePipeline { device_handle: device });
 
         Ok(handle)
     }
@@ -1394,10 +1320,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(backend.targets_created.len(), 1);
-        assert_eq!(
-            backend.targets_created[0],
-            (800, 600, TextureFormat::Rgba8Unorm)
-        );
+        assert_eq!(backend.targets_created[0], (800, 600, TextureFormat::Rgba8Unorm));
 
         backend.destroy_render_target(target);
     }
@@ -1496,13 +1419,7 @@ mod tests {
 
         // Create an index buffer
         let index_buffer = backend
-            .create_buffer(
-                device,
-                12,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 12, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         // Write some indices (6 u16 indices for 2 triangles)
@@ -1536,11 +1453,7 @@ mod tests {
 
         // Check SetIndexBuffer was recorded correctly
         match &backend.recorded_commands[0][1] {
-            RenderCommand::SetIndexBuffer {
-                buffer,
-                offset,
-                format,
-            } => {
+            RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 assert_eq!(*buffer, index_buffer);
                 assert_eq!(*offset, 0);
                 assert_eq!(*format, IndexFormat::Uint16);
@@ -1577,13 +1490,7 @@ mod tests {
             .create_render_target(device, 100, 100, TextureFormat::Rgba8Unorm)
             .unwrap();
         let index_buffer = backend
-            .create_buffer(
-                device,
-                24,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 24, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         // Test with offset and base_vertex
@@ -1636,44 +1543,29 @@ mod tests {
         // Create a mock window handle for surface creation
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(
-                &self,
-            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
                 // Return a null handle - mock backend doesn't use it
                 Ok(unsafe {
-                    raw_window_handle::WindowHandle::borrow_raw(
-                        raw_window_handle::RawWindowHandle::Web(
-                            raw_window_handle::WebWindowHandle::new(0),
-                        ),
-                    )
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
                 })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(
-                &self,
-            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::DisplayHandle::borrow_raw(
-                        raw_window_handle::RawDisplayHandle::Web(
-                            raw_window_handle::WebDisplayHandle::new(),
-                        ),
-                    )
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
                 })
             }
         }
 
-        let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         // Default format should be Bgra8UnormSrgb
-        assert_eq!(
-            backend.surface_format(surface),
-            TextureFormat::Bgra8UnormSrgb
-        );
+        assert_eq!(backend.surface_format(surface), TextureFormat::Bgra8UnormSrgb);
     }
 
     #[test]
@@ -1687,37 +1579,25 @@ mod tests {
 
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(
-                &self,
-            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::WindowHandle::borrow_raw(
-                        raw_window_handle::RawWindowHandle::Web(
-                            raw_window_handle::WebWindowHandle::new(0),
-                        ),
-                    )
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
                 })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(
-                &self,
-            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::DisplayHandle::borrow_raw(
-                        raw_window_handle::RawDisplayHandle::Web(
-                            raw_window_handle::WebDisplayHandle::new(),
-                        ),
-                    )
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
                 })
             }
         }
 
-        let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         // Should return the configured format, not the default
         assert_eq!(backend.surface_format(surface), TextureFormat::Rgba8Unorm);
@@ -1732,59 +1612,36 @@ mod tests {
 
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(
-                &self,
-            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::WindowHandle::borrow_raw(
-                        raw_window_handle::RawWindowHandle::Web(
-                            raw_window_handle::WebWindowHandle::new(0),
-                        ),
-                    )
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
                 })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(
-                &self,
-            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::DisplayHandle::borrow_raw(
-                        raw_window_handle::RawDisplayHandle::Web(
-                            raw_window_handle::WebDisplayHandle::new(),
-                        ),
-                    )
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
                 })
             }
         }
 
         // Create first surface with default format
-        let surface1 = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
-        assert_eq!(
-            backend.surface_format(surface1),
-            TextureFormat::Bgra8UnormSrgb
-        );
+        let surface1 = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
+        assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
 
         // Change default and create second surface
         backend.set_default_surface_format(TextureFormat::Rgba8UnormSrgb);
-        let surface2 = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
+        let surface2 = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         // First surface should retain its original format
-        assert_eq!(
-            backend.surface_format(surface1),
-            TextureFormat::Bgra8UnormSrgb
-        );
+        assert_eq!(backend.surface_format(surface1), TextureFormat::Bgra8UnormSrgb);
         // Second surface should have the new format
-        assert_eq!(
-            backend.surface_format(surface2),
-            TextureFormat::Rgba8UnormSrgb
-        );
+        assert_eq!(backend.surface_format(surface2), TextureFormat::Rgba8UnormSrgb);
     }
 
     #[test]
@@ -1794,31 +1651,13 @@ mod tests {
 
         // Create multiple buffers and verify they get sequential bindless indices
         let buffer1 = backend
-            .create_buffer(
-                device,
-                64,
-                BufferKind::Broadcast,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 64, BufferKind::Broadcast, None, BufferFlags::empty())
             .unwrap();
         let buffer2 = backend
-            .create_buffer(
-                device,
-                128,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 128, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         let buffer3 = backend
-            .create_buffer(
-                device,
-                256,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         assert_eq!(backend.buffer_bindless_index(buffer1), Some(0));
@@ -1833,13 +1672,7 @@ mod tests {
 
         // Create a buffer first to verify textures share the same index namespace
         let _buffer = backend
-            .create_buffer(
-                device,
-                64,
-                BufferKind::Broadcast,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 64, BufferKind::Broadcast, None, BufferFlags::empty())
             .unwrap();
 
         let texture1 = backend
@@ -1873,12 +1706,8 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
 
-        let sampler1 = backend
-            .create_sampler(device, &SamplerDesc::default())
-            .unwrap();
-        let sampler2 = backend
-            .create_sampler(device, &SamplerDesc::default())
-            .unwrap();
+        let sampler1 = backend.create_sampler(device, &SamplerDesc::default()).unwrap();
+        let sampler2 = backend.create_sampler(device, &SamplerDesc::default()).unwrap();
 
         assert_eq!(backend.sampler_bindless_index(sampler1), Some(0));
         assert_eq!(backend.sampler_bindless_index(sampler2), Some(1));
@@ -1891,13 +1720,7 @@ mod tests {
 
         // Create resources in interleaved order to verify shared namespace
         let buffer1 = backend
-            .create_buffer(
-                device,
-                64,
-                BufferKind::Broadcast,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 64, BufferKind::Broadcast, None, BufferFlags::empty())
             .unwrap();
         let texture1 = backend
             .create_texture(
@@ -1909,17 +1732,9 @@ mod tests {
                 TextureFlags::empty(),
             )
             .unwrap();
-        let sampler1 = backend
-            .create_sampler(device, &SamplerDesc::default())
-            .unwrap();
+        let sampler1 = backend.create_sampler(device, &SamplerDesc::default()).unwrap();
         let buffer2 = backend
-            .create_buffer(
-                device,
-                128,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 128, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         // All resources share a single incrementing index
@@ -1948,22 +1763,10 @@ mod tests {
             .unwrap();
 
         let buffer1 = backend
-            .create_buffer(
-                device,
-                64,
-                BufferKind::Broadcast,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 64, BufferKind::Broadcast, None, BufferFlags::empty())
             .unwrap();
         let buffer2 = backend
-            .create_buffer(
-                device,
-                128,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 128, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         let commands = vec![
@@ -2023,22 +1826,10 @@ mod tests {
         let device = backend.create_device(0).unwrap();
 
         let buffer1 = backend
-            .create_buffer(
-                device,
-                64,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 64, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         let buffer2 = backend
-            .create_buffer(
-                device,
-                128,
-                BufferKind::Scattered,
-                None,
-                BufferFlags::empty(),
-            )
+            .create_buffer(device, 128, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         let commands = vec![
@@ -2111,30 +1902,20 @@ mod tests {
     fn acquire_release_pairs_on_mock() {
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(
-                &self,
-            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::WindowHandle::borrow_raw(
-                        raw_window_handle::RawWindowHandle::Web(
-                            raw_window_handle::WebWindowHandle::new(0),
-                        ),
-                    )
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
                 })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(
-                &self,
-            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::DisplayHandle::borrow_raw(
-                        raw_window_handle::RawDisplayHandle::Web(
-                            raw_window_handle::WebDisplayHandle::new(),
-                        ),
-                    )
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
                 })
             }
         }
@@ -2142,9 +1923,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let ctx = backend.create_context(device).unwrap();
-        let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         let (frame, _tex) = backend.begin_frame(surface, ctx).unwrap();
         assert_eq!(backend.pending_acquire_count(surface), 1);
@@ -2165,30 +1944,20 @@ mod tests {
     fn surface_frame_signals_stay_on_presenting_context() {
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(
-                &self,
-            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::WindowHandle::borrow_raw(
-                        raw_window_handle::RawWindowHandle::Web(
-                            raw_window_handle::WebWindowHandle::new(0),
-                        ),
-                    )
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
                 })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(
-                &self,
-            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::DisplayHandle::borrow_raw(
-                        raw_window_handle::RawDisplayHandle::Web(
-                            raw_window_handle::WebDisplayHandle::new(),
-                        ),
-                    )
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
                 })
             }
         }
@@ -2197,9 +1966,7 @@ mod tests {
         let device = backend.create_device(0).unwrap();
         let ctx_a = backend.create_context(device).unwrap();
         let ctx_b = backend.create_context(device).unwrap();
-        let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         let (frame, _tex) = backend.begin_frame(surface, ctx_a).unwrap();
         assert!(backend.poll_signals(ctx_b).is_empty());
@@ -2220,30 +1987,20 @@ mod tests {
     fn counter_zero_after_resize() {
         struct MockWindow;
         impl raw_window_handle::HasWindowHandle for MockWindow {
-            fn window_handle(
-                &self,
-            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::WindowHandle::borrow_raw(
-                        raw_window_handle::RawWindowHandle::Web(
-                            raw_window_handle::WebWindowHandle::new(0),
-                        ),
-                    )
+                    raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                        raw_window_handle::WebWindowHandle::new(0),
+                    ))
                 })
             }
         }
         impl raw_window_handle::HasDisplayHandle for MockWindow {
-            fn display_handle(
-                &self,
-            ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
-            {
+            fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
                 Ok(unsafe {
-                    raw_window_handle::DisplayHandle::borrow_raw(
-                        raw_window_handle::RawDisplayHandle::Web(
-                            raw_window_handle::WebDisplayHandle::new(),
-                        ),
-                    )
+                    raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                        raw_window_handle::WebDisplayHandle::new(),
+                    ))
                 })
             }
         }
@@ -2251,9 +2008,7 @@ mod tests {
         let mut backend = MockBackend::new();
         let device = backend.create_device(0).unwrap();
         let ctx = backend.create_context(device).unwrap();
-        let surface = backend
-            .create_surface(device, &MockWindow, &MockWindow, None)
-            .unwrap();
+        let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         let (_frame, _tex) = backend.begin_frame(surface, ctx).unwrap();
         assert_eq!(backend.pending_acquire_count(surface), 1);

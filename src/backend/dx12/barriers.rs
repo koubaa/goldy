@@ -105,10 +105,7 @@ pub unsafe fn barrier_groups(
 ///
 /// # Safety
 /// `barriers` must remain valid for the duration of the call.
-pub unsafe fn barrier_textures(
-    cmd: &ID3D12GraphicsCommandList7,
-    barriers: &[D3D12_TEXTURE_BARRIER],
-) {
+pub unsafe fn barrier_textures(cmd: &ID3D12GraphicsCommandList7, barriers: &[D3D12_TEXTURE_BARRIER]) {
     if barriers.is_empty() {
         return;
     }
@@ -210,11 +207,7 @@ pub fn texture_barrier_full(
     layout_before: D3D12_BARRIER_LAYOUT,
     layout_after: D3D12_BARRIER_LAYOUT,
 ) -> D3D12_TEXTURE_BARRIER {
-    assert_sync_access_pairing(
-        sync_before,
-        access_before,
-        "texture SyncBefore/AccessBefore",
-    );
+    assert_sync_access_pairing(sync_before, access_before, "texture SyncBefore/AccessBefore");
     assert_sync_access_pairing(sync_after, access_after, "texture SyncAfter/AccessAfter");
     D3D12_TEXTURE_BARRIER {
         SyncBefore: sync_before,

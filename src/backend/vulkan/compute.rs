@@ -4,9 +4,7 @@ use super::super::shared;
 use super::super::shared::DISPATCH_BATCH_STRIDE;
 use super::staging;
 use super::types::{ComputePipelineState, LogicalDevice, PipelineState, PushLayout, SlotKey};
-use super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-};
+use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
@@ -28,10 +26,7 @@ fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Op
     }
 }
 
-fn collect_slots_from_raw_bind(
-    indices: &[u32],
-    categories: &[Option<crate::types::ResourceCategory>],
-) -> Vec<SlotKey> {
+fn collect_slots_from_raw_bind(indices: &[u32], categories: &[Option<crate::types::ResourceCategory>]) -> Vec<SlotKey> {
     let mut slots = Vec::new();
     for (i, &idx) in indices.iter().enumerate() {
         if let Some(Some(cat)) = categories.get(i) {
@@ -53,9 +48,7 @@ fn collect_slot_keys_from_gpu_commands(
     for cmd in commands {
         match cmd {
             GpuCommand::SetPipeline(p) => current_pipeline = Some(*p),
-            GpuCommand::BindResources {
-                buffers: buf_handles,
-            } => {
+            GpuCommand::BindResources { buffers: buf_handles } => {
                 for h in buf_handles {
                     if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
                         slots.push(SlotKey::StorageBuffer(idx));
@@ -64,10 +57,7 @@ fn collect_slot_keys_from_gpu_commands(
             }
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
-                    slots.extend(collect_slots_from_raw_bind(
-                        indices,
-                        &p.push_constant_categories,
-                    ));
+                    slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
                 }
             }
             GpuCommand::BindResourcesTyped { handles } => {
@@ -77,20 +67,15 @@ fn collect_slot_keys_from_gpu_commands(
                     }
                 }
             }
-            GpuCommand::DispatchBatch {
-                arg_data, count, ..
-            } => {
+            GpuCommand::DispatchBatch { arg_data, count, .. } => {
                 if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
                     let layout_size = std::mem::size_of::<PushLayout>();
                     for i in 0..*count as usize {
                         let base = i * DISPATCH_BATCH_STRIDE;
                         if base + layout_size <= arg_data.len() {
-                            let layout: &PushLayout =
-                                bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                            let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
                             for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                if let Some(Some(cat)) =
-                                    p.push_constant_categories.get(slot_i).copied()
-                                {
+                                if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
                                     if let Some(key) = slot_key_from_category(cat, idx as u32) {
                                         slots.push(key);
                                     }
@@ -119,9 +104,7 @@ fn collect_slot_keys_from_graph_commands(
         match gc {
             GraphCommand::Compute(cmd) => match cmd {
                 GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
-                GpuCommand::BindResources {
-                    buffers: buf_handles,
-                } => {
+                GpuCommand::BindResources { buffers: buf_handles } => {
                     for h in buf_handles {
                         if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
                             slots.push(SlotKey::StorageBuffer(idx));
@@ -129,13 +112,8 @@ fn collect_slot_keys_from_graph_commands(
                     }
                 }
                 GpuCommand::BindResourcesRaw { indices, .. } => {
-                    if let Some(p) =
-                        current_compute_pipeline.and_then(|h| compute_pipelines.get(&h))
-                    {
-                        slots.extend(collect_slots_from_raw_bind(
-                            indices,
-                            &p.push_constant_categories,
-                        ));
+                    if let Some(p) = current_compute_pipeline.and_then(|h| compute_pipelines.get(&h)) {
+                        slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles } => {
@@ -145,22 +123,15 @@ fn collect_slot_keys_from_graph_commands(
                         }
                     }
                 }
-                GpuCommand::DispatchBatch {
-                    arg_data, count, ..
-                } => {
-                    if let Some(p) =
-                        current_compute_pipeline.and_then(|h| compute_pipelines.get(&h))
-                    {
+                GpuCommand::DispatchBatch { arg_data, count, .. } => {
+                    if let Some(p) = current_compute_pipeline.and_then(|h| compute_pipelines.get(&h)) {
                         let layout_size = std::mem::size_of::<PushLayout>();
                         for i in 0..*count as usize {
                             let base = i * DISPATCH_BATCH_STRIDE;
                             if base + layout_size <= arg_data.len() {
-                                let layout: &PushLayout =
-                                    bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                                let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
                                 for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                    if let Some(Some(cat)) =
-                                        p.push_constant_categories.get(slot_i).copied()
-                                    {
+                                    if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
                                         if let Some(key) = slot_key_from_category(cat, idx as u32) {
                                             slots.push(key);
                                         }
@@ -173,15 +144,12 @@ fn collect_slot_keys_from_graph_commands(
                 _ => {}
             },
             GraphCommand::Render {
-                commands: render_cmds,
-                ..
+                commands: render_cmds, ..
             } => {
                 for rc in render_cmds {
                     match rc {
                         RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
-                        RenderCommand::BindResources {
-                            buffers: buf_handles,
-                        } => {
+                        RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
                                 if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
                                     slots.push(SlotKey::StorageBuffer(idx));
@@ -189,12 +157,8 @@ fn collect_slot_keys_from_graph_commands(
                             }
                         }
                         RenderCommand::BindResourcesRaw { indices, .. } => {
-                            if let Some(p) = current_render_pipeline.and_then(|h| pipelines.get(&h))
-                            {
-                                slots.extend(collect_slots_from_raw_bind(
-                                    indices,
-                                    &p.push_constant_categories,
-                                ));
+                            if let Some(p) = current_render_pipeline.and_then(|h| pipelines.get(&h)) {
+                                slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
                             }
                         }
                         RenderCommand::BindResourcesTyped { handles } => {
@@ -255,17 +219,13 @@ fn slot_usage_to_vk_access(usage: &SlotUsageSet) -> vk::AccessFlags2 {
         }
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        flags |= vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
-            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        flags |= vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
     }
     flags
 }
 
 /// Acquire a command buffer: recycle from the free-list or allocate a fresh one.
-fn acquire_cmd_buffer(
-    ld: &LogicalDevice,
-    sc: &mut super::types::SubmissionContext,
-) -> Result<vk::CommandBuffer> {
+fn acquire_cmd_buffer(ld: &LogicalDevice, sc: &mut super::types::SubmissionContext) -> Result<vk::CommandBuffer> {
     if let Some(cb) = sc.free_cmd_buffers.pop() {
         return Ok(cb);
     }
@@ -273,8 +233,8 @@ fn acquire_cmd_buffer(
         .command_pool(sc.command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
-    let cbs = unsafe { ld.device.allocate_command_buffers(&alloc_info) }
-        .context("Failed to allocate command buffer")?;
+    let cbs =
+        unsafe { ld.device.allocate_command_buffers(&alloc_info) }.context("Failed to allocate command buffer")?;
     Ok(cbs[0])
 }
 
@@ -325,10 +285,7 @@ unsafe fn create_vulkan_gpu_profile_pool(
     dispatch_count: usize,
     dispatch_labels: Vec<Option<&'static str>>,
 ) -> Result<Option<VulkanGpuProfilePool>> {
-    if defer_present
-        || !gpu_profiler::gpu_profile_enabled()
-        || !ld.vk_timestamp_compute_and_graphics
-    {
+    if defer_present || !gpu_profiler::gpu_profile_enabled() || !ld.vk_timestamp_compute_and_graphics {
         return Ok(None);
     }
     debug_assert_eq!(dispatch_labels.len(), dispatch_count);
@@ -410,12 +367,7 @@ unsafe fn vulkan_finish_gpu_profile(
         let mut dispatches = Vec::with_capacity(n);
         for i in 0..n {
             let si = 2 + 2 * i;
-            let ns = vulkan_decode_duration_ns(
-                raw[si],
-                raw[si + 1],
-                profile.valid_bits,
-                profile.period_ns,
-            );
+            let ns = vulkan_decode_duration_ns(raw[si], raw[si + 1], profile.valid_bits, profile.period_ns);
             let label = profile.dispatch_labels[i].unwrap_or("dispatch");
             dispatches.push(DispatchGpuNs { label, gpu_ns: ns });
         }
@@ -442,10 +394,7 @@ pub(super) fn ctx_completed_value(
     ctx: super::ContextHandle,
     device_handle: super::DeviceHandle,
 ) -> u64 {
-    let sem = state
-        .contexts
-        .get(&ctx)
-        .map(|sc| sc.lock().unwrap().timeline_semaphore);
+    let sem = state.contexts.get(&ctx).map(|sc| sc.lock().unwrap().timeline_semaphore);
     let dev = state.devices.get(&device_handle).map(|ld| &ld.device);
     match (dev, sem) {
         (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
@@ -469,8 +418,7 @@ fn reap_signaled_fences(state: &super::types::VulkanState) {
         pool.iter()
             .filter_map(|(token, (device_handle, fence, _))| {
                 let logical_device = state.devices.get(device_handle)?;
-                let signaled =
-                    unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
+                let signaled = unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
                 if signaled {
                     Some(*token)
                 } else {
@@ -509,9 +457,7 @@ pub(super) fn create(
     cs_module: vk::ShaderModule,
     shader_debug_name: String,
 ) -> Result<ComputePipelineHandle> {
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Always use bindless pipeline layout
     let pipeline_layout = logical_device
@@ -537,11 +483,9 @@ pub(super) fn create(
         .push_next(&mut robustness);
 
     let pipelines = unsafe {
-        logical_device.device.create_compute_pipelines(
-            logical_device.pipeline_cache,
-            &[pipeline_info],
-            None,
-        )
+        logical_device
+            .device
+            .create_compute_pipelines(logical_device.pipeline_cache, &[pipeline_info], None)
     }
     .map_err(|(_, e)| anyhow::anyhow!("Failed to create compute pipeline: {:?}", e))?;
 
@@ -576,14 +520,10 @@ pub(super) fn destroy(
         if let Some(logical_device) = devices.get(&pipeline.device_handle) {
             unsafe {
                 logical_device.device.device_wait_idle().ok();
-                logical_device
-                    .device
-                    .destroy_pipeline(pipeline.pipeline, None);
+                logical_device.device.destroy_pipeline(pipeline.pipeline, None);
                 // Only destroy layout if we own it (not the global bindless layout)
                 if pipeline.owns_layout {
-                    logical_device
-                        .device
-                        .destroy_pipeline_layout(pipeline.layout, None);
+                    logical_device.device.destroy_pipeline_layout(pipeline.layout, None);
                 }
             }
         }
@@ -608,9 +548,7 @@ pub(super) fn submit(
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
     // fence-pool maintenance when this submit has no host→GPU uploads.
     // The next WriteBuffer-bearing submit will reclaim/reap any debris.
-    let has_write_buffer = commands
-        .iter()
-        .any(|c| matches!(c, GpuCommand::WriteBuffer { .. }));
+    let has_write_buffer = commands.iter().any(|c| matches!(c, GpuCommand::WriteBuffer { .. }));
 
     // Reap any previously-submitted fences that have already signaled. Keeps
     // the pool bounded when callers (ekrano) don't wait on every intermediate submit.
@@ -643,11 +581,7 @@ pub(super) fn submit(
 
         if has_write_texture {
             if let Some(sc_arc) = state.contexts.get(&ctx) {
-                sc_arc
-                    .lock()
-                    .unwrap()
-                    .texture_staging_pool
-                    .reclaim(completed_timeline);
+                sc_arc.lock().unwrap().texture_staging_pool.reclaim(completed_timeline);
             }
         }
     }
@@ -672,40 +606,24 @@ pub(super) fn submit(
                         .buffers
                         .get(buf_handle)
                         .context("WriteBuffer: invalid buffer handle")?;
-                    (
-                        buf.host_mapped,
-                        buf.is_storage,
-                        buf.device_handle,
-                        buf.memory,
-                    )
+                    (buf.host_mapped, buf.is_storage, buf.device_handle, buf.memory)
                 };
                 if let Some(base) = host_mapped {
                     let p = base as *mut u8;
                     unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            data.as_ptr(),
-                            p.add(*offset as usize),
-                            data.len(),
-                        );
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), p.add(*offset as usize), data.len());
                     }
                 } else if !is_storage {
-                    let dev = state
-                        .devices
-                        .get(&buf_device)
-                        .context("WriteBuffer: device invalid")?;
+                    let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                     unsafe {
                         let ptr = dev
                             .map_memory2(buf_memory, *offset, data.len() as u64)
                             .context("WriteBuffer: map failed")?;
                         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-                        dev.unmap_memory2(buf_memory)
-                            .context("WriteBuffer: unmap failed")?;
+                        dev.unmap_memory2(buf_memory).context("WriteBuffer: unmap failed")?;
                     }
                 } else {
-                    let dev = state
-                        .devices
-                        .get(&buf_device)
-                        .context("WriteBuffer: device invalid")?;
+                    let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                     let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
                     let mut sc = sc_arc.lock().unwrap();
                     let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
@@ -729,26 +647,19 @@ pub(super) fn submit(
             .lock()
             .unwrap()
             .timeline_semaphore;
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let queue = ld.queue;
         let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         let signal_info = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let submit_info2 =
-            vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
+        let submit_info2 = vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
         let r = {
             let _queue_guard = queue_lock.lock().unwrap();
             unsafe {
-                ld.device.queue_submit2(
-                    queue,
-                    std::slice::from_ref(&submit_info2),
-                    vk::Fence::null(),
-                )
+                ld.device
+                    .queue_submit2(queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
             }
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
@@ -831,25 +742,18 @@ pub(super) fn submit(
 
     let (dispatch_count, dispatch_labels) = collect_dispatch_labels_compute(commands);
     let vk_gpu_profile = unsafe {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         create_vulkan_gpu_profile_pool(ld, false, dispatch_count, dispatch_labels)?
     };
 
     let mut vk_gpu_profile = vk_gpu_profile;
 
     let cmd = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
         let mut sc = sc_arc.lock().unwrap();
         let cb = acquire_cmd_buffer(ld, &mut sc)?;
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
             sc.free_cmd_buffers.push(cb);
             return Err(anyhow::anyhow!("Failed to begin command buffer: {:?}", e));
@@ -858,19 +762,14 @@ pub(super) fn submit(
     };
 
     let (cmd, belt_idx, _texture_upload_idx) = {
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         // Cross-submission acquire: make prior submit's writes visible to this
         // CB's reads. Same-queue execution ordering is guaranteed by Vulkan but
         // memory visibility is not.
         unsafe {
             let acquire = vk::MemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-                )
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
                 .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                 .dst_stage_mask(
                     vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -906,12 +805,9 @@ pub(super) fn submit(
                 logical_device
                     .device
                     .cmd_reset_query_pool(cmd, prof.pool, 0, prof.query_count);
-                logical_device.device.cmd_write_timestamp2(
-                    cmd,
-                    vk::PipelineStageFlags2::TOP_OF_PIPE,
-                    prof.pool,
-                    0,
-                );
+                logical_device
+                    .device
+                    .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::TOP_OF_PIPE, prof.pool, 0);
             }
         }
 
@@ -939,11 +835,8 @@ pub(super) fn submit(
                 GpuCommand::BindResources {
                     buffers: buffer_handles,
                 } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
-                    {
-                        if crate::slang::layout_validation_enabled()
-                            && !pipeline.binding_element_strides.is_empty()
-                        {
+                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                        if crate::slang::layout_validation_enabled() && !pipeline.binding_element_strides.is_empty() {
                             let actual_strides: Vec<Option<u32>> = buffer_handles
                                 .iter()
                                 .map(|h| buffers.get(h).and_then(|b| b.element_stride))
@@ -957,9 +850,9 @@ pub(super) fn submit(
                         let mut layout = PushLayout::default();
                         shared::fill_bindless(
                             &mut layout,
-                            buffer_handles.iter().map(|h| {
-                                buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)
-                            }),
+                            buffer_handles
+                                .iter()
+                                .map(|h| buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)),
                         );
                         unsafe {
                             logical_device.device.cmd_push_constants(
@@ -976,8 +869,7 @@ pub(super) fn submit(
                     indices: raw_indices,
                     user: raw_user,
                 } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
-                    {
+                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         let mut layout = PushLayout::default();
                         shared::fill_raw(&mut layout, raw_indices, raw_user);
                         unsafe {
@@ -991,11 +883,8 @@ pub(super) fn submit(
                         }
                     }
                 }
-                GpuCommand::BindResourcesTyped {
-                    handles: typed_handles,
-                } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p))
-                    {
+                GpuCommand::BindResourcesTyped { handles: typed_handles } => {
+                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,
@@ -1031,12 +920,9 @@ pub(super) fn submit(
                                 base,
                             );
                         }
-                        logical_device.device.cmd_dispatch(
-                            cmd,
-                            *workgroups_x,
-                            *workgroups_y,
-                            *workgroups_z,
-                        );
+                        logical_device
+                            .device
+                            .cmd_dispatch(cmd, *workgroups_x, *workgroups_y, *workgroups_z);
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
                             logical_device.device.cmd_write_timestamp2(
@@ -1064,14 +950,9 @@ pub(super) fn submit(
                         let base = i * stride;
                         let layout_bytes = &arg_data[base..base + push_size];
                         let wg_off = base + push_size;
-                        let wg_x =
-                            u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
-                        let wg_y = u32::from_ne_bytes(
-                            arg_data[wg_off + 4..wg_off + 8].try_into().unwrap(),
-                        );
-                        let wg_z = u32::from_ne_bytes(
-                            arg_data[wg_off + 8..wg_off + 12].try_into().unwrap(),
-                        );
+                        let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
+                        let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
+                        let wg_z = u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into().unwrap());
                         unsafe {
                             if let Some(layout) = pipeline_layout {
                                 logical_device.device.cmd_push_constants(
@@ -1093,9 +974,7 @@ pub(super) fn submit(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let buf_state = buffers
-                        .get(buffer)
-                        .context("DispatchIndirect: invalid buffer handle")?;
+                    let buf_state = buffers.get(buffer).context("DispatchIndirect: invalid buffer handle")?;
                     unsafe {
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -1129,11 +1008,9 @@ pub(super) fn submit(
                             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                             .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
                             .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .dst_access_mask(
-                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                            );
-                        let dep_info = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier));
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep_info =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
                 }
@@ -1181,15 +1058,9 @@ pub(super) fn submit(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
                 }
-                GpuCommand::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
+                GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
-                    let buf_state = buffers
-                        .get(buffer)
-                        .context("ClearBuffer: invalid buffer handle")?;
+                    let buf_state = buffers.get(buffer).context("ClearBuffer: invalid buffer handle")?;
                     let clear_size = if *size == 0 {
                         buf_state.size.saturating_sub(*offset)
                     } else {
@@ -1197,23 +1068,17 @@ pub(super) fn submit(
                     };
                     if clear_size > 0 {
                         unsafe {
-                            logical_device.device.cmd_fill_buffer(
-                                cmd,
-                                buf_state.buffer,
-                                *offset,
-                                clear_size,
-                                0,
-                            );
+                            logical_device
+                                .device
+                                .cmd_fill_buffer(cmd, buf_state.buffer, *offset, clear_size, 0);
 
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                                .dst_access_mask(
-                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                                );
-                            let dep_info = vk::DependencyInfo::default()
-                                .memory_barriers(std::slice::from_ref(&mem_barrier));
+                                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                            let dep_info =
+                                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         }
                     }
@@ -1224,9 +1089,7 @@ pub(super) fn submit(
                     data,
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
-                    let buf_state = buffers
-                        .get(buf_handle)
-                        .context("WriteBuffer: invalid buffer handle")?;
+                    let buf_state = buffers.get(buf_handle).context("WriteBuffer: invalid buffer handle")?;
                     // HOST_VISIBLE / CPU_READABLE paths were handled in the pre-pass;
                     // DEVICE_LOCAL storage uses the staging belt (see pre-pass).
                     if buf_state.is_storage && buf_state.host_mapped.is_none() {
@@ -1251,11 +1114,9 @@ pub(super) fn submit(
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                                .dst_access_mask(
-                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                                );
-                            let dep_info = vk::DependencyInfo::default()
-                                .memory_barriers(std::slice::from_ref(&mem_barrier));
+                                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                            let dep_info =
+                                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         }
                     }
@@ -1266,20 +1127,12 @@ pub(super) fn submit(
                         .get(texture_upload_idx)
                         .context("WriteTexture: scratch missing (internal)")?;
                     texture_upload_idx += 1;
-                    super::texture::record_compute_texture_upload(
-                        &state.devices,
-                        &state.textures,
-                        cmd,
-                        scratch,
-                    )?;
+                    super::texture::record_compute_texture_upload(&state.devices, &state.textures, cmd, scratch)?;
                 }
                 GpuCommand::CopyTexture { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_texture");
                     let (src_image, width, height) = {
-                        let ts = state
-                            .textures
-                            .get(src)
-                            .context("CopyTexture: src texture not found")?;
+                        let ts = state.textures.get(src).context("CopyTexture: src texture not found")?;
                         (ts.image, ts.width, ts.height)
                     };
                     let dst_image = state
@@ -1292,19 +1145,12 @@ pub(super) fn submit(
                         // Barrier: ensure compute writes to src are visible; dst may be
                         // written by compute, so also synchronise its prior writes.
                         let mem_barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(
-                                vk::PipelineStageFlags2::COMPUTE_SHADER
-                                    | vk::PipelineStageFlags2::TRANSFER,
-                            )
-                            .src_access_mask(
-                                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
-                            )
+                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                             .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                            .dst_access_mask(
-                                vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE,
-                            );
-                        let dep_info = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier));
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep_info =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
 
                         // Both UAV textures are in GENERAL layout — copy is valid.
@@ -1343,14 +1189,11 @@ pub(super) fn submit(
                             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                             .dst_stage_mask(
-                                vk::PipelineStageFlags2::COMPUTE_SHADER
-                                    | vk::PipelineStageFlags2::ALL_COMMANDS,
+                                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_COMMANDS,
                             )
-                            .dst_access_mask(
-                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                            );
-                        let dep_info2 = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier2));
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep_info2 =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier2));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2);
                     }
                 }
@@ -1366,9 +1209,7 @@ pub(super) fn submit(
         // Release barrier: make this CB's writes available to subsequent submits.
         unsafe {
             let release = vk::MemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-                )
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
                 .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                 .dst_stage_mask(
                     vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -1389,12 +1230,9 @@ pub(super) fn submit(
 
         if let Some(ref prof) = vk_gpu_profile {
             unsafe {
-                logical_device.device.cmd_write_timestamp2(
-                    cmd,
-                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                    prof.pool,
-                    1,
-                );
+                logical_device
+                    .device
+                    .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, prof.pool, 1);
             }
         }
 
@@ -1413,15 +1251,11 @@ pub(super) fn submit(
 
     // Standalone submit: signal device timeline semaphore (Vulkan 1.2+).
     let signal_value = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
-    let used_slots =
-        collect_slot_keys_from_gpu_commands(commands, &state.compute_pipelines, &state.buffers);
+    let used_slots = collect_slot_keys_from_gpu_commands(commands, &state.compute_pipelines, &state.buffers);
     if let Some(ld) = state.devices.get(&device_handle) {
         ld.ledger
             .lock()
@@ -1436,10 +1270,7 @@ pub(super) fn submit(
         .lock()
         .unwrap()
         .timeline_semaphore;
-    let submit_device_core = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let submit_device_core = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device_core.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
@@ -1470,35 +1301,22 @@ pub(super) fn submit(
             .unwrap()
             .command_pool;
         unsafe {
-            submit_device_core
-                .device
-                .free_command_buffers(ctx_pool, &[cmd]);
+            submit_device_core.device.free_command_buffers(ctx_pool, &[cmd]);
             if let Some(prof) = vk_gpu_profile.take() {
-                submit_device_core
-                    .device
-                    .destroy_query_pool(prof.pool, None);
+                submit_device_core.device.destroy_query_pool(prof.pool, None);
             }
         }
-        return Err(anyhow::anyhow!(
-            "Failed to queue_submit2 command buffer: {:?}",
-            e
-        ));
+        return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
-        sc.timeline_cmd_buffers
-            .entry(signal_value)
-            .or_default()
-            .push(cmd);
+        sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
     }
 
     if !texture_upload_scratch.is_empty() {
-        let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
-            .into_iter()
-            .map(|s| s.entry)
-            .collect();
+        let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch.into_iter().map(|s| s.entry).collect();
         if let Some(sc_arc) = state.contexts.get(&ctx) {
             sc_arc
                 .lock()
@@ -1520,10 +1338,7 @@ pub(super) fn submit(
 
     if let Some(prof) = vk_gpu_profile {
         let (device_clone, timeline_sem) = {
-            let ld = state
-                .devices
-                .get(&device_handle)
-                .context("Invalid device handle")?;
+            let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
             let sem = state
                 .contexts
                 .get(&ctx)
@@ -1534,15 +1349,7 @@ pub(super) fn submit(
             (ld.device.clone(), sem)
         };
         unsafe {
-            vulkan_finish_gpu_profile(
-                state,
-                ctx,
-                &device_clone,
-                timeline_sem,
-                signal_value,
-                cmd,
-                prof,
-            )?;
+            vulkan_finish_gpu_profile(state, ctx, &device_clone, timeline_sem, signal_value, cmd, prof)?;
         }
     }
 
@@ -1560,11 +1367,8 @@ pub(super) fn submit(
                 for r in ctx_batch {
                     super::types::destroy_pending_deletion(ld, &mut ledger, r);
                 }
-                let completed_values = super::types::snapshot_context_completed_values(
-                    &ld.device,
-                    &state.contexts,
-                    device_handle,
-                );
+                let completed_values =
+                    super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
                 ledger.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -1627,9 +1431,7 @@ fn submit_graph_impl(
     let has_write_texture_graph = commands.iter().any(|c| {
         matches!(
             c,
-            GraphCommand::Compute(
-                GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
-            )
+            GraphCommand::Compute(GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. })
         )
     });
 
@@ -1650,11 +1452,7 @@ fn submit_graph_impl(
 
         if has_write_texture_graph {
             if let Some(sc_arc) = state.contexts.get(&ctx) {
-                sc_arc
-                    .lock()
-                    .unwrap()
-                    .texture_staging_pool
-                    .reclaim(completed_timeline);
+                sc_arc.lock().unwrap().texture_staging_pool.reclaim(completed_timeline);
             }
         }
     }
@@ -1679,49 +1477,27 @@ fn submit_graph_impl(
                                 .buffers
                                 .get(buf_handle)
                                 .context("WriteBuffer: invalid buffer handle")?;
-                            (
-                                buf.host_mapped,
-                                buf.is_storage,
-                                buf.device_handle,
-                                buf.memory,
-                            )
+                            (buf.host_mapped, buf.is_storage, buf.device_handle, buf.memory)
                         };
                         if let Some(base) = host_mapped {
                             let p = base as *mut u8;
                             unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    data.as_ptr(),
-                                    p.add(*offset as usize),
-                                    data.len(),
-                                );
+                                std::ptr::copy_nonoverlapping(data.as_ptr(), p.add(*offset as usize), data.len());
                             }
                         } else if !is_storage {
-                            let dev = state
-                                .devices
-                                .get(&buf_device)
-                                .context("WriteBuffer: device invalid")?;
+                            let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                             unsafe {
                                 let ptr = dev
                                     .map_memory2(buf_memory, *offset, data.len() as u64)
                                     .context("WriteBuffer: map failed")?;
-                                std::ptr::copy_nonoverlapping(
-                                    data.as_ptr(),
-                                    ptr as *mut u8,
-                                    data.len(),
-                                );
-                                dev.unmap_memory2(buf_memory)
-                                    .context("WriteBuffer: unmap failed")?;
+                                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                                dev.unmap_memory2(buf_memory).context("WriteBuffer: unmap failed")?;
                             }
                         } else {
-                            let dev = state
-                                .devices
-                                .get(&buf_device)
-                                .context("WriteBuffer: device invalid")?;
-                            let sc_arc =
-                                state.contexts.get(&ctx).context("Invalid context handle")?;
+                            let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
+                            let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
                             let mut sc = sc_arc.lock().unwrap();
-                            let (stg_buf, stg_off) =
-                                sc.staging_belt.write(&state.instance, dev, data)?;
+                            let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
                             belt_slices.push((stg_buf, stg_off));
                         }
                     }
@@ -1734,20 +1510,18 @@ fn submit_graph_impl(
                         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
                         let mut sc_guard = sc_arc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
-                        texture_upload_scratch.push(
-                            super::texture::allocate_compute_texture_staging(
-                                &state.instance,
-                                &state.devices,
-                                &state.textures,
-                                pool,
-                                *texture,
-                                data,
-                                0,
-                                0,
-                                *width,
-                                *height,
-                            )?,
-                        );
+                        texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                            &state.instance,
+                            &state.devices,
+                            &state.textures,
+                            pool,
+                            *texture,
+                            data,
+                            0,
+                            0,
+                            *width,
+                            *height,
+                        )?);
                     }
                     GpuCommand::WriteTextureRegion {
                         texture,
@@ -1760,20 +1534,18 @@ fn submit_graph_impl(
                         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
                         let mut sc_guard = sc_arc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
-                        texture_upload_scratch.push(
-                            super::texture::allocate_compute_texture_staging(
-                                &state.instance,
-                                &state.devices,
-                                &state.textures,
-                                pool,
-                                *texture,
-                                data,
-                                *x,
-                                *y,
-                                *width,
-                                *height,
-                            )?,
-                        );
+                        texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                            &state.instance,
+                            &state.devices,
+                            &state.textures,
+                            pool,
+                            *texture,
+                            data,
+                            *x,
+                            *y,
+                            *width,
+                            *height,
+                        )?);
                     }
                     _ => {}
                 }
@@ -1783,10 +1555,7 @@ fn submit_graph_impl(
 
     // --- Acquire and begin command buffer ---
     let cmd = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
         let mut sc = sc_arc.lock().unwrap();
         let cb = acquire_cmd_buffer(ld, &mut sc)?;
@@ -1806,27 +1575,16 @@ fn submit_graph_impl(
         cb
     };
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let (dispatch_count_graph, dispatch_labels_graph) = collect_dispatch_labels_graph(commands);
-    let mut vk_gpu_profile = unsafe {
-        create_vulkan_gpu_profile_pool(
-            logical_device,
-            false,
-            dispatch_count_graph,
-            dispatch_labels_graph,
-        )?
-    };
+    let mut vk_gpu_profile =
+        unsafe { create_vulkan_gpu_profile_pool(logical_device, false, dispatch_count_graph, dispatch_labels_graph)? };
 
     // Cross-submission acquire: make prior submit's writes visible.
     unsafe {
         let acquire = vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-            )
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(
                 vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -1862,12 +1620,9 @@ fn submit_graph_impl(
             logical_device
                 .device
                 .cmd_reset_query_pool(cmd, prof.pool, 0, prof.query_count);
-            logical_device.device.cmd_write_timestamp2(
-                cmd,
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                prof.pool,
-                0,
-            );
+            logical_device
+                .device
+                .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::TOP_OF_PIPE, prof.pool, 0);
         }
     }
 
@@ -1898,15 +1653,13 @@ fn submit_graph_impl(
                 GpuCommand::BindResources {
                     buffers: buffer_handles,
                 } => {
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| compute_pipelines.get(&p))
-                    {
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         let mut layout = PushLayout::default();
                         shared::fill_bindless(
                             &mut layout,
-                            buffer_handles.iter().map(|h| {
-                                buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)
-                            }),
+                            buffer_handles
+                                .iter()
+                                .map(|h| buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)),
                         );
                         unsafe {
                             logical_device.device.cmd_push_constants(
@@ -1923,9 +1676,7 @@ fn submit_graph_impl(
                     indices: raw_indices,
                     user: raw_user,
                 } => {
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| compute_pipelines.get(&p))
-                    {
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         let mut layout = PushLayout::default();
                         shared::fill_raw(&mut layout, raw_indices, raw_user);
                         unsafe {
@@ -1939,12 +1690,8 @@ fn submit_graph_impl(
                         }
                     }
                 }
-                GpuCommand::BindResourcesTyped {
-                    handles: typed_handles,
-                } => {
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| compute_pipelines.get(&p))
-                    {
+                GpuCommand::BindResourcesTyped { handles: typed_handles } => {
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,
@@ -1980,12 +1727,9 @@ fn submit_graph_impl(
                                 base,
                             );
                         }
-                        logical_device.device.cmd_dispatch(
-                            cmd,
-                            *workgroups_x,
-                            *workgroups_y,
-                            *workgroups_z,
-                        );
+                        logical_device
+                            .device
+                            .cmd_dispatch(cmd, *workgroups_x, *workgroups_y, *workgroups_z);
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
                             logical_device.device.cmd_write_timestamp2(
@@ -2013,14 +1757,9 @@ fn submit_graph_impl(
                         let base = i * stride;
                         let layout_bytes = &arg_data[base..base + push_size];
                         let wg_off = base + push_size;
-                        let wg_x =
-                            u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
-                        let wg_y = u32::from_ne_bytes(
-                            arg_data[wg_off + 4..wg_off + 8].try_into().unwrap(),
-                        );
-                        let wg_z = u32::from_ne_bytes(
-                            arg_data[wg_off + 8..wg_off + 12].try_into().unwrap(),
-                        );
+                        let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
+                        let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
+                        let wg_z = u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into().unwrap());
                         unsafe {
                             if let Some(layout) = pipeline_layout {
                                 logical_device.device.cmd_push_constants(
@@ -2042,9 +1781,7 @@ fn submit_graph_impl(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let buf_state = buffers
-                        .get(buffer)
-                        .context("DispatchIndirect: invalid buffer handle")?;
+                    let buf_state = buffers.get(buffer).context("DispatchIndirect: invalid buffer handle")?;
                     unsafe {
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -2078,11 +1815,9 @@ fn submit_graph_impl(
                             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                             .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
                             .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .dst_access_mask(
-                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                            );
-                        let dep_info = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier));
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep_info =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
                 }
@@ -2130,15 +1865,9 @@ fn submit_graph_impl(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
                 }
-                GpuCommand::ClearBuffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
+                GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
-                    let buf_state = buffers
-                        .get(buffer)
-                        .context("ClearBuffer: invalid buffer handle")?;
+                    let buf_state = buffers.get(buffer).context("ClearBuffer: invalid buffer handle")?;
                     let clear_size = if *size == 0 {
                         buf_state.size.saturating_sub(*offset)
                     } else {
@@ -2146,22 +1875,16 @@ fn submit_graph_impl(
                     };
                     if clear_size > 0 {
                         unsafe {
-                            logical_device.device.cmd_fill_buffer(
-                                cmd,
-                                buf_state.buffer,
-                                *offset,
-                                clear_size,
-                                0,
-                            );
+                            logical_device
+                                .device
+                                .cmd_fill_buffer(cmd, buf_state.buffer, *offset, clear_size, 0);
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                                .dst_access_mask(
-                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                                );
-                            let dep_info = vk::DependencyInfo::default()
-                                .memory_barriers(std::slice::from_ref(&mem_barrier));
+                                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                            let dep_info =
+                                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         }
                     }
@@ -2172,9 +1895,7 @@ fn submit_graph_impl(
                     data,
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
-                    let buf_state = buffers
-                        .get(buf_handle)
-                        .context("WriteBuffer: invalid buffer handle")?;
+                    let buf_state = buffers.get(buf_handle).context("WriteBuffer: invalid buffer handle")?;
                     if buf_state.is_storage && buf_state.host_mapped.is_none() {
                         let (stg, stg_off) = belt_slices
                             .get(belt_idx)
@@ -2196,11 +1917,9 @@ fn submit_graph_impl(
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                                .dst_access_mask(
-                                    vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                                );
-                            let dep_info = vk::DependencyInfo::default()
-                                .memory_barriers(std::slice::from_ref(&mem_barrier));
+                                .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                            let dep_info =
+                                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         }
                     }
@@ -2211,20 +1930,12 @@ fn submit_graph_impl(
                         .get(texture_upload_idx)
                         .context("WriteTexture: scratch missing (internal)")?;
                     texture_upload_idx += 1;
-                    super::texture::record_compute_texture_upload(
-                        &state.devices,
-                        &state.textures,
-                        cmd,
-                        scratch,
-                    )?;
+                    super::texture::record_compute_texture_upload(&state.devices, &state.textures, cmd, scratch)?;
                 }
                 GpuCommand::CopyTexture { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_texture");
                     let (src_image, width, height) = {
-                        let ts = state
-                            .textures
-                            .get(src)
-                            .context("CopyTexture: src texture not found")?;
+                        let ts = state.textures.get(src).context("CopyTexture: src texture not found")?;
                         (ts.image, ts.width, ts.height)
                     };
                     let dst_image = state
@@ -2234,19 +1945,11 @@ fn submit_graph_impl(
                         .image;
                     unsafe {
                         let mem_barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(
-                                vk::PipelineStageFlags2::COMPUTE_SHADER
-                                    | vk::PipelineStageFlags2::TRANSFER,
-                            )
-                            .src_access_mask(
-                                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
-                            )
+                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                             .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                            .dst_access_mask(
-                                vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE,
-                            );
-                        let dep = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier));
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
 
                         let region = vk::ImageCopy {
@@ -2283,14 +1986,10 @@ fn submit_graph_impl(
                             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                             .dst_stage_mask(
-                                vk::PipelineStageFlags2::COMPUTE_SHADER
-                                    | vk::PipelineStageFlags2::ALL_COMMANDS,
+                                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_COMMANDS,
                             )
-                            .dst_access_mask(
-                                vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
-                            );
-                        let dep2 = vk::DependencyInfo::default()
-                            .memory_barriers(std::slice::from_ref(&mem_barrier2));
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep2 = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier2));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep2);
                     }
                 }
@@ -2303,13 +2002,8 @@ fn submit_graph_impl(
                 // Flush compute writes before the render pass
                 unsafe {
                     let barrier = vk::MemoryBarrier2::default()
-                        .src_stage_mask(
-                            vk::PipelineStageFlags2::COMPUTE_SHADER
-                                | vk::PipelineStageFlags2::TRANSFER,
-                        )
-                        .src_access_mask(
-                            vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
-                        )
+                        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+                        .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                         .dst_stage_mask(
                             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
                                 | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
@@ -2323,8 +2017,7 @@ fn submit_graph_impl(
                                 | vk::AccessFlags2::SHADER_READ
                                 | vk::AccessFlags2::MEMORY_READ,
                         );
-                    let dep = vk::DependencyInfo::default()
-                        .memory_barriers(std::slice::from_ref(&barrier));
+                    let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
                     logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
                 }
 
@@ -2338,9 +2031,7 @@ fn submit_graph_impl(
                     render_cmds,
                     cmd,
                     |cb, cmds, ld, cur_pipe| {
-                        super::render_commands::record(
-                            cb, cmds, ld, pipelines, rt_buffers, cur_pipe,
-                        )
+                        super::render_commands::record(cb, cmds, ld, pipelines, rt_buffers, cur_pipe)
                     },
                 )?;
 
@@ -2354,21 +2045,16 @@ fn submit_graph_impl(
                                 | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
                         )
                         .src_access_mask(
-                            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
-                                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
                         )
-                        .dst_stage_mask(
-                            vk::PipelineStageFlags2::COMPUTE_SHADER
-                                | vk::PipelineStageFlags2::TRANSFER,
-                        )
+                        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
                         .dst_access_mask(
                             vk::AccessFlags2::SHADER_READ
                                 | vk::AccessFlags2::SHADER_WRITE
                                 | vk::AccessFlags2::TRANSFER_READ
                                 | vk::AccessFlags2::TRANSFER_WRITE,
                         );
-                    let dep = vk::DependencyInfo::default()
-                        .memory_barriers(std::slice::from_ref(&barrier));
+                    let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
                     logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
                 }
             }
@@ -2378,9 +2064,7 @@ fn submit_graph_impl(
     // --- Release barrier: make this CB's writes available to subsequent submits ---
     unsafe {
         let release = vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER,
-            )
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(
                 vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -2401,12 +2085,9 @@ fn submit_graph_impl(
 
     if let Some(ref prof) = vk_gpu_profile {
         unsafe {
-            logical_device.device.cmd_write_timestamp2(
-                cmd,
-                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                prof.pool,
-                1,
-            );
+            logical_device
+                .device
+                .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, prof.pool, 1);
         }
     }
 
@@ -2421,19 +2102,12 @@ fn submit_graph_impl(
     }
 
     let signal_value = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
-    let used_slots = collect_slot_keys_from_graph_commands(
-        commands,
-        &state.compute_pipelines,
-        &state.pipelines,
-        &state.buffers,
-    );
+    let used_slots =
+        collect_slot_keys_from_graph_commands(commands, &state.compute_pipelines, &state.pipelines, &state.buffers);
     if let Some(ld) = state.devices.get(&device_handle) {
         ld.ledger
             .lock()
@@ -2448,10 +2122,7 @@ fn submit_graph_impl(
         .lock()
         .unwrap()
         .timeline_semaphore;
-    let submit_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
@@ -2487,10 +2158,7 @@ fn submit_graph_impl(
                 submit_device.device.destroy_query_pool(prof.pool, None);
             }
         }
-        return Err(anyhow::anyhow!(
-            "Failed to queue_submit2 command buffer: {:?}",
-            e
-        ));
+        return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
 
     // Post-submit: store the CB for lifecycle management.
@@ -2504,18 +2172,12 @@ fn submit_graph_impl(
                 used_slots,
             });
         } else {
-            sc.timeline_cmd_buffers
-                .entry(signal_value)
-                .or_default()
-                .push(cmd);
+            sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
         }
     }
 
     if !texture_upload_scratch.is_empty() {
-        let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch
-            .into_iter()
-            .map(|s| s.entry)
-            .collect();
+        let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch.into_iter().map(|s| s.entry).collect();
         if let Some(sc_arc) = state.contexts.get(&ctx) {
             sc_arc
                 .lock()
@@ -2531,10 +2193,7 @@ fn submit_graph_impl(
 
     if let Some(prof) = vk_gpu_profile {
         let (device_clone, timeline_sem) = {
-            let ld = state
-                .devices
-                .get(&device_handle)
-                .context("Invalid device handle")?;
+            let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
             let sem = state
                 .contexts
                 .get(&ctx)
@@ -2545,15 +2204,7 @@ fn submit_graph_impl(
             (ld.device.clone(), sem)
         };
         unsafe {
-            vulkan_finish_gpu_profile(
-                state,
-                ctx,
-                &device_clone,
-                timeline_sem,
-                signal_value,
-                cmd,
-                prof,
-            )?;
+            vulkan_finish_gpu_profile(state, ctx, &device_clone, timeline_sem, signal_value, cmd, prof)?;
         }
     }
 
@@ -2578,11 +2229,8 @@ fn submit_graph_impl(
                 for r in ctx_batch {
                     super::types::destroy_pending_deletion(ld, &mut ledger, r);
                 }
-                let completed_values = super::types::snapshot_context_completed_values(
-                    &ld.device,
-                    &state.contexts,
-                    device_handle,
-                );
+                let completed_values =
+                    super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
                 ledger.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -2641,16 +2289,10 @@ pub(super) fn try_resubmit_retained(
     };
 
     let signal_value = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
-    let submit_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
@@ -2695,11 +2337,8 @@ pub(super) fn try_resubmit_retained(
                 for r in ctx_batch {
                     super::types::destroy_pending_deletion(ld, &mut ledger, r);
                 }
-                let completed_values = super::types::snapshot_context_completed_values(
-                    &ld.device,
-                    &state.contexts,
-                    device_handle,
-                );
+                let completed_values =
+                    super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
                 ledger.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -2713,11 +2352,7 @@ pub(super) fn try_resubmit_retained(
 
 /// Evict the retained dispatch CB for `key` (or any retained CB if `key` doesn't match),
 /// returning the `VkCommandBuffer` to `free_cmd_buffers` for pool reuse.
-pub(super) fn evict_retained(
-    state: &super::types::VulkanState,
-    ctx: super::ContextHandle,
-    _key: u64,
-) {
+pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, _key: u64) {
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_compute_cb.take() {

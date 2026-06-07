@@ -12,10 +12,7 @@ pub(super) fn create(
     device_handle: DeviceHandle,
     desc: &crate::types::SamplerDesc,
 ) -> Result<SamplerHandle> {
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get_mut(&device_handle).context("Invalid device handle")?;
 
     let handle = state.next_sampler_handle;
     state.next_sampler_handle += 1;
@@ -38,7 +35,12 @@ pub(super) fn create(
 
     let sampler = logical_device.device.new_sampler(&descriptor);
 
-    let index = logical_device.resource_registry.register_sampler(handle);
+    let index = logical_device
+        .ledger
+        .lock()
+        .unwrap()
+        .resource_registry
+        .register_sampler(handle);
     let encoding_index = ResourceRegistry::sampler_global_index(index);
     tracing::debug!(
         "Registered sampler {} at bindless local={} global={}",
@@ -53,9 +55,7 @@ pub(super) fn create(
         logical_device
             .sampler_encoder
             .set_argument_buffer(&logical_device.argument_buffer, offset);
-        logical_device
-            .sampler_encoder
-            .set_sampler_state(0, &sampler);
+        logical_device.sampler_encoder.set_sampler_state(0, &sampler);
         tracing::trace!(
             "Encoded sampler {} at arg buffer offset {} (stride={})",
             handle,
@@ -87,23 +87,37 @@ pub(super) fn create(
 /// Destroy a sampler.
 pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
-        if let Some(device) = state.devices.get_mut(&sampler.device_handle) {
-            device.resource_registry.unregister_sampler(sampler_handle);
-            let barrier = device.timeline_scheduled_max;
-            device.deletion_queue.queue(
-                barrier,
-                super::types::PendingDeletion::Sampler {
-                    sampler: sampler.sampler,
-                },
-            );
+        let device_handle = sampler.device_handle;
+        let gpu_idle = super::gpu_is_idle(state);
+        let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
+        if let Some(device) = state.devices.get(&device_handle) {
+            device
+                .ledger
+                .lock()
+                .unwrap()
+                .resource_registry
+                .unregister_sampler(sampler_handle);
+        }
+        let deletion = super::types::PendingDeletion::Sampler {
+            sampler: sampler.sampler,
+        };
+        // Hot path: route to the owning context's per-context deletion queue.
+        // Falls back to device-level queue (async GC safety net) when no
+        // reclamation context is installed on the current thread.
+        let ctx_h = super::context::context_handle_for_thread(state, device_handle);
+        if let Some(h) = ctx_h {
+            if let Some(sc_arc) = state.contexts.get(&h) {
+                sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
+                return;
+            }
+        }
+        if let Some(device) = state.devices.get(&device_handle) {
+            device.deletion_queue.lock().unwrap().queue(barrier, deletion);
         }
     }
 }
 
 /// Get the bindless index for a sampler.
 pub(super) fn bindless_index(state: &MetalState, sampler_handle: SamplerHandle) -> Option<u32> {
-    state
-        .samplers
-        .get(&sampler_handle)
-        .map(|s| s.arg_buffer_index)
+    state.samplers.get(&sampler_handle).map(|s| s.arg_buffer_index)
 }

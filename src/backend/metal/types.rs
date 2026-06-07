@@ -11,8 +11,8 @@
 //! - Shaders access resources by index into the argument buffer
 
 use super::super::{
-    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
-    SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
+    BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle,
+    SurfaceHandle, TextureHandle,
 };
 use crate::backend::BufferKind;
 use crate::timeline::TimelineValue;
@@ -23,10 +23,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
-    ArgumentEncoder, Buffer as MTLBuffer, CommandQueue,
-    ComputePipelineState as MTLComputePipelineState, DepthStencilState as MTLDepthStencilState,
-    Device as MTLDevice, Heap, Library, MTLPrimitiveType, MTLResourceOptions, RenderPipelineState,
-    SamplerState, SharedEvent, Texture as MTLTexture,
+    ArgumentEncoder, Buffer as MTLBuffer, CommandQueue, ComputePipelineState as MTLComputePipelineState,
+    DepthStencilState as MTLDepthStencilState, Device as MTLDevice, Heap, Library, MTLPrimitiveType,
+    MTLResourceOptions, RenderPipelineState, SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
 /// Maximum size of the argument buffer.
@@ -240,11 +239,7 @@ impl HeapAllocator {
     }
 
     /// Declare all buffer heaps resident for a render encoder at the given stages.
-    pub fn use_heaps_for_render(
-        &self,
-        encoder: &mtl::RenderCommandEncoderRef,
-        stages: mtl::MTLRenderStages,
-    ) {
+    pub fn use_heaps_for_render(&self, encoder: &mtl::RenderCommandEncoderRef, stages: mtl::MTLRenderStages) {
         if !self.has_buffers() {
             return;
         }
@@ -478,11 +473,7 @@ impl TextureHeapAllocator {
     }
 
     /// Declare all texture heaps resident for a render encoder at the given stages.
-    pub fn use_heaps_for_render(
-        &self,
-        encoder: &mtl::RenderCommandEncoderRef,
-        stages: mtl::MTLRenderStages,
-    ) {
+    pub fn use_heaps_for_render(&self, encoder: &mtl::RenderCommandEncoderRef, stages: mtl::MTLRenderStages) {
         if !self.has_textures() {
             return;
         }
@@ -581,8 +572,7 @@ impl TimelineWaiter {
     pub fn signal(&self, value: u64) {
         // Stamp CPU time first so TID_RENDER sees a timestamp that is never
         // newer than the condvar wake-up it will observe.
-        self.last_signal_instant_ns
-            .store(metal_instant_ns(), Ordering::Release);
+        self.last_signal_instant_ns.store(metal_instant_ns(), Ordering::Release);
 
         if let Some(queue) = &self.signal_queue {
             let mut last = self.last_emitted.load(Ordering::Acquire);
@@ -651,6 +641,16 @@ pub(crate) struct MetalSubmissionContext {
     pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
     /// Most recently committed timeline on this context (WriteBuffer fast-path gate).
     pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
+    /// Per-context staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
+    pub staging_belt: super::staging::StagingBelt,
+    /// Per-context staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
+    pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Per-context deferred GPU resource teardown, drained on this context's own
+    /// completed timeline value (not the device-wide `device_retired` horizon).
+    /// Resources destroyed while a reclamation context is installed on the current
+    /// thread are routed here so they reclaim without blocking on any other context.
+    /// See issue #190.
+    pub deletion_queue: DeletionQueue,
 }
 
 /// A logical Metal device with associated resources.
@@ -678,9 +678,9 @@ pub(crate) struct LogicalDevice {
 
     // Bindless infrastructure (always present — Tier 2 required)
     /// Multi-heap allocator for buffer allocations (grows on demand)
-    pub heap_allocator: HeapAllocator,
+    pub heap_allocator: Mutex<HeapAllocator>,
     /// Multi-heap allocator for texture allocations (grows on demand)
-    pub texture_heap: TextureHeapAllocator,
+    pub texture_heap: Mutex<TextureHeapAllocator>,
     /// Global argument buffer containing resource IDs
     pub argument_buffer: MTLBuffer,
     /// Encoder for writing buffers to the argument buffer
@@ -694,26 +694,36 @@ pub(crate) struct LogicalDevice {
     /// category; never hardcode 8 when encoding sampler offsets.
     pub sampler_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
-    pub resource_registry: ResourceRegistry,
+    pub ledger: Arc<Mutex<DeviceLedger>>,
     /// Device-global submission sequence (contexts signal their own shared events).
-    pub timeline_next: u64,
+    pub timeline_next: Arc<AtomicU64>,
     /// Highest device-global seq scheduled on the GPU queue (used for idle / flush).
-    pub timeline_scheduled_max: u64,
+    pub timeline_scheduled_max: AtomicU64,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
-    pub retired_floor: u64,
+    pub retired_floor: AtomicU64,
     /// Deferred GPU resource teardown until device timeline reaches the queued barrier.
-    pub deletion_queue: DeletionQueue,
-    /// Pooled staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
-    pub staging_belt: super::staging::StagingBelt,
-    /// Pooled staging entries for `WriteTexture` / `WriteTextureRegion` uploads.
-    pub texture_staging_pool: super::staging::TextureStagingPool,
+    /// Wrapped in `Mutex` so `LogicalDevice` can be Arc-shared and `process_deletion_queue_up_to`
+    /// can take `&self` — matching the pattern used by the Vulkan and DX12 backends (phase 5).
+    pub deletion_queue: Mutex<DeletionQueue>,
+    /// Serialises `command_buffer.commit()` across concurrent submits on this device.
+    ///
+    /// Metal's single `MTLCommandQueue` is thread-safe for `newCommandBuffer()` but
+    /// `commit()` must be issued in timeline order.  Holding this lock only for the
+    /// commit call (not all of MetalState) allows submit prep to overlap while still
+    /// serialising the queue-enqueue moment.  Cloned out of `LogicalDevice` before
+    /// recording begins so the global backend lock can be dropped before commit.
+    pub queue_lock: Arc<Mutex<()>>,
 }
 
 impl LogicalDevice {
     /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
-    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
-        self.deletion_queue.process_up_to(completed);
-        self.resource_registry.drain_pending_slots_up_to(completed);
+    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+        self.deletion_queue.lock().unwrap().process_up_to(completed);
+        self.ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .drain_pending_slots_up_to(completed);
     }
 }
 
@@ -808,8 +818,7 @@ impl ResourceRegistry {
     /// Failing fast surfaces the leak instead of producing corrupt frames.
     pub fn register_storage_buffer(&mut self, handle: BufferHandle) -> u32 {
         assert!(
-            self.storage_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY
-                || self.storage_buffer.free_count() > 0,
+            self.storage_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY || self.storage_buffer.free_count() > 0,
             "storage-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
              next_index={} free={} pending_free={} live_indices={} \
              (Scattered={}, Broadcast={}). \
@@ -831,8 +840,7 @@ impl ResourceRegistry {
                 .count(),
         );
         let local_index = self.storage_buffer.alloc();
-        self.buffer_indices
-            .insert(handle, (local_index, BufferKind::Scattered));
+        self.buffer_indices.insert(handle, (local_index, BufferKind::Scattered));
         local_index
     }
 
@@ -848,14 +856,12 @@ impl ResourceRegistry {
     /// and cause silent shader-side garbage reads.
     pub fn register_uniform_buffer(&mut self, handle: BufferHandle) -> u32 {
         assert!(
-            self.uniform_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY
-                || self.uniform_buffer.free_count() > 0,
+            self.uniform_buffer.next_fresh() < MAX_RESOURCES_PER_CATEGORY || self.uniform_buffer.free_count() > 0,
             "uniform-buffer bindless slots exhausted ({MAX_RESOURCES_PER_CATEGORY} max). \
              Likely a per-frame leak in bind_map for Broadcast buffers."
         );
         let local_index = self.uniform_buffer.alloc();
-        self.buffer_indices
-            .insert(handle, (local_index, BufferKind::Broadcast));
+        self.buffer_indices.insert(handle, (local_index, BufferKind::Broadcast));
         local_index
     }
 
@@ -968,15 +974,13 @@ impl ResourceRegistry {
                     self.storage_buffer.free(local_index);
                 }
                 (BufferKind::Scattered, Some(b)) => {
-                    self.pending_free_storage_buffer_slots
-                        .push((local_index, b));
+                    self.pending_free_storage_buffer_slots.push((local_index, b));
                 }
                 (BufferKind::Broadcast, None) => {
                     self.uniform_buffer.free(local_index);
                 }
                 (BufferKind::Broadcast, Some(b)) => {
-                    self.pending_free_uniform_buffer_slots
-                        .push((local_index, b));
+                    self.pending_free_uniform_buffer_slots.push((local_index, b));
                 }
             }
         }
@@ -1060,6 +1064,30 @@ impl ResourceRegistry {
     #[cfg(test)]
     pub fn free_uniform_buffer_count(&self) -> usize {
         self.uniform_buffer.free_count()
+    }
+}
+
+/// Device-shared descriptor-heap ledger.
+///
+/// Wraps `ResourceRegistry` (the bindless slot allocator + pending-free lists)
+/// behind an `Arc<Mutex<>>` so that submit paths can acquire it independently
+/// of the global backend mutex. The critical section is intentionally minimal:
+/// slot alloc/free only. MTL object encoding and GPU submission stay outside.
+///
+/// Metal does not need `slot_last_seen` / `pending_slot_reclamations` tracking
+/// (those exist on Vulkan/DX12 for multi-referencer slots). Under the
+/// no-cross-context-dependency axiom each slot has a single owning context, so
+/// per-context own-clock reclaim is sufficient; the conservative
+/// `device_retired` GC drain is kept as a safety net (see issue #190).
+pub(crate) struct DeviceLedger {
+    pub resource_registry: ResourceRegistry,
+}
+
+impl DeviceLedger {
+    pub(crate) fn new() -> Self {
+        Self {
+            resource_registry: ResourceRegistry::new(),
+        }
     }
 }
 
@@ -1240,6 +1268,14 @@ pub(crate) struct MetalAdapterInfo {
     pub adapter_id: u32,
 }
 
+/// `Arc`-wrapped logical device — cloned out of `MetalState` before the global backend
+/// lock is dropped so submit paths can hold per-device state independently (phase 5).
+pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
+/// `Arc<Mutex>`-wrapped per-context state — allows submit paths to lock only the
+/// submitting context rather than all of `MetalState` (phase 5).
+pub(crate) type SharedMetalSubmissionContext = Arc<Mutex<MetalSubmissionContext>>;
+
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
@@ -1251,9 +1287,9 @@ pub(super) struct MetalState {
     /// the app cascade errors quickly and exit cleanly rather than appearing
     /// frozen for tens of seconds while each frame times out.
     pub device_lost: std::sync::atomic::AtomicBool,
-    pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
+    pub devices: std::collections::HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: std::collections::HashMap<super::ContextHandle, MetalSubmissionContext>,
+    pub contexts: std::collections::HashMap<super::ContextHandle, SharedMetalSubmissionContext>,
     pub next_context_id: super::ContextHandle,
     pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
@@ -1278,14 +1314,10 @@ pub(super) struct MetalState {
 
 impl MetalState {
     #[inline]
-    pub(super) fn slang_compiler_mut_or_init(
-        &mut self,
-    ) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
+    pub(super) fn slang_compiler_mut_or_init(&mut self) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
         use anyhow::Context;
         if self.slang_compiler.is_none() {
-            self.slang_compiler = Some(
-                crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?,
-            );
+            self.slang_compiler = Some(crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?);
         }
         Ok(self.slang_compiler.as_mut().expect("just set"))
     }
@@ -1416,19 +1448,12 @@ mod tests {
 
         // GPU is "busy" → park on pending.
         reg.unregister_buffer(h0, Some(1));
-        assert_eq!(
-            reg.pending_buffer_slot_count(),
-            1,
-            "expected slot to land in pending"
-        );
+        assert_eq!(reg.pending_buffer_slot_count(), 1, "expected slot to land in pending");
 
         // Until drain, register must NOT re-hand out slot 0.
         let h1: BufferHandle = 2;
         let i1 = reg.register_storage_buffer(h1);
-        assert_eq!(
-            i1, 1,
-            "register_storage_buffer must not recycle a still-pending slot"
-        );
+        assert_eq!(i1, 1, "register_storage_buffer must not recycle a still-pending slot");
 
         // After drain, pending→free, and the next register picks it up.
         reg.drain_pending_slots();
@@ -1473,10 +1498,7 @@ mod tests {
 
         let h1: TextureHandle = 101;
         let i1 = reg.register_texture(h1);
-        assert_ne!(
-            i1, i0,
-            "texture slot must not be recycled while still pending"
-        );
+        assert_ne!(i1, i0, "texture slot must not be recycled while still pending");
 
         reg.drain_pending_slots();
         reg.release_texture_slot(i1, None);

@@ -34,8 +34,9 @@ use types::MetalState;
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
 pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     state.devices.iter().all(|(device, ld)| {
-        ld.timeline_scheduled_max == 0
-            || context::device_retired(state, *device) >= ld.timeline_scheduled_max
+        ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed) == 0
+            || context::device_retired(state, *device)
+                >= ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed)
     })
 }
 
@@ -44,8 +45,8 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
 /// Called after [`GpuBackend::wait_until`] has confirmed GPU completion so slots
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
-    for device in state.devices.values_mut() {
-        device.resource_registry.drain_pending_slots();
+    for device in state.devices.values() {
+        device.ledger.lock().unwrap().resource_registry.drain_pending_slots();
     }
 }
 
@@ -63,10 +64,7 @@ pub(in crate::backend::metal) fn drain_completed_cbs(sc: &mut types::MetalSubmis
 }
 
 /// Block until scheduled timeline values have been signaled on one device, or timeout.
-pub(in crate::backend::metal) fn wait_device_idle(
-    state: &MetalState,
-    device: DeviceHandle,
-) -> Result<()> {
+pub(in crate::backend::metal) fn wait_device_idle(state: &MetalState, device: DeviceHandle) -> Result<()> {
     use std::sync::atomic::Ordering;
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost; refusing to wait for in-flight work");
@@ -75,7 +73,7 @@ pub(in crate::backend::metal) fn wait_device_idle(
         .devices
         .get(&device)
         .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
-    let target = ld.timeline_scheduled_max;
+    let target = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed);
     if target == 0 {
         return Ok(());
     }
@@ -115,15 +113,12 @@ impl MetalBackend {
 
         // Runtime Metal shader validation reads `MTL_SHADER_VALIDATION` before the first
         // device is created when GPU API validation is on (`GOLDY_VALIDATION=1`, `api`, `all`, …).
-        if crate::backend::goldy_validation_enabled()
-            && std::env::var_os("MTL_SHADER_VALIDATION").is_none()
-        {
+        if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
             std::env::set_var("MTL_SHADER_VALIDATION", "1");
             tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION); was unset");
         }
 
-        let slang_compiler =
-            crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
+        let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         let adapters: Vec<types::MetalAdapterInfo> = ::metal::Device::all()
             .into_iter()
@@ -198,7 +193,7 @@ impl GpuBackend for MetalBackend {
             .state
             .contexts
             .iter()
-            .filter(|(_, sc)| sc.device == device)
+            .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device)
             .map(|(id, _)| *id)
             .collect();
         for ctx in ctxs {
@@ -228,9 +223,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn is_device_lost(&self, _device: DeviceHandle) -> bool {
-        self.state
-            .device_lost
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.state.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_buffer(
@@ -326,22 +319,11 @@ impl GpuBackend for MetalBackend {
         buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
     }
 
-    fn read_buffer_to_cpu(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
+    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
         buffer::read_to_cpu(&self.state, device, buffer, output)
     }
 
-    fn clear_buffer(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    ) -> Result<()> {
+    fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         buffer::clear(&self.state, device, buffer, offset, size)
     }
 
@@ -353,14 +335,7 @@ impl GpuBackend for MetalBackend {
         defines: &[(&str, &str)],
         optimization_level: crate::types::OptimizationLevel,
     ) -> Result<ShaderHandle> {
-        self.create_shader_with_checks(
-            device,
-            slang_source,
-            search_paths,
-            defines,
-            optimization_level,
-            vec![],
-        )
+        self.create_shader_with_checks(device, slang_source, search_paths, defines, optimization_level, vec![])
     }
 
     fn create_shader_with_checks(
@@ -376,14 +351,8 @@ impl GpuBackend for MetalBackend {
             &self.state.devices,
             &mut self.state.shaders,
             &mut self.state.next_shader_handle,
-            crate::backend::shared::ShaderDesc::new(
-                device,
-                slang_source,
-                search_paths,
-                defines,
-                optimization_level,
-            )
-            .with_layout_checks(layout_checks),
+            crate::backend::shared::ShaderDesc::new(device, slang_source, search_paths, defines, optimization_level)
+                .with_layout_checks(layout_checks),
         )
     }
 
@@ -400,8 +369,7 @@ impl GpuBackend for MetalBackend {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
         let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
             device_handle: device,
             vertex_shader,
@@ -421,9 +389,8 @@ impl GpuBackend for MetalBackend {
         target_format: TextureFormat,
         depth_stencil: Option<&DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
-                .with_depth_stencil(depth_stencil);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
+            .with_depth_stencil(depth_stencil);
         let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
             device_handle: device,
             vertex_shader,
@@ -455,14 +422,7 @@ impl GpuBackend for MetalBackend {
         color_format: TextureFormat,
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle> {
-        render_target::create_with_depth(
-            &mut self.state,
-            device,
-            width,
-            height,
-            color_format,
-            depth_format,
-        )
+        render_target::create_with_depth(&mut self.state, device, width, height, color_format, depth_format)
     }
 
     fn destroy_render_target(&mut self, target: RenderTargetHandle) {
@@ -491,24 +451,10 @@ impl GpuBackend for MetalBackend {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        texture::create(
-            &mut self.state,
-            device,
-            width,
-            height,
-            format,
-            access,
-            flags,
-        )
+        texture::create(&mut self.state, device, width, height, format, access, flags)
     }
 
-    fn write_texture(
-        &mut self,
-        texture: TextureHandle,
-        data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
         texture::write(&self.state, texture, data, width, height)
     }
 
@@ -540,11 +486,7 @@ impl GpuBackend for MetalBackend {
         texture::bindless_sampled_index(&self.state, texture)
     }
 
-    fn create_sampler(
-        &mut self,
-        device: DeviceHandle,
-        desc: &SamplerDesc,
-    ) -> Result<SamplerHandle> {
+    fn create_sampler(&mut self, device: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
         sampler::create(&mut self.state, device, desc)
     }
 
@@ -570,14 +512,10 @@ impl GpuBackend for MetalBackend {
         surface::destroy(&mut self.state, surface);
     }
 
-    fn begin_frame(
-        &mut self,
-        surface: SurfaceHandle,
-        ctx: ContextHandle,
-    ) -> Result<(FrameToken, TextureHandle)> {
+    fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
         let image = surface::acquire(&mut self.state, surface, ctx)?;
-        let tex = surface::frame_texture(&self.state, surface)
-            .context("begin_frame: surface frame texture unavailable")?;
+        let tex =
+            surface::frame_texture(&self.state, surface).context("begin_frame: surface frame texture unavailable")?;
         Ok((
             FrameToken {
                 surface,
@@ -604,11 +542,7 @@ impl GpuBackend for MetalBackend {
         surface::format(&self.state, surface)
     }
 
-    fn surface_set_present_mode(
-        &mut self,
-        surface: SurfaceHandle,
-        mode: crate::types::PresentMode,
-    ) -> Result<()> {
+    fn surface_set_present_mode(&mut self, surface: SurfaceHandle, mode: crate::types::PresentMode) -> Result<()> {
         surface::set_present_mode(&mut self.state, surface, mode)
     }
 
@@ -628,7 +562,7 @@ impl GpuBackend for MetalBackend {
         self.state
             .contexts
             .get(&ctx)
-            .map(|sc| sc.timeline_event.as_ref().signaled_value())
+            .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
             .unwrap_or(0)
     }
 
@@ -636,29 +570,24 @@ impl GpuBackend for MetalBackend {
         context::device_retired(&self.state, device)
     }
 
-    fn device_wait_until(
-        &mut self,
-        device: DeviceHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> anyhow::Result<()> {
+    fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         let timeout = std::time::Duration::from_secs(60);
         if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
             Ok(())
         } else {
-            anyhow::bail!(
-                "device_wait_until: timed out after 60 s waiting for timeline value {value}"
-            )
+            anyhow::bail!("device_wait_until: timed out after 60 s waiting for timeline value {value}")
         }
     }
 
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
         let device = self.context_device(ctx);
-        let sc = match self.state.contexts.get(&ctx) {
-            Some(sc) => sc,
+        let sc_arc = match self.state.contexts.get(&ctx) {
+            Some(sc) => sc.clone(),
             None => return Vec::new(),
         };
-        let returns: Vec<(SurfaceHandle, u32)> =
-            std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
+        let sc = sc_arc.lock().unwrap();
+        let returns: Vec<(SurfaceHandle, u32)> = std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
+        drop(sc);
         for (surface_handle, _image_index) in returns {
             if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
                 if surf.device_handle == device {
@@ -666,12 +595,14 @@ impl GpuBackend for MetalBackend {
                 }
             }
         }
-        crate::signal::drain_all_signals(&sc.signal_queue)
+        let sc2 = sc_arc.lock().unwrap();
+        crate::signal::drain_all_signals(&sc2.signal_queue)
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.state.contexts.get(&ctx)?;
-        let progress = self.gpu_progress(ctx);
+        let sc_arc = self.state.contexts.get(&ctx)?;
+        let sc = sc_arc.lock().unwrap();
+        let progress = sc.timeline_event.as_ref().signaled_value();
         if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
@@ -687,11 +618,7 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
-    fn wait_until(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         use std::sync::atomic::Ordering;
         let device = self.context_device(ctx);
         let _tz = crate::tracy_zone!("mtl.wait_until");
@@ -704,10 +631,12 @@ impl GpuBackend for MetalBackend {
         if self.gpu_progress(ctx) >= value {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
             let retired = context::device_retired(&self.state, device);
-            if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-                drain_completed_cbs(sc);
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                drain_completed_cbs(&mut sc);
+                sc.deletion_queue.process_up_to(value);
             }
-            if let Some(ld) = self.state.devices.get_mut(&device) {
+            if let Some(ld) = self.state.devices.get(&device) {
                 ld.process_deletion_queue_up_to(value.min(retired));
             }
             drain_all_pending_slots(&mut self.state);
@@ -719,7 +648,8 @@ impl GpuBackend for MetalBackend {
         // that CB guarantees all earlier CBs (and timeline values) are also done.
         // This uses the Metal runtime's native Mach-semaphore wait rather than
         // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
-        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc| {
+        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
             sc.in_flight_command_buffers
                 .iter()
                 .find(|(tv, _)| *tv >= value)
@@ -737,6 +667,8 @@ impl GpuBackend for MetalBackend {
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_waiter
                 .clone();
             let timeout = std::time::Duration::from_secs(300);
@@ -755,10 +687,12 @@ impl GpuBackend for MetalBackend {
         {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
             let retired = context::device_retired(&self.state, device);
-            if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-                drain_completed_cbs(sc);
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                drain_completed_cbs(&mut sc);
+                sc.deletion_queue.process_up_to(value);
             }
-            if let Some(ld) = self.state.devices.get_mut(&device) {
+            if let Some(ld) = self.state.devices.get(&device) {
                 ld.process_deletion_queue_up_to(value.min(retired));
             }
         }
@@ -787,6 +721,8 @@ impl GpuBackend for MetalBackend {
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_waiter
             .clone();
 
@@ -799,7 +735,10 @@ impl GpuBackend for MetalBackend {
         }
 
         let retired = context::device_retired(&self.state, device);
-        if let Some(ld) = self.state.devices.get_mut(&device) {
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().deletion_queue.process_up_to(value);
+        }
+        if let Some(ld) = self.state.devices.get(&device) {
             ld.process_deletion_queue_up_to(value.min(retired));
         }
         drain_all_pending_slots(&mut self.state);
@@ -848,41 +787,34 @@ impl GpuBackend for MetalBackend {
         compute::destroy(&mut self.state, pipeline);
     }
 
-    fn available_bindless_slots(
-        &self,
-        device: DeviceHandle,
-        category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn available_bindless_slots(&self, device: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
         self.state
             .devices
             .get(&device)
-            .map(|ld| ld.resource_registry.available_slots(category))
+            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 
-    fn max_bindless_slots_per_category(
-        &self,
-        _device: DeviceHandle,
-        _category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn max_bindless_slots_per_category(&self, _device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {
         types::MAX_RESOURCES_PER_CATEGORY
     }
 
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device);
-        if let Some(ld) = self.state.devices.get_mut(&device) {
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            sc.deletion_queue.process_up_to(ctx_signaled);
+        }
+        if let Some(ld) = self.state.devices.get(&device) {
             ld.process_deletion_queue_up_to(retired);
         }
     }
 
-    fn set_reclamation_context(
-        &mut self,
-        ctx: ContextHandle,
-        epoch: Option<crate::timeline::TimelineValue>,
-    ) {
-        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-            sc.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
+    fn set_reclamation_context(&mut self, ctx: ContextHandle, epoch: Option<crate::timeline::TimelineValue>) {
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
         }
     }
 
@@ -899,23 +831,25 @@ impl GpuBackend for MetalBackend {
             return;
         }
         drain_all_pending_slots(&mut self.state);
-        if let Some(logical_device) = self.state.devices.get_mut(&device) {
-            logical_device.heap_allocator.reset_for_frame();
+        if let Some(logical_device) = self.state.devices.get(&device) {
+            logical_device.heap_allocator.lock().unwrap().reset_for_frame();
         }
     }
 
     fn ensure_buffer_heap_capacity(&mut self, device: DeviceHandle, min_capacity: u64) {
-        if let Some(logical_device) = self.state.devices.get_mut(&device) {
+        if let Some(logical_device) = self.state.devices.get(&device) {
             logical_device
                 .heap_allocator
+                .lock()
+                .unwrap()
                 .ensure_primary_capacity(min_capacity);
         }
     }
 
     fn compact_overflow_heaps(&mut self, device: DeviceHandle) {
-        if let Some(logical_device) = self.state.devices.get_mut(&device) {
-            logical_device.heap_allocator.compact_overflow();
-            logical_device.texture_heap.compact_overflow();
+        if let Some(logical_device) = self.state.devices.get(&device) {
+            logical_device.heap_allocator.lock().unwrap().compact_overflow();
+            logical_device.texture_heap.lock().unwrap().compact_overflow();
         }
     }
 
@@ -926,40 +860,48 @@ impl GpuBackend for MetalBackend {
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
         let device = self.context_device(ctx);
-        self.state
+        let ctx_count = self
+            .state
+            .contexts
+            .get(&ctx)
+            .map(|sc_arc| sc_arc.lock().unwrap().deletion_queue.pending_len())
+            .unwrap_or(0);
+        let device_count = self
+            .state
             .devices
             .get(&device)
-            .map(|d| d.deletion_queue.pending_len())
-            .unwrap_or(0)
+            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
+            .unwrap_or(0);
+        ctx_count + device_count
     }
 
     fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {
-        self.state
-            .devices
-            .get(&device)
-            .map(|ld| super::BufferHeapStats {
-                buffer_count: ld.heap_allocator.buffer_count(),
-                overflow_count: ld.heap_allocator.overflow_count(),
-                high_water_bytes: ld.heap_allocator.high_water_mark(),
-                primary_heap_bytes: ld.heap_allocator.primary_size(),
-            })
+        self.state.devices.get(&device).map(|ld| {
+            let ha = ld.heap_allocator.lock().unwrap();
+            super::BufferHeapStats {
+                buffer_count: ha.buffer_count(),
+                overflow_count: ha.overflow_count(),
+                high_water_bytes: ha.high_water_mark(),
+                primary_heap_bytes: ha.primary_size(),
+            }
+        })
     }
 
     fn texture_heap_stats(&self, device: DeviceHandle) -> Option<super::TextureHeapStats> {
-        self.state
-            .devices
-            .get(&device)
-            .map(|ld| super::TextureHeapStats {
-                texture_count: ld.texture_heap.texture_count(),
-                overflow_count: ld.texture_heap.overflow_count(),
-            })
+        self.state.devices.get(&device).map(|ld| {
+            let th = ld.texture_heap.lock().unwrap();
+            super::TextureHeapStats {
+                texture_count: th.texture_count(),
+                overflow_count: th.overflow_count(),
+            }
+        })
     }
 
     fn in_flight_command_buffer_count(&self, ctx: ContextHandle) -> usize {
         self.state
             .contexts
             .get(&ctx)
-            .map(|sc| sc.in_flight_command_buffers.len())
+            .map(|sc_arc| sc_arc.lock().unwrap().in_flight_command_buffers.len())
             .unwrap_or(0)
     }
 }
@@ -971,11 +913,7 @@ mod tests {
     #[test]
     fn test_metal_backend_creation() {
         let backend = MetalBackend::new();
-        assert!(
-            backend.is_ok(),
-            "Failed to create Metal backend: {:?}",
-            backend.err()
-        );
+        assert!(backend.is_ok(), "Failed to create Metal backend: {:?}", backend.err());
         let backend = backend.unwrap();
         assert_eq!(backend.backend_type(), BackendType::Metal);
     }
@@ -994,11 +932,7 @@ mod tests {
     fn test_metal_device_creation() {
         let mut backend = MetalBackend::new().unwrap();
         let device = backend.create_device(0);
-        assert!(
-            device.is_ok(),
-            "Failed to create Metal device: {:?}",
-            device.err()
-        );
+        assert!(device.is_ok(), "Failed to create Metal device: {:?}", device.err());
         let device = device.unwrap();
         assert!(backend.is_device_valid(device));
         backend.destroy_device(device);

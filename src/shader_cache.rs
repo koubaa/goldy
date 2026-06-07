@@ -135,14 +135,13 @@ impl ShaderBytecodeDiskCache {
             }
         };
 
-        let decompressed =
-            match zstd::decode_all(std::io::Cursor::new(&bytes)).map_err(|e| anyhow::anyhow!(e)) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(?e, "failed ZSTD-decompress shader cache; ignoring");
-                    return empty_shader_cache_shell(Some(path));
-                }
-            };
+        let decompressed = match zstd::decode_all(std::io::Cursor::new(&bytes)).map_err(|e| anyhow::anyhow!(e)) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(?e, "failed ZSTD-decompress shader cache; ignoring");
+                return empty_shader_cache_shell(Some(path));
+            }
+        };
 
         let magic = GOLDY_SHADER_CACHE_MAGIC.as_slice();
         let Some(body) = decompressed.strip_prefix(magic) else {
@@ -227,9 +226,7 @@ impl ShaderBytecodeDiskCache {
 
         let mut uncompressed = Vec::new();
         let _ = uncompressed.write_all(GOLDY_SHADER_CACHE_MAGIC.as_slice());
-        uncompressed
-            .write_all(GOLDY_CACHE_VERSION.as_bytes())
-            .unwrap();
+        uncompressed.write_all(GOLDY_CACHE_VERSION.as_bytes()).unwrap();
         uncompressed.write_all(b"\n").unwrap();
         if flatten_map_to_disk(&mut uncompressed, &self.map).is_ok() {
             match zstd::encode_all(uncompressed.as_slice(), 10) {
@@ -309,8 +306,7 @@ fn flatten_map_to_disk(dest: &mut Vec<u8>, map: &HashMap<u64, Vec<u8>>) -> Resul
     for k in keys {
         let blob = map.get(&k).expect("key from map iteration");
         dest.write_all(&k.to_le_bytes())?;
-        let len_u32 = u32::try_from(blob.len())
-            .map_err(|_| anyhow::anyhow!("shader cache blob too large"))?;
+        let len_u32 = u32::try_from(blob.len()).map_err(|_| anyhow::anyhow!("shader cache blob too large"))?;
         dest.write_all(&len_u32.to_le_bytes())?;
         dest.write_all(blob)?;
     }
@@ -323,8 +319,7 @@ mod tests {
     use crate::slang::{
         ffi::SlangStage,
         virtual_main::{effective_slang_source_for_compile, transform_virtual_main},
-        CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck, ShaderReflection,
-        ShaderTarget,
+        CompiledShader, CompiledShaderWithReflection, OwnedLayoutCheck, ShaderReflection, ShaderTarget,
     };
     use crate::types::OptimizationLevel;
     use tempfile::TempDir;
@@ -387,10 +382,7 @@ mod tests {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
         let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
         let alt = "float4 main() : SV_Target0 { return 1; }";
-        assert_ne!(
-            base_key,
-            compile_cache_key(alt, tgt, &eps, &defs, &layouts, opt)
-        );
+        assert_ne!(base_key, compile_cache_key(alt, tgt, &eps, &defs, &layouts, opt));
     }
 
     #[test]
@@ -408,10 +400,7 @@ mod tests {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
         let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
         let eps2 = vec![("other", SlangStage::Fragment)];
-        assert_ne!(
-            base_key,
-            compile_cache_key(src, tgt, &eps2, &defs, &layouts, opt)
-        );
+        assert_ne!(base_key, compile_cache_key(src, tgt, &eps2, &defs, &layouts, opt));
     }
 
     #[test]
@@ -419,10 +408,7 @@ mod tests {
         let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
         let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
         let defs2 = vec![("A", "2"), ("B", "2")];
-        assert_ne!(
-            base_key,
-            compile_cache_key(src, tgt, &eps, &defs2, &layouts, opt)
-        );
+        assert_ne!(base_key, compile_cache_key(src, tgt, &eps, &defs2, &layouts, opt));
     }
 
     #[test]
@@ -441,10 +427,7 @@ mod tests {
         let base_key = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
         let mut layouts2 = layouts.clone();
         layouts2[0].rust_size = 32;
-        assert_ne!(
-            base_key,
-            compile_cache_key(src, tgt, &eps, &defs, &layouts2, opt)
-        );
+        assert_ne!(base_key, compile_cache_key(src, tgt, &eps, &defs, &layouts2, opt));
     }
 
     /// Disk cache keys must follow the same effective source as Slang (`compile_with_reflection`).
@@ -474,8 +457,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             &layouts,
             opt,
         );
-        let k_transformed_only =
-            compile_cache_key(transformed.as_str(), tgt, &eps, &defs, &layouts, opt);
+        let k_transformed_only = compile_cache_key(transformed.as_str(), tgt, &eps, &defs, &layouts, opt);
         assert_eq!(
             k_effective, k_transformed_only,
             "cache key must hash post-transform source, matching transform_virtual_main output"

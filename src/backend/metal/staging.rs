@@ -145,10 +145,7 @@ impl TextureStagingEntry {
     }
 }
 
-fn allocate_texture_staging_entry(
-    device: &mtl::DeviceRef,
-    size: u64,
-) -> Result<TextureStagingEntry> {
+fn allocate_texture_staging_entry(device: &mtl::DeviceRef, size: u64) -> Result<TextureStagingEntry> {
     let buffer = device.new_buffer(size, mtl::MTLResourceOptions::StorageModeShared);
     let mapped = buffer.contents() as *mut u8;
     anyhow::ensure!(

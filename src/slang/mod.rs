@@ -46,9 +46,9 @@ pub mod loader;
 pub mod virtual_main;
 
 pub use compiler::{
-    layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout,
-    LayoutCheck, OwnedLayoutCheck, ParameterBlockLayout, ResourceKind, ShaderReflection,
-    ShaderTarget, SlangCompiler, StructFieldLayout, StructLayout,
+    layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout, LayoutCheck,
+    OwnedLayoutCheck, ParameterBlockLayout, ResourceKind, ShaderReflection, ShaderTarget, SlangCompiler,
+    StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;
 

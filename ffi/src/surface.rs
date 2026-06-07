@@ -81,11 +81,7 @@ pub unsafe extern "C" fn goldy_surface_format(surface: *const GoldySurface) -> G
 /// # Safety
 /// The surface pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_surface_resize(
-    surface: *mut GoldySurface,
-    width: u32,
-    height: u32,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_surface_resize(surface: *mut GoldySurface, width: u32, height: u32) -> GoldyResult {
     if surface.is_null() {
         return GoldyResult::NullPointer;
     }
@@ -106,9 +102,7 @@ pub unsafe extern "C" fn goldy_surface_resize(
 /// # Safety
 /// The surface pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_surface_acquire(
-    surface: *const GoldySurface,
-) -> *mut GoldySurfaceFrame {
+pub unsafe extern "C" fn goldy_surface_acquire(surface: *const GoldySurface) -> *mut GoldySurfaceFrame {
     if surface.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Surface is null"));
         return ptr::null_mut();
@@ -205,8 +199,7 @@ pub unsafe extern "C" fn goldy_surface_frame_height(frame: *const GoldySurfaceFr
 mod windows_surface {
     use super::*;
     use raw_window_handle::{
-        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, Win32WindowHandle,
-        WindowsDisplayHandle,
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
     };
     use std::ffi::c_void;
     use std::num::NonZeroIsize;
@@ -217,25 +210,17 @@ mod windows_surface {
     }
 
     impl HasWindowHandle for Win32Window {
-        fn window_handle(
-            &self,
-        ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
             let handle = Win32WindowHandle::new(self.hwnd);
             // hinstance is optional for surface creation
-            Ok(unsafe {
-                raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::Win32(handle))
-            })
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
         }
     }
 
     impl HasDisplayHandle for Win32Window {
-        fn display_handle(
-            &self,
-        ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
             let handle = WindowsDisplayHandle::new();
-            Ok(unsafe {
-                raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::Windows(handle))
-            })
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::Windows(handle)) })
         }
     }
 

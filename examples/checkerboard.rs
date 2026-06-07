@@ -8,9 +8,8 @@
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example checkerboard`
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance,
-    LayoutCheckable, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule,
-    Surface, VertexBufferLayout,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, LayoutCheckable, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;

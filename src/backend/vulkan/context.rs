@@ -37,10 +37,7 @@ pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
 }
 
 pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<ContextHandle> {
-    let ld = state
-        .devices
-        .get(&device)
-        .context("Invalid device handle")?;
+    let ld = state.devices.get(&device).context("Invalid device handle")?;
 
     let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
         .semaphore_type(vk::SemaphoreType::TIMELINE)
@@ -89,9 +86,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             free_cmd_buffers: Vec::new(),
             retained_compute_cb: None,
             timeline_cmd_buffers: std::collections::HashMap::new(),
-            staging_belt: super::staging::StagingBelt::new(
-                super::staging::DEFAULT_STAGING_CHUNK_SIZE,
-            ),
+            staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
         })),
@@ -109,11 +104,7 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         state
             .devices
             .get(&device)
-            .and_then(|ld| {
-                ld.device
-                    .get_semaphore_counter_value(sc.timeline_semaphore)
-                    .ok()
-            })
+            .and_then(|ld| ld.device.get_semaphore_counter_value(sc.timeline_semaphore).ok())
             .unwrap_or(0)
     };
     if let Some(ld) = state.devices.get(&device) {
@@ -204,9 +195,7 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
         let mut spins = 0u32;
         while device_retired(state, device) < seq {
             if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    "wait_until_device_seq_at_least timed out waiting for seq {seq} on device {device}"
-                );
+                tracing::warn!("wait_until_device_seq_at_least timed out waiting for seq {seq} on device {device}");
                 return;
             }
             if let Some(sem) = state.contexts.values().find_map(|sc_arc| {

@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ResourceAccess, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ShaderModule,
+    Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -109,12 +109,10 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Compute shader for particle physics
-        let compute_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
+        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
 
         // Render shader for visualization
-        let render_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
+        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
 
         // Create particle buffer with initial rain particles
         let particles = Self::create_particles(false);
@@ -127,8 +125,7 @@ impl RenderState {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer =
-            device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
+        let params_buffer = device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
@@ -146,10 +143,7 @@ impl RenderState {
             },
         )?;
 
-        println!(
-            "Created rain/snow simulation with {} particles",
-            NUM_PARTICLES
-        );
+        println!("Created rain/snow simulation with {} particles", NUM_PARTICLES);
 
         Ok(Self {
             window,
@@ -232,12 +226,8 @@ impl RenderState {
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
-                self.particle_buffer
-                    .resource_index(ResourceAccess::Write)
-                    .unwrap(),
-                self.params_buffer
-                    .resource_index(ResourceAccess::Read)
-                    .unwrap(),
+                self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
+                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
             ])
             .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
         graph.dispatch(&self.context)?;

@@ -2,7 +2,7 @@
 
 use super::super::shared;
 use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle};
-use super::staging::{StagingBelt, TextureStagingEntry, TextureStagingPool};
+use super::staging::TextureStagingEntry;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
@@ -39,9 +39,10 @@ fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
         let n = MEM_DIAG_COUNTER.fetch_add(1, Ordering::Relaxed);
         if n.is_multiple_of(mem_diag_cadence()) {
             let mib = ld.device.current_allocated_size() / (1024 * 1024);
-            let heap_primary_mib = ld.heap_allocator.primary_size() / (1024 * 1024);
-            let heap_overflow = ld.heap_allocator.overflow_count();
-            let heap_hwm_mib = ld.heap_allocator.high_water_mark() / (1024 * 1024);
+            let ha = ld.heap_allocator.lock().unwrap();
+            let heap_primary_mib = ha.primary_size() / (1024 * 1024);
+            let heap_overflow = ha.overflow_count();
+            let heap_hwm_mib = ha.high_water_mark() / (1024 * 1024);
             tracing::info!(
                 target: "goldy::diag::mem",
                 metal_current_allocated_mib = mib,
@@ -59,9 +60,7 @@ fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
 /// Collects the unique sequence of pipeline names (in order of first appearance)
 /// and counts total dispatch calls. Used by `submit` / `submit_graph` when
 /// `goldy::diag::submit` is enabled in `RUST_LOG`.
-fn summarise_commands<'a>(
-    commands: impl Iterator<Item = &'a super::super::GpuCommand>,
-) -> (usize, Vec<&'static str>) {
+fn summarise_commands<'a>(commands: impl Iterator<Item = &'a super::super::GpuCommand>) -> (usize, Vec<&'static str>) {
     let mut dispatch_count = 0usize;
     let mut pipeline_names: Vec<&'static str> = Vec::new();
     let mut pending_label: Option<&'static str> = None;
@@ -99,15 +98,9 @@ pub(super) fn create(
 ) -> Result<ComputePipelineHandle> {
     super::shader::ensure_stage_compiled(state, compute_shader, SlangStage::Compute)?;
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let shader = state
-        .shaders
-        .get(&compute_shader)
-        .context("Invalid compute shader")?;
+    let shader = state.shaders.get(&compute_shader).context("Invalid compute shader")?;
 
     let workgroup_size = parse_numthreads(&shader.slang_source).unwrap_or_else(|| {
         tracing::warn!(
@@ -140,12 +133,7 @@ pub(super) fn create(
         .shaders
         .get(&compute_shader)
         .and_then(|s| s.reflection.as_ref())
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.binding_element_strides.clone(),
-            )
-        })
+        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
         .unwrap_or_default();
 
     let shader_debug_name = format!("compute_shader#{compute_shader}");
@@ -192,8 +180,16 @@ pub(super) fn begin_compute_encoder<'a>(
     device_handle: DeviceHandle,
 ) -> &'a mtl::ComputeCommandEncoderRef {
     let encoder = command_buffer.new_compute_command_encoder();
-    logical_device.heap_allocator.use_heaps_for_compute(encoder);
-    logical_device.texture_heap.use_heaps_for_compute(encoder);
+    logical_device
+        .heap_allocator
+        .lock()
+        .unwrap()
+        .use_heaps_for_compute(encoder);
+    logical_device
+        .texture_heap
+        .lock()
+        .unwrap()
+        .use_heaps_for_compute(encoder);
 
     // Collect resource refs by usage tier then call use_resources once per tier,
     // replacing one ObjC msg_send per resource with at most three total.
@@ -204,16 +200,13 @@ pub(super) fn begin_compute_encoder<'a>(
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {
             let buf_ref: &mtl::BufferRef = &buf_state.buffer;
-            rw_refs.push(unsafe {
-                std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref)
-            });
+            rw_refs.push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
         }
     }
     for tex_state in state.textures.values() {
         if tex_state.device_handle == device_handle {
             let tex_ref: &mtl::TextureRef = &tex_state.texture;
-            let res_ref =
-                unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) };
+            let res_ref = unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) };
             if tex_state.is_storage_image {
                 rw_refs.push(res_ref);
             } else {
@@ -222,10 +215,7 @@ pub(super) fn begin_compute_encoder<'a>(
         }
     }
     if !rw_refs.is_empty() {
-        encoder.use_resources(
-            &rw_refs,
-            mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-        );
+        encoder.use_resources(&rw_refs, mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write);
     }
     if !ro_refs.is_empty() {
         encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
@@ -328,8 +318,7 @@ pub(super) fn record_commands_to_buffer(
             blit_touched_bufs.clear();
             blit_touched_texs.clear();
             if guard.compute.is_none() {
-                let enc =
-                    begin_compute_encoder(command_buffer, state, logical_device, device_handle);
+                let enc = begin_compute_encoder(command_buffer, state, logical_device, device_handle);
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
                 }
@@ -375,11 +364,7 @@ pub(super) fn record_commands_to_buffer(
 
     for cmd in commands {
         match cmd {
-            GpuCommand::ClearBuffer {
-                buffer,
-                offset,
-                size,
-            } => {
+            GpuCommand::ClearBuffer { buffer, offset, size } => {
                 let buf_state = state
                     .buffers
                     .get(buffer)
@@ -419,9 +404,7 @@ pub(super) fn record_commands_to_buffer(
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
                 if gpu_idle
                     && !has_recorded_gpu_work
-                    && !buf_state
-                        .flags
-                        .contains(crate::types::BufferFlags::GPU_ONLY)
+                    && !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
                     let ptr = buf_state.buffer.contents();
@@ -443,13 +426,10 @@ pub(super) fn record_commands_to_buffer(
                     .get(*belt_idx)
                     .context("WriteBuffer: belt_slices index out of range (pre-pass mismatch)")?;
                 *belt_idx += 1;
-                guard.blit.unwrap().copy_from_buffer(
-                    stg_buf,
-                    *stg_off,
-                    &buf_state.buffer,
-                    *offset,
-                    data.len() as u64,
-                );
+                guard
+                    .blit
+                    .unwrap()
+                    .copy_from_buffer(stg_buf, *stg_off, &buf_state.buffer, *offset, data.len() as u64);
             }
             GpuCommand::WriteTexture {
                 texture: tex_handle,
@@ -587,13 +567,9 @@ pub(super) fn record_commands_to_buffer(
                 let mut layout = PushLayout::default();
                 shared::fill_bindless(
                     &mut layout,
-                    buffers.iter().map(|h| {
-                        state
-                            .buffers
-                            .get(h)
-                            .map(|b| b.arg_buffer_index)
-                            .unwrap_or(0)
-                    }),
+                    buffers
+                        .iter()
+                        .map(|h| state.buffers.get(h).map(|b| b.arg_buffer_index).unwrap_or(0)),
                 );
                 let layout_bytes = layout.as_bytes();
                 guard
@@ -692,9 +668,7 @@ pub(super) fn record_commands_to_buffer(
                         height: pipeline.workgroup_size[1] as u64,
                         depth: pipeline.workgroup_size[2] as u64,
                     };
-                    let enc = guard
-                        .compute
-                        .expect("encoder must be set after ensure_compute!()");
+                    let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
                     for i in 0..entry_count {
                         let base = i * stride;
                         let layout_slice = &arg_data[base..base + push_size];
@@ -706,8 +680,7 @@ pub(super) fn record_commands_to_buffer(
                         let wg_off = base + push_size;
                         let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into()?);
                         let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into()?);
-                        let wg_z =
-                            u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into()?);
+                        let wg_z = u32::from_ne_bytes(arg_data[wg_off + 8..wg_off + 12].try_into()?);
                         let threadgroups = MTLSize {
                             width: wg_x as u64,
                             height: wg_y as u64,
@@ -741,14 +714,8 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::CopyTexture { src, dst } => {
                 ensure_blit_tex!(*src);
                 ensure_blit_tex!(*dst);
-                let src_state = state
-                    .textures
-                    .get(src)
-                    .context("CopyTexture: src texture not found")?;
-                let dst_state = state
-                    .textures
-                    .get(dst)
-                    .context("CopyTexture: dst texture not found")?;
+                let src_state = state.textures.get(src).context("CopyTexture: src texture not found")?;
+                let dst_state = state.textures.get(dst).context("CopyTexture: dst texture not found")?;
                 let w = src_state.width as u64;
                 let h = src_state.height as u64;
                 guard.blit.unwrap().copy_from_texture(
@@ -770,9 +737,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::Barrier => {
                 if let Some(enc) = guard.compute {
                     const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
-                    let () = unsafe {
-                        msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES]
-                    };
+                    let () = unsafe { msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES] };
                 }
             }
             GpuCommand::ResourceBarrier {
@@ -785,24 +750,21 @@ pub(super) fn record_commands_to_buffer(
                     for (handle, _) in buf_entries {
                         if let Some(buf_state) = state.buffers.get(handle) {
                             let buf_ref: &mtl::BufferRef = &buf_state.buffer;
-                            resources.push(unsafe {
-                                std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref)
-                            });
+                            resources
+                                .push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
                         }
                     }
                     for (handle, _) in tex_entries {
                         if let Some(tex_state) = state.textures.get(handle) {
                             let tex_ref: &mtl::TextureRef = &tex_state.texture;
-                            resources.push(unsafe {
-                                std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref)
-                            });
+                            resources
+                                .push(unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) });
                         }
                     }
                     if !resources.is_empty() {
                         let count: mtl::NSUInteger = resources.len() as mtl::NSUInteger;
                         let ptr = resources.as_ptr();
-                        let () =
-                            unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
+                        let () = unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
                     }
                 }
             }
@@ -841,16 +803,15 @@ fn stage_uploads(
     let has_upload = commands.iter().any(|c| {
         matches!(
             c,
-            GpuCommand::WriteBuffer { .. }
-                | GpuCommand::WriteTexture { .. }
-                | GpuCommand::WriteTextureRegion { .. }
+            GpuCommand::WriteBuffer { .. } | GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
         )
     });
 
     let gpu_idle = state
         .contexts
         .get(&ctx)
-        .map(|sc| {
+        .map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
             sc.last_committed_timeline
                 .map(|last| sc.timeline_event.as_ref().signaled_value() >= last)
                 .unwrap_or(true)
@@ -863,13 +824,12 @@ fn stage_uploads(
 
     // Reclaim: return completed in-flight resources to the free lists.
     {
-        let completed = super::context::device_retired(state, device_handle);
-        let ld = state
-            .devices
-            .get_mut(&device_handle)
-            .context("stage_uploads: invalid device handle")?;
-        ld.staging_belt.reclaim(completed);
-        ld.texture_staging_pool.reclaim(completed);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let completed = sc.timeline_event.as_ref().signaled_value();
+            sc.staging_belt.reclaim(completed);
+            sc.texture_staging_pool.reclaim(completed);
+        }
     }
 
     // Pre-pass: stage data for every command that will need the slow path.
@@ -919,13 +879,11 @@ fn stage_uploads(
                     // Fast path will do a direct CPU memcpy; no staging needed.
                     // The fast path does NOT open an encoder, so would_have_gpu_work stays as-is.
                 } else {
-                    let ld = state
-                        .devices
-                        .get_mut(&device_handle)
-                        .context("stage_uploads: invalid device handle")?;
-                    // Split borrow: device and staging_belt are distinct fields.
-                    let belt: &mut StagingBelt = &mut ld.staging_belt;
-                    let (buf, off) = belt.write(&device_mtl, data)?;
+                    let sc_arc = state
+                        .contexts
+                        .get(&ctx)
+                        .context("stage_uploads: invalid context handle")?;
+                    let (buf, off) = sc_arc.lock().unwrap().staging_belt.write(&device_mtl, data)?;
                     belt_slices.push((buf, off));
                     // Slow-path WriteBuffer opens a blit encoder.
                     would_have_gpu_work = true;
@@ -935,12 +893,15 @@ fn stage_uploads(
                 if data.is_empty() {
                     continue;
                 }
-                let ld = state
-                    .devices
-                    .get_mut(&device_handle)
-                    .context("stage_uploads: invalid device handle")?;
-                let pool: &mut TextureStagingPool = &mut ld.texture_staging_pool;
-                let entry = pool.acquire(&device_mtl, data.len() as u64)?;
+                let sc_arc = state
+                    .contexts
+                    .get(&ctx)
+                    .context("stage_uploads: invalid context handle")?;
+                let entry = sc_arc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .acquire(&device_mtl, data.len() as u64)?;
                 unsafe {
                     std::ptr::copy_nonoverlapping(data.as_ptr(), entry.mapped_ptr(), data.len());
                 }
@@ -967,11 +928,7 @@ fn stage_uploads(
 }
 
 /// Submit compute commands without blocking. Returns the timeline value signaled when the work completes.
-pub(super) fn submit(
-    state: &mut MetalState,
-    ctx: ContextHandle,
-    commands: &[GpuCommand],
-) -> Result<TimelineValue> {
+pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit");
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
@@ -990,23 +947,16 @@ pub(super) fn submit(
     let device_handle = super::context::context_device(state, ctx);
 
     let owned_command_buffer = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.command_queue.new_command_buffer().to_owned()
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
 
     // Reclaim and pre-stage all uploads before recording.
-    let (belt_slices, texture_scratches, gpu_idle) =
-        stage_uploads(state, ctx, device_handle, commands)?;
+    let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, commands)?;
 
     {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
         record_commands_to_buffer(
@@ -1024,13 +974,9 @@ pub(super) fn submit(
     }
 
     let signal_value = {
-        let ld = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
         v
     };
 
@@ -1038,6 +984,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_waiter
         .clone();
 
@@ -1076,31 +1024,50 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_event
         .clone();
     command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
+
+    // Clone queue_lock before commit so we hold only the per-device queue lock
+    // during the actual enqueue — not all of MetalState.
+    let queue_lock = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .queue_lock
+        .clone();
 
     tracing::debug!(
         "[mtl.cb_commit] kind=compute signal_value={signal_value} queue=command_queue commands={n}",
         n = commands.len()
     );
-    command_buffer_ref.commit();
+    {
+        let _queue_guard = queue_lock.lock().unwrap();
+        command_buffer_ref.commit();
+    }
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.staging_belt.finish(signal_value);
-        ld.texture_staging_pool
-            .release(signal_value, texture_scratches);
-    }
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
+        sc.staging_belt.finish(signal_value);
+        sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
+    // Drain per-context deletion queue on the context's own clock (hot path),
+    // then the device-level queue as the async GC safety net (see issue #190).
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
+        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+        sc.deletion_queue.process_up_to(ctx_signaled);
+    }
     {
         let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
             maybe_log_mem_diag(ld);
         }
@@ -1153,10 +1120,7 @@ pub(super) fn submit_graph(
     let device_handle = super::context::context_device(state, ctx);
 
     let owned_command_buffer = {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.command_queue.new_command_buffer().to_owned()
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
@@ -1175,8 +1139,7 @@ pub(super) fn submit_graph(
         })
         .collect();
 
-    let (belt_slices, texture_scratches, gpu_idle) =
-        stage_uploads(state, ctx, device_handle, &all_compute_cmds)?;
+    let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, &all_compute_cmds)?;
 
     // Walk GraphCommands, collecting contiguous compute batches and recording
     // render passes inline. Encoder transitions within a single command buffer
@@ -1185,10 +1148,7 @@ pub(super) fn submit_graph(
     // belt_idx and tex_idx advance across all compute-batch calls to
     // record_commands_to_buffer so they consume the single pre-pass result.
     {
-        let ld = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         let mut compute_batch: Vec<GpuCommand> = Vec::new();
         let mut belt_idx = 0usize;
@@ -1221,14 +1181,7 @@ pub(super) fn submit_graph(
                     }
 
                     // Record the render pass into the same command buffer.
-                    record_render_pass_to_buffer(
-                        state,
-                        command_buffer_ref,
-                        ld,
-                        device_handle,
-                        *target,
-                        render_cmds,
-                    )?;
+                    record_render_pass_to_buffer(state, command_buffer_ref, ld, device_handle, *target, render_cmds)?;
                 }
             }
         }
@@ -1252,13 +1205,9 @@ pub(super) fn submit_graph(
 
     // Signal timeline and commit — same pattern as `submit`.
     let signal_value = {
-        let ld = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
-        let v = ld.timeline_next;
-        ld.timeline_next += 1;
-        ld.timeline_scheduled_max = ld.timeline_scheduled_max.max(v);
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
         v
     };
 
@@ -1266,6 +1215,8 @@ pub(super) fn submit_graph(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_waiter
         .clone();
 
@@ -1297,27 +1248,45 @@ pub(super) fn submit_graph(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_event
         .clone();
     command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
 
-    command_buffer_ref.commit();
+    // Clone queue_lock before commit so we hold only the per-device queue lock
+    // during the actual enqueue — not all of MetalState.
+    let queue_lock = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .queue_lock
+        .clone();
+    {
+        let _queue_guard = queue_lock.lock().unwrap();
+        command_buffer_ref.commit();
+    }
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
-    if let Some(ld) = state.devices.get_mut(&device_handle) {
-        ld.staging_belt.finish(signal_value);
-        ld.texture_staging_pool
-            .release(signal_value, texture_scratches);
-    }
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
+        sc.staging_belt.finish(signal_value);
+        sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
+    // Drain per-context deletion queue on the context's own clock (hot path),
+    // then the device-level queue as the async GC safety net (see issue #190).
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
+        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+        sc.deletion_queue.process_up_to(ctx_signaled);
+    }
     {
         let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
             maybe_log_mem_diag(ld);
         }
@@ -1344,10 +1313,7 @@ fn record_render_pass_to_buffer(
     target: super::super::RenderTargetHandle,
     commands: &[super::super::RenderCommand],
 ) -> Result<()> {
-    let render_target = state
-        .render_targets
-        .get(&target)
-        .context("Invalid render target")?;
+    let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
     let mut clear_color = None;
     let mut clear_depth = None;
@@ -1371,9 +1337,13 @@ fn record_render_pass_to_buffer(
     let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
     logical_device
         .heap_allocator
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     logical_device
         .texture_heap
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {
@@ -1427,8 +1397,6 @@ pub(super) fn read_command_buffer_error_description(buf: &mtl::CommandBufferRef)
         if utf8.is_null() {
             return "<error with null UTF8>".into();
         }
-        std::ffi::CStr::from_ptr(utf8)
-            .to_string_lossy()
-            .into_owned()
+        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
     }
 }

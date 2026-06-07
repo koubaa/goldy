@@ -43,15 +43,10 @@ mod windows_impl {
             return None;
         }
         let mut buf = vec![0u16; 1024];
-        let len =
-            unsafe { GetModuleFileNameW(handle, buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        let len = unsafe { GetModuleFileNameW(handle, buf.as_mut_ptr(), buf.len() as u32) } as usize;
         if len == 0 || len >= buf.len() {
             return None;
         }
-        Some(
-            OsString::from_wide(&buf[..len])
-                .to_string_lossy()
-                .into_owned(),
-        )
+        Some(OsString::from_wide(&buf[..len]).to_string_lossy().into_owned())
     }
 }

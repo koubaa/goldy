@@ -62,15 +62,7 @@ impl RetainedPool {
         init: Option<&[u8]>,
     ) -> Result<Parcel> {
         let tex = if let Some(data) = init {
-            crate::texture::Texture::with_data(
-                &self.device,
-                data,
-                width,
-                height,
-                format,
-                access,
-                flags,
-            )?
+            crate::texture::Texture::with_data(&self.device, data, width, height, format, access, flags)?
         } else {
             self.device
                 .alloc_texture(width, height, format, access, flags)
@@ -113,12 +105,7 @@ impl RetainedPool {
     ) -> Result<crate::buffer::Buffer> {
         if let Some(data) = init {
             self.device
-                .alloc_buffer_with_bytes_stride_and_flags(
-                    data,
-                    access,
-                    element_stride.unwrap_or(1),
-                    flags,
-                )
+                .alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride.unwrap_or(1), flags)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         } else {
             self.device
@@ -132,10 +119,7 @@ impl RetainedPool {
     pub fn transfer_out(&mut self, mut parcel: Parcel) -> StampedParcel {
         let ready_after = parcel.last_referenced();
         parcel.release_bookkeeping();
-        StampedParcel {
-            parcel,
-            ready_after,
-        }
+        StampedParcel { parcel, ready_after }
     }
 
     /// Committed bytes currently held through this pool, by [`ParcelType`].
@@ -246,9 +230,7 @@ mod tests {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
         let data = vec![0u8; 32 * 32 * 4];
-        let p = pool
-            .acquire_texture(32, 32, fmt, acc, flags, Some(&data))
-            .unwrap();
+        let p = pool.acquire_texture(32, 32, fmt, acc, flags, Some(&data)).unwrap();
         assert_eq!(p.byte_size(), 32 * 32 * 4);
     }
 
@@ -344,10 +326,7 @@ mod tests {
         let _reserved = m.reserve::<u32>(8);
         let parcel = m.build().unwrap();
 
-        assert!(parcel
-            .view(slot)
-            .resource_index(ResourceAccess::Write)
-            .is_some());
+        assert!(parcel.view(slot).resource_index(ResourceAccess::Write).is_some());
         assert_eq!(parcel.view(slot).offset(), 0);
         assert!(parcel.view(slot).size() > 0);
     }
@@ -402,9 +381,7 @@ mod tests {
         let (fmt, acc, flags) = rgba_interpolated();
         let parcel = pool.acquire_texture(4, 4, fmt, acc, flags, None).unwrap();
         let err = parcel.copy_into(&[0u32]).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("only valid for non-mosaic buffer parcels"));
+        assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
     }
 
     #[test]
@@ -414,9 +391,7 @@ mod tests {
         m.emplace(&[1u32]);
         let parcel = m.build().unwrap();
         let err = parcel.copy_into(&[0u32]).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("only valid for non-mosaic buffer parcels"));
+        assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
     }
 
     #[test]

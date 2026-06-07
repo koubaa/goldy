@@ -90,9 +90,7 @@ fn make_device() -> goldy::Device {
     // on some CI runners so it's misclassified as DiscreteGpu, but its D3D12 compute
     // implementation faults silently (e.g. Signal AV after GPU work).
     #[cfg(all(feature = "dx12", target_os = "windows"))]
-    if std::env::var("GOLDY_DX12_ALLOW_WARP")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    {
+    if std::env::var("GOLDY_DX12_ALLOW_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
         if let Ok(adapter) = instance.request_adapter(&goldy::RequestAdapterOptions {
             power_preference: goldy::PowerPreference::None,
             force_fallback_adapter: true,
@@ -133,9 +131,7 @@ fn graph_linear_chain() {
     let add_pipe = ComputePipeline::new(&device, &add_shader).unwrap();
 
     let input: Vec<u32> = (0..64).collect();
-    let src = device
-        .alloc_buffer_with_data(&input, BufferKind::Scattered)
-        .unwrap();
+    let src = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
     let dst = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
@@ -326,9 +322,7 @@ fn graph_matches_encoder() {
     let input: Vec<u32> = (0..64).collect();
 
     // --- Run via ComputeEncoder (manual barriers) ---
-    let src_enc = device
-        .alloc_buffer_with_data(&input, BufferKind::Scattered)
-        .unwrap();
+    let src_enc = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
     let dst_enc = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
@@ -362,9 +356,7 @@ fn graph_matches_encoder() {
     let result_enc = readback_u32(&device, &dst_enc, 64);
 
     // --- Run via TaskGraph ---
-    let src_graph = device
-        .alloc_buffer_with_data(&input, BufferKind::Scattered)
-        .unwrap();
+    let src_graph = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
     let dst_graph = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
@@ -390,10 +382,7 @@ fn graph_matches_encoder() {
     let result_graph = readback_u32(&device, &dst_graph, 64);
 
     // Both should produce identical results
-    assert_eq!(
-        result_enc, result_graph,
-        "TaskGraph should match ComputeEncoder output"
-    );
+    assert_eq!(result_enc, result_graph, "TaskGraph should match ComputeEncoder output");
 }
 
 /// Non-blocking submit via TaskGraph.
@@ -453,9 +442,7 @@ fn clear_then_dispatch_reads_zeros() {
 
     // Allocate and fill a buffer with nonzero values.
     let nonzero: Vec<u32> = (1..=64).collect();
-    let buf = device
-        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
-        .unwrap();
+    let buf = device.alloc_buffer_with_data(&nonzero, BufferKind::Scattered).unwrap();
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
@@ -564,16 +551,9 @@ fn stress_clear_then_dispatch_large() {
 
     const N: usize = 16384;
     let nonzero: Vec<u32> = (1..=N as u32).collect();
-    let buf = device
-        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
-        .unwrap();
+    let buf = device.alloc_buffer_with_data(&nonzero, BufferKind::Scattered).unwrap();
     let out = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
@@ -618,19 +598,10 @@ fn stress_many_clears_many_dispatches() {
     let mut outs = Vec::new();
     for _ in 0..NUM_BUFS {
         let nonzero: Vec<u32> = (1..=N as u32).collect();
-        srcs.push(
-            device
-                .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
-                .unwrap(),
-        );
+        srcs.push(device.alloc_buffer_with_data(&nonzero, BufferKind::Scattered).unwrap());
         outs.push(
             device
-                .alloc_buffer(
-                    (N * 4) as u64,
-                    BufferKind::Scattered,
-                    None,
-                    BufferFlags::empty(),
-                )
+                .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap(),
         );
     }
@@ -677,16 +648,9 @@ fn stress_clear_write_dispatch_chain() {
 
     const N: usize = 1024;
     let nonzero: Vec<u32> = (1..=N as u32).collect();
-    let buf = device
-        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
-        .unwrap();
+    let buf = device.alloc_buffer_with_data(&nonzero, BufferKind::Scattered).unwrap();
     let out = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
@@ -732,20 +696,13 @@ fn stress_two_phase_submission() {
 
     const N: usize = 4096;
     let input: Vec<u32> = (0..N as u32).collect();
-    let buf = device
-        .alloc_buffer_with_data(&input, BufferKind::Scattered)
-        .unwrap();
+    let buf = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
 
     // Phase 1: double in-place. Use a tmp buffer since DOUBLE_SHADER reads
     // from one buffer and writes to another.
     let tmp = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     let tmp_idx = tmp.resource_index(ResourceAccess::Write).unwrap();
 
@@ -794,9 +751,7 @@ fn stress_rapid_submissions() {
 
     const N: usize = 256;
     let zeros: Vec<u32> = vec![0; N];
-    let buf = device
-        .alloc_buffer_with_data(&zeros, BufferKind::Scattered)
-        .unwrap();
+    let buf = device.alloc_buffer_with_data(&zeros, BufferKind::Scattered).unwrap();
     let idx = buf.resource_index(ResourceAccess::Write).unwrap();
 
     const ROUNDS: u32 = 20;
@@ -851,16 +806,9 @@ void cs_main(Scattered<uint> args, ThreadId id) {
     const N: usize = 256;
 
     let nonzero: Vec<u32> = (1..=N as u32).collect();
-    let buf = device
-        .alloc_buffer_with_data(&nonzero, BufferKind::Scattered)
-        .unwrap();
+    let buf = device.alloc_buffer_with_data(&nonzero, BufferKind::Scattered).unwrap();
     let out = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     let args = device
         .alloc_buffer(12, BufferKind::Scattered, None, BufferFlags::empty())
@@ -911,28 +859,13 @@ fn stress_alternating_write_dispatch() {
     const N: usize = 256;
 
     let buf = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     let out1 = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
     let out2 = device
-        .alloc_buffer(
-            (N * 4) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),
-        )
+        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();

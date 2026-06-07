@@ -64,14 +64,8 @@ mod tests {
         let weak = Arc::downgrade(&alive);
         ctx.defer_until(tv, alive);
 
-        assert!(
-            ctx.has_deferred_payloads(),
-            "VRAM ring must hold payload before flush"
-        );
-        assert!(
-            weak.upgrade().is_some(),
-            "payload must stay alive before flush"
-        );
+        assert!(ctx.has_deferred_payloads(), "VRAM ring must hold payload before flush");
+        assert!(weak.upgrade().is_some(), "payload must stay alive before flush");
 
         ctx.wait_until(tv).expect("wait");
 
@@ -91,10 +85,7 @@ mod tests {
             !ctx.has_deferred_payloads(),
             "VRAM ring must be empty after submit + wait + flush"
         );
-        assert!(
-            weak.upgrade().is_none(),
-            "payload must be dropped after flush"
-        );
+        assert!(weak.upgrade().is_none(), "payload must be dropped after flush");
     }
 
     /// HeapTransient freed ranges return to the free list once `gpu_progress >= epoch`.
@@ -124,9 +115,7 @@ mod tests {
 
         ctx.wait_until(far_epoch).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
-        let reused = alloc
-            .alloc(&device, 1024, Some(4))
-            .expect("alloc after reclaim");
+        let reused = alloc.alloc(&device, 1024, Some(4)).expect("alloc after reclaim");
         assert_eq!(
             reused.offset(),
             offset,
@@ -185,10 +174,7 @@ mod tests {
             !ctx.has_deferred_payloads(),
             "VRAM ring must empty via pull path without polling signals"
         );
-        assert!(
-            weak.upgrade().is_none(),
-            "payload must drop after pull flush"
-        );
+        assert!(weak.upgrade().is_none(), "payload must drop after pull flush");
     }
 
     /// `boundary_crossed` is idempotent: calling it twice for the same epoch reclaims once.
@@ -211,10 +197,7 @@ mod tests {
             !ctx.has_deferred_payloads(),
             "first boundary_crossed must drain the VRAM ring"
         );
-        assert!(
-            weak.upgrade().is_none(),
-            "payload must drop on first boundary_crossed"
-        );
+        assert!(weak.upgrade().is_none(), "payload must drop on first boundary_crossed");
 
         // Second call for the same epoch must be a no-op (no double-free panic).
         ctx.boundary_crossed(tv);
@@ -285,9 +268,7 @@ mod tests {
 
         // After reset the bump pointer is at 0, so the next alloc should land at
         // the same offset as the first (confirming reset happened).
-        let v2 = alloc
-            .alloc(&device, 512, Some(4))
-            .expect("alloc after reset");
+        let v2 = alloc.alloc(&device, 512, Some(4)).expect("alloc after reset");
         assert_eq!(
             v2.offset(),
             original_offset,

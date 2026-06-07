@@ -1,9 +1,7 @@
 //! Graphics pipeline management logic.
 
 use super::types::{self, PipelineState};
-use super::utils::{
-    compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk,
-};
+use super::utils::{compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk};
 use super::{DeviceHandle, PipelineHandle};
 use crate::types::CompareFunction;
 use anyhow::{Context, Result};
@@ -35,9 +33,7 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
         shader_debug_name,
     } = bundle;
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Shader stages - Slang outputs "main" as the entry point name in SPIR-V
     let vs_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -53,15 +49,14 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
     let shader_stages = [vs_stage, fs_stage];
 
     // Vertex input — only declare binding 0 when there are actual attributes
-    let binding_descs: Vec<vk::VertexInputBindingDescription> =
-        if raster_desc.vertex_layout.attributes.is_empty() {
-            Vec::new()
-        } else {
-            vec![vk::VertexInputBindingDescription::default()
-                .binding(0)
-                .stride(raster_desc.vertex_layout.stride)
-                .input_rate(vk::VertexInputRate::VERTEX)]
-        };
+    let binding_descs: Vec<vk::VertexInputBindingDescription> = if raster_desc.vertex_layout.attributes.is_empty() {
+        Vec::new()
+    } else {
+        vec![vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(raster_desc.vertex_layout.stride)
+            .input_rate(vk::VertexInputRate::VERTEX)]
+    };
 
     let attribute_descs: Vec<_> = raster_desc
         .vertex_layout
@@ -116,8 +111,7 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
 
     // Dynamic state
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state =
-        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
     // Reuse the device's shared bindless pipeline layout
     let layout = logical_device
@@ -127,8 +121,8 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
 
     // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)
     let color_format = format_to_vk(raster_desc.target_format);
-    let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
-        .color_attachment_formats(std::slice::from_ref(&color_format));
+    let mut rendering_info =
+        vk::PipelineRenderingCreateInfo::default().color_attachment_formats(std::slice::from_ref(&color_format));
 
     // Pipeline robustness (core in Vulkan 1.4): OOB descriptor access returns zero.
     // vertex_inputs must be covered too; without it the spec requires every vertex
@@ -184,9 +178,7 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
 }
 
 /// Create a graphics pipeline with depth testing support.
-pub(super) fn create_with_depth(
-    bundle: VulkanGraphicsPipelineCreateBundle<'_>,
-) -> Result<PipelineHandle> {
+pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<PipelineHandle> {
     let VulkanGraphicsPipelineCreateBundle {
         devices,
         pipelines,
@@ -198,9 +190,7 @@ pub(super) fn create_with_depth(
         shader_debug_name,
     } = bundle;
 
-    let logical_device = devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Shader stages
     let vs_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -216,15 +206,14 @@ pub(super) fn create_with_depth(
     let shader_stages = [vs_stage, fs_stage];
 
     // Vertex input — only declare binding 0 when there are actual attributes
-    let binding_descs: Vec<vk::VertexInputBindingDescription> =
-        if raster_desc.vertex_layout.attributes.is_empty() {
-            Vec::new()
-        } else {
-            vec![vk::VertexInputBindingDescription::default()
-                .binding(0)
-                .stride(raster_desc.vertex_layout.stride)
-                .input_rate(vk::VertexInputRate::VERTEX)]
-        };
+    let binding_descs: Vec<vk::VertexInputBindingDescription> = if raster_desc.vertex_layout.attributes.is_empty() {
+        Vec::new()
+    } else {
+        vec![vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(raster_desc.vertex_layout.stride)
+            .input_rate(vk::VertexInputRate::VERTEX)]
+    };
 
     let attribute_descs: Vec<_> = raster_desc
         .vertex_layout
@@ -271,9 +260,7 @@ pub(super) fn create_with_depth(
     // Depth stencil state
     let depth_stencil_state = if let Some(ds) = raster_desc.depth_stencil {
         vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(
-                ds.depth_write_enabled || ds.depth_compare != CompareFunction::Always,
-            )
+            .depth_test_enable(ds.depth_write_enabled || ds.depth_compare != CompareFunction::Always)
             .depth_write_enable(ds.depth_write_enabled)
             .depth_compare_op(compare_to_vk(ds.depth_compare))
             .depth_bounds_test_enable(false)
@@ -296,8 +283,7 @@ pub(super) fn create_with_depth(
 
     // Dynamic state
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state =
-        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
     // Pipeline layout - always use bindless with resource slots
     let bindless_set_layout = logical_device
@@ -317,12 +303,8 @@ pub(super) fn create_with_depth(
         .set_layouts(&all_layouts)
         .push_constant_ranges(std::slice::from_ref(&slot_range));
 
-    let layout = unsafe {
-        logical_device
-            .device
-            .create_pipeline_layout(&layout_info, None)
-    }
-    .context("Failed to create bindless pipeline layout")?;
+    let layout = unsafe { logical_device.device.create_pipeline_layout(&layout_info, None) }
+        .context("Failed to create bindless pipeline layout")?;
     let owns_layout = true;
 
     // Dynamic rendering (core since Vulkan 1.3, mandatory in 1.4)

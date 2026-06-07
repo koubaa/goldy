@@ -146,9 +146,7 @@ static SHARED_DX12: OnceLock<Arc<Mutex<Box<dyn super::GpuBackend>>>> = OnceLock:
 /// is not safe under concurrent device lifetimes.
 pub fn is_debug_mode() -> bool {
     let no_debug = std::env::var("GOLDY_DX12_NO_DEBUG").is_ok_and(|v| v == "1" || v == "true");
-    !no_debug
-        && (cfg!(debug_assertions)
-            || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true"))
+    !no_debug && (cfg!(debug_assertions) || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true"))
 }
 
 /// Get or create the shared DX12 backend.
@@ -162,9 +160,7 @@ pub fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>
             .clone())
     } else {
         let backend = Dx12Backend::new()?;
-        Ok(Arc::new(Mutex::new(
-            Box::new(backend) as Box<dyn super::GpuBackend>
-        )))
+        Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
     }
 }
 
@@ -192,16 +188,14 @@ impl Dx12Backend {
                         // GPU-Based Validation: catches UAV/SRV descriptor mismatches,
                         // resource state errors, and out-of-bounds access on the GPU timeline.
                         // Very slow — enable with GOLDY_DX12_GBV=1.
-                        let enable_gbv = std::env::var("GOLDY_DX12_GBV")
-                            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                        let enable_gbv =
+                            std::env::var("GOLDY_DX12_GBV").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
                         if enable_gbv {
                             if let Ok(debug1) = d.cast::<ID3D12Debug1>() {
                                 unsafe { debug1.SetEnableGPUBasedValidation(true) };
                                 tracing::info!("D3D12 GPU-Based Validation (GBV) enabled");
                             } else {
-                                tracing::warn!(
-                                    "ID3D12Debug1 not available — GPU-Based Validation unavailable"
-                                );
+                                tracing::warn!("ID3D12Debug1 not available — GPU-Based Validation unavailable");
                             }
                         }
                     }
@@ -216,8 +210,8 @@ impl Dx12Backend {
             DXGI_CREATE_FACTORY_FLAGS(0)
         };
 
-        let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory2(factory_flags) }
-            .context("Failed to create DXGI factory")?;
+        let factory: IDXGIFactory4 =
+            unsafe { CreateDXGIFactory2(factory_flags) }.context("Failed to create DXGI factory")?;
 
         // Check tearing support (IDXGIFactory5::CheckFeatureSupport)
         let allow_tearing = factory
@@ -242,8 +236,7 @@ impl Dx12Backend {
         let mut adapter_index = 0u32;
 
         loop {
-            let adapter_result: Result<IDXGIAdapter1, _> =
-                unsafe { factory.EnumAdapters1(adapter_index) };
+            let adapter_result: Result<IDXGIAdapter1, _> = unsafe { factory.EnumAdapters1(adapter_index) };
             match adapter_result {
                 Ok(adapter) => {
                     let desc = match unsafe { adapter.GetDesc1() } {
@@ -259,8 +252,7 @@ impl Dx12Backend {
                             .to_string();
                         tracing::info!("  [{}] {}", adapter_index, name);
 
-                        let supports_reserved_buffers =
-                            device::query_supports_reserved_buffers(&adapter);
+                        let supports_reserved_buffers = device::query_supports_reserved_buffers(&adapter);
                         adapters.push(DxgiAdapterInfo {
                             adapter,
                             desc,
@@ -277,8 +269,7 @@ impl Dx12Backend {
         tracing::info!("Found {} hardware DXGI adapters", adapters.len());
 
         if env_allow_warp() {
-            let warp_result: windows::core::Result<IDXGIAdapter> =
-                unsafe { factory.EnumWarpAdapter() };
+            let warp_result: windows::core::Result<IDXGIAdapter> = unsafe { factory.EnumWarpAdapter() };
             match warp_result {
                 Ok(warp) => match warp.cast::<IDXGIAdapter1>() {
                     Ok(adapter) => match unsafe { adapter.GetDesc1() } {
@@ -287,8 +278,7 @@ impl Dx12Backend {
                                 .trim_end_matches('\0')
                                 .to_string();
                             tracing::info!("  [{}] {} (WARP)", WARP_ADAPTER_ID, name);
-                            let supports_reserved_buffers =
-                                device::query_supports_reserved_buffers(&adapter);
+                            let supports_reserved_buffers = device::query_supports_reserved_buffers(&adapter);
                             adapters.push(DxgiAdapterInfo {
                                 adapter,
                                 desc,
@@ -304,14 +294,10 @@ impl Dx12Backend {
             }
         }
 
-        tracing::info!(
-            "Total {} DX12 adapters (including WARP if enabled)",
-            adapters.len()
-        );
+        tracing::info!("Total {} DX12 adapters (including WARP if enabled)", adapters.len());
 
         // Create Slang compiler
-        let slang_compiler =
-            crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
+        let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         let state = Dx12State {
             factory,
@@ -351,11 +337,8 @@ impl Dx12Backend {
 
     /// Wait for the GPU to finish all work on a device (sync fence path).
     fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
-        let fence_value = device
-            .timeline_next
-            .load(std::sync::atomic::Ordering::Relaxed);
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-            .context("Failed to signal fence")?;
+        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
         utils::wait_for_fence(&device.fence, fence_value)
     }
 }
@@ -380,11 +363,7 @@ impl Dx12Backend {
                     let path = cache_root
                         .join("goldy")
                         .join(format!("dx12_pso_{}.bin", logical_device.adapter_id));
-                    if let Err(e) = pso_cache::save_maps(
-                        &path,
-                        &pso_cache.graphics_blobs,
-                        &pso_cache.compute_blobs,
-                    ) {
+                    if let Err(e) = pso_cache::save_maps(&path, &pso_cache.graphics_blobs, &pso_cache.compute_blobs) {
                         tracing::warn!(
                             error = ?e,
                             path = ?path,
@@ -544,9 +523,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn is_device_lost(&self, _device: DeviceHandle) -> bool {
-        self.state
-            .device_removed
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.state.device_removed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn create_buffer(
@@ -572,12 +549,7 @@ impl GpuBackend for Dx12Backend {
         buffer::destroy(&mut self.state, buffer_handle);
     }
 
-    fn write_buffer(
-        &mut self,
-        buffer_handle: BufferHandle,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<()> {
+    fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         buffer::write(&mut self.state, buffer_handle, offset, data)
     }
 
@@ -615,12 +587,7 @@ impl GpuBackend for Dx12Backend {
         buffer_handle: BufferHandle,
         new_logical_size: u64,
     ) -> Result<()> {
-        buffer::set_logical_size(
-            &mut self.state,
-            device_handle,
-            buffer_handle,
-            new_logical_size,
-        )
+        buffer::set_logical_size(&mut self.state, device_handle, buffer_handle, new_logical_size)
     }
 
     fn hint_buffer_unused_above(&mut self, buffer_handle: BufferHandle, offset: u64) {
@@ -655,32 +622,16 @@ impl GpuBackend for Dx12Backend {
         buffer::resize(&mut self.state, device, buffer, new_size, preserve_contents)
     }
 
-    fn read_buffer_to_cpu(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
+    fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
         buffer::read_to_cpu(&mut self.state, device, buffer, output)
     }
 
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
-        let adapter_id = self
-            .state
-            .devices
-            .get(&device)
-            .map(|d| d.adapter_id)
-            .unwrap_or(0);
+        let adapter_id = self.state.devices.get(&device).map(|d| d.adapter_id).unwrap_or(0);
         self.adapter_capabilities(adapter_id)
     }
 
-    fn clear_buffer(
-        &mut self,
-        device: DeviceHandle,
-        buffer: BufferHandle,
-        offset: u64,
-        size: u64,
-    ) -> Result<()> {
+    fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         buffer::clear(&mut self.state, device, buffer, offset, size)
     }
 
@@ -737,8 +688,7 @@ impl GpuBackend for Dx12Backend {
         topology: PrimitiveTopology,
         target_format: TextureFormat,
     ) -> Result<PipelineHandle> {
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
         let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
             device_handle,
             vertex_shader,
@@ -782,13 +732,7 @@ impl GpuBackend for Dx12Backend {
         display: &dyn raw_window_handle::HasDisplayHandle,
         depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<SurfaceHandle> {
-        surface::create(
-            &mut self.state,
-            device_handle,
-            window,
-            display,
-            depth_format,
-        )
+        surface::create(&mut self.state, device_handle, window, display, depth_format)
     }
     fn destroy_surface(&mut self, surface_handle: SurfaceHandle) {
         surface::destroy(&mut self.state, surface_handle);
@@ -816,12 +760,7 @@ impl GpuBackend for Dx12Backend {
         surface::render(&mut self.state, frame.surface, frame.image, commands)
     }
 
-    fn surface_resize(
-        &mut self,
-        surface_handle: SurfaceHandle,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
         surface::resize(&mut self.state, surface_handle, width, height)
     }
     fn surface_size(&self, surface_handle: SurfaceHandle) -> (u32, u32) {
@@ -855,11 +794,7 @@ impl GpuBackend for Dx12Backend {
         context::device_retired(&self.state, device)
     }
 
-    fn device_wait_until(
-        &mut self,
-        device: DeviceHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> anyhow::Result<()> {
+    fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         if context::device_retired(&self.state, device) >= value {
             return Ok(());
         }
@@ -904,8 +839,7 @@ impl GpuBackend for Dx12Backend {
             }
             surface.pending_swapchain_returns.retain(|&(idx, tv)| {
                 if progress >= tv {
-                    signal_queue
-                        .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    signal_queue.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
                     false
                 } else {
@@ -935,11 +869,7 @@ impl GpuBackend for Dx12Backend {
             .unwrap_or(0)
     }
 
-    fn wait_until(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         let fence = self
             .state
@@ -1077,9 +1007,8 @@ impl GpuBackend for Dx12Backend {
         target_format: TextureFormat,
         depth_stencil: Option<&crate::types::DepthStencilState>,
     ) -> Result<PipelineHandle> {
-        let raster =
-            crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
-                .with_depth_stencil(depth_stencil);
+        let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
+            .with_depth_stencil(depth_stencil);
         let desc = crate::backend::shared::GraphicsPipelineCreateDesc {
             device_handle,
             vertex_shader,
@@ -1115,24 +1044,10 @@ impl GpuBackend for Dx12Backend {
         access: TextureKind,
         flags: TextureFlags,
     ) -> Result<TextureHandle> {
-        texture::create(
-            &mut self.state,
-            device_handle,
-            width,
-            height,
-            format,
-            access,
-            flags,
-        )
+        texture::create(&mut self.state, device_handle, width, height, format, access, flags)
     }
 
-    fn write_texture(
-        &mut self,
-        texture_handle: TextureHandle,
-        data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    fn write_texture(&mut self, texture_handle: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
         texture::write(&mut self.state, texture_handle, data, width, height)
     }
 
@@ -1152,11 +1067,7 @@ impl GpuBackend for Dx12Backend {
         texture::destroy(&mut self.state, texture_handle);
     }
 
-    fn read_texture_to_cpu(
-        &mut self,
-        texture_handle: TextureHandle,
-        output: &mut [u8],
-    ) -> Result<()> {
+    fn read_texture_to_cpu(&mut self, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
         texture::read_to_cpu(&mut self.state, texture_handle, output)
     }
 
@@ -1196,12 +1107,7 @@ impl GpuBackend for Dx12Backend {
             .shaders
             .get(&compute_shader)
             .and_then(|s| s.reflection.as_ref())
-            .map(|r| {
-                (
-                    r.push_constant_categories.clone(),
-                    r.binding_element_strides.clone(),
-                )
-            })
+            .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
             .unwrap_or_default();
 
         if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
@@ -1224,21 +1130,11 @@ impl GpuBackend for Dx12Backend {
         }
     }
 
-    fn available_bindless_slots(
-        &self,
-        device_handle: DeviceHandle,
-        category: crate::types::ResourceCategory,
-    ) -> u32 {
+    fn available_bindless_slots(&self, device_handle: DeviceHandle, category: crate::types::ResourceCategory) -> u32 {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| {
-                ld.ledger
-                    .lock()
-                    .unwrap()
-                    .resource_registry
-                    .available_slots(category)
-            })
+            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 

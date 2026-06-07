@@ -126,13 +126,7 @@ impl RenderTarget {
         );
         let handle = {
             let mut backend = device.inner.backend.lock().unwrap();
-            backend.create_render_target_with_depth(
-                device.inner.handle,
-                width,
-                height,
-                color_format,
-                depth_format,
-            )?
+            backend.create_render_target_with_depth(device.inner.handle, width, height, color_format, depth_format)?
         };
 
         Ok(Self {

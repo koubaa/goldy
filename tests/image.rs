@@ -29,10 +29,7 @@ impl ComparisonType {
                 );
                 within
             }
-            ComparisonType::Percentile {
-                percentile,
-                threshold,
-            } => {
+            ComparisonType::Percentile { percentile, threshold } => {
                 let value = pool.get_percentile(percentile, true);
                 let within = value <= threshold;
                 println!(
@@ -118,26 +115,21 @@ impl From<std::io::Error> for ImageComparisonError {
 }
 
 /// Read a PNG file and return its RGBA pixel data.
-fn read_png(
-    path: &Path,
-    expected_width: u32,
-    expected_height: u32,
-) -> Result<Vec<u8>, ImageComparisonError> {
-    let data = std::fs::read(path)
-        .map_err(|_| ImageComparisonError::ReferenceNotFound(path.display().to_string()))?;
+fn read_png(path: &Path, expected_width: u32, expected_height: u32) -> Result<Vec<u8>, ImageComparisonError> {
+    let data = std::fs::read(path).map_err(|_| ImageComparisonError::ReferenceNotFound(path.display().to_string()))?;
 
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
-    let mut reader = decoder.read_info().map_err(|e| {
-        ImageComparisonError::FormatMismatch(format!("Failed to read PNG header: {}", e))
-    })?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| ImageComparisonError::FormatMismatch(format!("Failed to read PNG header: {}", e)))?;
 
     let buffer_len = reader
         .output_buffer_size()
         .expect("output buffer size should be known after reading info");
     let mut buffer = vec![0u8; buffer_len];
-    let info = reader.next_frame(&mut buffer).map_err(|e| {
-        ImageComparisonError::FormatMismatch(format!("Failed to decode PNG: {}", e))
-    })?;
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|e| ImageComparisonError::FormatMismatch(format!("Failed to decode PNG: {}", e)))?;
 
     if info.width != expected_width || info.height != expected_height {
         return Err(ImageComparisonError::DimensionMismatch {
@@ -181,17 +173,11 @@ fn write_png(
     encoder.set_compression(compression);
 
     let mut writer = encoder.write_header().map_err(|e| {
-        ImageComparisonError::IoError(std::io::Error::other(format!(
-            "Failed to write PNG header: {}",
-            e
-        )))
+        ImageComparisonError::IoError(std::io::Error::other(format!("Failed to write PNG header: {}", e)))
     })?;
 
     writer.write_image_data(data).map_err(|e| {
-        ImageComparisonError::IoError(std::io::Error::other(format!(
-            "Failed to write PNG data: {}",
-            e
-        )))
+        ImageComparisonError::IoError(std::io::Error::other(format!("Failed to write PNG data: {}", e)))
     })?;
 
     Ok(())
@@ -199,11 +185,7 @@ fn write_png(
 
 /// Remove alpha channel from RGBA data to get RGB data for FLIP.
 fn remove_alpha(input: &[u8]) -> Vec<u8> {
-    input
-        .chunks_exact(4)
-        .flat_map(|chunk| &chunk[0..3])
-        .copied()
-        .collect()
+    input.chunks_exact(4).flat_map(|chunk| &chunk[0..3]).copied().collect()
 }
 
 /// Add alpha channel (255) to RGB data to get RGBA for PNG output.
@@ -266,11 +248,7 @@ pub fn compare_images(
     let actual_flip = nv_flip::FlipImageRgb8::with_data(width, height, &actual_rgb);
 
     // Compute FLIP error map
-    let error_map = nv_flip::flip(
-        reference_flip,
-        actual_flip,
-        nv_flip::DEFAULT_PIXELS_PER_DEGREE,
-    );
+    let error_map = nv_flip::flip(reference_flip, actual_flip, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
 
     // Gather statistics
     let mut pool = nv_flip::FlipPool::from_image(&error_map);
@@ -291,34 +269,19 @@ pub fn compare_images(
     }
 
     // Comparison failed - write debug images
-    let stem = reference_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
+    let stem = reference_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
     let parent = reference_path.parent().unwrap_or(Path::new("."));
 
     let actual_path = parent.join(format!("{}-actual.png", stem));
     let difference_path = parent.join(format!("{}-diff.png", stem));
 
     // Write actual image
-    write_png(
-        &actual_path,
-        width,
-        height,
-        actual_rgba,
-        png::Compression::Fast,
-    )?;
+    write_png(&actual_path, width, height, actual_rgba, png::Compression::Fast)?;
 
     // Convert error map to magma colormap and write difference image
     let magma_rgb = error_map.apply_color_lut(&nv_flip::magma_lut()).to_vec();
     let magma_rgba = add_alpha(&magma_rgb);
-    write_png(
-        &difference_path,
-        width,
-        height,
-        &magma_rgba,
-        png::Compression::Fast,
-    )?;
+    write_png(&difference_path, width, height, &magma_rgba, png::Compression::Fast)?;
 
     println!("  Result: FAIL");
     println!("    Actual image saved to: {}", actual_path.display());

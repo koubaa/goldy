@@ -55,8 +55,7 @@ impl GpuProfileConfig {
     }
 }
 
-pub static GPU_PROFILE_CONFIG: LazyLock<GpuProfileConfig> =
-    LazyLock::new(GpuProfileConfig::from_env);
+pub static GPU_PROFILE_CONFIG: LazyLock<GpuProfileConfig> = LazyLock::new(GpuProfileConfig::from_env);
 
 #[inline]
 pub fn gpu_profile_enabled() -> bool {
@@ -93,9 +92,7 @@ pub fn log_dispatch_timings(backend: &str, timeline: u64, dispatches: &[Dispatch
         chrome_record_complete(backend, timeline, Some(d.label), ms * 1_000_000.0);
     }
     let total_ms = total_ns as f64 / 1_000_000.0;
-    tracing::info!(
-        "[GPU] backend={backend} timeline={timeline} total_dispatch_gpu={total_ms:.3}ms"
-    );
+    tracing::info!("[GPU] backend={backend} timeline={timeline} total_dispatch_gpu={total_ms:.3}ms");
 }
 
 fn wall_ts_us() -> f64 {
@@ -121,12 +118,7 @@ fn escape_json_str(s: &str) -> String {
     out
 }
 
-fn chrome_record_complete(
-    backend: &str,
-    timeline: u64,
-    dispatch_label: Option<&'static str>,
-    dur_us: f64,
-) {
+fn chrome_record_complete(backend: &str, timeline: u64, dispatch_label: Option<&'static str>, dur_us: f64) {
     let Some(path) = GPU_PROFILE_CONFIG.chrome_path.clone() else {
         return;
     };

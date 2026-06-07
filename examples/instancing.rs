@@ -9,9 +9,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor,
-    Instance, Instance2D, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance, Instance2D,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
+    VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -45,10 +45,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-    println!(
-        "Goldy Instancing Example - {} quads (GPU-driven)",
-        NUM_QUADS
-    );
+    println!("Goldy Instancing Example - {} quads (GPU-driven)", NUM_QUADS);
     println!("Press Escape to exit");
 
     let event_loop = EventLoop::new()?;
@@ -94,10 +91,8 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Load shaders
-        let compute_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/instancing_update.slang"))?;
-        let render_shader =
-            ShaderModule::from_slang(&device, include_str!("../shaders/instancing_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/instancing_update.slang"))?;
+        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/instancing_render.slang"))?;
 
         // Create instance buffer with initial positions
         // Positions are static, compute shader updates rotation and color
@@ -244,10 +239,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title(format!(
-                                "Goldy - Instancing ({} quads, GPU-driven)",
-                                NUM_QUADS
-                            ))
+                            .with_title(format!("Goldy - Instancing ({} quads, GPU-driven)", NUM_QUADS))
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .expect("Failed to create window"),

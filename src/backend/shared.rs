@@ -16,9 +16,7 @@
 )]
 
 use crate::slang::OwnedLayoutCheck;
-use crate::types::{
-    DepthStencilState, OptimizationLevel, PrimitiveTopology, TextureFormat, VertexBufferLayout,
-};
+use crate::types::{DepthStencilState, OptimizationLevel, PrimitiveTopology, TextureFormat, VertexBufferLayout};
 use anyhow::Result;
 
 use super::DeviceHandle;
@@ -112,10 +110,7 @@ pub fn fill_raw(layout: &mut PushLayout, indices: &[u32], user: &[u32]) {
 ///
 /// Handles beyond [`MAX_BINDLESS_SLOTS`] are silently dropped.
 #[inline]
-pub fn fill_typed(
-    layout: &mut PushLayout,
-    handles: impl IntoIterator<Item = crate::types::ResourceHandle>,
-) {
+pub fn fill_typed(layout: &mut PushLayout, handles: impl IntoIterator<Item = crate::types::ResourceHandle>) {
     for (i, h) in handles.into_iter().enumerate().take(MAX_BINDLESS_SLOTS) {
         layout.bindless[i] = h.index() as u16;
     }
@@ -216,17 +211,13 @@ pub struct DeferredQueue<K, V> {
 
 impl<K, V> Default for DeferredQueue<K, V> {
     fn default() -> Self {
-        Self {
-            pending: Vec::new(),
-        }
+        Self { pending: Vec::new() }
     }
 }
 
 impl<K, V> DeferredQueue<K, V> {
     pub fn new() -> Self {
-        Self {
-            pending: Vec::new(),
-        }
+        Self { pending: Vec::new() }
     }
 
     /// Enqueue `value` to be released once the key threshold reaches `key`.
@@ -330,11 +321,7 @@ impl<C: BeltChunk> StagingBeltCore<C> {
     /// recycled or `alloc` is called to create a fresh one. The returned index
     /// into `self.active` lets the caller extract the backend-specific resource
     /// handle (e.g. `vk::Buffer` or `ID3D12Resource`).
-    pub fn write(
-        &mut self,
-        data: &[u8],
-        alloc: impl FnOnce(u64) -> Result<C>,
-    ) -> Result<(usize, u64)> {
+    pub fn write(&mut self, data: &[u8], alloc: impl FnOnce(u64) -> Result<C>) -> Result<(usize, u64)> {
         if data.is_empty() {
             anyhow::bail!("StagingBeltCore::write: empty data");
         }
@@ -345,11 +332,7 @@ impl<C: BeltChunk> StagingBeltCore<C> {
             let start = align_up(ch.offset(), STAGING_COPY_ALIGN);
             if start + len <= ch.capacity() {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        ch.mapped_ptr().add(start as usize),
-                        data.len(),
-                    );
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ch.mapped_ptr().add(start as usize), data.len());
                 }
                 *ch.offset_mut() = start + len;
                 return Ok((self.active.len() - 1, start));
@@ -372,11 +355,7 @@ impl<C: BeltChunk> StagingBeltCore<C> {
         debug_assert_eq!(chunk.offset(), 0);
         let start = 0u64;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                chunk.mapped_ptr().add(start as usize),
-                data.len(),
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr(), chunk.mapped_ptr().add(start as usize), data.len());
         }
         *chunk.offset_mut() = start + len;
         self.active.push(chunk);
@@ -388,8 +367,7 @@ impl<C: BeltChunk> StagingBeltCore<C> {
         if self.active.is_empty() {
             return;
         }
-        self.in_flight
-            .push((token, std::mem::take(&mut self.active)));
+        self.in_flight.push((token, std::mem::take(&mut self.active)));
     }
 
     /// Drop free chunks whose capacity exceeds `self.chunk_size`.

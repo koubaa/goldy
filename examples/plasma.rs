@@ -3,8 +3,8 @@
 //! Run with: cargo run --example plasma
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;

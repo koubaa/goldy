@@ -81,10 +81,7 @@ pub(super) fn query_supports_reserved_buffers(adapter: &IDXGIAdapter1) -> bool {
 }
 
 /// Build the public capability snapshot for a physical adapter.
-pub(super) fn adapter_capabilities(
-    adapters: &[DxgiAdapterInfo],
-    adapter_id: u32,
-) -> crate::device::DeviceCapabilities {
+pub(super) fn adapter_capabilities(adapters: &[DxgiAdapterInfo], adapter_id: u32) -> crate::device::DeviceCapabilities {
     let mut caps = crate::device::DeviceCapabilities {
         has_zero_copy_storage_readback: false,
         ..Default::default()
@@ -151,8 +148,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         NodeMask: 0,
     };
 
-    let command_queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&queue_desc) }
-        .context("Failed to create command queue")?;
+    let command_queue: ID3D12CommandQueue =
+        unsafe { device.CreateCommandQueue(&queue_desc) }.context("Failed to create command queue")?;
 
     // Create command allocator
     let command_allocator: ID3D12CommandAllocator =
@@ -167,11 +164,10 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         NodeMask: 0,
     };
 
-    let rtv_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&rtv_heap_desc) }
-        .context("Failed to create RTV heap")?;
+    let rtv_heap: ID3D12DescriptorHeap =
+        unsafe { device.CreateDescriptorHeap(&rtv_heap_desc) }.context("Failed to create RTV heap")?;
 
-    let rtv_descriptor_size =
-        unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
+    let rtv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
 
     // Create DSV descriptor heap
     let dsv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
@@ -181,11 +177,10 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         NodeMask: 0,
     };
 
-    let dsv_heap: ID3D12DescriptorHeap = unsafe { device.CreateDescriptorHeap(&dsv_heap_desc) }
-        .context("Failed to create DSV heap")?;
+    let dsv_heap: ID3D12DescriptorHeap =
+        unsafe { device.CreateDescriptorHeap(&dsv_heap_desc) }.context("Failed to create DSV heap")?;
 
-    let dsv_descriptor_size =
-        unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV) };
+    let dsv_descriptor_size = unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV) };
 
     // Create CBV/SRV/UAV descriptor heap (large for bindless rendering)
     let cbv_srv_uav_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
@@ -196,8 +191,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     };
 
     let cbv_srv_uav_heap: ID3D12DescriptorHeap =
-        unsafe { device.CreateDescriptorHeap(&cbv_srv_uav_heap_desc) }
-            .context("Failed to create CBV/SRV/UAV heap")?;
+        unsafe { device.CreateDescriptorHeap(&cbv_srv_uav_heap_desc) }.context("Failed to create CBV/SRV/UAV heap")?;
 
     let cbv_srv_uav_descriptor_size =
         unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
@@ -211,8 +205,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     };
 
     let sampler_heap: ID3D12DescriptorHeap =
-        unsafe { device.CreateDescriptorHeap(&sampler_heap_desc) }
-            .context("Failed to create sampler heap")?;
+        unsafe { device.CreateDescriptorHeap(&sampler_heap_desc) }.context("Failed to create sampler heap")?;
 
     let sampler_descriptor_size =
         unsafe { device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) };
@@ -255,23 +248,14 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         let mut signature_blob: Option<ID3DBlob> = None;
         let mut error_blob: Option<ID3DBlob> = None;
 
-        unsafe {
-            D3D12SerializeVersionedRootSignature(
-                &versioned_desc,
-                &mut signature_blob,
-                Some(&mut error_blob),
-            )
-        }
-        .context("Failed to serialize shared bindless root signature")?;
+        unsafe { D3D12SerializeVersionedRootSignature(&versioned_desc, &mut signature_blob, Some(&mut error_blob)) }
+            .context("Failed to serialize shared bindless root signature")?;
 
         let blob = signature_blob.context("Root signature serialization produced no output")?;
         let root_sig: ID3D12RootSignature = unsafe {
             device.CreateRootSignature(
                 0,
-                std::slice::from_raw_parts(
-                    blob.GetBufferPointer() as *const u8,
-                    blob.GetBufferSize(),
-                ),
+                std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize()),
             )
         }
         .context("Failed to create shared bindless root signature")?;
@@ -345,7 +329,9 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             )
         };
         if let Err(e) = result {
-            tracing::warn!("Failed to create batch dispatch command signature: {e}; DispatchBatch will use per-dispatch fallback");
+            tracing::warn!(
+                "Failed to create batch dispatch command signature: {e}; DispatchBatch will use per-dispatch fallback"
+            );
             None
         } else {
             tracing::debug!("Created batch dispatch command signature (stride={stride}B)");
@@ -367,10 +353,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN,
-        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_NONE,
     };
@@ -390,25 +373,18 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         )
     }
     .context("Failed to create zero buffer")?;
-    let zero_buffer =
-        zero_buffer_opt.context("CreateCommittedResource returned null for zero buffer")?;
+    let zero_buffer = zero_buffer_opt.context("CreateCommittedResource returned null for zero buffer")?;
 
     // Create device sync fence (Signal+wait paths only; per-context fences track submissions)
-    let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
-        .context("Failed to create fence")?;
+    let fence: ID3D12Fence =
+        unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.context("Failed to create fence")?;
 
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
     let (graphics_pso_blobs, compute_pso_blobs) = dirs::cache_dir().map_or_else(
         || (HashMap::new(), HashMap::new()),
-        |cache_root| {
-            pso_cache::load_maps(
-                &cache_root
-                    .join("goldy")
-                    .join(format!("dx12_pso_{adapter_id}.bin")),
-            )
-        },
+        |cache_root| pso_cache::load_maps(&cache_root.join("goldy").join(format!("dx12_pso_{adapter_id}.bin"))),
     );
 
     state.devices.insert(

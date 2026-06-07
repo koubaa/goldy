@@ -3,9 +3,7 @@
 use super::super::shared::GraphicsPipelineCreateDesc;
 use super::super::PipelineHandle;
 use super::types::{MetalState, PipelineState};
-use super::utils::{
-    compare_to_mtl, depth_format_to_mtl, format_to_mtl, topology_to_mtl, vertex_format_to_mtl,
-};
+use super::utils::{compare_to_mtl, depth_format_to_mtl, format_to_mtl, topology_to_mtl, vertex_format_to_mtl};
 use crate::slang::SlangStage;
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -25,19 +23,10 @@ pub(super) fn create_with_depth(
     super::shader::ensure_stage_compiled(state, vertex_shader, SlangStage::Vertex)?;
     super::shader::ensure_stage_compiled(state, fragment_shader, SlangStage::Fragment)?;
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let vs_shader = state
-        .shaders
-        .get(&vertex_shader)
-        .context("Invalid vertex shader")?;
-    let fs_shader = state
-        .shaders
-        .get(&fragment_shader)
-        .context("Invalid fragment shader")?;
+    let vs_shader = state.shaders.get(&vertex_shader).context("Invalid vertex shader")?;
+    let fs_shader = state.shaders.get(&fragment_shader).context("Invalid fragment shader")?;
 
     let vs_library = vs_shader
         .vertex_library
@@ -95,11 +84,7 @@ pub(super) fn create_with_depth(
         ds_descriptor.set_depth_compare_function(compare_to_mtl(ds.depth_compare));
         ds_descriptor.set_depth_write_enabled(ds.depth_write_enabled);
 
-        Some(
-            logical_device
-                .device
-                .new_depth_stencil_state(&ds_descriptor),
-        )
+        Some(logical_device.device.new_depth_stencil_state(&ds_descriptor))
     } else {
         None
     };
@@ -116,18 +101,8 @@ pub(super) fn create_with_depth(
         .shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| {
-            state
-                .shaders
-                .get(&vertex_shader)
-                .and_then(|s| s.reflection.as_ref())
-        })
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.binding_element_strides.clone(),
-            )
-        })
+        .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
         .unwrap_or_default();
 
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
@@ -145,11 +120,7 @@ pub(super) fn create_with_depth(
         },
     );
 
-    tracing::debug!(
-        "Created render pipeline {} with topology {:?}",
-        handle,
-        topology
-    );
+    tracing::debug!("Created render pipeline {} with topology {:?}", handle, topology);
     Ok(handle)
 }
 

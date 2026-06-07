@@ -17,26 +17,14 @@ pub(super) fn create(
     let topology = desc.raster.topology;
     let target_format = desc.raster.target_format;
     // Compile shaders on-demand
-    let vs_bytecode =
-        shader::ensure_stage_compiled(state, vertex_shader, crate::slang::SlangStage::Vertex)?;
-    let fs_bytecode =
-        shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
+    let vs_bytecode = shader::ensure_stage_compiled(state, vertex_shader, crate::slang::SlangStage::Vertex)?;
+    let fs_bytecode = shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
 
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-    let key = pso_cache::graphics_pso_key(
-        &vs_bytecode,
-        &fs_bytecode,
-        vertex_layout,
-        topology,
-        target_format,
-        None,
-    );
+    let key = pso_cache::graphics_pso_key(&vs_bytecode, &fs_bytecode, vertex_layout, topology, target_format, None);
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Use the shared bindless root signature from the device
     let root_signature = logical_device
@@ -93,12 +81,7 @@ pub(super) fn create(
         .collect();
 
     let pso_cache_arc = std::sync::Arc::clone(&logical_device.pso_cache);
-    let disk_blob_bytes: Option<Vec<u8>> = pso_cache_arc
-        .read()
-        .unwrap()
-        .graphics_blobs
-        .get(&key)
-        .cloned();
+    let disk_blob_bytes: Option<Vec<u8>> = pso_cache_arc.read().unwrap().graphics_blobs.get(&key).cloned();
     let mut try_drop_stale_cached_blob = disk_blob_bytes.is_some();
     let cached_pso = disk_blob_bytes
         .as_ref()
@@ -170,10 +153,7 @@ pub(super) fn create(
             DXGI_FORMAT_UNKNOWN,
             DXGI_FORMAT_UNKNOWN,
         ],
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         CachedPSO: cached_pso,
         ..Default::default()
     };
@@ -198,11 +178,7 @@ pub(super) fn create(
         }
     };
 
-    let blob = unsafe {
-        pipeline_state
-            .GetCachedBlob()
-            .context("GetCachedBlob (graphics PSO)")?
-    };
+    let blob = unsafe { pipeline_state.GetCachedBlob().context("GetCachedBlob (graphics PSO)")? };
     let new_blob = unsafe { pso_cache::id3dblob_to_vec(&blob) };
 
     {
@@ -223,18 +199,8 @@ pub(super) fn create(
         .shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| {
-            state
-                .shaders
-                .get(&vertex_shader)
-                .and_then(|s| s.reflection.as_ref())
-        })
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.binding_element_strides.clone(),
-            )
-        })
+        .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
         .unwrap_or_default();
 
     state.pipelines.insert(
@@ -269,10 +235,8 @@ pub(super) fn create_with_depth(
     let topology = desc.raster.topology;
     let target_format = desc.raster.target_format;
     let depth_stencil = desc.raster.depth_stencil;
-    let vs_bytecode =
-        shader::ensure_stage_compiled(state, vertex_shader, crate::slang::SlangStage::Vertex)?;
-    let fs_bytecode =
-        shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
+    let vs_bytecode = shader::ensure_stage_compiled(state, vertex_shader, crate::slang::SlangStage::Vertex)?;
+    let fs_bytecode = shader::ensure_stage_compiled(state, fragment_shader, crate::slang::SlangStage::Fragment)?;
 
     let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
@@ -285,10 +249,7 @@ pub(super) fn create_with_depth(
         depth_stencil,
     );
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let root_signature = logical_device
         .bindless_root_signature
@@ -356,12 +317,7 @@ pub(super) fn create_with_depth(
     };
 
     let pso_cache_arc = std::sync::Arc::clone(&logical_device.pso_cache);
-    let disk_blob_bytes: Option<Vec<u8>> = pso_cache_arc
-        .read()
-        .unwrap()
-        .graphics_blobs
-        .get(&key)
-        .cloned();
+    let disk_blob_bytes: Option<Vec<u8>> = pso_cache_arc.read().unwrap().graphics_blobs.get(&key).cloned();
     let mut try_drop_stale_cached_blob = disk_blob_bytes.is_some();
     let cached_pso = disk_blob_bytes
         .as_ref()
@@ -435,10 +391,7 @@ pub(super) fn create_with_depth(
             DXGI_FORMAT_UNKNOWN,
             DXGI_FORMAT_UNKNOWN,
         ],
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         CachedPSO: cached_pso,
         ..Default::default()
     };
@@ -459,10 +412,7 @@ pub(super) fn create_with_depth(
                 pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
                 try_drop_stale_cached_blob = false;
             }
-            Err(e) => anyhow::bail!(
-                "Failed to create DX12 depth graphics pipeline state: {:?}",
-                e
-            ),
+            Err(e) => anyhow::bail!("Failed to create DX12 depth graphics pipeline state: {:?}", e),
         }
     };
 
@@ -491,18 +441,8 @@ pub(super) fn create_with_depth(
         .shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| {
-            state
-                .shaders
-                .get(&vertex_shader)
-                .and_then(|s| s.reflection.as_ref())
-        })
-        .map(|r| {
-            (
-                r.push_constant_categories.clone(),
-                r.binding_element_strides.clone(),
-            )
-        })
+        .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
         .unwrap_or_default();
 
     state.pipelines.insert(

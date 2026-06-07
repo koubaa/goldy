@@ -1,9 +1,7 @@
 //! Buffer management logic.
 
 use super::super::{BufferHandle, DeviceHandle};
-use super::types::{
-    BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE, MAX_HEAP_SIZE,
-};
+use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SIZE, MAX_HEAP_SIZE};
 use crate::backend::BufferKind;
 use crate::types::BufferFlags;
 use ::metal as mtl;
@@ -34,10 +32,7 @@ fn allocate_mtl_storage_buffer(
     let gpu_only = flags.contains(BufferFlags::GPU_ONLY);
 
     {
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         if gpu_only || allocation_size > MAX_HEAP_SIZE {
             let buf = logical_device.device.new_buffer(allocation_size, options);
             return Ok((buf, true));
@@ -46,6 +41,8 @@ fn allocate_mtl_storage_buffer(
         // Attempt 1: fast path — heap has space.
         if let Some(buf) = logical_device
             .heap_allocator
+            .lock()
+            .unwrap()
             .allocate(allocation_size, options)
         {
             return Ok((buf, false));
@@ -58,20 +55,16 @@ fn allocate_mtl_storage_buffer(
     {
         let _tz = crate::tracy_zone!("mtl.heap_allocator.drain_reclaim");
         let retired = super::context::device_retired(state, device_handle);
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.heap_allocator.compact_overflow();
+        logical_device.heap_allocator.lock().unwrap().compact_overflow();
     }
     {
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         if let Some(buf) = logical_device
             .heap_allocator
+            .lock()
+            .unwrap()
             .allocate(allocation_size, options)
         {
             return Ok((buf, false));
@@ -93,14 +86,13 @@ fn allocate_mtl_storage_buffer(
         );
         cb.wait_until_completed();
         let retired = super::context::device_retired(state, device_handle);
-        let logical_device = state
-            .devices
-            .get_mut(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.heap_allocator.compact_overflow();
+        logical_device.heap_allocator.lock().unwrap().compact_overflow();
         if let Some(buf) = logical_device
             .heap_allocator
+            .lock()
+            .unwrap()
             .allocate(allocation_size, options)
         {
             return Ok((buf, false));
@@ -133,18 +125,14 @@ fn insert_buffer_common(
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let is_storage = access == BufferKind::Scattered;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let arg_buffer_index = match access {
-        BufferKind::Broadcast => logical_device
-            .resource_registry
-            .register_uniform_buffer(handle),
-        BufferKind::Scattered => logical_device
-            .resource_registry
-            .register_storage_buffer(handle),
+    let arg_buffer_index = {
+        let mut ledger = logical_device.ledger.lock().unwrap();
+        match access {
+            BufferKind::Broadcast => ledger.resource_registry.register_uniform_buffer(handle),
+            BufferKind::Scattered => ledger.resource_registry.register_storage_buffer(handle),
+        }
     };
     let encoding_index = match access {
         BufferKind::Broadcast => ResourceRegistry::uniform_global_index(arg_buffer_index),
@@ -211,9 +199,7 @@ pub(super) fn create(
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let is_storage = access == BufferKind::Scattered;
     if cpu_readable && !is_storage {
-        anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
-        );
+        anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
     if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
         anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_READABLE");
@@ -222,8 +208,7 @@ pub(super) fn create(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let (buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(state, device_handle, size, flags)?;
+    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(state, device_handle, size, flags)?;
 
     insert_buffer_common(
         state,
@@ -256,9 +241,7 @@ pub(super) fn create_with_capacity(
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
     let is_storage = access == BufferKind::Scattered;
     if cpu_readable && !is_storage {
-        anyhow::bail!(
-            "BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers"
-        );
+        anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
     if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
         anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_READABLE");
@@ -273,8 +256,7 @@ pub(super) fn create_with_capacity(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let (buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(state, device_handle, capacity, flags)?;
+    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(state, device_handle, capacity, flags)?;
 
     insert_buffer_common(
         state,
@@ -308,10 +290,7 @@ pub(super) fn set_logical_size(
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
-    let b = state
-        .buffers
-        .get_mut(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let b = state.buffers.get_mut(&buffer_handle).context("Invalid buffer handle")?;
     if b.parent_for_view.is_some() {
         anyhow::bail!("cannot resize logical extent of buffer views");
     }
@@ -357,11 +336,7 @@ pub(super) fn hint_unused_above(state: &mut MetalState, buffer_handle: BufferHan
             return;
         }
         unsafe {
-            libc::madvise(
-                ptr.add(page_off as usize).cast(),
-                len as usize,
-                libc::MADV_FREE,
-            );
+            libc::madvise(ptr.add(page_off as usize).cast(), len as usize, libc::MADV_FREE);
         }
     }
 }
@@ -398,12 +373,12 @@ pub(super) fn create_view(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let arg_buffer_index = logical_device
+        .ledger
+        .lock()
+        .unwrap()
         .resource_registry
         .register_storage_buffer(handle);
 
@@ -468,10 +443,7 @@ pub(super) fn resize(
     let (new_buffer, is_device_allocated) =
         allocate_mtl_storage_buffer(state, device_handle, new_size, old_state.flags)?;
 
-    let logical_device = state
-        .devices
-        .get_mut(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let copy_len = if preserve_contents {
         old_state.size.min(new_size)
@@ -509,22 +481,20 @@ pub(super) fn resize(
         logical_device
             .argument_encoder
             .set_argument_buffer(&logical_device.argument_buffer, off);
-        logical_device
-            .argument_encoder
-            .set_buffer(0, &new_buffer, 0);
+        logical_device.argument_encoder.set_buffer(0, &new_buffer, 0);
     }
 
-    if old_state.flags.contains(BufferFlags::CPU_READABLE)
-        && old_state.access == BufferKind::Scattered
-    {
+    if old_state.flags.contains(BufferFlags::CPU_READABLE) && old_state.access == BufferKind::Scattered {
         let ptr = new_buffer.contents() as *mut u8;
         if ptr.is_null() {
             anyhow::bail!("Metal buffer contents() returned null for CPU_READABLE (resize)");
         }
     }
 
-    let barrier = logical_device.timeline_scheduled_max;
-    logical_device.deletion_queue.queue(
+    let barrier = logical_device
+        .timeline_scheduled_max
+        .load(std::sync::atomic::Ordering::Relaxed);
+    logical_device.deletion_queue.lock().unwrap().queue(
         barrier,
         super::types::PendingDeletion::Buffer {
             buffer: old_state.buffer,
@@ -568,9 +538,7 @@ pub(super) fn resize(
             logical_device
                 .argument_encoder
                 .set_argument_buffer(&logical_device.argument_buffer, ab_off);
-            logical_device
-                .argument_encoder
-                .set_buffer(0, &new_mtl, mtl_off);
+            logical_device.argument_encoder.set_buffer(0, &new_mtl, mtl_off);
         }
         state.buffers.get_mut(&vh).unwrap().buffer = new_mtl.clone();
     }
@@ -594,16 +562,29 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         // call free the Metal heap allocation immediately rather than waiting for
         // the (often much larger) timeline_scheduled_max.
         let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
-        if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
+        if let Some(device) = state.devices.get(&buffer.device_handle) {
             device
+                .ledger
+                .lock()
+                .unwrap()
                 .resource_registry
                 .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });
-            device.deletion_queue.queue(
-                barrier,
-                super::types::PendingDeletion::Buffer {
-                    buffer: buffer.buffer,
-                },
-            );
+        }
+        let deletion = super::types::PendingDeletion::Buffer { buffer: buffer.buffer };
+        // Hot path: route to the owning context's per-context deletion queue so
+        // the MTL buffer is freed as soon as the context's own timeline retires,
+        // without waiting for device_retired (max over all contexts).
+        // Falls back to the device-level queue (async GC safety net) when there
+        // is no reclamation context installed on the current thread.
+        let ctx_h = super::context::context_handle_for_thread(state, buffer.device_handle);
+        if let Some(h) = ctx_h {
+            if let Some(sc_arc) = state.contexts.get(&h) {
+                sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
+                return;
+            }
+        }
+        if let Some(device) = state.devices.get(&buffer.device_handle) {
+            device.deletion_queue.lock().unwrap().queue(barrier, deletion);
         }
     }
 }
@@ -621,16 +602,8 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
 /// output was tiny — only visible around scene transitions where the
 /// previous frame's config had happened to be re-uploaded into the same
 /// pool-recycled physical buffer.
-pub(super) fn write(
-    state: &MetalState,
-    buffer_handle: BufferHandle,
-    offset: u64,
-    data: &[u8],
-) -> Result<()> {
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+pub(super) fn write(state: &MetalState, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     if offset + data.len() as u64 > buffer.size {
         anyhow::bail!("Write would exceed buffer bounds");
@@ -649,10 +622,7 @@ pub(super) fn write(
     }
 
     let device_handle = buffer.device_handle;
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Allocate a transient staging buffer (shared storage) populated with the
     // same bytes and emit a blit `copy_from_buffer` into the destination on
@@ -678,19 +648,12 @@ pub(super) fn write(
 
 /// Get the size of a buffer in bytes.
 pub(super) fn size(state: &MetalState, buffer_handle: BufferHandle) -> u64 {
-    state
-        .buffers
-        .get(&buffer_handle)
-        .map(|b| b.size)
-        .unwrap_or(0)
+    state.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
 }
 
 /// Get the bindless index for a buffer.
 pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) -> Option<u32> {
-    state
-        .buffers
-        .get(&buffer_handle)
-        .map(|b| b.arg_buffer_index)
+    state.buffers.get(&buffer_handle).map(|b| b.arg_buffer_index)
 }
 
 /// Read buffer contents back to CPU memory.
@@ -701,10 +664,7 @@ pub(super) fn read_to_cpu(
     buffer_handle: BufferHandle,
     output: &mut [u8],
 ) -> Result<()> {
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let len = output.len() as u64;
     if len > buffer.size {
@@ -713,10 +673,7 @@ pub(super) fn read_to_cpu(
 
     if buffer.flags.contains(BufferFlags::GPU_ONLY) {
         let device_handle = buffer.device_handle;
-        let logical_device = state
-            .devices
-            .get(&device_handle)
-            .context("Invalid device handle")?;
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         let staging = logical_device.device.new_buffer(
             len,
@@ -784,10 +741,7 @@ pub(super) fn clear(
     offset: u64,
     size: u64,
 ) -> Result<()> {
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("Invalid buffer handle")?;
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let clear_size = super::super::shared::resolve_clear_size(buffer.size, offset, size);
 
@@ -806,10 +760,7 @@ pub(super) fn clear(
         }
     }
 
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let blit = command_buffer.new_blit_command_encoder();
