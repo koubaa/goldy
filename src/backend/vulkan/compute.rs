@@ -442,7 +442,10 @@ pub(super) fn ctx_completed_value(
     ctx: super::ContextHandle,
     device_handle: super::DeviceHandle,
 ) -> u64 {
-    let sem = state.contexts.get(&ctx).map(|sc| sc.timeline_semaphore);
+    let sem = state
+        .contexts
+        .get(&ctx)
+        .map(|sc| sc.lock().unwrap().timeline_semaphore);
     let dev = state.devices.get(&device_handle).map(|ld| &ld.device);
     match (dev, sem) {
         (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
@@ -497,7 +500,7 @@ fn reap_signaled_fences(state: &mut super::types::VulkanState) {
 
 /// Create a compute pipeline.
 pub(super) fn create(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
     next_compute_pipeline_handle: &mut ComputePipelineHandle,
     device_handle: DeviceHandle,
@@ -563,7 +566,7 @@ pub(super) fn create(
 
 /// Destroy a compute pipeline.
 pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
     pipeline_handle: ComputePipelineHandle,
 ) {
@@ -596,6 +599,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("vk.submit");
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
@@ -624,21 +629,23 @@ pub(super) fn submit(
         let completed_timeline = ctx_completed_value(state, ctx, device_handle);
 
         if has_write_buffer {
-            let (fence_pool, devices, contexts) = (
-                &state.compute_fence_pool,
-                &state.devices,
-                &mut state.contexts,
-            );
-            if let Some(sc) = contexts.get_mut(&ctx) {
-                sc.staging_belt
-                    .reclaim(fence_pool, devices, completed_timeline)?;
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc.lock().unwrap().staging_belt.reclaim(
+                    &state.compute_fence_pool,
+                    &state.devices,
+                    completed_timeline,
+                )?;
             }
             reap_signaled_fences(state);
         }
 
         if has_write_texture {
-            if let Some(sc) = state.contexts.get_mut(&ctx) {
-                sc.texture_staging_pool.reclaim(completed_timeline);
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -697,10 +704,8 @@ pub(super) fn submit(
                         .devices
                         .get(&buf_device)
                         .context("WriteBuffer: device invalid")?;
-                    let sc = state
-                        .contexts
-                        .get_mut(&ctx)
-                        .context("Invalid context handle")?;
+                    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                    let mut sc = sc_arc.lock().unwrap();
                     let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
                     belt_slices.push((stg_buf, stg_off));
                 }
@@ -719,6 +724,8 @@ pub(super) fn submit(
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_semaphore;
         let ld = state
             .devices
@@ -743,10 +750,10 @@ pub(super) fn submit(
             let completed = ctx_completed_value(state, ctx, device_handle);
             let ctx_batch: Vec<_> = state
                 .contexts
-                .get_mut(&ctx)
-                .map(|sc| sc.deletion_queue.drain_up_to(completed))
+                .get(&ctx)
+                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
                 .unwrap_or_default();
-            if let Some(ld) = state.devices.get_mut(&device_handle) {
+            if let Some(ld) = state.devices.get(&device_handle) {
                 let ledger_arc = std::sync::Arc::clone(&ld.ledger);
                 let mut ledger = ledger_arc.lock().unwrap();
                 for r in ctx_batch {
@@ -754,8 +761,8 @@ pub(super) fn submit(
                 }
             }
         }
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.last_submitted_seq = signal_value;
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().last_submitted_seq = signal_value;
         }
         return Ok(signal_value);
     }
@@ -772,11 +779,9 @@ pub(super) fn submit(
                 width,
                 height,
             } => {
-                let pool = &mut state
-                    .contexts
-                    .get_mut(&ctx)
-                    .context("Invalid context handle")?
-                    .texture_staging_pool;
+                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                let mut sc_guard = sc_arc.lock().unwrap();
+                let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
@@ -798,11 +803,9 @@ pub(super) fn submit(
                 height,
                 data,
             } => {
-                let pool = &mut state
-                    .contexts
-                    .get_mut(&ctx)
-                    .context("Invalid context handle")?
-                    .texture_staging_pool;
+                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                let mut sc_guard = sc_arc.lock().unwrap();
+                let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
                     &state.instance,
                     &state.devices,
@@ -836,11 +839,9 @@ pub(super) fn submit(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        let sc = state
-            .contexts
-            .get_mut(&ctx)
-            .context("Invalid context handle")?;
-        let cb = acquire_cmd_buffer(ld, sc)?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let mut sc = sc_arc.lock().unwrap();
+        let cb = acquire_cmd_buffer(ld, &mut sc)?;
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
@@ -1426,6 +1427,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_semaphore;
     let submit_device_core = state
         .devices
@@ -1455,6 +1458,8 @@ pub(super) fn submit(
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .command_pool;
         unsafe {
             submit_device_core
@@ -1472,7 +1477,8 @@ pub(super) fn submit(
         ));
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         sc.timeline_cmd_buffers
             .entry(signal_value)
@@ -1485,13 +1491,17 @@ pub(super) fn submit(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.texture_staging_pool.release(signal_value, entries);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(signal_value, entries);
         }
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
-        sc.staging_belt.finish(signal_value);
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().staging_belt.finish(signal_value);
     }
 
     debug_assert_eq!(
@@ -1510,6 +1520,8 @@ pub(super) fn submit(
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_semaphore;
             (ld.device.clone(), sem)
         };
@@ -1530,10 +1542,10 @@ pub(super) fn submit(
         let completed = ctx_completed_value(state, ctx, device_handle);
         let ctx_batch: Vec<_> = state
             .contexts
-            .get_mut(&ctx)
-            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             {
                 let mut ledger = ledger_arc.lock().unwrap();
@@ -1587,6 +1599,8 @@ fn submit_graph_impl(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .device;
     let _tz = tracy_zone!("vk.submit_graph");
     // --- Same housekeeping as `submit` ---
@@ -1616,21 +1630,23 @@ fn submit_graph_impl(
         let completed_timeline = ctx_completed_value(state, ctx, device_handle);
 
         {
-            let (fence_pool, devices, contexts) = (
-                &state.compute_fence_pool,
-                &state.devices,
-                &mut state.contexts,
-            );
-            if let Some(sc) = contexts.get_mut(&ctx) {
-                sc.staging_belt
-                    .reclaim(fence_pool, devices, completed_timeline)?;
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc.lock().unwrap().staging_belt.reclaim(
+                    &state.compute_fence_pool,
+                    &state.devices,
+                    completed_timeline,
+                )?;
             }
         }
         reap_signaled_fences(state);
 
         if has_write_texture_graph {
-            if let Some(sc) = state.contexts.get_mut(&ctx) {
-                sc.texture_staging_pool.reclaim(completed_timeline);
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -1693,10 +1709,9 @@ fn submit_graph_impl(
                                 .devices
                                 .get(&buf_device)
                                 .context("WriteBuffer: device invalid")?;
-                            let sc = state
-                                .contexts
-                                .get_mut(&ctx)
-                                .context("Invalid context handle")?;
+                            let sc_arc =
+                                state.contexts.get(&ctx).context("Invalid context handle")?;
+                            let mut sc = sc_arc.lock().unwrap();
                             let (stg_buf, stg_off) =
                                 sc.staging_belt.write(&state.instance, dev, data)?;
                             belt_slices.push((stg_buf, stg_off));
@@ -1708,11 +1723,9 @@ fn submit_graph_impl(
                         width,
                         height,
                     } => {
-                        let pool = &mut state
-                            .contexts
-                            .get_mut(&ctx)
-                            .context("Invalid context handle")?
-                            .texture_staging_pool;
+                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -1736,11 +1749,9 @@ fn submit_graph_impl(
                         height,
                         data,
                     } => {
-                        let pool = &mut state
-                            .contexts
-                            .get_mut(&ctx)
-                            .context("Invalid context handle")?
-                            .texture_staging_pool;
+                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(
                             super::texture::allocate_compute_texture_staging(
                                 &state.instance,
@@ -1768,11 +1779,9 @@ fn submit_graph_impl(
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        let sc = state
-            .contexts
-            .get_mut(&ctx)
-            .context("Invalid context handle")?;
-        let cb = acquire_cmd_buffer(ld, sc)?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let mut sc = sc_arc.lock().unwrap();
+        let cb = acquire_cmd_buffer(ld, &mut sc)?;
         // Use ONE_TIME_SUBMIT for normal submits (driver hint for optimization).
         // When retaining, omit the flag so the CB stays executable after GPU completion
         // and can be resubmitted on the next frame.
@@ -2428,6 +2437,8 @@ fn submit_graph_impl(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_semaphore;
     let submit_device = state
         .devices
@@ -2457,6 +2468,8 @@ fn submit_graph_impl(
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .command_pool;
         unsafe {
             submit_device.device.free_command_buffers(ctx_pool, &[cmd]);
@@ -2471,7 +2484,8 @@ fn submit_graph_impl(
     }
 
     // Post-submit: store the CB for lifecycle management.
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         if let Some(key) = retain_key {
             sc.retained_compute_cb = Some(super::types::RetainedVkCb {
@@ -2492,13 +2506,17 @@ fn submit_graph_impl(
             .into_iter()
             .map(|s| s.entry)
             .collect();
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
-            sc.texture_staging_pool.release(signal_value, entries);
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(signal_value, entries);
         }
     }
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
-        sc.staging_belt.finish(signal_value);
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().staging_belt.finish(signal_value);
     }
 
     if let Some(prof) = vk_gpu_profile {
@@ -2511,6 +2529,8 @@ fn submit_graph_impl(
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_semaphore;
             (ld.device.clone(), sem)
         };
@@ -2538,10 +2558,10 @@ fn submit_graph_impl(
         let completed = ctx_completed_value(state, ctx, device_handle);
         let ctx_batch: Vec<_> = state
             .contexts
-            .get_mut(&ctx)
-            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             {
                 let mut ledger = ledger_arc.lock().unwrap();
@@ -2592,13 +2612,14 @@ pub(super) fn try_resubmit_retained(
     ctx: super::ContextHandle,
     key: u64,
 ) -> Result<Option<TimelineValue>> {
-    let device_handle = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .device;
+    let (device_handle, timeline_sem) = {
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc = sc_arc.lock().unwrap();
+        (sc.device, sc.timeline_semaphore)
+    };
     let retained = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc = sc_arc.lock().unwrap();
         match sc.retained_compute_cb.as_ref() {
             Some(r) if r.fingerprint == key => Some((r.command_buffer, r.used_slots.clone())),
             _ => None,
@@ -2616,12 +2637,6 @@ pub(super) fn try_resubmit_retained(
             .context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
-
-    let timeline_sem = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .timeline_semaphore;
     let submit_device = state
         .devices
         .get(&device_handle)
@@ -2658,10 +2673,10 @@ pub(super) fn try_resubmit_retained(
         let completed = ctx_completed_value(state, ctx, device_handle);
         let ctx_batch: Vec<_> = state
             .contexts
-            .get_mut(&ctx)
-            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             {
                 let mut ledger = ledger_arc.lock().unwrap();
@@ -2677,8 +2692,8 @@ pub(super) fn try_resubmit_retained(
             }
         }
     }
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
-        sc.last_submitted_seq = signal_value;
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().last_submitted_seq = signal_value;
     }
 
     Ok(Some(signal_value))
@@ -2691,7 +2706,8 @@ pub(super) fn evict_retained(
     ctx: super::ContextHandle,
     _key: u64,
 ) {
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_compute_cb.take() {
             sc.free_cmd_buffers.push(old.command_buffer);
         }
@@ -2704,10 +2720,11 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
     max_completed_value: u64,
 ) {
     let (device, pool, keys): (DeviceHandle, vk::CommandPool, Vec<u64>) = {
-        let sc = match state.contexts.get(&ctx) {
+        let sc_arc = match state.contexts.get(&ctx) {
             Some(s) => s,
             None => return,
         };
+        let sc = sc_arc.lock().unwrap();
         if sc.timeline_cmd_buffers.is_empty() {
             return;
         }
@@ -2723,7 +2740,8 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
         return;
     }
     let cbs_to_free: Vec<vk::CommandBuffer> = {
-        let sc = state.contexts.get_mut(&ctx).expect("context");
+        let sc_arc = state.contexts.get(&ctx).expect("context");
+        let mut sc = sc_arc.lock().unwrap();
         keys.iter()
             .filter_map(|k| sc.timeline_cmd_buffers.remove(k))
             .flatten()

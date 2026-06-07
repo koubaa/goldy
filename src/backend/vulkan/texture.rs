@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 #[allow(clippy::manual_find)]
 pub(super) fn create(
     instance: &ash::Instance,
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     next_texture_handle: &mut TextureHandle,
     device_handle: DeviceHandle,
@@ -144,7 +144,7 @@ pub(super) fn create(
     let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
 
     let bindless_index = {
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         let index = logical_device
             .ledger
             .lock()
@@ -202,7 +202,7 @@ pub(super) fn create(
 
     // For DirectInterpolated, also register a sampled-texture (SRV) slot.
     let sampled_bindless_index = if is_dual_access {
-        let logical_device = devices.get_mut(&device_handle).unwrap();
+        let logical_device = devices.get(&device_handle).unwrap();
         // Register in the sampled pool (is_storage_image = false).
         let index = logical_device
             .ledger
@@ -274,7 +274,7 @@ pub(super) fn create(
 #[allow(clippy::manual_find)]
 pub(super) fn write(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     data: &[u8],
@@ -534,7 +534,7 @@ pub(super) fn write(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_region(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     x: u32,
@@ -794,7 +794,7 @@ pub(super) fn write_region(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_to_cpu(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
     output: &mut [u8],
@@ -1009,12 +1009,12 @@ pub(super) fn read_to_cpu(
 
 /// Destroy a texture, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
-    devices: &mut HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     texture_handle: TextureHandle,
 ) {
     if let Some(texture) = textures.remove(&texture_handle) {
-        if let Some(logical_device) = devices.get_mut(&texture.device_handle) {
+        if let Some(logical_device) = devices.get(&texture.device_handle) {
             if texture.transient_heap_suballoc {
                 logical_device
                     .ledger
@@ -1032,7 +1032,7 @@ pub(super) fn destroy(
                 .timeline_next
                 .load(Ordering::Relaxed)
                 .saturating_sub(1);
-            logical_device.deletion_queue.queue(
+            logical_device.deletion_queue.lock().unwrap().queue(
                 barrier,
                 types::PendingDeletion::Texture {
                     texture_handle,
@@ -1174,7 +1174,7 @@ pub(super) struct ComputeTextureScratch {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn allocate_compute_texture_staging(
     instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &HashMap<TextureHandle, TextureState>,
     pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
@@ -1235,7 +1235,7 @@ pub(super) fn allocate_compute_texture_staging(
 
 /// Record buffer→image copy + layout transitions into an open command buffer.
 pub(super) fn record_compute_texture_upload(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     cmd: vk::CommandBuffer,
     scratch: &ComputeTextureScratch,

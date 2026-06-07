@@ -851,7 +851,7 @@ pub(crate) fn destroy_pending_deletion(
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(
                     &ld.command_queue,
-                    &mut *pool,
+                    &mut pool,
                     &resource,
                     &tiles,
                 );
@@ -888,7 +888,7 @@ pub(crate) fn destroy_pending_deletion(
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(
                     &ld.command_queue,
-                    &mut *pool,
+                    &mut pool,
                     &resource,
                     &tiles,
                 );

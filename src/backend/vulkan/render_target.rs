@@ -32,7 +32,7 @@ fn find_memory_type(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: &mut RenderTargetHandle,
     device_handle: DeviceHandle,
@@ -158,7 +158,7 @@ pub(super) fn create(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_with_depth(
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     next_render_target_handle: &mut RenderTargetHandle,
     device_handle: DeviceHandle,
@@ -349,7 +349,7 @@ pub(super) fn create_with_depth(
 
 /// Destroy a render target and free GPU resources.
 pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     target: RenderTargetHandle,
 ) {
@@ -391,7 +391,7 @@ pub(super) fn destroy(
 /// (COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL) into `cmd`.
 /// Does NOT begin/end the command buffer and does NOT submit.
 pub(super) fn record_render_pass_to_buffer<F>(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -587,7 +587,7 @@ where
 }
 
 pub(super) fn render_to<F>(
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -657,7 +657,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_to_cpu(
     instance: &Instance,
-    devices: &HashMap<DeviceHandle, LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     target: RenderTargetHandle,
     output: &mut [u8],

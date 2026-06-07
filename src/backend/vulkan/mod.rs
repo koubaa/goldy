@@ -328,7 +328,7 @@ impl GpuBackend for VulkanBackend {
             .state
             .contexts
             .iter()
-            .filter(|(_, sc)| sc.device == device_handle)
+            .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
             .collect();
         for ctx in ctxs {
@@ -379,7 +379,7 @@ impl GpuBackend for VulkanBackend {
         flags: crate::types::BufferFlags,
     ) -> Result<BufferHandle> {
         buffer::create(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.buffers,
             &mut self.state.next_buffer_handle,
             &self.state.instance,
@@ -393,11 +393,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
-        buffer::destroy(
-            &mut self.state.devices,
-            &mut self.state.buffers,
-            buffer_handle,
-        );
+        buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer_handle);
     }
 
     fn write_buffer(
@@ -443,7 +439,7 @@ impl GpuBackend for VulkanBackend {
         if use_sparse {
             let handle = buffer::create_sparse_with_capacity(
                 &self.state.instance,
-                &mut self.state.devices,
+                &self.state.devices,
                 &mut self.state.buffers,
                 &mut self.state.next_buffer_handle,
                 device_handle,
@@ -456,7 +452,7 @@ impl GpuBackend for VulkanBackend {
             return Ok((handle, cap_out));
         }
         let handle = buffer::create(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.buffers,
             &mut self.state.next_buffer_handle,
             &self.state.instance,
@@ -477,7 +473,7 @@ impl GpuBackend for VulkanBackend {
         new_logical_size: u64,
     ) -> Result<()> {
         buffer::set_logical_size(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.buffers,
             device_handle,
             buffer_handle,
@@ -487,7 +483,7 @@ impl GpuBackend for VulkanBackend {
 
     fn hint_buffer_unused_above(&mut self, buffer_handle: BufferHandle, offset: u64) {
         buffer::hint_unused_above(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.buffers,
             buffer_handle,
             offset,
@@ -524,7 +520,7 @@ impl GpuBackend for VulkanBackend {
         element_stride: Option<u32>,
     ) -> Result<BufferHandle> {
         buffer::create_view(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.buffers,
             &mut self.state.next_buffer_handle,
             parent,
@@ -543,7 +539,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<()> {
         buffer::resize(
             &self.state.instance,
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.buffers,
             device_handle,
             buffer_handle,
@@ -576,7 +572,7 @@ impl GpuBackend for VulkanBackend {
         size: u64,
     ) -> Result<()> {
         buffer::clear(
-            &mut self.state.devices,
+            &self.state.devices,
             &self.state.buffers,
             device_handle,
             buffer_handle,
@@ -746,7 +742,7 @@ impl GpuBackend for VulkanBackend {
         surface::create(
             &self.state.entry,
             &self.state.instance,
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.surfaces,
             &mut self.state.textures,
             &mut self.state.next_surface_handle,
@@ -762,7 +758,7 @@ impl GpuBackend for VulkanBackend {
         surface::destroy(
             &self.state.entry,
             &self.state.instance,
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.surfaces,
             &mut self.state.textures,
             surface_handle,
@@ -793,9 +789,11 @@ impl GpuBackend for VulkanBackend {
             .contexts
             .get(&frame.context)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_semaphore;
         surface::render(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.surfaces,
             frame.surface,
             frame.image,
@@ -819,8 +817,8 @@ impl GpuBackend for VulkanBackend {
             .and_then(|s| s.frame_sync.get(s.current_frame))
             .and_then(|fs| fs.frame_timeline_value)
         {
-            if let Some(sc) = self.state.contexts.get_mut(&frame.context) {
-                sc.last_submitted_seq = tv;
+            if let Some(sc_arc) = self.state.contexts.get(&frame.context) {
+                sc_arc.lock().unwrap().last_submitted_seq = tv;
             }
         }
         Ok(())
@@ -835,7 +833,7 @@ impl GpuBackend for VulkanBackend {
         surface::resize(
             &self.state.entry,
             &self.state.instance,
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.surfaces,
             &mut self.state.textures,
             &mut self.state.next_texture_handle,
@@ -939,7 +937,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<TextureHandle> {
         texture::create(
             &self.state.instance,
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.textures,
             &mut self.state.next_texture_handle,
             device_handle,
@@ -993,7 +991,7 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
         texture::destroy(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.textures,
             texture_handle,
         );
@@ -1027,7 +1025,7 @@ impl GpuBackend for VulkanBackend {
         desc: &crate::types::SamplerDesc,
     ) -> Result<SamplerHandle> {
         sampler::create(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.samplers,
             &mut self.state.next_sampler_handle,
             device_handle,
@@ -1037,7 +1035,7 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
         sampler::destroy(
-            &mut self.state.devices,
+            &self.state.devices,
             &mut self.state.samplers,
             sampler_handle,
         );
@@ -1097,9 +1095,10 @@ impl GpuBackend for VulkanBackend {
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
         let _tz = crate::tracy_zone!("vk.gpu_progress");
-        let Some(sc) = self.state.contexts.get(&ctx) else {
+        let Some(sc_arc) = self.state.contexts.get(&ctx) else {
             return 0;
         };
+        let sc = sc_arc.lock().unwrap();
         let Some(ld) = self.state.devices.get(&sc.device) else {
             return 0;
         };
@@ -1126,7 +1125,7 @@ impl GpuBackend for VulkanBackend {
             .state
             .contexts
             .get(&ctx)
-            .map(|sc| std::sync::Arc::clone(&sc.signal_queue));
+            .map(|sc| std::sync::Arc::clone(&sc.lock().unwrap().signal_queue));
         let Some(signal_queue) = signal_queue else {
             return Vec::new();
         };
@@ -1149,9 +1148,10 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.state.contexts.get(&ctx)?;
+        let sc_arc = self.state.contexts.get(&ctx)?;
+        let last_submitted_seq = sc_arc.lock().unwrap().last_submitted_seq;
         let progress = self.gpu_progress(ctx);
-        if progress < sc.last_submitted_seq {
+        if progress < last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -1180,6 +1180,8 @@ impl GpuBackend for VulkanBackend {
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_semaphore;
             let dev = &self.state.devices.get(&device_handle).unwrap().device;
             let wait = vk::SemaphoreWaitInfo::default()
@@ -1200,11 +1202,11 @@ impl GpuBackend for VulkanBackend {
             let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
             compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
         }
-        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+        if let Some(ld) = self.state.devices.get(&device_handle) {
             let drain_to = value.min(retired);
             let drained = {
                 let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
-                ld.deletion_queue.drain_up_to(drain_to)
+                ld.deletion_queue.lock().unwrap().drain_up_to(drain_to)
             };
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
@@ -1236,6 +1238,8 @@ impl GpuBackend for VulkanBackend {
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_semaphore;
         let dev = &self.state.devices.get(&device_handle).unwrap().device;
         let wait = vk::SemaphoreWaitInfo::default()
@@ -1246,8 +1250,12 @@ impl GpuBackend for VulkanBackend {
             Ok(()) => {
                 let retired = context::device_retired(&self.state, device_handle);
                 compute::reap_timeline_cmd_buffers_up_to(&mut self.state, ctx, value);
-                if let Some(ld) = self.state.devices.get_mut(&device_handle) {
-                    let drained = ld.deletion_queue.drain_up_to(value.min(retired));
+                if let Some(ld) = self.state.devices.get(&device_handle) {
+                    let drained = ld
+                        .deletion_queue
+                        .lock()
+                        .unwrap()
+                        .drain_up_to(value.min(retired));
                     let ledger_arc = std::sync::Arc::clone(&ld.ledger);
                     let mut ledger = ledger_arc.lock().unwrap();
                     for r in drained {
@@ -1337,7 +1345,8 @@ impl GpuBackend for VulkanBackend {
         let Some(logical_device) = self.state.devices.get(&device_handle) else {
             return;
         };
-        for sc in self.state.contexts.values_mut() {
+        for sc_arc in self.state.contexts.values() {
+            let mut sc = sc_arc.lock().unwrap();
             if sc.device == device_handle {
                 unsafe { sc.staging_belt.trim(logical_device) };
             }
@@ -1377,10 +1386,10 @@ impl GpuBackend for VulkanBackend {
         let ctx_batch: Vec<_> = self
             .state
             .contexts
-            .get_mut(&ctx)
-            .map(|sc| sc.deletion_queue.drain_up_to(completed))
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
-        if let Some(ld) = self.state.devices.get_mut(&device_handle) {
+        if let Some(ld) = self.state.devices.get(&device_handle) {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
             {
                 let mut ledger = ledger_arc.lock().unwrap();
@@ -1404,7 +1413,7 @@ impl GpuBackend for VulkanBackend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|d| d.deletion_queue.len())
+            .map(|d| d.deletion_queue.lock().unwrap().len())
             .unwrap_or(0)
     }
 }

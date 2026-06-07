@@ -71,7 +71,7 @@ impl StagingBelt {
     pub fn reclaim(
         &mut self,
         compute_fence_pool: &HashMap<u64, (DeviceHandle, vk::Fence, Option<vk::CommandBuffer>)>,
-        devices: &HashMap<DeviceHandle, LogicalDevice>,
+        devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
         completed_timeline: u64,
     ) -> Result<()> {
         let mut i = 0;

@@ -1556,10 +1556,9 @@ fn execute_signal_and_finish(
         ledger.drain_ready_slot_reclamations(&state.context_fences);
     }
 
-    state
-        .contexts
-        .get(&ctx)
-        .map(|sc_arc| sc_arc.lock().unwrap().staging_belt.finish(fence_value));
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().staging_belt.finish(fence_value);
+    }
 
     if !staged_texture_uploads.is_empty() {
         let entries = staged_texture_uploads

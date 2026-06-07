@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 /// Create a shader from Slang source code.
 pub(super) fn create(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     next_shader_handle: &mut ShaderHandle,
     desc: crate::backend::shared::ShaderDesc<'_>,
@@ -45,7 +45,7 @@ pub(super) fn create(
 
 /// Destroy a shader and clean up compiled shader modules.
 pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     shader_handle: ShaderHandle,
 ) {
@@ -69,7 +69,7 @@ pub(super) fn destroy(
 /// Compile a shader for a specific stage on demand.
 pub(super) fn ensure_stage_compiled(
     slang_compiler: &crate::slang::SlangCompiler,
-    devices: &HashMap<DeviceHandle, types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,

@@ -160,17 +160,22 @@ impl DeviceLedger {
 /// retirement data it needs without touching live context state while the ledger is locked.
 pub(super) fn snapshot_context_completed_values(
     device: &ash::Device,
-    contexts: &HashMap<super::ContextHandle, SubmissionContext>,
+    contexts: &HashMap<super::ContextHandle, SharedSubmissionContext>,
     for_device: super::DeviceHandle,
 ) -> HashMap<super::ContextHandle, u64> {
     contexts
         .iter()
-        .filter(|(_, sc)| sc.device == for_device)
-        .map(|(&id, sc)| unsafe {
-            let v = device
-                .get_semaphore_counter_value(sc.timeline_semaphore)
-                .unwrap_or(0);
-            (id, v)
+        .filter_map(|(&id, sc_arc)| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device != for_device {
+                return None;
+            }
+            let v = unsafe {
+                device
+                    .get_semaphore_counter_value(sc.timeline_semaphore)
+                    .unwrap_or(0)
+            };
+            Some((id, v))
         })
         .collect()
 }
@@ -640,7 +645,8 @@ pub(crate) struct LogicalDevice {
     #[allow(dead_code)] // captured at device init for diagnostics / future use
     pub sparse_memory_type_index: u32,
     /// Sub-allocated DEVICE_LOCAL pages for [`super::sparse::SparsePagePool`].
-    pub sparse_page_pool: Option<super::sparse::SparsePagePool>,
+    /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a).
+    pub sparse_page_pool: Mutex<Option<super::sparse::SparsePagePool>>,
 
     // Vulkan 1.4 core via KHR extension loaders (ash 0.38 doesn't have core 1.4 wrappers yet)
     pub map_memory2: ash::khr::map_memory2::Device,
@@ -658,14 +664,17 @@ pub(crate) struct LogicalDevice {
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
     pub ledger: Arc<Mutex<DeviceLedger>>,
-    /// Deferred deletion queue for resources that are still in-flight
-    pub deletion_queue: DeletionQueue,
+    /// Deferred deletion queue for resources that are still in-flight.
+    /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a): callers that
+    /// previously took `&mut LogicalDevice` now lock this field individually.
+    pub deletion_queue: Mutex<DeletionQueue>,
     /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
     /// `Arc` allows submit paths to clone the counter out before dropping device/state borrows
     /// (required for Phase 5 lock-free submit).
     pub timeline_next: Arc<AtomicU64>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
-    pub retired_floor: u64,
+    /// `AtomicU64` so `LogicalDevice` can be `Arc`-wrapped; updated with `fetch_max`.
+    pub retired_floor: AtomicU64,
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
@@ -1085,7 +1094,7 @@ impl DeletionQueue {
 /// `ledger` must be the already-locked `DeviceLedger` from `ld.ledger`; passing it separately
 /// avoids holding the ledger lock while the caller re-locks it (double-lock hazard).
 pub(crate) fn destroy_pending_deletion(
-    ld: &mut LogicalDevice,
+    ld: &LogicalDevice,
     ledger: &mut DeviceLedger,
     resource: PendingDeletion,
 ) {
@@ -1102,6 +1111,10 @@ pub(crate) fn destroy_pending_deletion(
 
     let device = &ld.device;
     let bind_queue = ld.sparse_binding_queue;
+    // Lock sparse_page_pool once for the duration of this call (needed when freeing
+    // sparse memory pages). Held only here; no other code path holds it concurrently
+    // while the outer backend lock serialises all submits.
+    let mut pool_guard = ld.sparse_page_pool.lock().unwrap();
 
     unsafe {
         match resource {
@@ -1135,7 +1148,7 @@ pub(crate) fn destroy_pending_deletion(
                             tracing::warn!(?e, "sparse unbind on buffer destroy failed");
                         }
                         for (_res_off, mem, mem_off) in &td.binds {
-                            if let Some(pool) = ld.sparse_page_pool.as_mut() {
+                            if let Some(pool) = pool_guard.as_mut() {
                                 pool.free_page(*mem, *mem_off);
                             }
                         }
@@ -1197,7 +1210,7 @@ pub(crate) fn destroy_pending_deletion(
                         tracing::warn!(?e, "sparse unbind on replaced buffer failed");
                     }
                     for (_res_off, mem, mem_off) in &binds {
-                        if let Some(pool) = ld.sparse_page_pool.as_mut() {
+                        if let Some(pool) = pool_guard.as_mut() {
                             pool.free_page(*mem, *mem_off);
                         }
                     }
@@ -1238,11 +1251,10 @@ pub(crate) fn destroy_pending_deletion(
 impl LogicalDevice {
     /// Drop deferred resources whose timeline barrier is `<= completed`.
     ///
-    /// Locks the ledger internally so that `destroy_pending_deletion` can
-    /// route descriptor-slot reclamation through the ledger without a
-    /// double-lock hazard.
-    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
-        let drained = self.deletion_queue.drain_up_to(completed);
+    /// Locks the deletion queue and ledger internally; takes `&self` so this
+    /// can be called through an `Arc<LogicalDevice>` (Phase 5a).
+    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+        let drained = self.deletion_queue.lock().unwrap().drain_up_to(completed);
         if drained.is_empty() {
             return;
         }
@@ -1252,7 +1264,29 @@ impl LogicalDevice {
             destroy_pending_deletion(self, &mut ledger, r);
         }
     }
+
+    /// Drain all pending deletions (device teardown).
+    pub(crate) fn flush_deletion_queue(&self) {
+        let batch = self.deletion_queue.lock().unwrap().flush_all_drain();
+        if batch.is_empty() {
+            return;
+        }
+        let ledger_arc = Arc::clone(&self.ledger);
+        let mut ledger = ledger_arc.lock().unwrap();
+        for r in batch {
+            destroy_pending_deletion(self, &mut ledger, r);
+        }
+    }
 }
+
+/// `Arc`-wrapped logical device — cloned out of `VulkanState` before dropping the
+/// global backend lock so submit paths can hold per-device state without borrowing
+/// all of `VulkanState` (Phase 5).
+pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
+/// `Arc<Mutex>`-wrapped per-context state — allows submit paths to lock only the
+/// submitting context rather than all of `VulkanState` (Phase 5).
+pub(crate) type SharedSubmissionContext = Arc<Mutex<SubmissionContext>>;
 
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
@@ -1260,9 +1294,9 @@ pub(super) struct VulkanState {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub physical_devices: Vec<PhysicalDeviceInfo>,
-    pub devices: HashMap<DeviceHandle, LogicalDevice>,
+    pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<super::ContextHandle, SubmissionContext>,
+    pub contexts: HashMap<super::ContextHandle, SharedSubmissionContext>,
     pub next_context_id: super::ContextHandle,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
