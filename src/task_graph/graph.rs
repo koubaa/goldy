@@ -21,7 +21,8 @@ use crate::types::TextureFormat;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::{atomic::AtomicU64, Arc};
 
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -169,6 +170,9 @@ pub struct TaskGraph {
     /// When the node count hasn't changed and the cache already holds a
     /// schedule, we skip the expensive `binding_fingerprint` hash.
     schedule_validated_node_count: usize,
+    /// Stamp cells for [`crate::Parcel`]s bound via [`NodeBuilder::bind_parcel`].
+    /// Cleared in [`Self::clear`]; stamped in [`Self::apply_reference_stamps`] at submit.
+    stamp_targets: Vec<Arc<AtomicU64>>,
 }
 
 /// Cache entry holding both the wave schedule and the emitted compute command stream.
@@ -205,6 +209,7 @@ impl TaskGraph {
             next_transient_texture_id: 0,
             schedule_cache: None,
             schedule_validated_node_count: 0,
+            stamp_targets: Vec::new(),
             #[cfg(debug_assertions)]
             prev_transient_shapes: Vec::new(),
             #[cfg(debug_assertions)]
@@ -1009,6 +1014,15 @@ impl TaskGraph {
         self.transient_texture_specs.clear();
         self.next_transient_id = 0;
         self.next_transient_texture_id = 0;
+        self.stamp_targets.clear();
+    }
+
+    /// Stamp every [`crate::Parcel`] bound via [`NodeBuilder::bind_parcel`] with the
+    /// timeline value of the submission that just completed.
+    pub(crate) fn apply_reference_stamps(&self, tv: TimelineValue) {
+        for stamp in &self.stamp_targets {
+            stamp.fetch_max(tv, Ordering::Relaxed);
+        }
     }
 
     /// Access the raw IR for internal use (e.g. transient lowering from outside the task_graph module).
@@ -1426,6 +1440,7 @@ impl<'a> NodeBuilder<'a> {
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
     pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: crate::types::ResourceAccess) -> Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access: access.into(),
@@ -2631,5 +2646,201 @@ mod tests {
             g2.compute_binding_fingerprint(),
             "resource slot change must not affect binding fingerprint"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Parcel reference stamping at submit
+    // -----------------------------------------------------------------------
+
+    fn retained_buffer_parcel(pool: &mut crate::RetainedPool) -> crate::Parcel {
+        pool.acquire_buffer(
+            256,
+            crate::BufferKind::Scattered,
+            None,
+            crate::types::BufferFlags::empty(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bind_parcel_submit_stamps_last_referenced() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        assert_eq!(parcel.last_referenced(), None);
+
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(parcel.last_referenced(), Some(tv));
+    }
+
+    #[test]
+    fn bind_parcel_monotonic_max_across_submits() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let tv1 = graph.submit(&ctx).unwrap();
+
+        graph.clear();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let tv2 = graph.submit(&ctx).unwrap();
+        assert!(tv2 > tv1);
+        assert_eq!(parcel.last_referenced(), Some(tv2));
+
+        // Lower epoch must not regress the stamp.
+        graph.apply_reference_stamps(tv1);
+        assert_eq!(parcel.last_referenced(), Some(tv2));
+    }
+
+    #[test]
+    fn bind_parcel_multiple_all_stamped() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let p1 = retained_buffer_parcel(&mut pool);
+        let p2 = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&p1, crate::types::ResourceAccess::Write)
+            .bind_parcel(&p2, crate::types::ResourceAccess::Read)
+            .dispatch(1, 1, 1);
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(p1.last_referenced(), Some(tv));
+        assert_eq!(p2.last_referenced(), Some(tv));
+    }
+
+    #[test]
+    fn unreferenced_parcel_stays_none_after_submit() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let bound = retained_buffer_parcel(&mut pool);
+        let unbound = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&bound, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(bound.last_referenced(), Some(tv));
+        assert_eq!(unbound.last_referenced(), None);
+    }
+
+    #[test]
+    fn transfer_out_ready_after_after_submit() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let tv = graph.submit(&ctx).unwrap();
+
+        let stamped = pool.transfer_out(parcel);
+        assert_eq!(stamped.ready_after, Some(tv));
+    }
+
+    #[test]
+    fn transfer_out_unreferenced_has_none_ready_after() {
+        let device = Arc::new(mock_device());
+        let mut pool = crate::RetainedPool::new(device);
+        let parcel = retained_buffer_parcel(&mut pool);
+        let stamped = pool.transfer_out(parcel);
+        assert_eq!(stamped.ready_after, None);
+    }
+
+    #[test]
+    fn clear_empties_stamp_targets() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        graph.clear();
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(parcel.last_referenced(), None);
+        let _ = tv;
+    }
+
+    #[test]
+    fn submit_pipelined_stamps_bound_parcel() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let tv = ctx.submit_pipelined(&mut graph).unwrap();
+        assert_eq!(parcel.last_referenced(), Some(tv));
+    }
+
+    #[test]
+    fn submit_pipelined_and_retain_stamps_bound_parcel() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let tv = ctx.submit_pipelined_and_retain(&mut graph).unwrap();
+        assert_eq!(parcel.last_referenced(), Some(tv));
     }
 }
