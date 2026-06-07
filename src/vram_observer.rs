@@ -7,7 +7,7 @@
 //! [`TrackingVramAllocator`](crate::vram_allocator::TrackingVramAllocator) composes
 //! [`VramByteTracker`] internally for the legacy `with_vram_allocator` wrapper path.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
@@ -188,6 +188,7 @@ impl Clone for ObserverEntry {
 /// wired through it later without changing parcel drop paths.
 pub(crate) struct ResourceHub {
     next_id: AtomicU64,
+    observer_count: AtomicUsize,
     observers: Mutex<Arc<[ObserverEntry]>>,
 }
 
@@ -195,12 +196,13 @@ impl ResourceHub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             next_id: AtomicU64::new(1),
+            observer_count: AtomicUsize::new(0),
             observers: Mutex::new(Arc::from([])),
         })
     }
 
     pub fn has_observers(&self) -> bool {
-        !self.observers.lock().unwrap().is_empty()
+        self.observer_count.load(Ordering::Relaxed) > 0
     }
 
     pub fn add_observer(&self, observer: Arc<dyn VramObserver>) -> VramObserverId {
@@ -209,6 +211,8 @@ impl ResourceHub {
         let mut entries: Vec<ObserverEntry> = guard.iter().cloned().collect();
         entries.push(ObserverEntry { id, observer });
         *guard = entries.into();
+        drop(guard);
+        self.observer_count.fetch_add(1, Ordering::Relaxed);
         id
     }
 
@@ -217,6 +221,10 @@ impl ResourceHub {
         let entries: Vec<ObserverEntry> = guard.iter().filter(|e| e.id != id).cloned().collect();
         let removed = entries.len() != guard.len();
         *guard = entries.into();
+        drop(guard);
+        if removed {
+            self.observer_count.fetch_sub(1, Ordering::Relaxed);
+        }
         removed
     }
 
