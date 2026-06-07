@@ -252,6 +252,7 @@ impl Context {
                     drop(backend);
                     self.classify(e)
                 })?;
+            graph.apply_reference_stamps(tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
@@ -259,6 +260,7 @@ impl Context {
         let tv = self
             .submit_with_placement_heap(graph, true)
             .map_err(|e| self.classify(e))?;
+        graph.apply_reference_stamps(tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
@@ -274,6 +276,7 @@ impl Context {
                     drop(backend);
                     self.classify(e)
                 })?;
+            graph.apply_reference_stamps(tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
@@ -281,6 +284,7 @@ impl Context {
         let tv = self
             .submit_with_placement_heap(graph, false)
             .map_err(|e| self.classify(e))?;
+        graph.apply_reference_stamps(tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
@@ -296,6 +300,7 @@ impl Context {
                 drop(backend);
                 self.classify(e)
             })?;
+        graph.apply_reference_stamps(tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }

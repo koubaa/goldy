@@ -11,7 +11,7 @@ use crate::timeline::TimelineValue;
 use crate::types::{ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
 /// Index into a [`Parcel`] mosaic's sub-ranges (returned by [`crate::retained_pool::MosaicBuilder`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,7 +109,8 @@ impl Drop for BookkeepingGuard {
 /// transient pool) or by dropping the value (implicit relinquish).
 pub struct Parcel {
     storage: ParcelStorage,
-    last_referenced: Option<TimelineValue>,
+    /// Last referencing timeline; `0` means never referenced by GPU work.
+    last_referenced: Arc<AtomicU64>,
     bookkeeping: Option<BookkeepingGuard>,
 }
 
@@ -117,7 +118,7 @@ impl Parcel {
     pub(crate) fn from_buffer(buf: Buffer, bookkeeping: BookkeepingGuard) -> Self {
         Self {
             storage: ParcelStorage::Buffer(buf),
-            last_referenced: None,
+            last_referenced: Arc::new(AtomicU64::new(0)),
             bookkeeping: Some(bookkeeping),
         }
     }
@@ -125,7 +126,7 @@ impl Parcel {
     pub(crate) fn from_texture(tex: Texture, bookkeeping: BookkeepingGuard) -> Self {
         Self {
             storage: ParcelStorage::Texture(tex),
-            last_referenced: None,
+            last_referenced: Arc::new(AtomicU64::new(0)),
             bookkeeping: Some(bookkeeping),
         }
     }
@@ -133,7 +134,7 @@ impl Parcel {
     pub(crate) fn from_mosaic(pool: BufferPool, views: Vec<BufferView>, bookkeeping: BookkeepingGuard) -> Self {
         Self {
             storage: ParcelStorage::Mosaic(Mosaic { pool, views }),
-            last_referenced: None,
+            last_referenced: Arc::new(AtomicU64::new(0)),
             bookkeeping: Some(bookkeeping),
         }
     }
@@ -207,16 +208,19 @@ impl Parcel {
     /// Record the timeline of the most recent GPU work that referenced this parcel.
     ///
     /// Monotonic: only increases; a smaller epoch is ignored.
-    pub fn mark_referenced(&mut self, epoch: TimelineValue) {
-        match self.last_referenced {
-            Some(prev) if epoch <= prev => {}
-            _ => self.last_referenced = Some(epoch),
-        }
+    pub fn mark_referenced(&self, epoch: TimelineValue) {
+        self.last_referenced.fetch_max(epoch, Ordering::Relaxed);
     }
 
     /// Last recorded referencing timeline, if any.
     pub fn last_referenced(&self) -> Option<TimelineValue> {
-        self.last_referenced
+        let v = self.last_referenced.load(Ordering::Relaxed);
+        if v == 0 { None } else { Some(v) }
+    }
+
+    /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
+    pub(crate) fn stamp_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.last_referenced)
     }
 
     /// Task-graph resource identity (runtime only).
