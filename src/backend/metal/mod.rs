@@ -210,7 +210,7 @@ impl GpuBackend for MetalBackend {
             .state
             .contexts
             .iter()
-            .filter(|(_, sc)| sc.device == device)
+            .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device)
             .map(|(id, _)| *id)
             .collect();
         for ctx in ctxs {
@@ -640,7 +640,14 @@ impl GpuBackend for MetalBackend {
         self.state
             .contexts
             .get(&ctx)
-            .map(|sc| sc.timeline_event.as_ref().signaled_value())
+            .map(|sc_arc| {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .timeline_event
+                    .as_ref()
+                    .signaled_value()
+            })
             .unwrap_or(0)
     }
 
@@ -665,12 +672,14 @@ impl GpuBackend for MetalBackend {
 
     fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
         let device = self.context_device(ctx);
-        let sc = match self.state.contexts.get(&ctx) {
-            Some(sc) => sc,
+        let sc_arc = match self.state.contexts.get(&ctx) {
+            Some(sc) => sc.clone(),
             None => return Vec::new(),
         };
+        let sc = sc_arc.lock().unwrap();
         let returns: Vec<(SurfaceHandle, u32)> =
             std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
+        drop(sc);
         for (surface_handle, _image_index) in returns {
             if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
                 if surf.device_handle == device {
@@ -678,12 +687,14 @@ impl GpuBackend for MetalBackend {
                 }
             }
         }
-        crate::signal::drain_all_signals(&sc.signal_queue)
+        let sc2 = sc_arc.lock().unwrap();
+        crate::signal::drain_all_signals(&sc2.signal_queue)
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.state.contexts.get(&ctx)?;
-        let progress = self.gpu_progress(ctx);
+        let sc_arc = self.state.contexts.get(&ctx)?;
+        let sc = sc_arc.lock().unwrap();
+        let progress = sc.timeline_event.as_ref().signaled_value();
         if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {
@@ -716,11 +727,12 @@ impl GpuBackend for MetalBackend {
         if self.gpu_progress(ctx) >= value {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
             let retired = context::device_retired(&self.state, device);
-            if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-                drain_completed_cbs(sc);
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                drain_completed_cbs(&mut sc);
                 sc.deletion_queue.process_up_to(value);
             }
-            if let Some(ld) = self.state.devices.get_mut(&device) {
+            if let Some(ld) = self.state.devices.get(&device) {
                 ld.process_deletion_queue_up_to(value.min(retired));
             }
             drain_all_pending_slots(&mut self.state);
@@ -732,7 +744,8 @@ impl GpuBackend for MetalBackend {
         // that CB guarantees all earlier CBs (and timeline values) are also done.
         // This uses the Metal runtime's native Mach-semaphore wait rather than
         // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
-        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc| {
+        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
             sc.in_flight_command_buffers
                 .iter()
                 .find(|(tv, _)| *tv >= value)
@@ -750,6 +763,8 @@ impl GpuBackend for MetalBackend {
                 .contexts
                 .get(&ctx)
                 .context("Invalid context handle")?
+                .lock()
+                .unwrap()
                 .timeline_waiter
                 .clone();
             let timeout = std::time::Duration::from_secs(300);
@@ -768,11 +783,12 @@ impl GpuBackend for MetalBackend {
         {
             let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
             let retired = context::device_retired(&self.state, device);
-            if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-                drain_completed_cbs(sc);
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                drain_completed_cbs(&mut sc);
                 sc.deletion_queue.process_up_to(value);
             }
-            if let Some(ld) = self.state.devices.get_mut(&device) {
+            if let Some(ld) = self.state.devices.get(&device) {
                 ld.process_deletion_queue_up_to(value.min(retired));
             }
         }
@@ -801,6 +817,8 @@ impl GpuBackend for MetalBackend {
             .contexts
             .get(&ctx)
             .context("Invalid context handle")?
+            .lock()
+            .unwrap()
             .timeline_waiter
             .clone();
 
@@ -813,10 +831,10 @@ impl GpuBackend for MetalBackend {
         }
 
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-            sc.deletion_queue.process_up_to(value);
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().deletion_queue.process_up_to(value);
         }
-        if let Some(ld) = self.state.devices.get_mut(&device) {
+        if let Some(ld) = self.state.devices.get(&device) {
             ld.process_deletion_queue_up_to(value.min(retired));
         }
         drain_all_pending_slots(&mut self.state);
@@ -894,11 +912,12 @@ impl GpuBackend for MetalBackend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
             let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
             sc.deletion_queue.process_up_to(ctx_signaled);
         }
-        if let Some(ld) = self.state.devices.get_mut(&device) {
+        if let Some(ld) = self.state.devices.get(&device) {
             ld.process_deletion_queue_up_to(retired);
         }
     }
@@ -908,8 +927,9 @@ impl GpuBackend for MetalBackend {
         ctx: ContextHandle,
         epoch: Option<crate::timeline::TimelineValue>,
     ) {
-        if let Some(sc) = self.state.contexts.get_mut(&ctx) {
-            sc.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            sc_arc.lock().unwrap().reclamation_context =
+                epoch.map(|epoch| (std::thread::current().id(), epoch));
         }
     }
 
@@ -926,23 +946,37 @@ impl GpuBackend for MetalBackend {
             return;
         }
         drain_all_pending_slots(&mut self.state);
-        if let Some(logical_device) = self.state.devices.get_mut(&device) {
-            logical_device.heap_allocator.reset_for_frame();
+        if let Some(logical_device) = self.state.devices.get(&device) {
+            logical_device
+                .heap_allocator
+                .lock()
+                .unwrap()
+                .reset_for_frame();
         }
     }
 
     fn ensure_buffer_heap_capacity(&mut self, device: DeviceHandle, min_capacity: u64) {
-        if let Some(logical_device) = self.state.devices.get_mut(&device) {
+        if let Some(logical_device) = self.state.devices.get(&device) {
             logical_device
                 .heap_allocator
+                .lock()
+                .unwrap()
                 .ensure_primary_capacity(min_capacity);
         }
     }
 
     fn compact_overflow_heaps(&mut self, device: DeviceHandle) {
-        if let Some(logical_device) = self.state.devices.get_mut(&device) {
-            logical_device.heap_allocator.compact_overflow();
-            logical_device.texture_heap.compact_overflow();
+        if let Some(logical_device) = self.state.devices.get(&device) {
+            logical_device
+                .heap_allocator
+                .lock()
+                .unwrap()
+                .compact_overflow();
+            logical_device
+                .texture_heap
+                .lock()
+                .unwrap()
+                .compact_overflow();
         }
     }
 
@@ -957,44 +991,44 @@ impl GpuBackend for MetalBackend {
             .state
             .contexts
             .get(&ctx)
-            .map(|sc| sc.deletion_queue.pending_len())
+            .map(|sc_arc| sc_arc.lock().unwrap().deletion_queue.pending_len())
             .unwrap_or(0);
         let device_count = self
             .state
             .devices
             .get(&device)
-            .map(|d| d.deletion_queue.pending_len())
+            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
             .unwrap_or(0);
         ctx_count + device_count
     }
 
     fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {
-        self.state
-            .devices
-            .get(&device)
-            .map(|ld| super::BufferHeapStats {
-                buffer_count: ld.heap_allocator.buffer_count(),
-                overflow_count: ld.heap_allocator.overflow_count(),
-                high_water_bytes: ld.heap_allocator.high_water_mark(),
-                primary_heap_bytes: ld.heap_allocator.primary_size(),
-            })
+        self.state.devices.get(&device).map(|ld| {
+            let ha = ld.heap_allocator.lock().unwrap();
+            super::BufferHeapStats {
+                buffer_count: ha.buffer_count(),
+                overflow_count: ha.overflow_count(),
+                high_water_bytes: ha.high_water_mark(),
+                primary_heap_bytes: ha.primary_size(),
+            }
+        })
     }
 
     fn texture_heap_stats(&self, device: DeviceHandle) -> Option<super::TextureHeapStats> {
-        self.state
-            .devices
-            .get(&device)
-            .map(|ld| super::TextureHeapStats {
-                texture_count: ld.texture_heap.texture_count(),
-                overflow_count: ld.texture_heap.overflow_count(),
-            })
+        self.state.devices.get(&device).map(|ld| {
+            let th = ld.texture_heap.lock().unwrap();
+            super::TextureHeapStats {
+                texture_count: th.texture_count(),
+                overflow_count: th.overflow_count(),
+            }
+        })
     }
 
     fn in_flight_command_buffer_count(&self, ctx: ContextHandle) -> usize {
         self.state
             .contexts
             .get(&ctx)
-            .map(|sc| sc.in_flight_command_buffers.len())
+            .map(|sc_arc| sc_arc.lock().unwrap().in_flight_command_buffers.len())
             .unwrap_or(0)
     }
 }

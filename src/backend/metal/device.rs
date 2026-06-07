@@ -108,11 +108,11 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
 
     state.devices.insert(
         handle,
-        LogicalDevice {
+        Arc::new(LogicalDevice {
             device,
             command_queue,
-            heap_allocator,
-            texture_heap,
+            heap_allocator: Mutex::new(heap_allocator),
+            texture_heap: Mutex::new(texture_heap),
             argument_buffer,
             argument_encoder,
             texture_encoder,
@@ -122,8 +122,9 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             timeline_next: Arc::new(AtomicU64::new(1)),
             timeline_scheduled_max: AtomicU64::new(0),
             retired_floor: AtomicU64::new(0),
-            deletion_queue: DeletionQueue::new(),
-        },
+            deletion_queue: Mutex::new(DeletionQueue::new()),
+            queue_lock: Arc::new(Mutex::new(())),
+        }),
     );
 
     Ok(handle)
@@ -272,8 +273,8 @@ pub(super) fn create_argument_encoders(
 
 /// Destroy a logical device and clean up resources owned by it.
 pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
-    if let Some(mut ld) = state.devices.remove(&device_handle) {
-        ld.deletion_queue.flush_all();
+    if let Some(ld) = state.devices.remove(&device_handle) {
+        ld.deletion_queue.lock().unwrap().flush_all();
         state
             .buffers
             .retain(|_, b| b.device_handle != device_handle);

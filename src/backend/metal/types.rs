@@ -688,9 +688,9 @@ pub(crate) struct LogicalDevice {
 
     // Bindless infrastructure (always present — Tier 2 required)
     /// Multi-heap allocator for buffer allocations (grows on demand)
-    pub heap_allocator: HeapAllocator,
+    pub heap_allocator: Mutex<HeapAllocator>,
     /// Multi-heap allocator for texture allocations (grows on demand)
-    pub texture_heap: TextureHeapAllocator,
+    pub texture_heap: Mutex<TextureHeapAllocator>,
     /// Global argument buffer containing resource IDs
     pub argument_buffer: MTLBuffer,
     /// Encoder for writing buffers to the argument buffer
@@ -712,13 +712,23 @@ pub(crate) struct LogicalDevice {
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     pub retired_floor: AtomicU64,
     /// Deferred GPU resource teardown until device timeline reaches the queued barrier.
-    pub deletion_queue: DeletionQueue,
+    /// Wrapped in `Mutex` so `LogicalDevice` can be Arc-shared and `process_deletion_queue_up_to`
+    /// can take `&self` — matching the pattern used by the Vulkan and DX12 backends (phase 5).
+    pub deletion_queue: Mutex<DeletionQueue>,
+    /// Serialises `command_buffer.commit()` across concurrent submits on this device.
+    ///
+    /// Metal's single `MTLCommandQueue` is thread-safe for `newCommandBuffer()` but
+    /// `commit()` must be issued in timeline order.  Holding this lock only for the
+    /// commit call (not all of MetalState) allows submit prep to overlap while still
+    /// serialising the queue-enqueue moment.  Cloned out of `LogicalDevice` before
+    /// recording begins so the global backend lock can be dropped before commit.
+    pub queue_lock: Arc<Mutex<()>>,
 }
 
 impl LogicalDevice {
     /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
-    pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
-        self.deletion_queue.process_up_to(completed);
+    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+        self.deletion_queue.lock().unwrap().process_up_to(completed);
         self.ledger
             .lock()
             .unwrap()
@@ -1274,6 +1284,14 @@ pub(crate) struct MetalAdapterInfo {
     pub adapter_id: u32,
 }
 
+/// `Arc`-wrapped logical device — cloned out of `MetalState` before the global backend
+/// lock is dropped so submit paths can hold per-device state independently (phase 5).
+pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
+
+/// `Arc<Mutex>`-wrapped per-context state — allows submit paths to lock only the
+/// submitting context rather than all of `MetalState` (phase 5).
+pub(crate) type SharedMetalSubmissionContext = Arc<Mutex<MetalSubmissionContext>>;
+
 /// Consolidated Metal backend state.
 /// Holds all resources and state for the Metal backend.
 pub(super) struct MetalState {
@@ -1285,9 +1303,9 @@ pub(super) struct MetalState {
     /// the app cascade errors quickly and exit cleanly rather than appearing
     /// frozen for tens of seconds while each frame times out.
     pub device_lost: std::sync::atomic::AtomicBool,
-    pub devices: std::collections::HashMap<DeviceHandle, LogicalDevice>,
+    pub devices: std::collections::HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: std::collections::HashMap<super::ContextHandle, MetalSubmissionContext>,
+    pub contexts: std::collections::HashMap<super::ContextHandle, SharedMetalSubmissionContext>,
     pub next_context_id: super::ContextHandle,
     pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,

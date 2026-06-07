@@ -24,8 +24,14 @@ pub(super) fn device_retired(state: &MetalState, device: DeviceHandle) -> u64 {
     let max_ctx = state
         .contexts
         .values()
-        .filter(|c| c.device == device)
-        .map(|c| c.timeline_event.as_ref().signaled_value())
+        .filter_map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device == device {
+                Some(sc.timeline_event.as_ref().signaled_value())
+            } else {
+                None
+            }
+        })
         .max()
         .unwrap_or(0);
     floor.max(max_ctx)
@@ -41,18 +47,17 @@ pub(super) fn context_handle_for_thread(
     device: DeviceHandle,
 ) -> Option<super::ContextHandle> {
     let thread = std::thread::current().id();
-    state
-        .contexts
-        .iter()
-        .filter(|(_, c)| c.device == device)
-        .find_map(|(h, c)| {
-            if let Some((t, _)) = c.reclamation_context {
+    state.contexts.iter().find_map(|(h, sc_arc)| {
+        let sc = sc_arc.lock().unwrap();
+        if sc.device == device {
+            if let Some((t, _)) = sc.reclamation_context {
                 if t == thread {
                     return Some(*h);
                 }
             }
-            None
-        })
+        }
+        None
+    })
 }
 
 pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<ContextHandle> {
@@ -69,7 +74,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
     state.next_context_id = state.next_context_id.saturating_add(1);
     state.contexts.insert(
         id,
-        MetalSubmissionContext {
+        Arc::new(Mutex::new(MetalSubmissionContext {
             device,
             timeline_event,
             timeline_waiter,
@@ -82,18 +87,19 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
-        },
+        })),
     );
     Ok(id)
 }
 
 pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
-    let Some(mut sc) = state.contexts.remove(&ctx) else {
+    let Some(sc_arc) = state.contexts.remove(&ctx) else {
         return;
     };
+    let mut sc = sc_arc.lock().unwrap();
     let device = sc.device;
     let completed = sc.timeline_event.as_ref().signaled_value();
-    if let Some(ld) = state.devices.get_mut(&device) {
+    if let Some(ld) = state.devices.get(&device) {
         ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
 
@@ -113,6 +119,8 @@ pub(super) fn context_device(state: &MetalState, ctx: ContextHandle) -> DeviceHa
         .contexts
         .get(&ctx)
         .expect("invalid context handle")
+        .lock()
+        .unwrap()
         .device
 }
 
@@ -134,12 +142,18 @@ pub(super) fn wait_until_device_seq_at_least(
             return false;
         }
         let remaining = timeout.saturating_sub(start.elapsed());
-        for sc in state.contexts.values().filter(|c| c.device == device) {
-            if sc.timeline_event.as_ref().signaled_value() < seq {
-                let chunk = remaining.min(std::time::Duration::from_millis(1));
-                let _ = sc.timeline_waiter.wait_until(seq, chunk);
-                break;
+        // Find any context on this device that hasn't reached seq yet and wait briefly.
+        let found_waiter = state.contexts.values().find_map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device == device && sc.timeline_event.as_ref().signaled_value() < seq {
+                Some(sc.timeline_waiter.clone())
+            } else {
+                None
             }
+        });
+        if let Some(waiter) = found_waiter {
+            let chunk = remaining.min(std::time::Duration::from_millis(1));
+            let _ = waiter.wait_until(seq, chunk);
         }
     }
     true
@@ -153,10 +167,17 @@ pub(super) fn oldest_in_flight_cb(
     state
         .contexts
         .values()
-        .filter(|c| c.device == device)
-        .filter_map(|c| c.in_flight_command_buffers.front())
+        .filter_map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device != device {
+                return None;
+            }
+            sc.in_flight_command_buffers
+                .front()
+                .map(|(tv, cb)| (*tv, cb.to_owned()))
+        })
         .min_by_key(|(tv, _)| *tv)
-        .map(|(_, cb)| cb.to_owned())
+        .map(|(_, cb)| cb)
 }
 
 /// Reclamation epoch installed on the current thread for any context on `device`.
@@ -165,10 +186,13 @@ pub(super) fn reclamation_barrier(state: &MetalState, device: DeviceHandle, gpu_
         return 0;
     }
     let thread = std::thread::current().id();
-    for sc in state.contexts.values().filter(|c| c.device == device) {
-        if let Some((t, epoch)) = sc.reclamation_context {
-            if t == thread {
-                return epoch;
+    for sc_arc in state.contexts.values() {
+        let sc = sc_arc.lock().unwrap();
+        if sc.device == device {
+            if let Some((t, epoch)) = sc.reclamation_context {
+                if t == thread {
+                    return epoch;
+                }
             }
         }
     }

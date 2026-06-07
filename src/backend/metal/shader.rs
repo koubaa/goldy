@@ -528,7 +528,7 @@ pub(super) fn ensure_stage_compiled(
 
 /// Create a shader handle (compilation deferred to pipeline creation).
 pub(super) fn create(
-    devices: &HashMap<DeviceHandle, super::types::LogicalDevice>,
+    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     next_shader_handle: &mut ShaderHandle,
     desc: ShaderDesc<'_>,
@@ -564,7 +564,7 @@ pub(super) fn create(
 
 /// Destroy a shader.
 pub(super) fn destroy(
-    _devices: &HashMap<DeviceHandle, super::types::LogicalDevice>,
+    _devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     shaders: &mut HashMap<ShaderHandle, ShaderState>,
     shader_handle: ShaderHandle,
 ) {

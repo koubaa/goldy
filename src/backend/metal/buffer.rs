@@ -36,7 +36,7 @@ fn allocate_mtl_storage_buffer(
     {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         if gpu_only || allocation_size > MAX_HEAP_SIZE {
             let buf = logical_device.device.new_buffer(allocation_size, options);
@@ -46,6 +46,8 @@ fn allocate_mtl_storage_buffer(
         // Attempt 1: fast path — heap has space.
         if let Some(buf) = logical_device
             .heap_allocator
+            .lock()
+            .unwrap()
             .allocate(allocation_size, options)
         {
             return Ok((buf, false));
@@ -60,18 +62,24 @@ fn allocate_mtl_storage_buffer(
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.heap_allocator.compact_overflow();
+        logical_device
+            .heap_allocator
+            .lock()
+            .unwrap()
+            .compact_overflow();
     }
     {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         if let Some(buf) = logical_device
             .heap_allocator
+            .lock()
+            .unwrap()
             .allocate(allocation_size, options)
         {
             return Ok((buf, false));
@@ -95,12 +103,18 @@ fn allocate_mtl_storage_buffer(
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.heap_allocator.compact_overflow();
+        logical_device
+            .heap_allocator
+            .lock()
+            .unwrap()
+            .compact_overflow();
         if let Some(buf) = logical_device
             .heap_allocator
+            .lock()
+            .unwrap()
             .allocate(allocation_size, options)
         {
             return Ok((buf, false));
@@ -135,7 +149,7 @@ fn insert_buffer_common(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     let arg_buffer_index = {
@@ -399,7 +413,7 @@ pub(super) fn create_view(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     let arg_buffer_index = logical_device
@@ -472,7 +486,7 @@ pub(super) fn resize(
 
     let logical_device = state
         .devices
-        .get_mut(&device_handle)
+        .get(&device_handle)
         .context("Invalid device handle")?;
 
     let copy_len = if preserve_contents {
@@ -528,7 +542,7 @@ pub(super) fn resize(
     let barrier = logical_device
         .timeline_scheduled_max
         .load(std::sync::atomic::Ordering::Relaxed);
-    logical_device.deletion_queue.queue(
+    logical_device.deletion_queue.lock().unwrap().queue(
         barrier,
         super::types::PendingDeletion::Buffer {
             buffer: old_state.buffer,
@@ -598,7 +612,7 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         // call free the Metal heap allocation immediately rather than waiting for
         // the (often much larger) timeline_scheduled_max.
         let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
-        if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
+        if let Some(device) = state.devices.get(&buffer.device_handle) {
             device
                 .ledger
                 .lock()
@@ -616,13 +630,21 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         // is no reclamation context installed on the current thread.
         let ctx_h = super::context::context_handle_for_thread(state, buffer.device_handle);
         if let Some(h) = ctx_h {
-            if let Some(sc) = state.contexts.get_mut(&h) {
-                sc.deletion_queue.queue(barrier, deletion);
+            if let Some(sc_arc) = state.contexts.get(&h) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .deletion_queue
+                    .queue(barrier, deletion);
                 return;
             }
         }
-        if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
-            device.deletion_queue.queue(barrier, deletion);
+        if let Some(device) = state.devices.get(&buffer.device_handle) {
+            device
+                .deletion_queue
+                .lock()
+                .unwrap()
+                .queue(barrier, deletion);
         }
     }
 }

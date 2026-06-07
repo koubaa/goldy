@@ -124,9 +124,13 @@ pub(super) fn render_to(
     let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
     logical_device
         .heap_allocator
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     logical_device
         .texture_heap
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == render_target.device_handle {

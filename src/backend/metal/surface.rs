@@ -172,7 +172,7 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     // registry's free list so another surface can claim them.
     let gpu_idle = super::gpu_is_idle(state);
     if let (Some(dev), Some(slot_arr)) = (device_handle, slots) {
-        if let Some(logical_device) = state.devices.get_mut(&dev) {
+        if let Some(logical_device) = state.devices.get(&dev) {
             let barrier = logical_device
                 .timeline_scheduled_max
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -212,16 +212,17 @@ pub(super) fn acquire(
 
     // Clone the GPU-signal timestamp arc before taking a mutable surface borrow.
     // This lets us read the value after nextDrawable without conflicting borrows.
-    let gpu_signal_arc = state
-        .surfaces
-        .get(&surface)
-        .and_then(|ss| {
-            state
-                .contexts
-                .values()
-                .find(|c| c.device == ss.device_handle)
+    let gpu_signal_arc = state.surfaces.get(&surface).and_then(|ss| {
+        let dev = ss.device_handle;
+        state.contexts.values().find_map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device == dev {
+                Some(sc.timeline_waiter.last_signal_ns_arc())
+            } else {
+                None
+            }
         })
-        .map(|sc| sc.timeline_waiter.last_signal_ns_arc());
+    });
 
     let surface_state = state
         .surfaces
@@ -339,20 +340,24 @@ pub(super) fn acquire(
         image_index
     };
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
-        sc.signal_queue
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc
+            .lock()
+            .unwrap()
+            .signal_queue
             .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
         sc.deletion_queue.process_up_to(ctx_signaled);
     }
     {
         let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
         }
     }
@@ -415,9 +420,13 @@ pub(super) fn render(
     let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
     logical_device
         .heap_allocator
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     logical_device
         .texture_heap
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == surface_state.device_handle {
@@ -478,20 +487,28 @@ pub(super) fn present(
     let drawable_ptr = match surface_state.current_drawable {
         Some(d) => d,
         None => {
-            if let Some(sc) = state.contexts.get_mut(&ctx) {
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
                 let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
                 sc.deletion_queue.process_up_to(ctx_signaled);
             }
             let retired = super::context::device_retired(state, device_handle);
             let ld = state
                 .devices
-                .get_mut(&device_handle)
+                .get(&device_handle)
                 .context("Device no longer valid")?;
             ld.process_deletion_queue_up_to(retired);
             return Ok(state
                 .contexts
                 .get(&ctx)
-                .map(|sc| sc.timeline_event.as_ref().signaled_value())
+                .map(|sc_arc| {
+                    sc_arc
+                        .lock()
+                        .unwrap()
+                        .timeline_event
+                        .as_ref()
+                        .signaled_value()
+                })
                 .unwrap_or(retired));
         }
     };
@@ -500,7 +517,7 @@ pub(super) fn present(
     let signal_value = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Device no longer valid")?;
         let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
         ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
@@ -516,7 +533,8 @@ pub(super) fn present(
     let command_buffer = owned_command_buffer.as_ref();
 
     let (timeline_event, waiter, signal_queue_present, return_pending) = {
-        let sc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        let sc = sc_arc.lock().unwrap();
         (
             sc.timeline_event.clone(),
             sc.timeline_waiter.clone(),
@@ -570,20 +588,22 @@ pub(super) fn present(
     surface_state.current_texture_handle = None;
     surface_state.last_acquired_image_index = None;
 
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
         sc.deletion_queue.process_up_to(ctx_signaled);
     }
     {
         let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
         }
     }
@@ -606,10 +626,11 @@ pub(super) fn submit_frame(
         return compute::submit(state, frame.context, &pending);
     }
 
-    let sc = state
+    let sc_arc = state
         .contexts
         .get(&frame.context)
         .context("Invalid context handle")?;
+    let sc = sc_arc.lock().unwrap();
     Ok(sc
         .timeline_event
         .as_ref()
@@ -704,7 +725,8 @@ pub(super) fn resize(
 
     surface_state.pending_acquire_count = 0;
     if let Some(device_handle) = state.surfaces.get(&surface).map(|s| s.device_handle) {
-        for sc in state.contexts.values_mut() {
+        for sc_arc in state.contexts.values() {
+            let sc = sc_arc.lock().unwrap();
             if sc.device == device_handle {
                 sc.pending_swapchain_returns.lock().unwrap().clear();
             }
@@ -772,7 +794,7 @@ fn register_surface_texture(
     let global_idx = {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Device no longer valid")?;
 
         logical_device
@@ -840,7 +862,7 @@ fn register_surface_texture(
 /// stays reserved across frames until the surface is destroyed.
 fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle) {
     if let Some(tex_state) = state.textures.remove(&tex_handle) {
-        if let Some(device) = state.devices.get_mut(&tex_state.device_handle) {
+        if let Some(device) = state.devices.get(&tex_state.device_handle) {
             device
                 .ledger
                 .lock()

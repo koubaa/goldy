@@ -95,7 +95,7 @@ pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
         let device_handle = sampler.device_handle;
         let gpu_idle = super::gpu_is_idle(state);
         let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
-        if let Some(device) = state.devices.get_mut(&device_handle) {
+        if let Some(device) = state.devices.get(&device_handle) {
             device
                 .ledger
                 .lock()
@@ -111,13 +111,21 @@ pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
         // reclamation context is installed on the current thread.
         let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         if let Some(h) = ctx_h {
-            if let Some(sc) = state.contexts.get_mut(&h) {
-                sc.deletion_queue.queue(barrier, deletion);
+            if let Some(sc_arc) = state.contexts.get(&h) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .deletion_queue
+                    .queue(barrier, deletion);
                 return;
             }
         }
-        if let Some(device) = state.devices.get_mut(&device_handle) {
-            device.deletion_queue.queue(barrier, deletion);
+        if let Some(device) = state.devices.get(&device_handle) {
+            device
+                .deletion_queue
+                .lock()
+                .unwrap()
+                .queue(barrier, deletion);
         }
     }
 }

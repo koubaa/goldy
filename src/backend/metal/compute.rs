@@ -39,9 +39,10 @@ fn maybe_log_mem_diag(ld: &super::types::LogicalDevice) {
         let n = MEM_DIAG_COUNTER.fetch_add(1, Ordering::Relaxed);
         if n.is_multiple_of(mem_diag_cadence()) {
             let mib = ld.device.current_allocated_size() / (1024 * 1024);
-            let heap_primary_mib = ld.heap_allocator.primary_size() / (1024 * 1024);
-            let heap_overflow = ld.heap_allocator.overflow_count();
-            let heap_hwm_mib = ld.heap_allocator.high_water_mark() / (1024 * 1024);
+            let ha = ld.heap_allocator.lock().unwrap();
+            let heap_primary_mib = ha.primary_size() / (1024 * 1024);
+            let heap_overflow = ha.overflow_count();
+            let heap_hwm_mib = ha.high_water_mark() / (1024 * 1024);
             tracing::info!(
                 target: "goldy::diag::mem",
                 metal_current_allocated_mib = mib,
@@ -192,8 +193,16 @@ pub(super) fn begin_compute_encoder<'a>(
     device_handle: DeviceHandle,
 ) -> &'a mtl::ComputeCommandEncoderRef {
     let encoder = command_buffer.new_compute_command_encoder();
-    logical_device.heap_allocator.use_heaps_for_compute(encoder);
-    logical_device.texture_heap.use_heaps_for_compute(encoder);
+    logical_device
+        .heap_allocator
+        .lock()
+        .unwrap()
+        .use_heaps_for_compute(encoder);
+    logical_device
+        .texture_heap
+        .lock()
+        .unwrap()
+        .use_heaps_for_compute(encoder);
 
     // Collect resource refs by usage tier then call use_resources once per tier,
     // replacing one ObjC msg_send per resource with at most three total.
@@ -850,7 +859,8 @@ fn stage_uploads(
     let gpu_idle = state
         .contexts
         .get(&ctx)
-        .map(|sc| {
+        .map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
             sc.last_committed_timeline
                 .map(|last| sc.timeline_event.as_ref().signaled_value() >= last)
                 .unwrap_or(true)
@@ -863,7 +873,8 @@ fn stage_uploads(
 
     // Reclaim: return completed in-flight resources to the free lists.
     {
-        if let Some(sc) = state.contexts.get_mut(&ctx) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
             let completed = sc.timeline_event.as_ref().signaled_value();
             sc.staging_belt.reclaim(completed);
             sc.texture_staging_pool.reclaim(completed);
@@ -917,11 +928,15 @@ fn stage_uploads(
                     // Fast path will do a direct CPU memcpy; no staging needed.
                     // The fast path does NOT open an encoder, so would_have_gpu_work stays as-is.
                 } else {
-                    let sc = state
+                    let sc_arc = state
                         .contexts
-                        .get_mut(&ctx)
+                        .get(&ctx)
                         .context("stage_uploads: invalid context handle")?;
-                    let (buf, off) = sc.staging_belt.write(&device_mtl, data)?;
+                    let (buf, off) = sc_arc
+                        .lock()
+                        .unwrap()
+                        .staging_belt
+                        .write(&device_mtl, data)?;
                     belt_slices.push((buf, off));
                     // Slow-path WriteBuffer opens a blit encoder.
                     would_have_gpu_work = true;
@@ -931,11 +946,13 @@ fn stage_uploads(
                 if data.is_empty() {
                     continue;
                 }
-                let sc = state
+                let sc_arc = state
                     .contexts
-                    .get_mut(&ctx)
+                    .get(&ctx)
                     .context("stage_uploads: invalid context handle")?;
-                let entry = sc
+                let entry = sc_arc
+                    .lock()
+                    .unwrap()
                     .texture_staging_pool
                     .acquire(&device_mtl, data.len() as u64)?;
                 unsafe {
@@ -1023,7 +1040,7 @@ pub(super) fn submit(
     let signal_value = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
         ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
@@ -1034,6 +1051,8 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_waiter
         .clone();
 
@@ -1072,18 +1091,33 @@ pub(super) fn submit(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_event
         .clone();
     command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
+
+    // Clone queue_lock before commit so we hold only the per-device queue lock
+    // during the actual enqueue — not all of MetalState.
+    let queue_lock = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .queue_lock
+        .clone();
 
     tracing::debug!(
         "[mtl.cb_commit] kind=compute signal_value={signal_value} queue=command_queue commands={n}",
         n = commands.len()
     );
-    command_buffer_ref.commit();
+    {
+        let _queue_guard = queue_lock.lock().unwrap();
+        command_buffer_ref.commit();
+    }
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.staging_belt.finish(signal_value);
         sc.texture_staging_pool
             .release(signal_value, texture_scratches);
@@ -1094,13 +1128,14 @@ pub(super) fn submit(
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
         sc.deletion_queue.process_up_to(ctx_signaled);
     }
     {
         let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
             maybe_log_mem_diag(ld);
         }
@@ -1254,7 +1289,7 @@ pub(super) fn submit_graph(
     let signal_value = {
         let ld = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
         ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
@@ -1265,6 +1300,8 @@ pub(super) fn submit_graph(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_waiter
         .clone();
 
@@ -1296,14 +1333,28 @@ pub(super) fn submit_graph(
         .contexts
         .get(&ctx)
         .context("Invalid context handle")?
+        .lock()
+        .unwrap()
         .timeline_event
         .clone();
     command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
 
-    command_buffer_ref.commit();
+    // Clone queue_lock before commit so we hold only the per-device queue lock
+    // during the actual enqueue — not all of MetalState.
+    let queue_lock = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .queue_lock
+        .clone();
+    {
+        let _queue_guard = queue_lock.lock().unwrap();
+        command_buffer_ref.commit();
+    }
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         sc.staging_belt.finish(signal_value);
         sc.texture_staging_pool
             .release(signal_value, texture_scratches);
@@ -1314,13 +1365,14 @@ pub(super) fn submit_graph(
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc) = state.contexts.get_mut(&ctx) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
         sc.deletion_queue.process_up_to(ctx_signaled);
     }
     {
         let retired = super::context::device_retired(state, device_handle);
-        if let Some(ld) = state.devices.get_mut(&device_handle) {
+        if let Some(ld) = state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
             maybe_log_mem_diag(ld);
         }
@@ -1374,9 +1426,13 @@ fn record_render_pass_to_buffer(
     let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
     logical_device
         .heap_allocator
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     logical_device
         .texture_heap
+        .lock()
+        .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     for buf_state in state.buffers.values() {
         if buf_state.device_handle == device_handle {

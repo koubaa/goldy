@@ -22,10 +22,15 @@ fn allocate_mtl_texture(
     {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         // Attempt 1: fast path.
-        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        if let Some(tex) = logical_device
+            .texture_heap
+            .lock()
+            .unwrap()
+            .allocate(descriptor)
+        {
             return Ok(tex);
         }
     }
@@ -36,17 +41,26 @@ fn allocate_mtl_texture(
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.texture_heap.compact_overflow();
+        logical_device
+            .texture_heap
+            .lock()
+            .unwrap()
+            .compact_overflow();
     }
     {
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
-        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        if let Some(tex) = logical_device
+            .texture_heap
+            .lock()
+            .unwrap()
+            .allocate(descriptor)
+        {
             return Ok(tex);
         }
     }
@@ -65,11 +79,12 @@ fn allocate_mtl_texture(
         let retired = super::context::device_retired(state, device_handle);
         let logical_device = state
             .devices
-            .get_mut(&device_handle)
+            .get(&device_handle)
             .context("Invalid device handle")?;
         logical_device.process_deletion_queue_up_to(retired);
-        logical_device.texture_heap.compact_overflow();
-        if let Some(tex) = logical_device.texture_heap.allocate(descriptor) {
+        let mut th = logical_device.texture_heap.lock().unwrap();
+        th.compact_overflow();
+        if let Some(tex) = th.allocate(descriptor) {
             return Ok(tex);
         }
     }
@@ -403,7 +418,7 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
         // timeline_scheduled_max.
         let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
         let slot_barrier = if gpu_idle { None } else { Some(barrier) };
-        if let Some(device) = state.devices.get_mut(&device_handle) {
+        if let Some(device) = state.devices.get(&device_handle) {
             let mut ledger = device.ledger.lock().unwrap();
             ledger.resource_registry.unregister_texture(texture_handle);
             if !texture.slot_owned_externally {
@@ -426,13 +441,21 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
         // reclamation context is installed on the current thread.
         let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         if let Some(h) = ctx_h {
-            if let Some(sc) = state.contexts.get_mut(&h) {
-                sc.deletion_queue.queue(barrier, deletion);
+            if let Some(sc_arc) = state.contexts.get(&h) {
+                sc_arc
+                    .lock()
+                    .unwrap()
+                    .deletion_queue
+                    .queue(barrier, deletion);
                 return;
             }
         }
-        if let Some(device) = state.devices.get_mut(&device_handle) {
-            device.deletion_queue.queue(barrier, deletion);
+        if let Some(device) = state.devices.get(&device_handle) {
+            device
+                .deletion_queue
+                .lock()
+                .unwrap()
+                .queue(barrier, deletion);
         }
     }
 }
