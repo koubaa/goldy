@@ -117,6 +117,9 @@ pub(super) fn create(
     // slot that the GPU is concurrently reading (see module-level doc comment).
     let bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| {
         logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .reserve_storage_image_slot()
     });
@@ -176,6 +179,9 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
             let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             for &local in &slot_arr {
                 logical_device
+                    .ledger
+                    .lock()
+                    .unwrap()
                     .resource_registry
                     .release_storage_image_slot(local, slot_barrier);
             }
@@ -754,6 +760,9 @@ fn register_surface_texture(
             .context("Device no longer valid")?;
 
         logical_device
+            .ledger
+            .lock()
+            .unwrap()
             .resource_registry
             .bind_storage_image_slot(handle, bindless_slot);
         let global = ResourceRegistry::storage_image_global_index(bindless_slot);
@@ -816,7 +825,12 @@ fn register_surface_texture(
 fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle) {
     if let Some(tex_state) = state.textures.remove(&tex_handle) {
         if let Some(device) = state.devices.get_mut(&tex_state.device_handle) {
-            device.resource_registry.unregister_texture(tex_handle);
+            device
+                .ledger
+                .lock()
+                .unwrap()
+                .resource_registry
+                .unregister_texture(tex_handle);
         }
         tracing::debug!("Unregistered surface drawable texture {}", tex_handle);
     }

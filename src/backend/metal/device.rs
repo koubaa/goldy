@@ -2,14 +2,14 @@
 
 use super::super::DeviceHandle;
 use super::types::{
-    DeletionQueue, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, ResourceRegistry,
+    DeletionQueue, DeviceLedger, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
     TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Initial heap size for both the buffer and texture heaps.
 ///
@@ -118,7 +118,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
             texture_encoder,
             storage_image_encoder,
             sampler_encoder,
-            resource_registry: ResourceRegistry::new(),
+            ledger: Arc::new(Mutex::new(DeviceLedger::new())),
             timeline_next: Arc::new(AtomicU64::new(1)),
             timeline_scheduled_max: AtomicU64::new(0),
             retired_floor: AtomicU64::new(0),

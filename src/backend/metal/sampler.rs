@@ -38,7 +38,12 @@ pub(super) fn create(
 
     let sampler = logical_device.device.new_sampler(&descriptor);
 
-    let index = logical_device.resource_registry.register_sampler(handle);
+    let index = logical_device
+        .ledger
+        .lock()
+        .unwrap()
+        .resource_registry
+        .register_sampler(handle);
     let encoding_index = ResourceRegistry::sampler_global_index(index);
     tracing::debug!(
         "Registered sampler {} at bindless local={} global={}",
@@ -88,7 +93,12 @@ pub(super) fn create(
 pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
         if let Some(device) = state.devices.get_mut(&sampler.device_handle) {
-            device.resource_registry.unregister_sampler(sampler_handle);
+            device
+                .ledger
+                .lock()
+                .unwrap()
+                .resource_registry
+                .unregister_sampler(sampler_handle);
             let barrier = device
                 .timeline_scheduled_max
                 .load(std::sync::atomic::Ordering::Relaxed);

@@ -698,7 +698,7 @@ pub(crate) struct LogicalDevice {
     /// category; never hardcode 8 when encoding sampler offsets.
     pub sampler_encoder: ArgumentEncoder,
     /// Registry tracking resource indices in the argument buffer
-    pub resource_registry: ResourceRegistry,
+    pub ledger: Arc<Mutex<DeviceLedger>>,
     /// Device-global submission sequence (contexts signal their own shared events).
     pub timeline_next: Arc<AtomicU64>,
     /// Highest device-global seq scheduled on the GPU queue (used for idle / flush).
@@ -713,7 +713,11 @@ impl LogicalDevice {
     /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
     pub(crate) fn process_deletion_queue_up_to(&mut self, completed: u64) {
         self.deletion_queue.process_up_to(completed);
-        self.resource_registry.drain_pending_slots_up_to(completed);
+        self.ledger
+            .lock()
+            .unwrap()
+            .resource_registry
+            .drain_pending_slots_up_to(completed);
     }
 }
 
@@ -1060,6 +1064,30 @@ impl ResourceRegistry {
     #[cfg(test)]
     pub fn free_uniform_buffer_count(&self) -> usize {
         self.uniform_buffer.free_count()
+    }
+}
+
+/// Device-shared descriptor-heap ledger.
+///
+/// Wraps `ResourceRegistry` (the bindless slot allocator + pending-free lists)
+/// behind an `Arc<Mutex<>>` so that submit paths can acquire it independently
+/// of the global backend mutex. The critical section is intentionally minimal:
+/// slot alloc/free only. MTL object encoding and GPU submission stay outside.
+///
+/// Metal does not need `slot_last_seen` / `pending_slot_reclamations` tracking
+/// (those exist on Vulkan/DX12 for multi-referencer slots). Under the
+/// no-cross-context-dependency axiom each slot has a single owning context, so
+/// per-context own-clock reclaim is sufficient; the conservative
+/// `device_retired` GC drain is kept as a safety net (see issue #190).
+pub(crate) struct DeviceLedger {
+    pub resource_registry: ResourceRegistry,
+}
+
+impl DeviceLedger {
+    pub(crate) fn new() -> Self {
+        Self {
+            resource_registry: ResourceRegistry::new(),
+        }
     }
 }
 

@@ -138,13 +138,12 @@ fn insert_buffer_common(
         .get_mut(&device_handle)
         .context("Invalid device handle")?;
 
-    let arg_buffer_index = match access {
-        BufferKind::Broadcast => logical_device
-            .resource_registry
-            .register_uniform_buffer(handle),
-        BufferKind::Scattered => logical_device
-            .resource_registry
-            .register_storage_buffer(handle),
+    let arg_buffer_index = {
+        let mut ledger = logical_device.ledger.lock().unwrap();
+        match access {
+            BufferKind::Broadcast => ledger.resource_registry.register_uniform_buffer(handle),
+            BufferKind::Scattered => ledger.resource_registry.register_storage_buffer(handle),
+        }
     };
     let encoding_index = match access {
         BufferKind::Broadcast => ResourceRegistry::uniform_global_index(arg_buffer_index),
@@ -404,6 +403,9 @@ pub(super) fn create_view(
         .context("Invalid device handle")?;
 
     let arg_buffer_index = logical_device
+        .ledger
+        .lock()
+        .unwrap()
         .resource_registry
         .register_storage_buffer(handle);
 
@@ -598,6 +600,9 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
         if let Some(device) = state.devices.get_mut(&buffer.device_handle) {
             device
+                .ledger
+                .lock()
+                .unwrap()
                 .resource_registry
                 .unregister_buffer(buffer_handle, if gpu_idle { None } else { Some(barrier) });
             device.deletion_queue.queue(
