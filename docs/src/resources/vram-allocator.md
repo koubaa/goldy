@@ -42,34 +42,43 @@ Every `device.alloc_*` call attaches an allocator **deed** and calls `VramAlloca
 
 Goldy's built-in pooling systems (`TexturePool`, `BufferPool`, ekrano's `ResourcePool`) all route through the device's allocator automatically.
 
-## Installing a Custom Allocator
+## Allocation Policy (Tracking and Budget)
 
-Use `Device::with_vram_allocator` to create a device handle that routes all allocations through your allocator:
+Install a [`BudgetPolicy`](../../src/allocation_policy.rs) on the default allocator to track live GPU bytes and optionally enforce a cap:
 
 ```rust
-use goldy::vram_allocator::{TrackingVramAllocator, DefaultVramAllocator};
+use goldy::BudgetPolicy;
 use std::sync::Arc;
 
-let tracking = Arc::new(TrackingVramAllocator::with_budget(
-    Arc::new(DefaultVramAllocator),
-    512 * 1024 * 1024, // 512 MiB budget
-));
+let policy = Arc::new(BudgetPolicy::with_budget(512 * 1024 * 1024)); // 512 MiB budget
+device.set_allocation_policy(policy.clone())?;
 
-let device = device.with_vram_allocator(tracking.clone());
+// All allocations through `device` now update the policy counters.
+println!("GPU memory in use: {} bytes", policy.allocated_bytes());
+```
 
-// All allocations through `device` now go through the tracking allocator.
-// Query live bytes at any time:
-println!("GPU memory in use: {} bytes", tracking.allocated_bytes());
+Use `BudgetPolicy::new()` when you only need telemetry without a hard budget.
+
+## Installing a Custom Allocator
+
+Use `Device::with_vram_allocator` to create a device handle that routes all allocations through a custom [`VramAllocator`] implementation (for example, a backend-native heap strategy):
+
+```rust
+use goldy::vram_allocator::{DefaultVramAllocator, VramAllocator};
+use std::sync::Arc;
+
+let custom = Arc::new(DefaultVramAllocator::new());
+let aliased = device.with_vram_allocator(custom);
 ```
 
 The original device handle is unaffected — only resources created through the new handle go through the custom allocator.
 
 ## Built-in Allocators
 
-| Allocator | Tracking | Budget | Use case |
+| Component | Tracking | Budget | Use case |
 |-----------|----------|--------|----------|
 | `DefaultVramAllocator` | No | No | Zero-overhead passthrough (default) |
-| `TrackingVramAllocator` | Yes | Optional | Memory telemetry, budget enforcement |
+| `BudgetPolicy` on default allocator | Yes | Optional | Memory telemetry, budget enforcement |
 
 ## Implementing a Custom Allocator
 
