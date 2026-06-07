@@ -50,8 +50,8 @@
 //!
 //! The [`Device`] holds an [`Arc<dyn VramAllocator>`]. The default
 //! ([`DefaultVramAllocator`]) delegates directly to the backend and implements the deferred
-//! ring at zero overhead when [`NoPolicy`](crate::allocation_policy::NoPolicy) is installed.
-//! Install a custom [`AllocationPolicy`](crate::allocation_policy::AllocationPolicy) via
+//! ring at zero overhead when [`NoPolicy`] is installed.
+//! Install a custom [`AllocationPolicy`] via
 //! [`Device::set_allocation_policy`](crate::device::Device::set_allocation_policy) for byte
 //! tracking and budget enforcement. Wrap with [`TrackingVramAllocator`] for the legacy alias path.
 //!
