@@ -31,7 +31,7 @@ impl VramObserverId {
     }
 }
 
-/// Allocation event emitted after a deed-holding parcel is created through [`Device::alloc_*`].
+/// Allocation event emitted after a deed-holding parcel is created through the `Device::alloc_*` helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VramAllocEvent {
     /// Reserved backing size (`Buffer::allocated_size` / texture byte size).

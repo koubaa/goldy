@@ -618,9 +618,7 @@ impl Device {
     fn finish_buffer_alloc(&self, mut buf: crate::buffer::Buffer) -> anyhow::Result<crate::buffer::Buffer> {
         if self.inner.resource_hub.has_observers() {
             let event = crate::vram_observer::VramAllocEvent::from_buffer(&buf);
-            if let Err(e) = self.inner.resource_hub.notify_allocated(&event) {
-                return Err(e);
-            }
+            self.inner.resource_hub.notify_allocated(&event)?;
         }
         buf.set_deed(self.parcel_deed());
         Ok(buf)
@@ -629,9 +627,7 @@ impl Device {
     fn finish_texture_alloc(&self, mut tex: crate::texture::Texture) -> anyhow::Result<crate::texture::Texture> {
         if self.inner.resource_hub.has_observers() {
             let event = crate::vram_observer::VramAllocEvent::from_texture(&tex);
-            if let Err(e) = self.inner.resource_hub.notify_allocated(&event) {
-                return Err(e);
-            }
+            self.inner.resource_hub.notify_allocated(&event)?;
         }
         tex.set_deed(self.parcel_deed());
         Ok(tex)

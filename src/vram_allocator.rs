@@ -153,7 +153,7 @@ pub enum ParcelType {
 /// memory budgets, placement-heap strategies, and telemetry without changing call sites.
 ///
 /// Methods take `&self` and must be internally synchronized (the trait is `Send + Sync`).
-/// Use [`AtomicI64`] / [`AtomicU64`](std::sync::atomic::AtomicU64) for lock-free counters,
+/// Use [`AtomicI64`](std::sync::atomic::AtomicI64) / [`AtomicU64`](std::sync::atomic::AtomicU64) for lock-free counters,
 /// or a `Mutex` for more complex state.
 pub trait VramAllocator: Send + Sync {
     /// Allocate a GPU buffer.
