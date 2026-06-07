@@ -300,7 +300,6 @@ impl Adapter {
                 adapter: self.clone(),
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                resource_hub: crate::vram_observer::ResourceHub::new(),
                 owns_backend_device: true,
             }),
         })
@@ -426,7 +425,6 @@ pub(crate) struct DeviceInner {
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
     vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
-    resource_hub: Arc<crate::vram_observer::ResourceHub>,
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
@@ -581,54 +579,29 @@ impl Device {
                 adapter: self.inner.adapter.clone(),
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
-                resource_hub: Arc::clone(&self.inner.resource_hub),
                 owns_backend_device: false,
             }),
         }
     }
 
-    /// Register an opt-in VRAM observer (telemetry, budget enforcement, etc.).
+    /// Install an [`AllocationPolicy`](crate::allocation_policy::AllocationPolicy) on the
+    /// device's [`DefaultVramAllocator`](crate::vram_allocator::DefaultVramAllocator).
     ///
-    /// When no observers are registered, [`Device::alloc_buffer`] / [`Device::alloc_texture`]
-    /// skip observer notification on the hot path.
-    pub fn add_vram_observer(
-        &self,
-        observer: Arc<dyn crate::vram_observer::VramObserver>,
-    ) -> crate::vram_observer::VramObserverId {
-        self.inner.resource_hub.add_observer(observer)
+    /// Returns `true` when the policy was accepted.
+    pub fn set_allocation_policy(&self, policy: Arc<dyn crate::allocation_policy::AllocationPolicy>) -> bool {
+        self.inner.vram_allocator.set_allocation_policy(policy)
     }
 
-    /// Remove a previously registered VRAM observer. Returns `false` if `id` was not found.
-    pub fn remove_vram_observer(&self, id: crate::vram_observer::VramObserverId) -> bool {
-        self.inner.resource_hub.remove_observer(id)
-    }
-
-    /// Returns `true` when at least one VRAM observer is registered.
-    pub fn has_vram_observers(&self) -> bool {
-        self.inner.resource_hub.has_observers()
-    }
-
-    fn parcel_deed(&self) -> crate::vram_observer::ParcelDeed {
-        crate::vram_observer::ParcelDeed {
-            hub: Arc::downgrade(&self.inner.resource_hub),
-            allocator: Arc::downgrade(&self.inner.vram_allocator),
-        }
+    fn parcel_deed(&self) -> crate::vram_allocator::ParcelDeed {
+        crate::vram_allocator::ParcelDeed::new(Arc::downgrade(&self.inner.vram_allocator))
     }
 
     fn finish_buffer_alloc(&self, mut buf: crate::buffer::Buffer) -> anyhow::Result<crate::buffer::Buffer> {
-        if self.inner.resource_hub.has_observers() {
-            let event = crate::vram_observer::VramAllocEvent::from_buffer(&buf);
-            self.inner.resource_hub.notify_allocated(&event)?;
-        }
         buf.set_deed(self.parcel_deed());
         Ok(buf)
     }
 
     fn finish_texture_alloc(&self, mut tex: crate::texture::Texture) -> anyhow::Result<crate::texture::Texture> {
-        if self.inner.resource_hub.has_observers() {
-            let event = crate::vram_observer::VramAllocEvent::from_texture(&tex);
-            self.inner.resource_hub.notify_allocated(&event)?;
-        }
         tex.set_deed(self.parcel_deed());
         Ok(tex)
     }
@@ -1068,7 +1041,6 @@ impl Device {
                 adapter,
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
-                resource_hub: crate::vram_observer::ResourceHub::new(),
                 owns_backend_device: true,
             }),
         })

@@ -7,8 +7,7 @@
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
 use crate::types::{ResourceAccess, ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
-use crate::vram_allocator::ParcelType;
-use crate::vram_observer::{ParcelDeed, VramFreeEvent};
+use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -384,11 +383,7 @@ impl Drop for Texture {
         }
         if let Some(deed) = self.deed.as_ref() {
             let byte_size = self.byte_size() as u64;
-            deed.notify_freed(&VramFreeEvent {
-                reserved: byte_size,
-                committed: byte_size,
-                kind: ParcelType::Texture,
-            });
+            deed.notify_freed(byte_size, byte_size, ParcelType::Texture);
         }
     }
 }

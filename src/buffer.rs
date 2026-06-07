@@ -3,8 +3,7 @@
 use crate::backend::{BufferHandle, GpuBackend};
 use crate::device::Device;
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
-use crate::vram_allocator::ParcelType;
-use crate::vram_observer::{ParcelDeed, VramFreeEvent};
+use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -482,11 +481,7 @@ impl Drop for Buffer {
         let mut backend = self.backend.lock().unwrap();
         backend.destroy_buffer(self.handle);
         if let Some(deed) = self.deed.as_ref() {
-            deed.notify_freed(&VramFreeEvent {
-                reserved: self.allocated_size,
-                committed: self.size,
-                kind: ParcelType::Buffer,
-            });
+            deed.notify_freed(self.allocated_size, self.size, ParcelType::Buffer);
         }
     }
 }
