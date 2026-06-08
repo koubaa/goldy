@@ -68,7 +68,7 @@ pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferE
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
 pub use signal::{OversubscribedReason, Signal};
-pub use timeline::TimelineValue;
+pub use timeline::{Epoch, ReferenceTable, TimelineValue};
 
 pub use backend::GraphCommand;
 pub use backend::{BufferHeapStats, TextureHeapStats};

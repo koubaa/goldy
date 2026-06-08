@@ -43,6 +43,9 @@ pub struct Frame {
     /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
     /// submit_compute can push to it via &self without requiring &mut Frame.
     keepalive: Mutex<DeferredPayload>,
+    /// Parcel stamp cells moved from a [`TaskGraph`] at [`Surface::submit_graph`] time;
+    /// applied at [`Self::submit_frame`].
+    stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
 }
 
 impl Surface {
@@ -145,6 +148,7 @@ impl Surface {
             presented: false,
             submit_tv: None,
             keepalive: Mutex::new(DeferredPayload::new()),
+            stamp_targets: Vec::new(),
         })
     }
 
@@ -274,7 +278,7 @@ impl Surface {
         }
 
         // ── Step 5: deferred surface acquire ─────────────────────────────────
-        let frame = {
+        let mut frame = {
             let _tz = tracy_zone!("surface.deferred_acquire");
             self.begin()?
         };
@@ -306,6 +310,7 @@ impl Surface {
             backend.record_gpu_work(&frame.token, &final_cmds)?;
         }
 
+        frame.stamp_targets = graph.take_stamp_targets();
         Ok(frame)
     }
 
@@ -314,7 +319,7 @@ impl Surface {
     /// This preserves `SwapchainOutput` as an abstract graph resource while allowing callers to
     /// request the WSI image at the beginning of frame recording. Early partitions still run before
     /// the swapchain-touching partition; the late partition is resolved against `frame`.
-    pub fn submit_graph_to_frame(&self, graph: &mut TaskGraph, frame: Frame) -> Result<Frame> {
+    pub fn submit_graph_to_frame(&self, graph: &mut TaskGraph, mut frame: Frame) -> Result<Frame> {
         let _tz = tracy_zone!("surface.submit_graph_to_frame");
 
         if frame.token.surface != self.handle {
@@ -381,6 +386,7 @@ impl Surface {
             backend.record_gpu_work(&frame.token, &final_cmds)?;
         }
 
+        frame.stamp_targets = graph.take_stamp_targets();
         Ok(frame)
     }
 
@@ -527,6 +533,15 @@ impl Frame {
         }
         let mut backend = self.backend.lock().unwrap();
         let tv = backend.submit_frame(&self.token)?;
+        if !self.stamp_targets.is_empty() {
+            crate::task_graph::apply_stamp_targets(
+                &self.stamp_targets,
+                self.ctx_handle,
+                &self.context.device().inner,
+                tv,
+            );
+            self.context.advance_high_water_timeline(tv);
+        }
         self.submit_tv = Some(tv);
         Ok(tv)
     }
@@ -860,5 +875,81 @@ mod tests {
         let surface = Surface::new(&ctx, &window).unwrap();
 
         let _frame = surface.begin().unwrap();
+    }
+
+    #[test]
+    fn submit_graph_stamps_bound_parcel_at_submit_frame() {
+        use std::sync::Arc;
+
+        use crate::compute::ComputePipeline;
+        use crate::retained_pool::RetainedPool;
+        use crate::shader::ShaderModule;
+        use crate::task_graph::NodeAccess;
+        use crate::types::{BufferFlags, BufferKind, ResourceAccess};
+
+        let device = Arc::new(create_test_device());
+        let ctx = device.create_context().unwrap();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&ctx, &window).unwrap();
+
+        let mut pool = RetainedPool::new(device.clone());
+        let parcel = pool
+            .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .unwrap();
+        assert!(parcel.last_referenced().is_empty());
+
+        let shader = ShaderModule::from_slang(&device, "void main() {}").unwrap();
+        let pipeline = ComputePipeline::new(&device, &shader).unwrap();
+
+        let mut graph = TaskGraph::new();
+        let sc = graph.declare_swapchain_output();
+        graph
+            .node("fine", &pipeline)
+            .bind_parcel(&parcel, ResourceAccess::ReadWrite)
+            .bind_swapchain_output(sc, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let mut frame = surface.submit_graph(&mut graph).unwrap();
+        let tv = frame.submit_frame().unwrap();
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
+        let _ = frame.present();
+    }
+
+    #[test]
+    fn submit_graph_to_frame_stamps_bound_parcel_at_submit_frame() {
+        use std::sync::Arc;
+
+        use crate::compute::ComputePipeline;
+        use crate::retained_pool::RetainedPool;
+        use crate::shader::ShaderModule;
+        use crate::task_graph::NodeAccess;
+        use crate::types::{BufferFlags, BufferKind, ResourceAccess};
+
+        let device = Arc::new(create_test_device());
+        let ctx = device.create_context().unwrap();
+        let window = MockWindow::new(800, 600);
+        let surface = Surface::new(&ctx, &window).unwrap();
+
+        let mut pool = RetainedPool::new(device.clone());
+        let parcel = pool
+            .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
+            .unwrap();
+
+        let shader = ShaderModule::from_slang(&device, "void main() {}").unwrap();
+        let pipeline = ComputePipeline::new(&device, &shader).unwrap();
+
+        let mut graph = TaskGraph::new();
+        let sc = graph.declare_swapchain_output();
+        graph
+            .node("fine", &pipeline)
+            .bind_parcel(&parcel, ResourceAccess::ReadWrite)
+            .bind_swapchain_output(sc, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let acquired = surface.begin().unwrap();
+        let mut frame = surface.submit_graph_to_frame(&mut graph, acquired).unwrap();
+        let tv = frame.submit_frame().unwrap();
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
+        let _ = frame.present();
     }
 }
