@@ -14,12 +14,17 @@ FetchContent_MakeAvailable(glfw)
 add_executable(triangle triangle.cpp)
 target_link_libraries(triangle PRIVATE goldy::goldy glfw)
 
+add_executable(game_of_life game_of_life.cpp)
+target_link_libraries(game_of_life PRIVATE goldy::goldy glfw)
+
 if(APPLE)
     set_source_files_properties(triangle.cpp PROPERTIES LANGUAGE OBJCXX)
+    set_source_files_properties(game_of_life.cpp PROPERTIES LANGUAGE OBJCXX)
     target_link_libraries(triangle PRIVATE "-framework Cocoa" "-framework QuartzCore")
+    target_link_libraries(game_of_life PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
 
-set(GOLDY_EXAMPLES triangle)
+set(GOLDY_EXAMPLES triangle game_of_life)
 
 # Platform-specific shared library handling for all examples
 if(GOLDY_FFI_LIB)

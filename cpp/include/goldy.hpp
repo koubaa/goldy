@@ -1210,6 +1210,59 @@ inline TaskGraph::RenderPass TaskGraph::render_pass(const char* label, const Ren
     return RenderPass(*this, label, target);
 }
 
+inline void TaskGraph::write_buffer(const Buffer& buffer, uint64_t offset, std::span<const uint8_t> data) {
+    detail::throw_on_result(goldy_task_graph_write_buffer(
+        ptr_.get(), buffer.get(), offset, data.data(), data.size()));
+}
+
+inline SurfaceFrame Surface::submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame) {
+    GoldySurfaceFrame* raw = frame.release();
+    detail::throw_on_result(
+        goldy_surface_submit_graph_to_frame(ptr_.get(), graph.get(), raw));
+    return SurfaceFrame(raw);
+}
+
+inline void Surface::present(SurfaceFrame frame) {
+    detail::throw_on_result(goldy_surface_present(ptr_.get(), frame.release()));
+}
+
+// =============================================================================
+// ComputePipeline
+// =============================================================================
+
+/**
+ * @brief A compute shader pipeline.
+ */
+class ComputePipeline {
+public:
+    /**
+     * @brief Create a compute pipeline.
+     * @param device The device.
+     * @param shader The compute shader.
+     * @throws Exception if creation fails.
+     */
+    ComputePipeline(const Device& device, const ShaderModule& shader) {
+        GoldyComputePipeline* ptr = goldy_compute_pipeline_create(device.get(), shader.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    ComputePipeline(const ComputePipeline&) = delete;
+    ComputePipeline& operator=(const ComputePipeline&) = delete;
+    ComputePipeline(ComputePipeline&&) = default;
+    ComputePipeline& operator=(ComputePipeline&&) = default;
+
+    /**
+     * @brief Get raw pointer (for advanced use).
+     */
+    GoldyComputePipeline* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyComputePipeline, detail::ComputePipelineDeleter> ptr_;
+};
+
 /**
  * @brief RAII scope for recording one compute dispatch node on a task graph.
  */
@@ -1271,59 +1324,6 @@ private:
 inline TaskGraph::ComputeNode TaskGraph::compute_node(const char* label, const ComputePipeline& pipeline) {
     return ComputeNode(*this, label, pipeline);
 }
-
-inline void TaskGraph::write_buffer(const Buffer& buffer, uint64_t offset, std::span<const uint8_t> data) {
-    detail::throw_on_result(goldy_task_graph_write_buffer(
-        ptr_.get(), buffer.get(), offset, data.data(), data.size()));
-}
-
-inline SurfaceFrame Surface::submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame) {
-    GoldySurfaceFrame* raw = frame.release();
-    detail::throw_on_result(
-        goldy_surface_submit_graph_to_frame(ptr_.get(), graph.get(), raw));
-    return SurfaceFrame(raw);
-}
-
-inline void Surface::present(SurfaceFrame frame) {
-    detail::throw_on_result(goldy_surface_present(ptr_.get(), frame.release()));
-}
-
-// =============================================================================
-// ComputePipeline
-// =============================================================================
-
-/**
- * @brief A compute shader pipeline.
- */
-class ComputePipeline {
-public:
-    /**
-     * @brief Create a compute pipeline.
-     * @param device The device.
-     * @param shader The compute shader.
-     * @throws Exception if creation fails.
-     */
-    ComputePipeline(const Device& device, const ShaderModule& shader) {
-        GoldyComputePipeline* ptr = goldy_compute_pipeline_create(device.get(), shader.get());
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    ComputePipeline(const ComputePipeline&) = delete;
-    ComputePipeline& operator=(const ComputePipeline&) = delete;
-    ComputePipeline(ComputePipeline&&) = default;
-    ComputePipeline& operator=(ComputePipeline&&) = default;
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyComputePipeline* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyComputePipeline, detail::ComputePipelineDeleter> ptr_;
-};
 
 // =============================================================================
 // ComputeEncoder

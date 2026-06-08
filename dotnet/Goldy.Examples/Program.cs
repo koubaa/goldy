@@ -16,6 +16,11 @@ class Program
             case "headless":
                 TriangleHeadless.Run();
                 break;
+            case "gameoflife":
+            case "game-of-life":
+            case "gol":
+                Goldy.Examples.GameOfLifeWindow.Run();
+                break;
             default:
                 PrintUsage();
                 break;
@@ -31,5 +36,6 @@ class Program
         Console.WriteLine("Available examples:");
         Console.WriteLine("  triangle           - Windowed animated triangle (default)");
         Console.WriteLine("  triangle-headless  - Headless triangle + readback (CI)");
+        Console.WriteLine("  gameoflife         - Windowed Conway's Game of Life (hybrid graph)");
     }
 }

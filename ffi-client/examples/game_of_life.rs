@@ -43,6 +43,13 @@ fn surface_from_window(device: &goldy_ffi_client::Device, window: &Window) -> go
     }
 }
 
+fn demo_frame_limit() -> Option<u32> {
+    std::env::var("GOLDY_DEMO_FRAMES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|n| n.max(1))
+}
+
 fn create_initial_state() -> Vec<u32> {
     let mut cells = vec![0u32; CELL_COUNT];
 
@@ -338,6 +345,12 @@ impl ApplicationHandler for App {
                 }
                 if let Err(e) = self.render_frame() {
                     tracing::error!("Render error: {e}");
+                }
+                if demo_frame_limit().is_some_and(|n| self.frame_count >= n) {
+                    self.window = None;
+                    self.surface = None;
+                    event_loop.exit();
+                    return;
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
