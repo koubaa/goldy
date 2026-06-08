@@ -1,58 +1,22 @@
 //! Headless integration test: clear an offscreen render target via TaskGraph FFI.
 
+mod common;
+
+use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_device_destroy, goldy_get_last_error, goldy_instance_adapter_count, goldy_instance_create,
-    goldy_instance_create_device_for_adapter, goldy_instance_destroy, goldy_instance_get_adapter,
-    goldy_render_target_buffer_size, goldy_render_target_create, goldy_render_target_destroy,
-    goldy_render_target_read_to_buffer, goldy_task_graph_clear, goldy_task_graph_create,
-    goldy_task_graph_declare_swapchain_output, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_finish,
-    GoldyAdapterInfo, GoldyColor, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyResult, GoldyTextureFormat,
+    goldy_device_destroy, goldy_instance_destroy, goldy_render_target_buffer_size,
+    goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
+    goldy_task_graph_clear, goldy_task_graph_create, goldy_task_graph_declare_swapchain_output,
+    goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
+    goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_finish, GoldyColor, GoldyResult,
+    GoldyTextureFormat,
 };
-use std::ffi::CStr;
-
-fn last_ffi_message() -> String {
-    unsafe {
-        let p = goldy_get_last_error();
-        if p.is_null() {
-            return "(no message)".into();
-        }
-        CStr::from_ptr(p).to_string_lossy().into_owned()
-    }
-}
-
-unsafe fn request_device(instance: *const GoldyInstance) -> *mut GoldyDevice {
-    let count = goldy_instance_adapter_count(instance);
-    let mut best_id: u32 = 0;
-    for i in 0..count {
-        let mut info = GoldyAdapterInfo {
-            id: 0,
-            device_type: GoldyDeviceType::Other,
-            name: [0; 256],
-            vendor: [0; 64],
-        };
-        if goldy_instance_get_adapter(instance, i, &mut info) != GoldyResult::Ok {
-            continue;
-        }
-        if i == 0 {
-            best_id = info.id;
-        }
-        if info.device_type == GoldyDeviceType::DiscreteGpu {
-            best_id = info.id;
-            break;
-        }
-    }
-    goldy_instance_create_device_for_adapter(instance, best_id)
-}
+use std::ffi::CString;
 
 #[test]
 fn task_graph_clear_render_target_readback_is_red() {
     unsafe {
-        let instance = goldy_instance_create();
-        assert!(!instance.is_null(), "{}", last_ffi_message());
-
-        let device = request_device(instance);
-        assert!(!device.is_null(), "{}", last_ffi_message());
+        let (instance, device) = open_device();
 
         let target = goldy_render_target_create(device, 2, 2, GoldyTextureFormat::Rgba8Unorm);
         assert!(!target.is_null(), "{}", last_ffi_message());
@@ -60,7 +24,7 @@ fn task_graph_clear_render_target_readback_is_red() {
         let graph = goldy_task_graph_create();
         assert!(!graph.is_null());
 
-        let label = std::ffi::CString::new("clear_red").unwrap();
+        let label = CString::new("clear_red").unwrap();
         assert_eq!(
             goldy_task_graph_render_pass_begin(graph, label.as_ptr(), target),
             GoldyResult::Ok,

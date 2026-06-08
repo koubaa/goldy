@@ -319,6 +319,49 @@ pub unsafe fn goldy_task_graph_dispatch(graph: *mut GoldyTaskGraph, device: *con
     (lib().goldy_task_graph_dispatch)(graph, device)
 }
 
+pub unsafe fn goldy_task_graph_compute_node_begin(
+    graph: *mut GoldyTaskGraph,
+    label: *const std::ffi::c_char,
+    pipeline: *const GoldyComputePipeline,
+) -> GoldyResult {
+    (lib().goldy_task_graph_compute_node_begin)(graph, label, pipeline)
+}
+
+pub unsafe fn goldy_task_graph_compute_node_bind_buffer(
+    graph: *mut GoldyTaskGraph,
+    buffer: *const GoldyBuffer,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    (lib().goldy_task_graph_compute_node_bind_buffer)(graph, buffer, access)
+}
+
+pub unsafe fn goldy_task_graph_compute_node_bind_resources_raw(
+    graph: *mut GoldyTaskGraph,
+    indices: *const u32,
+    count: u32,
+) -> GoldyResult {
+    (lib().goldy_task_graph_compute_node_bind_resources_raw)(graph, indices, count)
+}
+
+pub unsafe fn goldy_task_graph_compute_node_dispatch(
+    graph: *mut GoldyTaskGraph,
+    workgroups_x: u32,
+    workgroups_y: u32,
+    workgroups_z: u32,
+) -> GoldyResult {
+    (lib().goldy_task_graph_compute_node_dispatch)(graph, workgroups_x, workgroups_y, workgroups_z)
+}
+
+pub unsafe fn goldy_task_graph_write_buffer(
+    graph: *mut GoldyTaskGraph,
+    buffer: *const GoldyBuffer,
+    offset: u64,
+    data: *const u8,
+    size: usize,
+) -> GoldyResult {
+    (lib().goldy_task_graph_write_buffer)(graph, buffer, offset, data, size)
+}
+
 pub unsafe fn goldy_task_graph_render_pass_begin(
     graph: *mut GoldyTaskGraph,
     label: *const std::ffi::c_char,

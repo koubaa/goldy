@@ -143,6 +143,12 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --features vulkan --test '*'
 
+      - name: Run goldy-ffi integration tests
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test -p goldy-ffi --features vulkan
+
   # Full GPU tests using native Metal backend (macOS)
   test-metal:
     name: Metal Tests (macOS)
@@ -196,6 +202,12 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --test '*'
+
+      - name: Run goldy-ffi integration tests
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test -p goldy-ffi
 
   # Build documentation
   docs:
@@ -310,6 +322,13 @@ jobs:
           GOLDY_DX12_ALLOW_WARP: "1"
           GOLDY_DX12_NO_DEBUG: "1"
         run: cargo nextest run --features dx12 --test-threads=1
+
+      - name: Run goldy-ffi integration tests (DX12 + WARP)
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+        run: cargo nextest run -p goldy-ffi --features dx12 --test-threads=1
 
   # Python bindings build and test (Linux with lavapipe)
   python-linux:

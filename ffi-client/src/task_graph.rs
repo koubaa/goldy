@@ -1,5 +1,7 @@
 use crate::buffer::Buffer;
-use crate::error::{expect_ok, non_null_expect};
+use crate::compute::ComputePipeline;
+use crate::device::Device;
+use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::sys::{self, GoldySwapchainOutput, GoldyTaskGraph};
@@ -33,10 +35,39 @@ impl TaskGraph {
         });
     }
 
+    /// Analyze the graph, submit, and block until complete.
+    pub fn dispatch(&mut self, device: &Device) -> Result<()> {
+        check(unsafe { sys::goldy_task_graph_dispatch(self.ptr, device.as_ptr()) })
+    }
+
+    /// Add a CPU→GPU buffer upload node to the graph.
+    pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: &[u8]) -> Result<()> {
+        check(unsafe {
+            sys::goldy_task_graph_write_buffer(
+                self.ptr,
+                buffer.as_ptr(),
+                offset,
+                data.as_ptr(),
+                data.len(),
+            )
+        })
+    }
+
     pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         let label = CString::new(label).expect("render pass label contains interior null byte");
         expect_ok(unsafe { sys::goldy_task_graph_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr()) });
         RenderPassBuilder {
+            graph: self,
+            active: true,
+        }
+    }
+
+    pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
+        let label = CString::new(label).expect("compute node label contains interior null byte");
+        expect_ok(unsafe {
+            sys::goldy_task_graph_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr())
+        });
+        ComputeNodeBuilder {
             graph: self,
             active: true,
         }
@@ -122,5 +153,47 @@ impl Drop for RenderPassBuilder<'_> {
             let _ = unsafe { sys::goldy_task_graph_render_pass_finish(self.graph.ptr) };
             self.active = false;
         }
+    }
+}
+
+/// Builder for recording one compute dispatch node on a task graph.
+pub struct ComputeNodeBuilder<'a> {
+    graph: &'a mut TaskGraph,
+    active: bool,
+}
+
+impl ComputeNodeBuilder<'_> {
+    pub fn bind_buffer(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_compute_node_bind_buffer(self.graph.ptr, buffer.as_ptr(), access.into())
+        });
+        self
+    }
+
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_compute_node_bind_resources_raw(
+                self.graph.ptr,
+                indices.as_ptr(),
+                indices.len() as u32,
+            )
+        });
+        self
+    }
+
+    pub fn dispatch(mut self, workgroups_x: u32, workgroups_y: u32, workgroups_z: u32) {
+        if self.active {
+            expect_ok(unsafe {
+                sys::goldy_task_graph_compute_node_dispatch(self.graph.ptr, workgroups_x, workgroups_y, workgroups_z)
+            });
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for ComputeNodeBuilder<'_> {
+    fn drop(&mut self) {
+        debug_assert!(!self.active, "ComputeNodeBuilder dropped without dispatch()");
+        self.active = false;
     }
 }

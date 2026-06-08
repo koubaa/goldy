@@ -81,8 +81,13 @@ pub(crate) struct GoldyFfi {
     pub goldy_task_graph_copy_render_target_to_swapchain: FnGoldyTaskGraphCopyRenderTargetToSwapchain,
     pub goldy_task_graph_create: FnGoldyTaskGraphCreate,
     pub goldy_task_graph_declare_swapchain_output: FnGoldyTaskGraphDeclareSwapchainOutput,
+    pub goldy_task_graph_compute_node_begin: FnGoldyTaskGraphComputeNodeBegin,
+    pub goldy_task_graph_compute_node_bind_buffer: FnGoldyTaskGraphComputeNodeBindBuffer,
+    pub goldy_task_graph_compute_node_bind_resources_raw: FnGoldyTaskGraphComputeNodeBindResourcesRaw,
+    pub goldy_task_graph_compute_node_dispatch: FnGoldyTaskGraphComputeNodeDispatch,
     pub goldy_task_graph_destroy: FnGoldyTaskGraphDestroy,
     pub goldy_task_graph_dispatch: FnGoldyTaskGraphDispatch,
+    pub goldy_task_graph_write_buffer: FnGoldyTaskGraphWriteBuffer,
     pub goldy_task_graph_render_pass_begin: FnGoldyTaskGraphRenderPassBegin,
     pub goldy_task_graph_render_pass_bind_buffer: FnGoldyTaskGraphRenderPassBindBuffer,
     pub goldy_task_graph_render_pass_bind_resources: FnGoldyTaskGraphRenderPassBindResources,
@@ -212,8 +217,25 @@ impl GoldyFfi {
                 "goldy_task_graph_declare_swapchain_output",
                 FnGoldyTaskGraphDeclareSwapchainOutput
             ),
+            goldy_task_graph_compute_node_begin: sym!(
+                "goldy_task_graph_compute_node_begin",
+                FnGoldyTaskGraphComputeNodeBegin
+            ),
+            goldy_task_graph_compute_node_bind_buffer: sym!(
+                "goldy_task_graph_compute_node_bind_buffer",
+                FnGoldyTaskGraphComputeNodeBindBuffer
+            ),
+            goldy_task_graph_compute_node_bind_resources_raw: sym!(
+                "goldy_task_graph_compute_node_bind_resources_raw",
+                FnGoldyTaskGraphComputeNodeBindResourcesRaw
+            ),
+            goldy_task_graph_compute_node_dispatch: sym!(
+                "goldy_task_graph_compute_node_dispatch",
+                FnGoldyTaskGraphComputeNodeDispatch
+            ),
             goldy_task_graph_destroy: sym!("goldy_task_graph_destroy", FnGoldyTaskGraphDestroy),
             goldy_task_graph_dispatch: sym!("goldy_task_graph_dispatch", FnGoldyTaskGraphDispatch),
+            goldy_task_graph_write_buffer: sym!("goldy_task_graph_write_buffer", FnGoldyTaskGraphWriteBuffer),
             goldy_task_graph_render_pass_begin: sym!(
                 "goldy_task_graph_render_pass_begin",
                 FnGoldyTaskGraphRenderPassBegin

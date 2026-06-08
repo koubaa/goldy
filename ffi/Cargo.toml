@@ -31,10 +31,6 @@ raw-window-handle = "0.6"
 [dev-dependencies]
 bytemuck = { version = "1.21", features = ["derive"] }
 
-[[test]]
-name = "task_graph_clear"
-path = "tests/task_graph_clear.rs"
-
 [build-dependencies]
 # C header generation
 cbindgen = "0.29"
