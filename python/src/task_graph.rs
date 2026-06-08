@@ -7,7 +7,9 @@ use crate::pipeline::PyRenderPipeline;
 use crate::render_target::PyRenderTarget;
 use crate::types::{PyColor, PyIndexFormat, PyNodeAccess};
 use goldy::task_graph::{RenderPassRecord, SwapchainOutputHandle, TaskGraph};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 use std::cell::RefCell;
 
 /// Opaque token from [`PyTaskGraph::declare_swapchain_output`].
@@ -63,6 +65,31 @@ impl PyTaskGraph {
         pass.commit(&mut *self.inner.borrow_mut());
         Ok(())
     }
+}
+
+/// Parse a Python `range` or `slice` into `(start, count)` with step 1.
+fn parse_index_range(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<(u32, u32)> {
+    let start: i64 = match obj.getattr("start") {
+        Ok(v) => v.extract().unwrap_or(0),
+        Err(_) => 0,
+    };
+    let stop: i64 = obj
+        .getattr("stop")
+        .map_err(|_| PyValueError::new_err(format!("{name} must be a range or slice")))?
+        .extract()?;
+    let step: i64 = match obj.getattr("step") {
+        Ok(v) => v.extract().unwrap_or(1),
+        Err(_) => 1,
+    };
+    if step != 1 {
+        return Err(PyValueError::new_err(format!("{name} range step must be 1")));
+    }
+    if start < 0 || stop < start {
+        return Err(PyValueError::new_err(format!(
+            "invalid {name} range: start={start}, stop={stop}"
+        )));
+    }
+    Ok((start as u32, (stop - start) as u32))
 }
 
 #[pymethods]
@@ -147,95 +174,172 @@ pub struct PyRenderPass {
 
 #[pymethods]
 impl PyRenderPass {
-    fn bind_buffer(&self, py: Python<'_>, buffer: &PyBuffer, access: PyNodeAccess) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn bind_buffer<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.bind_buffer(buffer.inner.as_ref(), access.into());
-        })
+        })?;
+        Ok(slf)
     }
 
-    fn clear(&self, py: Python<'_>, color: &PyColor) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn clear<'py>(slf: PyRef<'py, Self>, py: Python<'py>, color: &PyColor) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.clear(color.inner);
-        })
+        })?;
+        Ok(slf)
     }
 
-    fn clear_depth(&self, py: Python<'_>, depth: f32) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn clear_depth<'py>(slf: PyRef<'py, Self>, py: Python<'py>, depth: f32) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.clear_depth(depth);
-        })
+        })?;
+        Ok(slf)
     }
 
-    fn set_pipeline(&self, py: Python<'_>, pipeline: &PyRenderPipeline) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn set_pipeline<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        pipeline: &PyRenderPipeline,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.set_pipeline(&pipeline.inner);
-        })
+        })?;
+        Ok(slf)
     }
 
-    fn set_vertex_buffer(&self, py: Python<'_>, slot: u32, buffer: &PyBuffer) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn set_vertex_buffer<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        slot: u32,
+        buffer: &PyBuffer,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.set_vertex_buffer(slot, buffer.inner.as_ref());
-        })
+        })?;
+        Ok(slf)
     }
 
     #[pyo3(signature = (slot, buffer, offset))]
-    fn set_vertex_buffer_offset(
-        &self,
-        py: Python<'_>,
+    fn set_vertex_buffer_offset<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
         slot: u32,
         buffer: &PyBuffer,
         offset: u64,
-    ) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.set_vertex_buffer_offset(slot, buffer.inner.as_ref(), offset);
-        })
+        })?;
+        Ok(slf)
     }
 
-    fn set_index_buffer(&self, py: Python<'_>, buffer: &PyBuffer, format: PyIndexFormat) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn set_index_buffer<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        format: PyIndexFormat,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.set_index_buffer(buffer.inner.as_ref(), format.into());
-        })
+        })?;
+        Ok(slf)
     }
 
-    #[pyo3(signature = (first_vertex=0, vertex_count=3, first_instance=0, instance_count=1))]
-    fn draw(
-        &self,
-        py: Python<'_>,
+    /// Draw primitives.
+    ///
+    /// Pass a ``range`` for vertices/instances (e.g. ``draw(range(3))``) or use
+    /// explicit ``first_vertex`` / ``vertex_count`` keyword arguments.
+    #[pyo3(signature = (vertices=None, *, first_vertex=0, vertex_count=None, instances=None, first_instance=0, instance_count=None))]
+    fn draw<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        vertices: Option<Bound<'py, PyAny>>,
         first_vertex: u32,
-        vertex_count: u32,
+        vertex_count: Option<u32>,
+        instances: Option<Bound<'py, PyAny>>,
         first_instance: u32,
-        instance_count: u32,
-    ) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
-            pass.draw(first_vertex, vertex_count, first_instance, instance_count);
-        })
+        instance_count: Option<u32>,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let (fv, vc) = if let Some(v) = vertices {
+            parse_index_range(&v, "vertices")?
+        } else {
+            (first_vertex, vertex_count.unwrap_or(3))
+        };
+        let (fi, ic) = if let Some(i) = instances {
+            parse_index_range(&i, "instances")?
+        } else {
+            (first_instance, instance_count.unwrap_or(1))
+        };
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.draw(fv, vc, fi, ic);
+        })?;
+        Ok(slf)
     }
 
-    #[pyo3(signature = (first_index, index_count, base_vertex=0, first_instance=0, instance_count=1))]
-    fn draw_indexed(
-        &self,
-        py: Python<'_>,
+    /// Draw indexed primitives.
+    ///
+    /// Pass a ``range`` for indices/instances or use explicit count keyword arguments.
+    #[pyo3(signature = (indices=None, *, first_index=0, index_count=None, base_vertex=0, instances=None, first_instance=0, instance_count=None))]
+    fn draw_indexed<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        indices: Option<Bound<'py, PyAny>>,
         first_index: u32,
-        index_count: u32,
+        index_count: Option<u32>,
         base_vertex: i32,
+        instances: Option<Bound<'py, PyAny>>,
         first_instance: u32,
-        instance_count: u32,
-    ) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
-            pass.draw_indexed(first_index, index_count, base_vertex, first_instance, instance_count);
-        })
+        instance_count: Option<u32>,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let (fi, ic) = if let Some(idx) = indices {
+            parse_index_range(&idx, "indices")?
+        } else {
+            (
+                first_index,
+                index_count.ok_or_else(|| {
+                    PyValueError::new_err("draw_indexed requires indices=range(...) or index_count=")
+                })?,
+            )
+        };
+        let (inst_start, inst_count) = if let Some(i) = instances {
+            parse_index_range(&i, "instances")?
+        } else {
+            (first_instance, instance_count.unwrap_or(1))
+        };
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.draw_indexed(fi, ic, base_vertex, inst_start, inst_count);
+        })?;
+        Ok(slf)
     }
 
-    fn draw_fullscreen(&self, py: Python<'_>) -> PyResult<()> {
-        self.graph.borrow(py).with_active_pass(|pass| {
+    fn draw_fullscreen<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.draw_fullscreen();
-        })
+        })?;
+        Ok(slf)
     }
 
-    fn bind_resources(&self, py: Python<'_>, buffers: Vec<PyRef<'_, PyBuffer>>) -> PyResult<()> {
+    fn draw_quads<'py>(slf: PyRef<'py, Self>, py: Python<'py>, count: u32) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.draw_quads(count);
+        })?;
+        Ok(slf)
+    }
+
+    fn bind_resources<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffers: Vec<PyRef<'py, PyBuffer>>,
+    ) -> PyResult<PyRef<'py, Self>> {
         let refs: Vec<&goldy::Buffer> = buffers.iter().map(|b| b.inner.as_ref()).collect();
-        self.graph.borrow(py).with_active_pass(|pass| {
+        slf.graph.borrow(py).with_active_pass(|pass| {
             pass.bind_resources(&refs);
-        })
+        })?;
+        Ok(slf)
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {

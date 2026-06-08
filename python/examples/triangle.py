@@ -62,11 +62,13 @@ def main():
 
     graph = goldy.TaskGraph()
     with graph.render_pass("triangle", target) as rp:
-        rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
-        rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
-        rp.set_pipeline(pipeline)
-        rp.set_vertex_buffer(0, vertex_buffer)
-        rp.draw(vertex_count=3)
+        (
+            rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+            .clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
+            .set_pipeline(pipeline)
+            .set_vertex_buffer(0, vertex_buffer)
+            .draw(range(3))
+        )
 
     graph.dispatch(device)
 
@@ -75,7 +77,7 @@ def main():
     assert pixels.dtype == np.uint8
     assert np.any(pixels[:, :, :3] > 0), "triangle should write non-black pixels"
 
-    print(f"Rendered {width}x{height}, readback OK (max channel={pixels.max()})")
+    print(f"Rendered {width}x{height}, readback OK")
     print("Done!")
 
 

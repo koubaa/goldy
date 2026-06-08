@@ -217,11 +217,13 @@ def test_triangle_via_graph(device):
 
     graph = goldy.TaskGraph()
     with graph.render_pass("triangle", target) as rp:
-        rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
-        rp.clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
-        rp.set_pipeline(pipeline)
-        rp.set_vertex_buffer(0, vertex_buffer)
-        rp.draw(vertex_count=3)
+        (
+            rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+            .clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
+            .set_pipeline(pipeline)
+            .set_vertex_buffer(0, vertex_buffer)
+            .draw(range(3))
+        )
 
     graph.dispatch(device)
     pixels = target.read_to_cpu()
