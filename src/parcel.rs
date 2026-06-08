@@ -122,8 +122,7 @@ impl Drop for BookkeepingGuard {
 
 /// A deed-held GPU parcel (buffer or texture). Gate-free while retained.
 ///
-/// Relinquish by [`crate::retained_pool::RetainedPool::transfer_out`] (stamped for the
-/// transient pool) or by dropping the value (implicit relinquish).
+/// Release by [`crate::retained_pool::RetainedPool::release`] (runtime reclaims when safe) or by dropping the parcel.
 pub struct Parcel {
     storage: ParcelStorage,
     stamp: ParcelStamp,
@@ -285,7 +284,7 @@ impl Parcel {
         }
     }
 
-    /// Release pool bookkeeping so [`Drop`] does not double-decrement after `transfer_out`.
+    /// Release pool bookkeeping so [`Drop`] does not double-decrement after [`RetainedPool::release`].
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
     }

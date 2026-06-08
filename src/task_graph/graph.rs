@@ -1465,11 +1465,11 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: crate::types::ResourceAccess) -> Self {
+    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
         self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
-            access: access.into(),
+            access,
         });
         self
     }
@@ -2703,7 +2703,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -2722,14 +2722,14 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv1 = graph.submit(&ctx).unwrap();
 
         graph.clear();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv2 = graph.submit(&ctx).unwrap();
         assert!(tv2 > tv1);
@@ -2753,8 +2753,8 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&p1, crate::types::ResourceAccess::Write)
-            .bind_parcel(&p2, crate::types::ResourceAccess::Read)
+            .bind_parcel(&p1, NodeAccess::Write)
+            .bind_parcel(&p2, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -2775,7 +2775,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&bound, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&bound, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
         assert_eq!(bound.last_referenced_on(ctx.backend_handle()), Some(tv));
@@ -2794,7 +2794,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
 
@@ -2824,7 +2824,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         graph.clear();
 
@@ -2845,7 +2845,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -2864,7 +2864,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined_and_retain(&mut graph).unwrap();
@@ -2884,7 +2884,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv_a = graph.submit(&ctx_a).unwrap();
 

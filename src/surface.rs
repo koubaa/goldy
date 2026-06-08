@@ -905,7 +905,7 @@ mod tests {
         let sc = graph.declare_swapchain_output();
         graph
             .node("fine", &pipeline)
-            .bind_parcel(&parcel, ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .bind_swapchain_output(sc, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
@@ -942,7 +942,7 @@ mod tests {
         let sc = graph.declare_swapchain_output();
         graph
             .node("fine", &pipeline)
-            .bind_parcel(&parcel, ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .bind_swapchain_output(sc, NodeAccess::Write)
             .dispatch(1, 1, 1);
 

@@ -2,7 +2,7 @@
 //!
 //! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
 //! [`RetainedPool::mosaic`] are the supported ways to create retained parcels. Parcels are
-//! opaque [`Parcel`] values; relinquish via [`RetainedPool::transfer_out`] or by dropping the parcel.
+//! opaque [`Parcel`] values; relinquish via [`RetainedPool::release`] or by dropping the parcel.
 //!
 //! Reuse-gate, transient pool, and backpressure are deferred.
 
@@ -115,9 +115,15 @@ impl RetainedPool {
         }
     }
 
-    /// Relinquish a parcel from the retained pool. The unit moves to the transient seam;
-    /// `ready_after` captures per-context referencing timelines (if any).
-    pub fn transfer_out(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
+    /// Release a held parcel. The runtime reclaims GPU memory when safe; callers
+    /// do not observe timeline tokens.
+    pub fn release(&mut self, ctx: &Context, parcel: Parcel) {
+        drop(self.transfer_out(ctx, parcel));
+    }
+
+    /// Internal release path. Returns stamped metadata for the future transient seam;
+    /// public clients should call [`Self::release`] instead.
+    pub(crate) fn transfer_out(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
         if let Some(home) = parcel.home_device().upgrade() {
             debug_assert!(
                 Arc::ptr_eq(&home, &ctx.device().inner),
@@ -463,7 +469,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("a", &pipeline)
-            .bind_parcel(&parcel, ResourceAccess::Read)
+            .bind_parcel(&parcel, crate::task_graph::NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let binding = graph.ir().nodes[0].bindings[0].resource;
