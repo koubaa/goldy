@@ -139,12 +139,12 @@ void cs_main(Scattered<float> data, ThreadId id) {
 shader = goldy.ShaderModule.from_slang(device, SHADER)
 pipeline = goldy.ComputePipeline(device, shader)
 
-encoder = goldy.ComputeEncoder()
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(pipeline)
-    cp.bind_resources([buffer])
-    cp.dispatch(4, 1, 1)      # 4 workgroups × 64 threads = 256 threads
-encoder.dispatch(device)
+graph = goldy.TaskGraph()
+idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
+    node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+    node.bind_resources_raw([idx])   # 4 workgroups × 64 threads = 256 threads
+graph.dispatch(device)
 ```
 
 ### Ping-Pong Buffers
@@ -157,18 +157,21 @@ buf_b = goldy.Buffer(device, initial_data, goldy.BufferKind.SCATTERED)
 
 use_a = True
 for _ in range(100):
-    encoder = goldy.ComputeEncoder()
-    with encoder.begin_compute_pass() as cp:
-        cp.set_pipeline(pipeline)
-        cp.bind_resources([buf_a, buf_b] if use_a else [buf_b, buf_a])
-        cp.dispatch(workgroups_x, workgroups_y, 1)
-    encoder.dispatch(device)
+    read_buf, write_buf = (buf_a, buf_b) if use_a else (buf_b, buf_a)
+    read_idx = read_buf.resource_index(goldy.ResourceAccess.READ)
+    write_idx = write_buf.resource_index(goldy.ResourceAccess.WRITE)
+    graph = goldy.TaskGraph()
+    with graph.compute_node("step", pipeline, workgroups=(workgroups_x, workgroups_y, 1)) as node:
+        node.bind_buffer(read_buf, goldy.NodeAccess.READ)
+        node.bind_buffer(write_buf, goldy.NodeAccess.WRITE)
+        node.bind_resources_raw([read_idx, write_idx])
+    graph.dispatch(device)
     use_a = not use_a
 ```
 
 ### Combining Compute and Graphics
 
-Hybrid compute + raster workflows use a single `TaskGraph` (see `python/examples/game_of_life.py` and `goldy/examples/game_of_life.rs`). Python exposes both `render_pass` and `compute_node` on `TaskGraph`. Use `ComputeEncoder` only for standalone compute without raster in the same frame.
+Standalone and hybrid compute workflows both use `TaskGraph` (see `python/examples/compute_demo.py`, `python/examples/game_of_life.py`, and `goldy/examples/game_of_life.rs`). Python exposes `render_pass` and `compute_node` on the same graph.
 
 ## Key Differences from Rust
 
@@ -294,17 +297,6 @@ with graph.compute_node("update", compute_pipeline, workgroups=(8, 8, 1)) as nod
 
 ```python
 pipeline = goldy.ComputePipeline(device, shader)
-```
-
-#### `ComputeEncoder`
-
-```python
-encoder = goldy.ComputeEncoder()
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(pipeline)
-    cp.bind_resources([buffer])
-    cp.dispatch(wg_x, wg_y, wg_z)
-encoder.dispatch(device)
 ```
 
 ### Enums

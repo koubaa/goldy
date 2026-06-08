@@ -131,16 +131,17 @@ let particle_buf = device.alloc_buffer_with_data(BufferKind::Scattered, &particl
 let shader = ShaderModule::from_slang(&device, PARTICLE_UPDATE_SOURCE)?;
 let pipeline = ComputePipeline::new(&device, &shader)?;
 
-let mut encoder = ComputeEncoder::new();
-let mut pass = encoder.begin_compute_pass();
-pass.set_pipeline(&pipeline);
-pass.bind_resources_typed(&[
-    params_buf.handle(ResourceAccess::Read).unwrap(),    // slot 0 → Broadcast → SimParams
-    particle_buf.handle(ResourceAccess::Write).unwrap(), // slot 1 → Scattered → Particle
-]);
-pass.dispatch((particle_count + 63) / 64, 1, 1);
-drop(pass);
-encoder.dispatch(&device)?;
+let mut graph = TaskGraph::new();
+graph
+    .node("update", &pipeline)
+    .bind_buffer(&params_buf, NodeAccess::Read)
+    .bind_buffer(&particle_buf, NodeAccess::ReadWrite)
+    .bind_resources_typed(&[
+        params_buf.handle(ResourceAccess::Read).unwrap(),    // slot 0 → Broadcast → SimParams
+        particle_buf.handle(ResourceAccess::Write).unwrap(), // slot 1 → Scattered → Particle
+    ])
+    .dispatch((particle_count + 63) / 64, 1, 1);
+graph.dispatch(&device)?;
 ```
 
 The shader author writes natural function parameters. The Rust side binds handles in declaration order. Goldy handles the rest — slot packing, category validation, and cross-backend descriptor plumbing.

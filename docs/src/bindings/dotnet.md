@@ -230,7 +230,7 @@ public sealed class ComputeNodeScope : IDisposable
 }
 ```
 
-Imperative graphics recording (`RenderPass`, `SurfaceFrame.Render`) was removed. Graphics goes through `TaskGraph`; standalone compute still uses `ComputeEncoder`.
+Graphics and compute both go through `TaskGraph`.
 
 ### RenderTarget
 
@@ -275,20 +275,9 @@ public sealed class ComputePipeline : IDisposable
 {
     public ComputePipeline(Device device, ShaderModule computeShader);
 }
-
-public sealed class ComputeEncoder
-{
-    public ComputeEncoder();
-    public void SetPipeline(ComputePipeline pipeline);
-    public void BindResources(params Buffer[] buffers);
-    public void BindResourcesRaw(uint[] indices);
-    public void Dispatch(uint x, uint y, uint z);
-    public void DispatchIndirect(Buffer buffer, ulong offset);
-    public void ClearBuffer(Buffer buffer, ulong offset, ulong size);
-    public void Dispatch(Device device);     // dispatch and block
-    public ulong Submit(Device device);      // submit, return timeline value
-}
 ```
+
+Record compute via `TaskGraph.ComputeNode` (see `ComputeNodeScope` above). Headless submission uses `TaskGraph.Dispatch`.
 
 ### Texture / Sampler
 
@@ -343,14 +332,6 @@ public struct Color
 }
 ```
 
-### Non-Blocking Submissions
+### Headless vs windowed submission
 
-`ComputeEncoder.Submit` returns a `ulong` device timeline value. Poll or wait on it via `Device.GpuProgress` and `Device.WaitUntil`:
-
-```csharp
-ulong ticket = computeEncoder.Submit(device);
-
-// ... do other work ...
-
-device.WaitUntil(ticket);   // block until the GPU catches up
-```
+`TaskGraph.Dispatch(device)` analyzes the graph, submits GPU work, and blocks until complete. For windowed presentation, build the graph (render passes, compute nodes, optional swapchain blit), then call `Surface.SubmitGraphToFrame` followed by `Surface.Present`.

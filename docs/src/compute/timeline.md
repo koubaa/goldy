@@ -15,7 +15,7 @@ let tv: TimelineValue = graph.submit(&device)?;
 
 This value represents a point on the device's timeline. When the GPU finishes executing that submission, the timeline advances past `tv`.
 
-Both `TaskGraph::submit` and `ComputeEncoder::submit` return timeline values. Surface presentation via `Frame::present` also returns one.
+`TaskGraph::submit` returns a timeline value. Surface presentation via `Frame::present` also returns one.
 
 ## Querying GPU progress
 

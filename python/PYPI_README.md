@@ -97,11 +97,11 @@ pixels = target.read_to_cpu()  # Shape: (height, width, 4), dtype: uint8
 
 ### Context Managers
 
-Pythonic API with `with` statements for compute passes:
+Pythonic API with `with` statements for task-graph recording:
 ```python
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(pipeline)
-    cp.dispatch(8, 8, 1)
+with graph.compute_node("update", pipeline, workgroups=(8, 8, 1)) as node:
+    node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+    node.bind_resources_raw([buffer.resource_index(goldy.ResourceAccess.WRITE)])
 ```
 
 ### Shader Libraries
@@ -140,7 +140,8 @@ device.register_library('mylib', '''
 | `TaskGraph` | GPU task graph (render passes, swapchain blit, dispatch) |
 | `RenderPass` | Draw commands within a render-pass node |
 | `NodeAccess` | Read/Write/ReadWrite for graph dependency tracking |
-| `ComputeEncoder` | Record compute commands |
+| `ComputeNode` | Record a compute dispatch node on a task graph |
+| `ComputePipeline` | Compute shader pipeline |
 
 ### Enums
 
