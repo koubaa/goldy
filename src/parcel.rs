@@ -4,18 +4,35 @@
 //! Resource indices for shader binding are exposed via [`Parcel::resource_index`];
 //! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
+use crate::backend::ContextHandle;
 use crate::buffer::{Buffer, BufferPool, BufferView};
+use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
-use crate::timeline::TimelineValue;
+use crate::timeline::{mark_reference, ReferenceTable, TimelineValue};
 use crate::types::{ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Index into a [`Parcel`] mosaic's sub-ranges (returned by [`crate::retained_pool::MosaicBuilder`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MosaicSlot(pub u32);
+
+/// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
+pub(crate) struct ParcelStamp {
+    pub(crate) references: Arc<Mutex<ReferenceTable>>,
+    pub(crate) home_device: Weak<DeviceInner>,
+}
+
+impl ParcelStamp {
+    pub(crate) fn new(home_device: Weak<DeviceInner>) -> Self {
+        Self {
+            references: Arc::new(Mutex::new(ReferenceTable::new())),
+            home_device,
+        }
+    }
+}
 
 /// One backing buffer subdivided into multiple bindless sub-ranges (lifetime-homogeneous).
 struct Mosaic {
@@ -105,36 +122,39 @@ impl Drop for BookkeepingGuard {
 
 /// A deed-held GPU parcel (buffer or texture). Gate-free while retained.
 ///
-/// Relinquish by [`crate::retained_pool::RetainedPool::transfer_out`] (stamped for the
-/// transient pool) or by dropping the value (implicit relinquish).
+/// Release by [`crate::retained_pool::RetainedPool::release`] (runtime reclaims when safe) or by dropping the parcel.
 pub struct Parcel {
     storage: ParcelStorage,
-    /// Last referencing timeline; `0` means never referenced by GPU work.
-    last_referenced: Arc<AtomicU64>,
+    stamp: ParcelStamp,
     bookkeeping: Option<BookkeepingGuard>,
 }
 
 impl Parcel {
-    pub(crate) fn from_buffer(buf: Buffer, bookkeeping: BookkeepingGuard) -> Self {
+    pub(crate) fn from_buffer(buf: Buffer, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
         Self {
             storage: ParcelStorage::Buffer(buf),
-            last_referenced: Arc::new(AtomicU64::new(0)),
+            stamp: ParcelStamp::new(home_device),
             bookkeeping: Some(bookkeeping),
         }
     }
 
-    pub(crate) fn from_texture(tex: Texture, bookkeeping: BookkeepingGuard) -> Self {
+    pub(crate) fn from_texture(tex: Texture, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
         Self {
             storage: ParcelStorage::Texture(tex),
-            last_referenced: Arc::new(AtomicU64::new(0)),
+            stamp: ParcelStamp::new(home_device),
             bookkeeping: Some(bookkeeping),
         }
     }
 
-    pub(crate) fn from_mosaic(pool: BufferPool, views: Vec<BufferView>, bookkeeping: BookkeepingGuard) -> Self {
+    pub(crate) fn from_mosaic(
+        pool: BufferPool,
+        views: Vec<BufferView>,
+        bookkeeping: BookkeepingGuard,
+        home_device: Weak<DeviceInner>,
+    ) -> Self {
         Self {
             storage: ParcelStorage::Mosaic(Mosaic { pool, views }),
-            last_referenced: Arc::new(AtomicU64::new(0)),
+            stamp: ParcelStamp::new(home_device),
             bookkeeping: Some(bookkeeping),
         }
     }
@@ -205,26 +225,34 @@ impl Parcel {
         }
     }
 
-    /// Record the timeline of the most recent GPU work that referenced this parcel.
+    /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
     ///
-    /// Monotonic: only increases; a smaller epoch is ignored.
-    pub fn mark_referenced(&self, epoch: TimelineValue) {
-        self.last_referenced.fetch_max(epoch, Ordering::Relaxed);
+    /// Monotonic per context: only increases; a smaller epoch is ignored.
+    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
+        let mut table = self.stamp.references.lock().unwrap();
+        mark_reference(&mut table, ctx, epoch);
     }
 
-    /// Last recorded referencing timeline, if any.
-    pub fn last_referenced(&self) -> Option<TimelineValue> {
-        let v = self.last_referenced.load(Ordering::Relaxed);
-        if v == 0 {
-            None
-        } else {
-            Some(v)
-        }
+    /// Context-qualified last-referencing timelines.
+    pub fn last_referenced(&self) -> ReferenceTable {
+        self.stamp.references.lock().unwrap().clone()
+    }
+
+    /// Last referencing timeline for a single context, if any.
+    pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
+        self.stamp.references.lock().unwrap().get(&ctx).copied()
     }
 
     /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
-    pub(crate) fn stamp_handle(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.last_referenced)
+    pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
+        Arc::new(ParcelStamp {
+            references: Arc::clone(&self.stamp.references),
+            home_device: self.stamp.home_device.clone(),
+        })
+    }
+
+    pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
+        &self.stamp.home_device
     }
 
     /// Task-graph resource identity (runtime only).
@@ -256,7 +284,7 @@ impl Parcel {
         }
     }
 
-    /// Release pool bookkeeping so [`Drop`] does not double-decrement after `transfer_out`.
+    /// Release pool bookkeeping so [`Drop`] does not double-decrement after [`RetainedPool::release`].
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
     }

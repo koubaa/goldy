@@ -7,7 +7,7 @@ use crate::backend::ContextHandle;
 use crate::device::Device;
 use crate::error::GoldyError;
 use crate::task_graph::TaskGraph;
-use crate::timeline::TimelineValue;
+use crate::timeline::{is_ready, ReferenceTable, TimelineValue};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -147,6 +147,10 @@ impl Context {
         self.inner.high_water_timeline.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn advance_high_water_timeline(&self, tv: TimelineValue) {
+        self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
+    }
+
     /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
     pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
@@ -252,7 +256,7 @@ impl Context {
                     drop(backend);
                     self.classify(e)
                 })?;
-            graph.apply_reference_stamps(tv);
+            graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
@@ -260,7 +264,7 @@ impl Context {
         let tv = self
             .submit_with_placement_heap(graph, true)
             .map_err(|e| self.classify(e))?;
-        graph.apply_reference_stamps(tv);
+        graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
@@ -276,7 +280,7 @@ impl Context {
                     drop(backend);
                     self.classify(e)
                 })?;
-            graph.apply_reference_stamps(tv);
+            graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
         }
@@ -284,7 +288,7 @@ impl Context {
         let tv = self
             .submit_with_placement_heap(graph, false)
             .map_err(|e| self.classify(e))?;
-        graph.apply_reference_stamps(tv);
+        graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
     }
@@ -300,9 +304,40 @@ impl Context {
                 drop(backend);
                 self.classify(e)
             })?;
-        graph.apply_reference_stamps(tv);
+        graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
+    }
+
+    /// Record that this context's submission at `tv` referenced `parcel`.
+    pub fn stamp_parcel(&self, parcel: &crate::Parcel, tv: TimelineValue) {
+        parcel.mark_referenced(self.backend_handle(), tv);
+    }
+
+    /// True when every context in `refs` has retired the stamped timeline values.
+    pub fn parcel_ready(&self, refs: &ReferenceTable) -> bool {
+        if refs.is_empty() {
+            return true;
+        }
+        let backend = self.inner.device.inner.backend.lock().unwrap();
+        let mut progress = HashMap::with_capacity(refs.len());
+        for &ctx in refs.keys() {
+            progress.insert(ctx, backend.gpu_progress(ctx));
+        }
+        drop(backend);
+        is_ready(refs, &progress)
+    }
+
+    /// Block until every context in `refs` has retired the stamped timeline values.
+    pub fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
+        for (&ctx_handle, &tv) in refs {
+            let mut backend = self.inner.device.inner.backend.lock().unwrap();
+            backend.wait_until(ctx_handle, tv).map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
+        }
+        Ok(())
     }
 
     pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {

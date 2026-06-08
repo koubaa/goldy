@@ -2,14 +2,15 @@
 //!
 //! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
 //! [`RetainedPool::mosaic`] are the supported ways to create retained parcels. Parcels are
-//! opaque [`Parcel`] values; relinquish via [`RetainedPool::transfer_out`] or by dropping the parcel.
+//! opaque [`Parcel`] values; relinquish via [`RetainedPool::release`] or by dropping the parcel.
 //!
 //! Reuse-gate, transient pool, and backpressure are deferred.
 
 use crate::buffer::{BufferPool, StructuredBufferElement};
+use crate::context::Context;
 use crate::device::Device;
 use crate::parcel::{BookkeepingGuard, BytesByKind, MosaicSlot, Parcel, PoolBookkeeping};
-use crate::timeline::TimelineValue;
+use crate::timeline::ReferenceTable;
 use crate::types::{BufferKind, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::ParcelType;
 use anyhow::Result;
@@ -31,8 +32,8 @@ pub struct MosaicBuilder<'a> {
 /// A parcel relinquished from the retained pool, stamped for handoff to the transient pool.
 pub struct StampedParcel {
     pub parcel: Parcel,
-    /// Timeline after which the parcel may be reused; `None` if never referenced by GPU work.
-    pub ready_after: Option<TimelineValue>,
+    /// Per-context timelines after which the parcel may be reused; empty if never referenced.
+    pub ready_after: ReferenceTable,
 }
 
 /// Deed-governed pool: allocates retained parcels; no epoch gate while held.
@@ -114,9 +115,21 @@ impl RetainedPool {
         }
     }
 
-    /// Relinquish a parcel from the retained pool. The unit moves to the transient seam;
-    /// `ready_after` is the last referencing timeline (if any).
-    pub fn transfer_out(&mut self, mut parcel: Parcel) -> StampedParcel {
+    /// Release a held parcel. The runtime reclaims GPU memory when safe; callers
+    /// do not observe timeline tokens.
+    pub fn release(&mut self, ctx: &Context, parcel: Parcel) {
+        drop(self.transfer_out(ctx, parcel));
+    }
+
+    /// Internal release path. Returns stamped metadata for the future transient seam;
+    /// public clients should call [`Self::release`] instead.
+    pub(crate) fn transfer_out(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
+        if let Some(home) = parcel.home_device().upgrade() {
+            debug_assert!(
+                Arc::ptr_eq(&home, &ctx.device().inner),
+                "transfer_out: parcel home_device must match submitting context's device"
+            );
+        }
         let ready_after = parcel.last_referenced();
         parcel.release_bookkeeping();
         StampedParcel { parcel, ready_after }
@@ -127,12 +140,16 @@ impl RetainedPool {
         self.bookkeeping.snapshot()
     }
 
+    fn home_device(&self) -> std::sync::Weak<crate::device::DeviceInner> {
+        Arc::downgrade(&self.device.inner)
+    }
+
     fn wrap_texture(&self, tex: crate::texture::Texture) -> Result<Parcel> {
         let bytes = tex.byte_size() as u64;
         let kind = ParcelType::Texture;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
-        Ok(Parcel::from_texture(tex, guard))
+        Ok(Parcel::from_texture(tex, guard, self.home_device()))
     }
 
     fn wrap_buffer(&self, buf: crate::buffer::Buffer) -> Result<Parcel> {
@@ -140,7 +157,7 @@ impl RetainedPool {
         let kind = ParcelType::Buffer;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
-        Ok(Parcel::from_buffer(buf, guard))
+        Ok(Parcel::from_buffer(buf, guard, self.home_device()))
     }
 }
 
@@ -193,7 +210,12 @@ impl<'a> MosaicBuilder<'a> {
         let kind = ParcelType::Buffer;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping), kind, bytes);
-        Ok(Parcel::from_mosaic(pool, views, guard))
+        Ok(Parcel::from_mosaic(
+            pool,
+            views,
+            guard,
+            Arc::downgrade(&self.device.inner),
+        ))
     }
 }
 
@@ -205,6 +227,10 @@ mod tests {
 
     fn test_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    fn test_ctx(device: &Arc<Device>) -> Context {
+        device.create_context().unwrap()
     }
 
     fn rgba_interpolated() -> (TextureFormat, TextureKind, TextureFlags) {
@@ -253,53 +279,64 @@ mod tests {
 
     #[test]
     fn mark_referenced_is_monotonic_max() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        p.mark_referenced(10);
-        p.mark_referenced(5);
-        assert_eq!(p.last_referenced(), Some(10));
-        p.mark_referenced(20);
-        assert_eq!(p.last_referenced(), Some(20));
+        let h = ctx.backend_handle();
+        p.mark_referenced(h, 10);
+        p.mark_referenced(h, 5);
+        assert_eq!(p.last_referenced_on(h), Some(10));
+        p.mark_referenced(h, 20);
+        assert_eq!(p.last_referenced_on(h), Some(20));
     }
 
     #[test]
     fn transfer_out_referenced_has_ready_after() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        p.mark_referenced(42);
-        let stamped = pool.transfer_out(p);
-        assert_eq!(stamped.ready_after, Some(42));
+        p.mark_referenced(ctx.backend_handle(), 42);
+        let stamped = pool.transfer_out(&ctx, p);
+        assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&42));
         assert_eq!(pool.bytes_by_kind().texture, 0);
     }
 
     #[test]
     fn transfer_out_unreferenced_has_none_ready_after() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        let stamped = pool.transfer_out(p);
-        assert_eq!(stamped.ready_after, None);
+        let stamped = pool.transfer_out(&ctx, p);
+        assert!(stamped.ready_after.is_empty());
     }
 
     #[test]
     fn transfer_out_preserves_texture_handle() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         let h_before = p.texture_handle().unwrap();
-        let stamped = pool.transfer_out(p);
+        let stamped = pool.transfer_out(&ctx, p);
         assert_eq!(stamped.parcel.texture_handle(), Some(h_before));
     }
 
     #[test]
     fn bytes_by_kind_zero_after_transfer_and_drop() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(16, 16, fmt, acc, flags, None).unwrap();
         assert!(pool.bytes_by_kind().texture > 0);
-        let stamped = pool.transfer_out(p);
+        let stamped = pool.transfer_out(&ctx, p);
         assert_eq!(pool.bytes_by_kind().texture, 0);
         drop(stamped);
     }
@@ -333,7 +370,9 @@ mod tests {
 
     #[test]
     fn mosaic_bytes_by_kind_and_transfer_out() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let mut m = pool.mosaic();
         m.emplace(&[0u32; 16]);
         let parcel = m.build().unwrap();
@@ -341,7 +380,7 @@ mod tests {
         assert!(pool.bytes_by_kind().buffer >= bytes_before);
 
         let h_before = parcel.buffer_handle().unwrap();
-        let stamped = pool.transfer_out(parcel);
+        let stamped = pool.transfer_out(&ctx, parcel);
         assert_eq!(pool.bytes_by_kind().buffer, 0);
         assert_eq!(stamped.parcel.buffer_handle(), Some(h_before));
         drop(stamped);
@@ -349,15 +388,18 @@ mod tests {
 
     #[test]
     fn mosaic_mark_referenced_is_monotonic() {
-        let mut pool = RetainedPool::new(test_device());
+        let device = test_device();
+        let ctx = test_ctx(&device);
+        let mut pool = RetainedPool::new(device);
         let mut m = pool.mosaic();
         m.emplace(&[1u32]);
         let parcel = m.build().unwrap();
-        parcel.mark_referenced(10);
-        parcel.mark_referenced(5);
-        assert_eq!(parcel.last_referenced(), Some(10));
-        parcel.mark_referenced(20);
-        assert_eq!(parcel.last_referenced(), Some(20));
+        let h = ctx.backend_handle();
+        parcel.mark_referenced(h, 10);
+        parcel.mark_referenced(h, 5);
+        assert_eq!(parcel.last_referenced_on(h), Some(10));
+        parcel.mark_referenced(h, 20);
+        assert_eq!(parcel.last_referenced_on(h), Some(20));
     }
 
     #[test]
@@ -427,7 +469,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("a", &pipeline)
-            .bind_parcel(&parcel, ResourceAccess::Read)
+            .bind_parcel(&parcel, crate::task_graph::NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let binding = graph.ir().nodes[0].bindings[0].resource;

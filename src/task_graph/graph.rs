@@ -21,8 +21,7 @@ use crate::types::TextureFormat;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::Ordering;
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::Arc;
 
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -172,7 +171,26 @@ pub struct TaskGraph {
     schedule_validated_node_count: usize,
     /// Stamp cells for [`crate::Parcel`]s bound via [`NodeBuilder::bind_parcel`].
     /// Cleared in [`Self::clear`]; stamped in [`Self::apply_reference_stamps`] at submit.
-    stamp_targets: Vec<Arc<AtomicU64>>,
+    stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
+}
+
+/// Stamp every parcel bound via [`NodeBuilder::bind_parcel`] with a context-qualified timeline.
+pub(crate) fn apply_stamp_targets(
+    targets: &[Arc<crate::parcel::ParcelStamp>],
+    ctx: crate::backend::ContextHandle,
+    submit_device: &std::sync::Arc<crate::device::DeviceInner>,
+    tv: TimelineValue,
+) {
+    for stamp in targets {
+        if let Some(home) = stamp.home_device.upgrade() {
+            debug_assert!(
+                std::sync::Arc::ptr_eq(&home, submit_device),
+                "parcel home_device must match submitting context's device"
+            );
+        }
+        let mut table = stamp.references.lock().unwrap();
+        crate::timeline::mark_reference(&mut table, ctx, tv);
+    }
 }
 
 /// Cache entry holding both the wave schedule and the emitted compute command stream.
@@ -1018,11 +1036,19 @@ impl TaskGraph {
     }
 
     /// Stamp every [`crate::Parcel`] bound via [`NodeBuilder::bind_parcel`] with the
-    /// timeline value of the submission that just completed.
-    pub(crate) fn apply_reference_stamps(&self, tv: TimelineValue) {
-        for stamp in &self.stamp_targets {
-            stamp.fetch_max(tv, Ordering::Relaxed);
-        }
+    /// context-qualified timeline value of the submission that just completed.
+    pub(crate) fn apply_reference_stamps(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        submit_device: &std::sync::Arc<crate::device::DeviceInner>,
+        tv: TimelineValue,
+    ) {
+        apply_stamp_targets(&self.stamp_targets, ctx, submit_device, tv);
+    }
+
+    /// Move parcel stamp cells off the graph for surface submit (applied at [`crate::Frame::submit_frame`]).
+    pub(crate) fn take_stamp_targets(&mut self) -> Vec<Arc<crate::parcel::ParcelStamp>> {
+        std::mem::take(&mut self.stamp_targets)
     }
 
     /// Access the raw IR for internal use (e.g. transient lowering from outside the task_graph module).
@@ -1439,11 +1465,11 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: crate::types::ResourceAccess) -> Self {
+    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
         self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
-            access: access.into(),
+            access,
         });
         self
     }
@@ -2669,7 +2695,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
         let parcel = retained_buffer_parcel(&mut pool);
-        assert_eq!(parcel.last_referenced(), None);
+        assert!(parcel.last_referenced().is_empty());
 
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -2677,11 +2703,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
-        assert_eq!(parcel.last_referenced(), Some(tv));
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]
@@ -2696,22 +2722,22 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv1 = graph.submit(&ctx).unwrap();
 
         graph.clear();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv2 = graph.submit(&ctx).unwrap();
         assert!(tv2 > tv1);
-        assert_eq!(parcel.last_referenced(), Some(tv2));
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv2));
 
         // Lower epoch must not regress the stamp.
-        graph.apply_reference_stamps(tv1);
-        assert_eq!(parcel.last_referenced(), Some(tv2));
+        graph.apply_reference_stamps(ctx.backend_handle(), &device.inner, tv1);
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv2));
     }
 
     #[test]
@@ -2727,13 +2753,13 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&p1, crate::types::ResourceAccess::Write)
-            .bind_parcel(&p2, crate::types::ResourceAccess::Read)
+            .bind_parcel(&p1, NodeAccess::Write)
+            .bind_parcel(&p2, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
-        assert_eq!(p1.last_referenced(), Some(tv));
-        assert_eq!(p2.last_referenced(), Some(tv));
+        assert_eq!(p1.last_referenced_on(ctx.backend_handle()), Some(tv));
+        assert_eq!(p2.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]
@@ -2749,11 +2775,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&bound, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&bound, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
-        assert_eq!(bound.last_referenced(), Some(tv));
-        assert_eq!(unbound.last_referenced(), None);
+        assert_eq!(bound.last_referenced_on(ctx.backend_handle()), Some(tv));
+        assert!(unbound.last_referenced().is_empty());
     }
 
     #[test]
@@ -2768,21 +2794,22 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
 
-        let stamped = pool.transfer_out(parcel);
-        assert_eq!(stamped.ready_after, Some(tv));
+        let stamped = pool.transfer_out(&ctx, parcel);
+        assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&tv));
     }
 
     #[test]
     fn transfer_out_unreferenced_has_none_ready_after() {
         let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device);
         let parcel = retained_buffer_parcel(&mut pool);
-        let stamped = pool.transfer_out(parcel);
-        assert_eq!(stamped.ready_after, None);
+        let stamped = pool.transfer_out(&ctx, parcel);
+        assert!(stamped.ready_after.is_empty());
     }
 
     #[test]
@@ -2797,12 +2824,12 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         graph.clear();
 
         let tv = graph.submit(&ctx).unwrap();
-        assert_eq!(parcel.last_referenced(), None);
+        assert!(parcel.last_referenced().is_empty());
         let _ = tv;
     }
 
@@ -2818,11 +2845,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
-        assert_eq!(parcel.last_referenced(), Some(tv));
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]
@@ -2837,10 +2864,36 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, crate::types::ResourceAccess::ReadWrite)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined_and_retain(&mut graph).unwrap();
-        assert_eq!(parcel.last_referenced(), Some(tv));
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
+    }
+
+    #[test]
+    fn bind_parcel_stamp_is_context_specific() {
+        let device = Arc::new(mock_device());
+        let ctx_a = device.create_context().unwrap();
+        let ctx_b = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+        let tv_a = graph.submit(&ctx_a).unwrap();
+
+        assert_eq!(parcel.last_referenced_on(ctx_a.backend_handle()), Some(tv_a));
+        assert_eq!(parcel.last_referenced_on(ctx_b.backend_handle()), None);
+        assert_eq!(ctx_b.gpu_progress(), 0, "context B must not observe A's submit");
+        assert!(
+            ctx_b.parcel_ready(&parcel.last_referenced()),
+            "readiness checks the stamping context's progress, not the caller's"
+        );
     }
 }
