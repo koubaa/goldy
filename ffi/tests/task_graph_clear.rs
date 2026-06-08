@@ -4,12 +4,11 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_device_destroy, goldy_instance_destroy, goldy_render_target_buffer_size,
-    goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
-    goldy_task_graph_clear, goldy_task_graph_create, goldy_task_graph_declare_swapchain_output,
-    goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
-    goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_finish, GoldyColor, GoldyResult,
-    GoldyTextureFormat,
+    goldy_device_destroy, goldy_instance_destroy, goldy_render_target_buffer_size, goldy_render_target_create,
+    goldy_render_target_destroy, goldy_render_target_read_to_buffer, goldy_task_graph_clear, goldy_task_graph_create,
+    goldy_task_graph_declare_swapchain_output, goldy_task_graph_destroy, goldy_task_graph_dispatch,
+    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_finish,
+    GoldyColor, GoldyResult, GoldyTextureFormat,
 };
 use std::ffi::CString;
 

@@ -9,14 +9,12 @@ use goldy_ffi::{
     goldy_buffer_create_with_data, goldy_buffer_destroy, goldy_device_destroy, goldy_instance_destroy,
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_render_target_buffer_size,
     goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
-    goldy_shader_create, goldy_shader_builtin_vertex_color_2d, goldy_shader_destroy,
-    goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_bind_buffer,
-    goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw,
+    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, goldy_task_graph_create,
+    goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
+    goldy_task_graph_render_pass_bind_buffer, goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw,
     goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline,
-    goldy_task_graph_render_pass_set_vertex_buffer, GoldyBufferKind, GoldyColor,
-    GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFormat, GoldyVertexAttribute,
-    GoldyVertexFormat,
+    goldy_task_graph_render_pass_set_vertex_buffer, GoldyBufferKind, GoldyColor, GoldyNodeAccess,
+    GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFormat, GoldyVertexAttribute, GoldyVertexFormat,
 };
 use std::ffi::CString;
 use std::mem::size_of;
@@ -56,10 +54,8 @@ fn task_graph_triangle_readback_center_pixel_lit() {
                 color: [0.0, 0.0, 1.0, 1.0],
             },
         ];
-        let vertex_bytes = std::slice::from_raw_parts(
-            vertices.as_ptr() as *const u8,
-            vertices.len() * size_of::<Vertex2D>(),
-        );
+        let vertex_bytes =
+            std::slice::from_raw_parts(vertices.as_ptr() as *const u8, vertices.len() * size_of::<Vertex2D>());
         let vertex_buffer = goldy_buffer_create_with_data(
             device,
             vertex_bytes.as_ptr(),
@@ -179,9 +175,7 @@ fn task_graph_triangle_readback_center_pixel_lit() {
         let clear_g = (clear.g * 255.0) as i32;
         let clear_b = (clear.b * 255.0) as i32;
         assert!(
-            (r as i32 - clear_r).abs() > 5
-                || (g as i32 - clear_g).abs() > 5
-                || (b as i32 - clear_b).abs() > 5,
+            (r as i32 - clear_r).abs() > 5 || (g as i32 - clear_g).abs() > 5 || (b as i32 - clear_b).abs() > 5,
             "center pixel should differ from clear color, got rgba=({r},{g},{b})"
         );
 

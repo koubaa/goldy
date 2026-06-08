@@ -93,9 +93,7 @@ impl PyBuffer {
     /// Read buffer contents back to CPU memory as a uint8 numpy array.
     fn read_to_cpu<'py>(&self, py: Python<'py>, device: &PyDevice) -> PyResult<Bound<'py, PyArray1<u8>>> {
         let mut output = vec![0u8; self.inner.size() as usize];
-        self.inner
-            .read_to_cpu(&device.inner, &mut output)
-            .into_py_result()?;
+        self.inner.read_to_cpu(&device.inner, &mut output).into_py_result()?;
         Ok(PyArray1::from_vec(py, output))
     }
 

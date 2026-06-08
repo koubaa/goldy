@@ -901,7 +901,7 @@ mod tests {
         use crate::retained_pool::RetainedPool;
         use crate::shader::ShaderModule;
         use crate::task_graph::NodeAccess;
-        use crate::types::{BufferFlags, BufferKind, ResourceAccess};
+        use crate::types::{BufferFlags, BufferKind};
 
         let device = Arc::new(create_test_device());
         let ctx = device.create_context().unwrap();
@@ -939,7 +939,7 @@ mod tests {
         use crate::retained_pool::RetainedPool;
         use crate::shader::ShaderModule;
         use crate::task_graph::NodeAccess;
-        use crate::types::{BufferFlags, BufferKind, ResourceAccess};
+        use crate::types::{BufferFlags, BufferKind};
 
         let device = Arc::new(create_test_device());
         let ctx = device.create_context().unwrap();

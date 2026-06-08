@@ -6,20 +6,18 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_read_to_cpu,
-    goldy_buffer_resource_index, goldy_buffer_size, goldy_compute_pipeline_create,
-    goldy_compute_pipeline_destroy,
-    goldy_device_destroy, goldy_instance_destroy, goldy_render_pipeline_create,
-    goldy_render_pipeline_destroy, goldy_render_target_buffer_size, goldy_render_target_create,
-    goldy_render_target_destroy, goldy_render_target_read_to_buffer, goldy_shader_create,
-    goldy_shader_destroy, goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_buffer,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch,
-    goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_bind_buffer,
+    goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_read_to_cpu, goldy_buffer_resource_index,
+    goldy_buffer_size, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy,
+    goldy_instance_destroy, goldy_render_pipeline_create, goldy_render_pipeline_destroy,
+    goldy_render_target_buffer_size, goldy_render_target_create, goldy_render_target_destroy,
+    goldy_render_target_read_to_buffer, goldy_shader_create, goldy_shader_destroy, goldy_task_graph_compute_node_begin,
+    goldy_task_graph_compute_node_bind_buffer, goldy_task_graph_compute_node_bind_resources_raw,
+    goldy_task_graph_compute_node_dispatch, goldy_task_graph_create, goldy_task_graph_destroy,
+    goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_bind_buffer,
     goldy_task_graph_render_pass_bind_resources_typed, goldy_task_graph_render_pass_clear,
     goldy_task_graph_render_pass_draw_fullscreen, goldy_task_graph_render_pass_finish,
-    goldy_task_graph_render_pass_set_pipeline, GoldyBufferKind, GoldyColor, GoldyNodeAccess,
-    GoldyRenderPipelineDesc, GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
+    goldy_task_graph_render_pass_set_pipeline, GoldyBufferKind, GoldyColor, GoldyNodeAccess, GoldyRenderPipelineDesc,
+    GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
 };
 use std::ffi::CString;
 
@@ -88,8 +86,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             target_format: GoldyTextureFormat::Rgba8Unorm,
             ..Default::default()
         };
-        let render_pipeline =
-            goldy_render_pipeline_create(device, render_shader, render_shader, &render_desc);
+        let render_pipeline = goldy_render_pipeline_create(device, render_shader, render_shader, &render_desc);
         assert!(!render_pipeline.is_null(), "{}", last_ffi_message());
 
         let target = goldy_render_target_create(device, GRID_WIDTH, GRID_HEIGHT, GoldyTextureFormat::Rgba8Unorm);
@@ -130,12 +127,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_dispatch(
-                graph,
-                GRID_WIDTH.div_ceil(8),
-                GRID_HEIGHT.div_ceil(8),
-                1
-            ),
+            goldy_task_graph_compute_node_dispatch(graph, GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -210,10 +202,8 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             "{}",
             last_ffi_message()
         );
-        let cells_out: &[u32] = std::slice::from_raw_parts(
-            readback.as_ptr() as *const u32,
-            readback.len() / cell_bytes,
-        );
+        let cells_out: &[u32] =
+            std::slice::from_raw_parts(readback.as_ptr() as *const u32, readback.len() / cell_bytes);
         assert_eq!(
             count_live(cells_out),
             4,

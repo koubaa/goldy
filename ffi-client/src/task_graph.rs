@@ -43,13 +43,7 @@ impl TaskGraph {
     /// Add a CPU→GPU buffer upload node to the graph.
     pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: &[u8]) -> Result<()> {
         check(unsafe {
-            sys::goldy_task_graph_write_buffer(
-                self.ptr,
-                buffer.as_ptr(),
-                offset,
-                data.as_ptr(),
-                data.len(),
-            )
+            sys::goldy_task_graph_write_buffer(self.ptr, buffer.as_ptr(), offset, data.as_ptr(), data.len())
         })
     }
 
@@ -64,9 +58,7 @@ impl TaskGraph {
 
     pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
         let label = CString::new(label).expect("compute node label contains interior null byte");
-        expect_ok(unsafe {
-            sys::goldy_task_graph_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr())
-        });
+        expect_ok(unsafe { sys::goldy_task_graph_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr()) });
         ComputeNodeBuilder {
             graph: self,
             active: true,
@@ -151,11 +143,7 @@ impl RenderPassBuilder<'_> {
             flat.push(h.index);
         }
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_bind_resources_typed(
-                self.graph.ptr,
-                flat.as_ptr(),
-                handles.len() as u32,
-            )
+            sys::goldy_task_graph_render_pass_bind_resources_typed(self.graph.ptr, flat.as_ptr(), handles.len() as u32)
         });
         self
     }

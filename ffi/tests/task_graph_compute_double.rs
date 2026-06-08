@@ -6,14 +6,13 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_buffer_create, goldy_buffer_create_with_data_stride, goldy_buffer_destroy,
-    goldy_buffer_read_to_cpu, goldy_buffer_resource_index, goldy_buffer_size,
-    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy,
-    goldy_instance_destroy, goldy_shader_create, goldy_shader_destroy,
+    goldy_buffer_create, goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_read_to_cpu,
+    goldy_buffer_resource_index, goldy_buffer_size, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
+    goldy_device_destroy, goldy_instance_destroy, goldy_shader_create, goldy_shader_destroy,
     goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_buffer,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch,
-    goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyBufferKind,
-    GoldyNodeAccess, GoldyResourceAccess, GoldyResult,
+    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
+    goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess,
+    GoldyResult,
 };
 use std::ffi::CString;
 
@@ -61,7 +60,11 @@ unsafe fn record_compute_node(
         );
     }
     assert_eq!(
-        goldy_task_graph_compute_node_bind_resources_raw(graph, resource_indices.as_ptr(), resource_indices.len() as u32),
+        goldy_task_graph_compute_node_bind_resources_raw(
+            graph,
+            resource_indices.as_ptr(),
+            resource_indices.len() as u32
+        ),
         GoldyResult::Ok,
         "{}",
         last_ffi_message()
@@ -80,10 +83,8 @@ fn task_graph_compute_double_then_add_ten() {
         let (instance, device) = open_device();
 
         let input: Vec<u32> = (0..64).collect();
-        let input_bytes = std::slice::from_raw_parts(
-            input.as_ptr() as *const u8,
-            input.len() * std::mem::size_of::<u32>(),
-        );
+        let input_bytes =
+            std::slice::from_raw_parts(input.as_ptr() as *const u8, input.len() * std::mem::size_of::<u32>());
         let src = goldy_buffer_create_with_data_stride(
             device,
             input_bytes.as_ptr(),

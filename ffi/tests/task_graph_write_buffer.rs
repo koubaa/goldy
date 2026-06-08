@@ -7,12 +7,12 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_create, goldy_buffer_destroy, goldy_buffer_read_to_cpu, goldy_buffer_resource_index,
-    goldy_buffer_size, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
-    goldy_device_destroy, goldy_instance_destroy, goldy_shader_create, goldy_shader_destroy,
-    goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_buffer,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch,
-    goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_write_buffer, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess, GoldyResult,
+    goldy_buffer_size, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy,
+    goldy_instance_destroy, goldy_shader_create, goldy_shader_destroy, goldy_task_graph_compute_node_begin,
+    goldy_task_graph_compute_node_bind_buffer, goldy_task_graph_compute_node_bind_resources_raw,
+    goldy_task_graph_compute_node_dispatch, goldy_task_graph_create, goldy_task_graph_destroy,
+    goldy_task_graph_dispatch, goldy_task_graph_write_buffer, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess,
+    GoldyResult,
 };
 use std::ffi::CString;
 

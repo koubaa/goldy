@@ -6,8 +6,8 @@
 
 use goldy_ffi_client::{
     Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory,
-    ResourceHandle, ShaderModule, TaskGraph, TextureFormat,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle,
+    ShaderModule, TaskGraph, TextureFormat,
 };
 
 const GRID_WIDTH: u32 = 128;
@@ -88,11 +88,7 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     let bytes = buf_b.read_to_cpu(&device)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&bytes);
-    assert_eq!(
-        count_live(cells_out),
-        4,
-        "still-life block should remain 4 live cells"
-    );
+    assert_eq!(count_live(cells_out), 4, "still-life block should remain 4 live cells");
 
     let pixels = target.read_to_cpu()?;
     let cx = (GRID_WIDTH / 2) as usize;
