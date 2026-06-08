@@ -674,6 +674,18 @@ enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
                                       uint32_t width,
                                       uint32_t height);
 
+// Submit a task graph that writes to an already-acquired swapchain frame.
+//
+// The graph must include [`goldy_task_graph_declare_swapchain_output`] and
+// [`goldy_task_graph_copy_render_target_to_swapchain`] (or another swapchain
+// binding). Updates `frame` in place with any parcel stamp targets from the graph.
+//
+// # Safety
+// All pointers must be valid. No render pass may be open on `graph`.
+enum GoldyResult goldy_surface_submit_graph_to_frame(const struct GoldySurface *surface,
+                                                     struct GoldyTaskGraph *graph,
+                                                     struct GoldySurfaceFrame *frame);
+
 // Get the surface width.
 //
 // # Safety

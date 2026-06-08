@@ -55,3 +55,8 @@ examples = ["dep:winit", "goldy/examples"]
 name = "compute_simple"
 path = "examples/compute_simple.rs"
 required-features = ["examples"]
+
+[[example]]
+name = "triangle"
+path = "examples/triangle.rs"
+required-features = ["examples"]

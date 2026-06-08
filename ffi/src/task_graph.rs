@@ -16,6 +16,12 @@ pub struct GoldyTaskGraph {
     active_pass: Option<RenderPassRecord>,
 }
 
+impl GoldyTaskGraph {
+    pub(crate) fn has_active_render_pass(&self) -> bool {
+        self.active_pass.is_some()
+    }
+}
+
 /// Opaque token returned by [`goldy_task_graph_declare_swapchain_output`].
 ///
 /// Carries no data; exists for type safety at the C ABI boundary.
