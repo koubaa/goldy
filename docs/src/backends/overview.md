@@ -18,7 +18,7 @@ its target API:
 ┌─────────────────────────────────────────────────────────────┐
 │                    Goldy Core API                           │
 │                                                             │
-│   Device, Buffer, Texture, Pipeline, CommandEncoder, ...    │
+│   Device, Buffer, Texture, Pipeline, TaskGraph, ...       │
 └─────────────────────────────────────────────────────────────┘
         │                    │                    │
         ▼                    ▼                    ▼

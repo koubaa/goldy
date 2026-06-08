@@ -70,7 +70,7 @@ graph.node("reduce", &pipeline)
 
 ### Finalizing nodes
 
-Compute nodes must be finalized with `dispatch(x, y, z)` or `dispatch_indirect(&buf, offset)`. Render pass nodes are finalized with `finish(commands)` or `finish_encoder(encoder)`.
+Compute nodes must be finalized with `dispatch(x, y, z)` or `dispatch_indirect(&buf, offset)`. Render pass nodes are finalized with `finish_recorded()` (or `finish(commands)` if you already have a `Vec<RenderCommand>`).
 
 ## NodeAccess and SWMR scheduling
 

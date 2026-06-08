@@ -68,9 +68,11 @@ pixels = target.read_to_cpu()
 
 See the `examples/` directory for complete examples:
 
-- **triangle.py** - Colored triangle via TaskGraph (headless readback)
+- **triangle.py** / **triangle_headless.py** - Colored triangle via TaskGraph (headless readback)
+- **triangle_window.py** - Windowed triangle (requires GLFW)
+- **game_of_life.py** - Hybrid compute + render graph in a window (requires GLFW)
 - **adapter_info.py** - Print GPU adapter information
-- **compute_demo.py** - Compute shader example
+- **compute_demo.py** - Standalone compute shader example
 
 Run an example:
 ```bash

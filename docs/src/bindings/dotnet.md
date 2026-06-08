@@ -41,29 +41,43 @@ using Goldy;
 using var instance = new Instance();
 using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
 using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);
+using var graph = new TaskGraph();
 
-using var pipeline = new ComputePipeline(device, computeShader);
-using var encoder = new ComputeEncoder();
-encoder.SetPipeline(pipeline);
-encoder.Dispatch(1, 1, 1);
-encoder.Execute(device);
+using (var pass = graph.RenderPass("clear", target))
+    pass.Clear(Color.CornflowerBlue);
+
+graph.Dispatch(device);
+byte[] pixels = target.ReadToCpu();
 ```
+
+See `Goldy.Examples/TriangleHeadless.cs` for a full triangle readback demo.
 
 ### Windowed Rendering
 
-For interactive applications, use `Surface` with a window handle:
+Build a task graph each frame, blit an offscreen `RenderTarget` to the swapchain, then present:
 
 ```csharp
-using Goldy;
+using var graph = new TaskGraph();
+graph.Clear();
 
-using var surface = new Surface(device, windowHandle);
-
-while (running)
+using (var pass = graph.RenderPass("main", sceneRt))
 {
-    using var frame = surface.Acquire();
-    surface.Present(frame);  // graphics via TaskGraph is Rust-only today
+    pass.BindBuffer(vertexBuffer, NodeAccess.Read);
+    pass.Clear(Color.CornflowerBlue);
+    pass.SetPipeline(pipeline);
+    pass.SetVertexBuffer(0, vertexBuffer);
+    pass.Draw(3);
 }
+
+var swapchain = graph.DeclareSwapchainOutput();
+graph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
+
+using var frame = surface.Acquire();
+surface.SubmitGraphToFrame(graph, frame);
+surface.Present(frame);
 ```
+
+See `Goldy.Examples/TriangleWindow.cs` and `GameOfLifeWindow.cs`.
 
 ### Shaders (Slang)
 
@@ -183,7 +197,40 @@ public sealed class RenderPipelineDesc
 }
 ```
 
-`CommandEncoder`, `RenderPass`, and `Render`/`SurfaceFrame.Render` were removed. Graphics rendering uses the Rust `TaskGraph` API; .NET bindings retain compute.
+### TaskGraph / RenderPass / ComputeNode
+
+```csharp
+public sealed class TaskGraph : IDisposable
+{
+    public TaskGraph();
+    public void Clear();
+    public void WriteBuffer(Buffer buffer, ulong offset, ReadOnlySpan<byte> data);
+    public RenderPassScope RenderPass(string label, RenderTarget target);
+    public ComputeNodeScope ComputeNode(string label, ComputePipeline pipeline,
+        uint workgroupsX = 1, uint workgroupsY = 1, uint workgroupsZ = 1);
+    public SwapchainOutput DeclareSwapchainOutput();
+    public void CopyRenderTargetToSwapchain(RenderTarget source, SwapchainOutput swapchain);
+    public void Dispatch(Device device);  // headless: submit and block
+}
+
+public sealed class RenderPassScope : IDisposable
+{
+    public void BindBuffer(Buffer buffer, NodeAccess access);
+    public void Clear(Color color);
+    public void SetPipeline(RenderPipeline pipeline);
+    public void SetVertexBuffer(uint slot, Buffer buffer);
+    public void Draw(uint vertexCount, uint instanceCount = 1);
+    public void DrawFullscreen();
+}
+
+public sealed class ComputeNodeScope : IDisposable
+{
+    public ComputeNodeScope BindBuffer(Buffer buffer, NodeAccess access);
+    public ComputeNodeScope BindResourcesRaw(ReadOnlySpan<uint> indices);
+}
+```
+
+Imperative graphics recording (`RenderPass`, `SurfaceFrame.Render`) was removed. Graphics goes through `TaskGraph`; standalone compute still uses `ComputeEncoder`.
 
 ### RenderTarget
 
@@ -207,6 +254,7 @@ public sealed class Surface : IDisposable
 {
     public Surface(Device device, nint windowHandle);
     public SurfaceFrame Acquire();
+    public void SubmitGraphToFrame(TaskGraph graph, SurfaceFrame frame);
     public void Present(SurfaceFrame frame);
     public void Resize(uint width, uint height);
     public uint Width { get; }

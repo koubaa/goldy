@@ -34,7 +34,7 @@ public sealed class ComputePipeline : IDisposable
 }
 
 /// <summary>
-/// Command encoder for compute operations.
+/// Records compute dispatches for standalone (non-graph) submission.
 /// </summary>
 public sealed class ComputeEncoder
 {

@@ -71,9 +71,7 @@ impl Drop for ComputePipeline {
     }
 }
 
-/// Command encoder for compute operations.
-///
-/// Similar to `CommandEncoder` for graphics, but for compute workloads.
+/// Records compute dispatches for standalone (non-graph) submission.
 /// Commands are recorded lock-free and executed when `dispatch()` is called.
 ///
 /// # Example

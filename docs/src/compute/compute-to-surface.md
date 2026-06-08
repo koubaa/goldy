@@ -1,6 +1,6 @@
 # Compute to Surface
 
-Compute-to-surface lets a compute shader write directly to the swapchain texture, bypassing the rasterization pipeline entirely. There is no `RenderPipeline`, no vertex buffers, no `CommandEncoder` — just a compute dispatch that fills pixels.
+Compute-to-surface lets a compute shader write directly to the swapchain texture, bypassing the rasterization pipeline entirely. There is no `RenderPipeline`, no vertex buffers, and no raster pass — just a compute dispatch that fills pixels.
 
 ## When to use compute-to-surface
 

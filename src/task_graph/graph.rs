@@ -12,8 +12,6 @@ use crate::backend::{
 use crate::buffer::{Buffer, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
-#[cfg(test)]
-use crate::encoder::CommandEncoder;
 use crate::error::GoldyError;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
@@ -1895,7 +1893,7 @@ impl<'a> RenderPassBuilder<'a> {
         });
     }
 
-    /// Finalize the node with recorded [`RenderCommand`]s (e.g. from a command encoder).
+    /// Finalize the node with a pre-built [`RenderCommand`] list.
     pub fn finish(self, commands: Vec<RenderCommand>) {
         self.push_node(commands);
     }
@@ -1915,11 +1913,6 @@ impl<'a> RenderPassBuilder<'a> {
             kind: NodeKind::RenderPass { target, commands },
         });
     }
-
-    #[cfg(test)]
-    pub(crate) fn finish_encoder(self, encoder: CommandEncoder) {
-        self.finish(encoder.finish())
-    }
 }
 
 #[cfg(test)]
@@ -1930,7 +1923,6 @@ mod tests {
     use crate::backend::GraphCommand;
     use crate::buffer::BufferPool;
     use crate::device::Device;
-    use crate::encoder::CommandEncoder;
     use crate::render_target::RenderTarget;
     use crate::shader::ShaderModule;
     use crate::types::{Color, TextureFormat};
@@ -1987,15 +1979,10 @@ mod tests {
             .bind_resources_raw_slice(&[1])
             .dispatch(1, 1, 1);
 
-        let mut enc = CommandEncoder::new();
-        {
-            let mut pass = enc.begin_render_pass();
-            pass.clear(Color::RED);
-        }
-        graph
-            .render_pass("draw", &target)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .finish_encoder(enc);
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_buffer_mut(&buf, NodeAccess::Read);
+        pass.clear(Color::RED);
+        pass.finish_recorded();
 
         let gcs = graph.compile_graph_commands();
         assert!(
@@ -2063,15 +2050,10 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph.write_parcel(&parcel, 0, vec![1, 2, 3, 4]).unwrap();
 
-        let mut enc = CommandEncoder::new();
-        {
-            let mut pass = enc.begin_render_pass();
-            pass.clear(Color::RED);
-        }
-        graph
-            .render_pass("draw", &target)
-            .bind_parcel(&parcel, NodeAccess::Read)
-            .finish_encoder(enc);
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.clear(Color::RED);
+        pass.finish_recorded();
 
         let gcs = graph.compile_graph_commands();
         assert!(
@@ -2102,14 +2084,10 @@ mod tests {
         let device = mock_device();
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
-        let mut enc = CommandEncoder::new();
-        {
-            let mut pass = enc.begin_render_pass();
-            pass.clear(Color::RED);
-        }
-
         let mut graph = TaskGraph::new();
-        graph.render_pass("draw", &target).finish_encoder(enc);
+        let mut pass = graph.render_pass("draw", &target);
+        pass.clear(Color::RED);
+        pass.finish_recorded();
         let sc = graph.declare_swapchain_output();
         graph.copy_render_target_to_swapchain(&target, sc);
 
@@ -2128,17 +2106,11 @@ mod tests {
         let parcel = retained_buffer_parcel(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
-        let mut enc = CommandEncoder::new();
-        {
-            let mut pass = enc.begin_render_pass();
-            pass.clear(Color::BLUE);
-        }
-
         let mut graph = TaskGraph::new();
-        graph
-            .render_pass("draw", &target)
-            .bind_parcel(&parcel, NodeAccess::Read)
-            .finish_encoder(enc);
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.clear(Color::BLUE);
+        pass.finish_recorded();
 
         let tv = graph.submit(&ctx).unwrap();
         assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));

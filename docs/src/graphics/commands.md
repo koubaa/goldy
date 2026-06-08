@@ -97,5 +97,5 @@ surface.submit_graph_to_frame(&mut frame_graph, frame)?;
 ## Notes
 
 - Depth buffers live on the offscreen `RenderTarget` (`RenderTarget::new_with_depth`), not on the swapchain surface.
-- `CommandEncoder` is internal to Goldy tests only; clients use `RenderPassBuilder::finish_recorded()`.
+- Imperative graphics draw recording was removed; clients use `RenderPassBuilder::finish_recorded()`.
 - Compute-only swapchain output (no raster) uses `SwapchainOutput` directly — see [Compute to Surface](../compute/compute-to-surface.md).

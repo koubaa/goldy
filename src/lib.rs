@@ -18,8 +18,6 @@ pub mod common_types;
 pub mod compute;
 pub mod context;
 pub mod device;
-#[cfg(test)]
-pub(crate) mod encoder;
 pub mod error;
 pub mod examples;
 pub mod frame_orchestrator;

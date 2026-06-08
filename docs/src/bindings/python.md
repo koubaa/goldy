@@ -168,7 +168,7 @@ for _ in range(100):
 
 ### Combining Compute and Graphics
 
-Hybrid compute + raster workflows use a single `TaskGraph` in Rust (see `goldy/examples/game_of_life.rs`). Python exposes raster via `TaskGraph` + `RenderPass`; compute graph nodes are not yet bound (use `ComputeEncoder` for standalone compute).
+Hybrid compute + raster workflows use a single `TaskGraph` (see `python/examples/game_of_life.py` and `goldy/examples/game_of_life.rs`). Python exposes both `render_pass` and `compute_node` on `TaskGraph`. Use `ComputeEncoder` only for standalone compute without raster in the same frame.
 
 ## Key Differences from Rust
 
@@ -177,7 +177,8 @@ Hybrid compute + raster workflows use a single `TaskGraph` in Rust (see `goldy/e
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
 | Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
-| Render pass | `RenderPassBuilder` on `TaskGraph` (Rust) | `with graph.render_pass(...) as rp:` |
+| Render pass | `RenderPassBuilder` on `TaskGraph` | `with graph.render_pass(...) as rp:` |
+| Compute node | `graph.node(...).dispatch(...)` | `with graph.compute_node(...) as node:` |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |
 | Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |
 
@@ -229,8 +230,7 @@ target = goldy.RenderTarget(device, width, height, format, depth_format=None)
 target.width, target.height
 target.format
 target.has_depth
-target.render(encoder)
-target.read_to_cpu()       # numpy array (H, W, 4)
+target.read_to_cpu()       # numpy array (H, W, 4) — render via TaskGraph first
 ```
 
 #### `ShaderModule`
@@ -278,6 +278,14 @@ graph.copy_render_target_to_swapchain(scene_rt, swapchain)
 frame = surface.acquire()
 surface.submit_graph_to_frame(graph, frame)
 surface.present(frame)
+```
+
+#### `ComputeNode` (on `TaskGraph`)
+
+```python
+with graph.compute_node("update", compute_pipeline, workgroups=(8, 8, 1)) as node:
+    node.bind_buffer(state_buf, goldy.NodeAccess.READ_WRITE)
+    node.bind_resources_raw([state_idx])
 ```
 
 ### Compute Classes
