@@ -47,8 +47,8 @@ features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "goldy._goldy"
 
-# Include Slang libraries in the wheel (platform-specific)
-# These are copied to the package directory by build-slang.py before building
+# Include Slang libraries in release wheels (platform-specific).
+# CI/maintainers run build-slang.py before `maturin build`; not needed for `pip install -e`.
 # Note: paths are relative to python-source directory (python/), not project root
 include = [
     { path = "goldy/*.dll", format = "wheel" },

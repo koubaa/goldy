@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// multi-consumer scenarios.
 #[pyclass(name = "RenderTarget", module = "goldy")]
 pub struct PyRenderTarget {
-    inner: Arc<goldy::RenderTarget>,
+    pub(crate) inner: Arc<goldy::RenderTarget>,
 }
 
 #[pymethods]

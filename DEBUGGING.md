@@ -234,22 +234,25 @@ This error occurs when the FFI loads the wrong Slang DLL. Goldy requires Slang 2
 
 **Cause**: The Slang library search falls back to an older `slang.dll` from the Vulkan SDK instead of the bundled `slang-compiler.dll`.
 
-**Automatic Bundling**: As of version 0.1.0, Goldy's FFI bindings automatically bundle Slang libraries:
-- **.NET**: `build-native.ps1` / `build-native.sh` copies Slang to `runtimes/{rid}/native/`
-- **Python**: `build-slang.py` copies Slang to the package before `maturin build`
+**Automatic Slang**: The Rust crate embeds Slang at compile time (`goldy/build.rs`) and
+extracts it on first shader compile. Python dev installs (`pip install -e ".[dev]"`)
+use that path — no `build-slang.py` required.
+
+Release / redistribution layouts copy Slang next to native libs:
+- **.NET**: `build-native.ps1` / `build-native.sh` → `runtimes/{rid}/native/`
+- **Python wheels**: `build-slang.py` before `maturin build` (CI only)
 - **C++**: CMake installs Slang alongside `goldy_ffi`
 
-If you still encounter this error, the Slang libraries may not have been bundled correctly. Rebuild using the appropriate build script.
+If you still encounter this error, rebuild the native extension or set `GOLDY_SLANG_PATH`.
 
 **Manual Override**: To use a custom Slang version, set the environment variable:
 ```bash
 export GOLDY_SLANG_PATH=/path/to/slang-compiler.dll
 ```
 
-**Slang Loader Search Order**:
+**Slang loader search order** (see `goldy/src/slang/loader.rs`):
 1. `GOLDY_SLANG_PATH` environment variable
-2. Same directory as executable (for FFI deployments)
-3. `slang/bin/{platform}/` relative to executable
-4. Downloaded by build.rs to `OUT_DIR` (Rust crate only)
+2. Same directory as the running executable (wheel / FFI layout)
+3. Cache directory (extracted from bytes embedded at compile time)
 
 The required Slang version and file list are defined in `slang/manifest.json`.

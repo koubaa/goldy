@@ -18,6 +18,7 @@ mod pipeline;
 mod render_target;
 mod shader;
 mod surface;
+mod task_graph;
 mod types;
 
 use pyo3::prelude::*;
@@ -41,6 +42,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyIndexFormat>()?;
     m.add_class::<types::PyDepthFormat>()?;
     m.add_class::<types::PyCompareFunction>()?;
+    m.add_class::<types::PyNodeAccess>()?;
     m.add_class::<types::PyColor>()?;
     m.add_class::<types::PyVertexAttribute>()?;
     m.add_class::<types::PyVertexBufferLayout>()?;
@@ -55,6 +57,9 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
     m.add_class::<render_target::PyRenderTarget>()?;
+    m.add_class::<task_graph::PyTaskGraph>()?;
+    m.add_class::<task_graph::PyRenderPass>()?;
+    m.add_class::<task_graph::PySwapchainOutput>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;

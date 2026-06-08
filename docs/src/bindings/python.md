@@ -15,9 +15,13 @@ pip install goldy
 ```bash
 git clone https://github.com/koubaa/goldy.git
 cd goldy/python
-pip install maturin
-maturin develop --release
+python -m venv .venv
+source .venv/Scripts/activate   # platform-specific
+pip install -e ".[dev]"
 ```
+
+Slang is embedded when the extension is compiled; you do not run `build-slang.py` for
+local development. Rebuild after editing `python/src/*.rs` with `maturin develop`.
 
 ### Requirements
 
@@ -44,12 +48,12 @@ instance = goldy.Instance()
 device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
 
-# Compute (graphics rendering uses TaskGraph in Rust — see goldy/examples/)
-encoder = goldy.ComputeEncoder()
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(compute_pipeline)
-    cp.dispatch(1, 1, 1)
-encoder.execute(device)
+# Graphics via TaskGraph (headless)
+graph = goldy.TaskGraph()
+with graph.render_pass("clear", target) as rp:
+    rp.clear(goldy.Color.CORNFLOWER_BLUE)
+graph.dispatch(device)
+pixels = target.read_to_cpu()
 ```
 
 ## NumPy Integration
@@ -164,7 +168,7 @@ for _ in range(100):
 
 ### Combining Compute and Graphics
 
-Hybrid compute + raster workflows use a single Rust `TaskGraph` (see `goldy/examples/game_of_life.rs`). Python bindings expose compute only until `TaskGraph` bindings are added.
+Hybrid compute + raster workflows use a single `TaskGraph` in Rust (see `goldy/examples/game_of_life.rs`). Python exposes raster via `TaskGraph` + `RenderPass`; compute graph nodes are not yet bound (use `ComputeEncoder` for standalone compute).
 
 ## Key Differences from Rust
 
@@ -173,7 +177,7 @@ Hybrid compute + raster workflows use a single Rust `TaskGraph` (see `goldy/exam
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
 | Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
-| Render pass | `RenderPassBuilder` on `TaskGraph` (Rust) | Not exposed in Python yet |
+| Render pass | `RenderPassBuilder` on `TaskGraph` (Rust) | `with graph.render_pass(...) as rp:` |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |
 | Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |
 
@@ -252,7 +256,29 @@ desc = goldy.RenderPipelineDesc(
 )
 ```
 
-Graphics rendering (`CommandEncoder`, `RenderPass`, `RenderTarget.render`) was removed from the Python bindings. Use the Rust `TaskGraph` API for raster workloads; Python retains compute via `ComputeEncoder`.
+#### `TaskGraph` / `RenderPass`
+
+```python
+graph = goldy.TaskGraph()
+graph.clear()
+
+with graph.render_pass("main", scene_rt) as rp:
+    rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+    rp.clear(goldy.Color.BLACK)
+    rp.set_pipeline(pipeline)
+    rp.set_vertex_buffer(0, vertex_buffer)
+    rp.draw(vertex_count=3)
+
+# Headless
+graph.dispatch(device)
+
+# Windowed
+swapchain = graph.declare_swapchain_output()
+graph.copy_render_target_to_swapchain(scene_rt, swapchain)
+frame = surface.acquire()
+surface.submit_graph_to_frame(graph, frame)
+surface.present(frame)
+```
 
 ### Compute Classes
 

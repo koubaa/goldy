@@ -8,19 +8,27 @@ Python bindings for the [Goldy](https://github.com/koubaa/goldy) GPU library.
 pip install goldy
 ```
 
-Or build from source:
+Or build from source (development):
 
 ```bash
 cd goldy/python
-pip install maturin
-
-# For development (editable install)
-maturin develop
-
-# For wheel building (includes Slang libraries)
-python build-slang.py  # Copy Slang libs to package
-maturin build --release
+python -m venv .venv
+source .venv/Scripts/activate   # Windows Git Bash; use .venv\Scripts\activate on cmd/PowerShell
+pip install -e ".[dev]"
 ```
+
+That editable install compiles the Rust extension via maturin. Slang is embedded at
+compile time by Goldy's `build.rs` and extracted on first use — no separate Slang
+install or `build-slang.py` step is needed for local development.
+
+After changing Rust bindings (`python/src/*.rs`), rebuild with:
+
+```bash
+maturin develop
+```
+
+**Release wheels only** (maintainers / CI): copy Slang into the package tree before
+`maturin build` so wheels ship DLLs alongside the module — see [PACKAGING.md](../PACKAGING.md).
 
 ## Quick Start
 
@@ -45,28 +53,29 @@ buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
 pipeline = goldy.RenderPipeline(device, shader, shader, goldy.RenderPipelineDesc())
 
-# Compute (graphics rendering uses TaskGraph in Rust; see goldy/examples/)
-encoder = goldy.ComputeEncoder()
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(compute_pipeline)
-    cp.dispatch(1, 1, 1)
-encoder.execute(device)
+# Graphics via TaskGraph (headless)
+graph = goldy.TaskGraph()
+with graph.render_pass("clear", target) as rp:
+    rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
+    rp.set_pipeline(pipeline)
+    rp.set_vertex_buffer(0, buffer)
+    rp.draw(vertex_count=3)
+graph.dispatch(device)
+pixels = target.read_to_cpu()
 ```
 
 ## Examples
 
 See the `examples/` directory for complete examples:
 
+- **triangle.py** - Colored triangle via TaskGraph (headless readback)
 - **adapter_info.py** - Print GPU adapter information
 - **compute_demo.py** - Compute shader example
 
-Graphics examples live in the Rust crate (`goldy/examples/`).
-
 Run an example:
 ```bash
-cd goldy-py
-maturin develop
-python examples/hello_triangle.py
+cd goldy/python
+python examples/triangle.py
 ```
 
 ## Features
@@ -125,7 +134,10 @@ device.register_library('mylib', '''
 | `Buffer` | GPU buffer for vertex/index/uniform data |
 | `ShaderModule` | Compiled Slang shader |
 | `RenderPipeline` | Complete render state |
-| `RenderTarget` | Off-screen render target (readback; rendering via TaskGraph is Rust-only) |
+| `RenderTarget` | Off-screen render target |
+| `TaskGraph` | GPU task graph (render passes, swapchain blit, dispatch) |
+| `RenderPass` | Draw commands within a render-pass node |
+| `NodeAccess` | Read/Write/ReadWrite for graph dependency tracking |
 | `ComputeEncoder` | Record compute commands |
 
 ### Enums
@@ -149,8 +161,7 @@ device.register_library('mylib', '''
 ## Testing
 
 ```bash
-cd goldy-py
-maturin develop
+cd goldy/python
 pytest tests/ -v
 ```
 
@@ -170,10 +181,10 @@ Goldy uses DX12 on Windows and Vulkan on Linux by default. Override with `GOLDY_
 
 ```bash
 # Use Vulkan on Windows
-GOLDY_BACKEND=vulkan python examples/hello_triangle.py
+GOLDY_BACKEND=vulkan python examples/triangle.py
 
 # Use DX12 explicitly  
-GOLDY_BACKEND=dx12 python examples/hello_triangle.py
+GOLDY_BACKEND=dx12 python examples/triangle.py
 ```
 
 Or set it in Python before importing goldy:

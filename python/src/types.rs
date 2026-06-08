@@ -164,6 +164,30 @@ impl From<goldy::BufferKind> for PyBufferKind {
 }
 
 // =============================================================================
+// NodeAccess
+// =============================================================================
+
+/// Per-node resource access for task graph dependency tracking.
+#[pyclass(name = "NodeAccess", module = "goldy", eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PyNodeAccess {
+    #[default]
+    READ = 0,
+    WRITE = 1,
+    READ_WRITE = 2,
+}
+
+impl From<PyNodeAccess> for goldy::NodeAccess {
+    fn from(access: PyNodeAccess) -> Self {
+        match access {
+            PyNodeAccess::READ => goldy::NodeAccess::Read,
+            PyNodeAccess::WRITE => goldy::NodeAccess::Write,
+            PyNodeAccess::READ_WRITE => goldy::NodeAccess::ReadWrite,
+        }
+    }
+}
+
+// =============================================================================
 // TextureKind
 // =============================================================================
 

@@ -9,20 +9,21 @@ Example:
     >>> instance = goldy.Instance()
     >>> device = instance.request_adapter().request_device()
     >>> 
-    >>> # Compute example (graphics uses TaskGraph in Rust; see goldy/examples/)
-    >>> pipeline = goldy.ComputePipeline(device, shader)
-    >>> encoder = goldy.ComputeEncoder()
-    >>> with encoder.begin_compute_pass() as cp:
-    ...     cp.set_pipeline(pipeline)
-    ...     cp.dispatch(1, 1, 1)
-    >>> encoder.execute(device)
+    >>> # Graphics via TaskGraph (headless)
+    >>> target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
+    >>> graph = goldy.TaskGraph()
+    >>> with graph.render_pass("clear", target) as rp:
+    ...     rp.clear(goldy.Color.CORNFLOWER_BLUE)
+    >>> graph.dispatch(device)
+    >>> pixels = target.read_to_cpu()
 """
 
 import os as _os
 from pathlib import Path as _Path
 
-# Set up GOLDY_SLANG_PATH to point to bundled Slang libraries
-# This must happen BEFORE importing the native module
+# PyPI wheels may ship slang-compiler next to this package; prefer that over cache.
+# Editable dev installs embed Slang at compile time — this block is a no-op unless
+# build-slang.py was run for a release wheel layout.
 if "GOLDY_SLANG_PATH" not in _os.environ:
     _package_dir = _Path(__file__).parent
     # Determine library name based on platform
@@ -66,6 +67,10 @@ from goldy._goldy import (
     RenderPipeline,
     RenderPipelineDesc,
     RenderTarget,
+    TaskGraph,
+    RenderPass,
+    SwapchainOutput,
+    NodeAccess,
     # Shader builtins
     Builtins,
     # Compute
@@ -105,6 +110,10 @@ __all__ = [
     "RenderPipeline",
     "RenderPipelineDesc",
     "RenderTarget",
+    "TaskGraph",
+    "RenderPass",
+    "SwapchainOutput",
+    "NodeAccess",
     # Shader builtins
     "Builtins",
     # Compute

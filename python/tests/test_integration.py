@@ -156,6 +156,79 @@ def test_render_target_with_depth(device):
     assert target.has_depth()
 
 
+def test_render_clear_via_graph(device):
+    """Clear a render target through TaskGraph and verify readback."""
+    import goldy
+
+    target = goldy.RenderTarget(device, 2, 2, goldy.TextureFormat.RGBA8_UNORM)
+    graph = goldy.TaskGraph()
+    with graph.render_pass("clear", target) as rp:
+        rp.clear(goldy.Color.RED)
+    graph.dispatch(device)
+
+    pixels = target.read_to_cpu()
+    assert pixels.shape == (2, 2, 4)
+    assert np.all(pixels[:, :, 0] == 255)
+    assert np.all(pixels[:, :, 1] == 0)
+    assert np.all(pixels[:, :, 2] == 0)
+    assert np.all(pixels[:, :, 3] == 255)
+
+
+def test_triangle_via_graph(device):
+    """Render a triangle through TaskGraph and verify non-empty readback."""
+    import goldy
+
+    shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
+    pipeline = goldy.RenderPipeline(
+        device,
+        shader,
+        shader,
+        goldy.RenderPipelineDesc(
+            vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
+            target_format=goldy.TextureFormat.RGBA8_UNORM,
+        ),
+    )
+
+    vertices = np.array(
+        [
+            0.0,
+            -0.5,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -0.5,
+            0.5,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.5,
+            0.5,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+        ],
+        dtype=np.float32,
+    )
+    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+    target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
+
+    graph = goldy.TaskGraph()
+    with graph.render_pass("triangle", target) as rp:
+        rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+        rp.clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
+        rp.set_pipeline(pipeline)
+        rp.set_vertex_buffer(0, vertex_buffer)
+        rp.draw(vertex_count=3)
+
+    graph.dispatch(device)
+    pixels = target.read_to_cpu()
+    assert pixels.shape == (100, 100, 4)
+    assert np.any(pixels[:, :, :3] > 0)
+
+
 def test_custom_shader_library(device):
     """Test registering a custom shader library."""
     import goldy

@@ -18,6 +18,9 @@ def test_import():
     assert hasattr(goldy, 'RenderTarget')
     assert hasattr(goldy, 'ShaderModule')
     assert hasattr(goldy, 'RenderPipeline')
+    assert hasattr(goldy, 'TaskGraph')
+    assert hasattr(goldy, 'RenderPass')
+    assert hasattr(goldy, 'NodeAccess')
     
     # Verify enums
     assert hasattr(goldy, 'DeviceType')
