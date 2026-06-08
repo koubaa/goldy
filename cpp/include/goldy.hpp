@@ -66,6 +66,7 @@ class Buffer;
 class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
+class TaskGraph;
 class ComputePipeline;
 class ComputeEncoder;
 class Texture;
@@ -135,6 +136,15 @@ enum class TextureKind {
 };
 
 /**
+ * @brief Logical access declared on a task-graph node.
+ */
+enum class NodeAccess {
+    Read = GOLDY_NODE_ACCESS_READ,
+    Write = GOLDY_NODE_ACCESS_WRITE,
+    ReadWrite = GOLDY_NODE_ACCESS_READ_WRITE,
+};
+
+/**
  * @brief Texture flags for copy and render operations.
  */
 namespace TextureFlags {
@@ -178,6 +188,10 @@ struct RenderTargetDeleter {
     void operator()(GoldyRenderTarget* p) const { if (p) goldy_render_target_destroy(p); }
 };
 
+struct TaskGraphDeleter {
+    void operator()(GoldyTaskGraph* p) const { if (p) goldy_task_graph_destroy(p); }
+};
+
 struct ComputePipelineDeleter {
     void operator()(GoldyComputePipeline* p) const { if (p) goldy_compute_pipeline_destroy(p); }
 };
@@ -193,6 +207,12 @@ struct TextureDeleter {
 struct SamplerDeleter {
     void operator()(GoldySampler* p) const { if (p) goldy_sampler_destroy(p); }
 };
+
+inline void throw_on_result(GoldyResult result) {
+    if (result != GOLDY_RESULT_OK) {
+        throw Exception::from_last_error();
+    }
+}
 
 } // namespace detail
 
@@ -610,6 +630,195 @@ public:
 private:
     std::unique_ptr<GoldyRenderTarget, detail::RenderTargetDeleter> ptr_;
 };
+
+// =============================================================================
+// TaskGraph
+// =============================================================================
+
+/**
+ * @brief Opaque token from TaskGraph::declare_swapchain_output().
+ *
+ * Not separately freed; exists only to pass to copy_render_target_to_swapchain().
+ */
+class SwapchainOutput {
+public:
+    explicit SwapchainOutput(GoldySwapchainOutput* ptr) : ptr_(ptr) {}
+
+    SwapchainOutput(const SwapchainOutput&) = delete;
+    SwapchainOutput& operator=(const SwapchainOutput&) = delete;
+    SwapchainOutput(SwapchainOutput&&) = default;
+    SwapchainOutput& operator=(SwapchainOutput&&) = default;
+
+    GoldySwapchainOutput* get() const { return ptr_; }
+
+private:
+    GoldySwapchainOutput* ptr_ = nullptr;
+};
+
+/**
+ * @brief GPU task graph for render passes, compute nodes, and swapchain blits.
+ */
+class TaskGraph {
+public:
+    class RenderPass;
+
+    TaskGraph() {
+        GoldyTaskGraph* ptr = goldy_task_graph_create();
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    TaskGraph(const TaskGraph&) = delete;
+    TaskGraph& operator=(const TaskGraph&) = delete;
+    TaskGraph(TaskGraph&&) = default;
+    TaskGraph& operator=(TaskGraph&&) = default;
+
+    void clear() {
+        detail::throw_on_result(goldy_task_graph_clear(ptr_.get()));
+    }
+
+    void dispatch(const Device& device) {
+        detail::throw_on_result(goldy_task_graph_dispatch(ptr_.get(), device.get()));
+    }
+
+    [[nodiscard]] SwapchainOutput declare_swapchain_output() {
+        GoldySwapchainOutput* token = goldy_task_graph_declare_swapchain_output(ptr_.get());
+        if (!token) {
+            throw Exception::from_last_error();
+        }
+        return SwapchainOutput(token);
+    }
+
+    void copy_render_target_to_swapchain(const RenderTarget& src, const SwapchainOutput& swapchain) {
+        detail::throw_on_result(goldy_task_graph_copy_render_target_to_swapchain(
+            ptr_.get(), src.get(), swapchain.get()));
+    }
+
+    [[nodiscard]] RenderPass render_pass(const char* label, const RenderTarget& target);
+
+    GoldyTaskGraph* get() const { return ptr_.get(); }
+
+private:
+    friend class RenderPass;
+    std::unique_ptr<GoldyTaskGraph, detail::TaskGraphDeleter> ptr_;
+};
+
+/**
+ * @brief RAII scope for recording one offscreen render pass on a task graph.
+ *
+ * Calls render_pass_finish on destruction if finish() was not called explicitly.
+ */
+class TaskGraph::RenderPass {
+public:
+    RenderPass(TaskGraph& graph, const char* label, const RenderTarget& target)
+        : graph_(graph) {
+        detail::throw_on_result(goldy_task_graph_render_pass_begin(
+            graph_.ptr_.get(), label, target.get()));
+        active_ = true;
+    }
+
+    ~RenderPass() {
+        if (active_) {
+            finish();
+        }
+    }
+
+    RenderPass(const RenderPass&) = delete;
+    RenderPass& operator=(const RenderPass&) = delete;
+    RenderPass(RenderPass&&) = delete;
+    RenderPass& operator=(RenderPass&&) = delete;
+
+    RenderPass& bind_buffer(const Buffer& buffer, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_buffer(
+            graph_.ptr_.get(), buffer.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    RenderPass& bind_resources(std::span<const Buffer* const> buffers) {
+        if (buffers.empty()) {
+            return *this;
+        }
+        std::vector<const GoldyBuffer*> ptrs;
+        ptrs.reserve(buffers.size());
+        for (const Buffer* buf : buffers) {
+            ptrs.push_back(buf->get());
+        }
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_resources(
+            graph_.ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size())));
+        return *this;
+    }
+
+    RenderPass& clear(const Color& color) {
+        detail::throw_on_result(goldy_task_graph_render_pass_clear(graph_.ptr_.get(), color));
+        return *this;
+    }
+
+    RenderPass& clear_depth(float depth = 1.0f) {
+        detail::throw_on_result(goldy_task_graph_render_pass_clear_depth(graph_.ptr_.get(), depth));
+        return *this;
+    }
+
+    RenderPass& set_pipeline(const RenderPipeline& pipeline) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_pipeline(
+            graph_.ptr_.get(), pipeline.get()));
+        return *this;
+    }
+
+    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_vertex_buffer(
+            graph_.ptr_.get(), slot, buffer.get()));
+        return *this;
+    }
+
+    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint64_t offset) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_vertex_buffer_offset(
+            graph_.ptr_.get(), slot, buffer.get(), offset));
+        return *this;
+    }
+
+    RenderPass& set_index_buffer(const Buffer& buffer, GoldyIndexFormat format) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_index_buffer(
+            graph_.ptr_.get(), buffer.get(), format));
+        return *this;
+    }
+
+    RenderPass& draw(uint32_t first_vertex, uint32_t vertex_count,
+                     uint32_t first_instance = 0, uint32_t instance_count = 1) {
+        detail::throw_on_result(goldy_task_graph_render_pass_draw(
+            graph_.ptr_.get(), first_vertex, vertex_count, first_instance, instance_count));
+        return *this;
+    }
+
+    RenderPass& draw_indexed(uint32_t first_index, uint32_t index_count, int32_t base_vertex = 0,
+                               uint32_t first_instance = 0, uint32_t instance_count = 1) {
+        detail::throw_on_result(goldy_task_graph_render_pass_draw_indexed(
+            graph_.ptr_.get(), first_index, index_count, base_vertex, first_instance, instance_count));
+        return *this;
+    }
+
+    RenderPass& draw_fullscreen() {
+        detail::throw_on_result(goldy_task_graph_render_pass_draw_fullscreen(graph_.ptr_.get()));
+        return *this;
+    }
+
+    void finish() {
+        if (!active_) {
+            return;
+        }
+        detail::throw_on_result(goldy_task_graph_render_pass_finish(graph_.ptr_.get()));
+        active_ = false;
+    }
+
+private:
+    TaskGraph& graph_;
+    bool active_ = false;
+};
+
+inline TaskGraph::RenderPass TaskGraph::render_pass(const char* label, const RenderTarget& target) {
+    return RenderPass(*this, label, target);
+}
 
 // =============================================================================
 // ComputePipeline

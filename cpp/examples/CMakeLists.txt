@@ -1,15 +1,10 @@
 # Goldy C++ Examples
 
-# Triangle example - basic rendering
+# Triangle example - offscreen TaskGraph render + PPM readback
 add_executable(triangle triangle.cpp)
 target_link_libraries(triangle PRIVATE goldy::goldy)
 
-# Plasma example
-add_executable(plasma plasma.cpp)
-target_link_libraries(plasma PRIVATE goldy::goldy)
-
-# List of all example targets
-set(GOLDY_EXAMPLES triangle plasma)
+set(GOLDY_EXAMPLES triangle)
 
 # Platform-specific shared library handling for all examples
 if(GOLDY_FFI_LIB)
