@@ -10,46 +10,75 @@ C and C++ bindings for the Goldy GPU library.
 
 ## Quick Start
 
+Headless offscreen render (all platforms with a GPU):
+
 ```cpp
 #include <goldy.hpp>
 
-int main() {
-    // Create instance and device
-    goldy::Instance instance;
-    goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
-    
-    // Create render target
-    goldy::RenderTarget target(device, 800, 600);
-    
-    // Compile shader and create pipeline
-    goldy::ShaderModule shader(device, R"(
-        [shader("vertex")]
-        float4 vs_main(float2 pos : POSITION) : SV_Position {
-            return float4(pos, 0.0, 1.0);
-        }
-        
-        [shader("fragment")]
-        float4 fs_main() : SV_Target {
-            return float4(1.0, 0.0, 0.0, 1.0);
-        }
-    )");
-    
-    GoldyRenderPipelineDesc desc{};
-    desc.target_format = GoldyTextureFormat::Rgba8Unorm;
-    goldy::RenderPipeline pipeline(device, shader, shader, desc);
+#include <cstdint>
+#include <iostream>
 
-    goldy::TaskGraph graph;
-    {
-        auto pass = graph.render_pass("clear", target);
-        pass.clear(goldy::Color::cornflower_blue())
-            .set_pipeline(pipeline)
-            .set_vertex_buffer(0, vertex_buffer)
-            .draw(0, 3);
+struct Vertex {
+    float position[2];
+    float color[4];
+};
+
+int main() {
+    try {
+        goldy::Instance instance;
+        goldy::Device device = instance.request_adapter().request_device();
+        goldy::RenderTarget target(device, 800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
+
+        const Vertex vertices[] = {
+            {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+            {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        };
+
+        goldy::Buffer vertex_buffer(
+            device,
+            std::span<const Vertex>(vertices),
+            goldy::BufferKind::Scattered);
+
+        goldy::ShaderModule shader(device, goldy::ShaderModule::builtin_vertex_color_2d());
+
+        GoldyVertexAttribute attributes[] = {
+            {0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0},
+            {1, GOLDY_VERTEX_FORMAT_FLOAT32X4, static_cast<uint32_t>(sizeof(float) * 2)},
+        };
+
+        GoldyRenderPipelineDesc desc{};
+        desc.vertex_attributes = attributes;
+        desc.vertex_attribute_count = static_cast<uint32_t>(std::size(attributes));
+        desc.vertex_stride = sizeof(Vertex);
+        desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        desc.target_format = GOLDY_TEXTURE_FORMAT_RGBA8_UNORM;
+
+        goldy::RenderPipeline pipeline(device, shader, shader, desc);
+
+        goldy::TaskGraph graph;
+        {
+            auto pass = graph.render_pass("triangle", target);
+            pass.bind_buffer(vertex_buffer, goldy::NodeAccess::Read)
+                .clear(goldy::Color::cornflower_blue())
+                .set_pipeline(pipeline)
+                .set_vertex_buffer(0, vertex_buffer)
+                .draw(0, 3);
+        }
+        graph.dispatch(device);
+
+        auto pixels = target.read_to_cpu();
+        std::cout << "Rendered " << pixels.size() << " bytes\n";
+        return 0;
+    } catch (const goldy::Exception& e) {
+        std::cerr << "Goldy error: " << e.what() << '\n';
+        return 1;
     }
-    graph.dispatch(device);
-    auto pixels = target.read_to_cpu();
 }
 ```
+
+Windowed rendering: see `examples/triangle.cpp` (Win32 / macOS). Check
+`goldy::Surface::is_supported()` before using `Surface`.
 
 ## Installation
 
@@ -106,12 +135,11 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 
 ## Platform Support
 
-| Platform | Status |
-|----------|--------|
-| Windows x64 | ✅ Supported |
-| Linux x64 | ✅ Supported |
-| macOS x64 | ✅ Supported |
-| macOS ARM64 | ✅ Supported |
+| Platform | Headless TaskGraph | Windowed Surface |
+|----------|-------------------|------------------|
+| Windows x64 | ✅ | ✅ |
+| Linux x64 | ✅ | ❌ (use headless or custom window + C API) |
+| macOS x64 / ARM64 | ✅ | ✅ |
 
 ## API Reference
 
@@ -126,6 +154,7 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 | `goldy::RenderPipeline` | Graphics pipeline |
 | `goldy::RenderTarget` | Offscreen render target (readback) |
 | `goldy::TaskGraph` | Task graph (render passes, swapchain blit, dispatch) |
+| `goldy::Surface` | Window swapchain (Win32 / macOS only) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
 | `goldy::ComputeEncoder` | Records compute commands |
 | `goldy::Texture` | GPU texture |
@@ -169,4 +198,3 @@ goldy_instance_destroy(instance);
 ## License
 
 LGPL-2.1-or-later. A commercial license is also available; contact [koubaa on github](permament email tbd) for terms.
-

@@ -719,8 +719,9 @@ struct GoldyTaskGraph *goldy_task_graph_create(void);
 
 // Declare that this graph will copy to the swapchain at submit time.
 //
-// Returns an opaque token passed to [`goldy_task_graph_copy_render_target_to_swapchain`].
-// Phase 2 surface submit uses the same graph with a `SwapchainOutput` binding.
+// Returns a pointer to a per-graph sentinel (not heap-allocated). The pointer is
+// valid until the graph is destroyed and must be passed to
+// [`goldy_task_graph_copy_render_target_to_swapchain`].
 //
 // # Safety
 // The graph pointer must be valid.

@@ -821,9 +821,20 @@ private:
  * Created from platform window handles via goldy_surface_create_win32 /
  * goldy_surface_create_appkit. Window toolkit code stays in the application;
  * this wrapper only wraps the stable C ABI.
+ *
+ * On platforms without a constructor here (e.g. Linux), use headless
+ * TaskGraph::dispatch() with RenderTarget, or bring your own windowing + C API.
  */
 class Surface {
 public:
+    static constexpr bool is_supported() noexcept {
+#if defined(_WIN32) || defined(__APPLE__)
+        return true;
+#else
+        return false;
+#endif
+    }
+
 #if defined(_WIN32)
     Surface(const Device& device, void* hwnd) {
         GoldySurface* ptr = goldy_surface_create_win32(device.get(), hwnd);
@@ -892,16 +903,17 @@ private:
 // =============================================================================
 
 /**
- * @brief Opaque token from TaskGraph::declare_swapchain_output().
+ * @brief Non-owning token from TaskGraph::declare_swapchain_output().
  *
- * Not separately freed; exists only to pass to copy_render_target_to_swapchain().
+ * Points at storage inside the parent graph; do not free. Pass to
+ * copy_render_target_to_swapchain() only.
  */
 class SwapchainOutput {
 public:
     explicit SwapchainOutput(GoldySwapchainOutput* ptr) : ptr_(ptr) {}
 
-    SwapchainOutput(const SwapchainOutput&) = delete;
-    SwapchainOutput& operator=(const SwapchainOutput&) = delete;
+    SwapchainOutput(const SwapchainOutput&) = default;
+    SwapchainOutput& operator=(const SwapchainOutput&) = default;
     SwapchainOutput(SwapchainOutput&&) = default;
     SwapchainOutput& operator=(SwapchainOutput&&) = default;
 
@@ -975,9 +987,11 @@ public:
         active_ = true;
     }
 
-    ~RenderPass() {
+    ~RenderPass() noexcept {
         if (active_) {
-            finish();
+            // Do not throw from a destructor.
+            goldy_task_graph_render_pass_finish(graph_.ptr_.get());
+            active_ = false;
         }
     }
 

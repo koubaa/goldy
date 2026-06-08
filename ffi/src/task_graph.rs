@@ -14,11 +14,23 @@ use std::ptr;
 pub struct GoldyTaskGraph {
     pub(crate) inner: TaskGraph,
     active_pass: Option<RenderPassRecord>,
+    /// Per-graph sentinel returned by [`goldy_task_graph_declare_swapchain_output`] (no heap alloc).
+    swapchain_token: GoldySwapchainOutput,
+    /// Keeps render-pass label strings alive for nodes in `inner` (cleared with the graph).
+    labels: Vec<String>,
 }
 
 impl GoldyTaskGraph {
     pub(crate) fn has_active_render_pass(&self) -> bool {
         self.active_pass.is_some()
+    }
+
+    fn intern_label(&mut self, label: &str) -> &'static str {
+        self.labels.push(label.to_string());
+        let s = self.labels.last().unwrap();
+        // SAFETY: `labels` is cleared in `goldy_task_graph_clear` alongside `inner`, and dropped
+        // with the graph. Node labels in `inner` never outlive this storage.
+        unsafe { std::mem::transmute::<&str, &'static str>(s.as_str()) }
     }
 }
 
@@ -30,17 +42,18 @@ pub struct GoldySwapchainOutput {
     _private: [u8; 0],
 }
 
-fn intern_label(label: *const libc::c_char) -> Result<&'static str, GoldyResult> {
+fn parse_label(label: *const libc::c_char) -> Result<String, GoldyResult> {
     if label.is_null() {
         set_last_error("Task graph label is null");
         return Err(GoldyResult::NullPointer);
     }
     let s = unsafe { CStr::from_ptr(label) };
-    let s = s.to_str().map_err(|e| {
-        set_last_error_from_anyhow(&anyhow::anyhow!("Invalid UTF-8 label: {e}"));
-        GoldyResult::InvalidArgument
-    })?;
-    Ok(Box::leak(s.to_string().into_boxed_str()))
+    s.to_str()
+        .map(|s| s.to_string())
+        .map_err(|e| {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Invalid UTF-8 label: {e}"));
+            GoldyResult::InvalidArgument
+        })
 }
 
 fn node_access(access: GoldyNodeAccess) -> NodeAccess {
@@ -64,6 +77,8 @@ pub extern "C" fn goldy_task_graph_create() -> *mut GoldyTaskGraph {
     Box::into_raw(Box::new(GoldyTaskGraph {
         inner: TaskGraph::new(),
         active_pass: None,
+        swapchain_token: GoldySwapchainOutput { _private: [] },
+        labels: Vec::new(),
     }))
 }
 
@@ -89,6 +104,7 @@ pub unsafe extern "C" fn goldy_task_graph_clear(graph: *mut GoldyTaskGraph) -> G
     }
     (*graph).inner.clear();
     (*graph).active_pass = None;
+    (*graph).labels.clear();
     GoldyResult::Ok
 }
 
@@ -111,8 +127,8 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_begin(
         set_last_error("A render pass is already being recorded");
         return GoldyResult::InvalidArgument;
     }
-    let label = match intern_label(label) {
-        Ok(l) => l,
+    let label = match parse_label(label) {
+        Ok(l) => (*graph).intern_label(&l),
         Err(e) => return e,
     };
     (*graph).active_pass = Some(RenderPassRecord::new(label, &(*target).inner));
@@ -383,8 +399,9 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_finish(graph: *mut GoldyTa
 
 /// Declare that this graph will copy to the swapchain at submit time.
 ///
-/// Returns an opaque token passed to [`goldy_task_graph_copy_render_target_to_swapchain`].
-/// Phase 2 surface submit uses the same graph with a `SwapchainOutput` binding.
+/// Returns a pointer to a per-graph sentinel (not heap-allocated). The pointer is
+/// valid until the graph is destroyed and must be passed to
+/// [`goldy_task_graph_copy_render_target_to_swapchain`].
 ///
 /// # Safety
 /// The graph pointer must be valid.
@@ -396,7 +413,7 @@ pub unsafe extern "C" fn goldy_task_graph_declare_swapchain_output(
         return ptr::null_mut();
     }
     (*graph).inner.declare_swapchain_output();
-    Box::into_raw(Box::new(GoldySwapchainOutput { _private: [] }))
+    ptr::addr_of_mut!((*graph).swapchain_token)
 }
 
 /// Add a render-target → swapchain blit node to the graph.

@@ -70,9 +70,9 @@ impl Drop for TaskGraph {
     }
 }
 
-/// Opaque token from [`TaskGraph::declare_swapchain_output`].
+/// Non-owning token from [`TaskGraph::declare_swapchain_output`].
 ///
-/// Not separately freed; exists only to pass to [`TaskGraph::copy_render_target_to_swapchain`].
+/// Points at storage inside the parent graph; pass to [`TaskGraph::copy_render_target_to_swapchain`].
 #[derive(Clone, Copy)]
 pub struct SwapchainOutputHandle {
     pub(crate) _token: *const GoldySwapchainOutput,
