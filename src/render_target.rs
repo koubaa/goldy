@@ -26,7 +26,6 @@ use std::sync::{Arc, Mutex};
 pub struct RenderTarget {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
-    device_handle: u64,
     handle: RenderTargetHandle,
     width: u32,
     height: u32,
@@ -62,7 +61,6 @@ impl RenderTarget {
         Ok(Self {
             _device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
-            device_handle: device.inner.handle,
             handle,
             width,
             height,
