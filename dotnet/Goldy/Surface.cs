@@ -63,6 +63,34 @@ public sealed class Surface : IDisposable
     }
 
     /// <summary>
+    /// Create a surface from an AppKit NSView pointer (macOS).
+    /// </summary>
+    public static Surface CreateAppKit(Device device, nint nsView)
+    {
+        device.ThrowIfDisposed();
+
+        var handle = NativeMethods.SurfaceCreateAppKit(device.Handle, nsView);
+        if (handle == nint.Zero)
+            throw GoldyException.FromLastError("Surface creation");
+
+        return new Surface(handle);
+    }
+
+    /// <summary>
+    /// Create a surface from Wayland wl_display and wl_surface pointers (Linux).
+    /// </summary>
+    public static Surface CreateWayland(Device device, nint display, nint surface)
+    {
+        device.ThrowIfDisposed();
+
+        var handle = NativeMethods.SurfaceCreateWayland(device.Handle, display, surface);
+        if (handle == nint.Zero)
+            throw GoldyException.FromLastError("Surface creation");
+
+        return new Surface(handle);
+    }
+
+    /// <summary>
     /// Get the surface width in pixels.
     /// </summary>
     public uint Width => NativeMethods.SurfaceWidth(Handle);

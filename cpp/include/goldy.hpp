@@ -819,21 +819,12 @@ private:
  * @brief A window swapchain surface.
  *
  * Created from platform window handles via goldy_surface_create_win32 /
- * goldy_surface_create_appkit. Window toolkit code stays in the application;
- * this wrapper only wraps the stable C ABI.
- *
- * On platforms without a constructor here (e.g. Linux), use headless
- * TaskGraph::dispatch() with RenderTarget, or bring your own windowing + C API.
+ * goldy_surface_create_appkit / goldy_surface_create_wayland. Window toolkit
+ * code stays in the application; this wrapper only wraps the stable C ABI.
  */
 class Surface {
 public:
-    static constexpr bool is_supported() noexcept {
-#if defined(_WIN32) || defined(__APPLE__)
-        return true;
-#else
-        return false;
-#endif
-    }
+    static constexpr bool is_supported() noexcept { return true; }
 
 #if defined(_WIN32)
     Surface(const Device& device, void* hwnd) {
@@ -846,6 +837,15 @@ public:
 #elif defined(__APPLE__)
     Surface(const Device& device, void* ns_view) {
         GoldySurface* ptr = goldy_surface_create_appkit(device.get(), ns_view);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+#else
+    Surface(const Device& device, void* wayland_display, void* wayland_surface) {
+        GoldySurface* ptr = goldy_surface_create_wayland(
+            device.get(), wayland_display, wayland_surface);
         if (!ptr) {
             throw Exception::from_last_error();
         }

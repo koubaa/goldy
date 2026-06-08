@@ -309,6 +309,12 @@ internal static partial class NativeMethods
     /// </summary>
     [LibraryImport(LibName, EntryPoint = "goldy_surface_create_win32")]
     internal static partial nint SurfaceCreateWin32(nint device, nint hwnd);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_appkit")]
+    internal static partial nint SurfaceCreateAppKit(nint device, nint nsView);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_create_wayland")]
+    internal static partial nint SurfaceCreateWayland(nint device, nint display, nint surface);
 }
 
 /// <summary>

@@ -383,3 +383,88 @@ mod windows_surface {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+mod wayland_surface {
+    use super::*;
+    use crate::device::GoldyDevice;
+    use raw_window_handle::{
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle,
+        WaylandWindowHandle,
+    };
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    struct WaylandWindow {
+        display: NonNull<c_void>,
+        surface: NonNull<c_void>,
+    }
+
+    impl HasWindowHandle for WaylandWindow {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let handle = WaylandWindowHandle::new(self.surface);
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::Wayland(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for WaylandWindow {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            let handle = WaylandDisplayHandle::new(self.display);
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(handle)) })
+        }
+    }
+
+    /// Create a surface from Wayland `wl_display` and `wl_surface` pointers.
+    ///
+    /// # Safety
+    /// - `device` must be valid.
+    /// - `display` and `surface` must be valid Wayland handles for the window.
+    /// - They must outlive the surface.
+    #[no_mangle]
+    pub unsafe extern "C" fn goldy_surface_create_wayland(
+        device: *const GoldyDevice,
+        display: *mut c_void,
+        surface: *mut c_void,
+    ) -> *mut GoldySurface {
+        if device.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Device pointer is null"));
+            return ptr::null_mut();
+        }
+        if display.is_null() || surface.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Wayland display or surface pointer is null"));
+            return ptr::null_mut();
+        }
+
+        let display = match NonNull::new(display) {
+            Some(d) => d,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("Wayland display pointer is null"));
+                return ptr::null_mut();
+            }
+        };
+        let surface = match NonNull::new(surface) {
+            Some(s) => s,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("Wayland surface pointer is null"));
+                return ptr::null_mut();
+            }
+        };
+
+        let window = WaylandWindow { display, surface };
+        let device = &(*device).inner;
+        let ctx = match device.create_context() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                return ptr::null_mut();
+            }
+        };
+        match goldy::Surface::new(&ctx, &window) {
+            Ok(s) => Box::into_raw(Box::new(GoldySurface { inner: s })),
+            Err(e) => {
+                set_last_error_from_anyhow(&e);
+                ptr::null_mut()
+            }
+        }
+    }
+}

@@ -2,9 +2,9 @@ using System.Runtime.InteropServices;
 using Goldy;
 
 /// <summary>
-/// Headless triangle example via TaskGraph (matches goldy/python/examples/triangle.py).
+/// Headless triangle via TaskGraph (CI / no display).
 /// </summary>
-static class Triangle
+static class TriangleHeadless
 {
     [StructLayout(LayoutKind.Sequential)]
     struct Vertex2D
@@ -15,7 +15,7 @@ static class Triangle
 
     public static void Run()
     {
-        Console.WriteLine("Goldy .NET Triangle (TaskGraph)");
+        Console.WriteLine("Goldy .NET Triangle (headless TaskGraph)");
         Console.WriteLine(new string('=', 40));
 
         using var instance = new Instance();

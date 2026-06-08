@@ -7,7 +7,14 @@ class Program
         switch (example)
         {
             case "triangle":
-                Triangle.Run();
+            case "triangle-window":
+            case "":
+            case null:
+                Goldy.Examples.TriangleWindow.Run();
+                break;
+            case "triangle-headless":
+            case "headless":
+                TriangleHeadless.Run();
                 break;
             default:
                 PrintUsage();
@@ -19,9 +26,10 @@ class Program
     {
         Console.WriteLine("Goldy.Examples - GPU demos via TaskGraph FFI");
         Console.WriteLine();
-        Console.WriteLine("Usage: dotnet run --project Goldy.Examples -- <example>");
+        Console.WriteLine("Usage: dotnet run --project Goldy.Examples -- [example]");
         Console.WriteLine();
         Console.WriteLine("Available examples:");
-        Console.WriteLine("  triangle  - Headless colored triangle (RenderTarget + TaskGraph)");
+        Console.WriteLine("  triangle           - Windowed animated triangle (default)");
+        Console.WriteLine("  triangle-headless  - Headless triangle + readback (CI)");
     }
 }

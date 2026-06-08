@@ -1,14 +1,22 @@
 # Goldy C++ Examples
 
-# Triangle example - interactive Surface + TaskGraph render
+include(FetchContent)
+FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(glfw)
+
 add_executable(triangle triangle.cpp)
-target_link_libraries(triangle PRIVATE goldy::goldy)
+target_link_libraries(triangle PRIVATE goldy::goldy glfw)
 
 if(APPLE)
     set_source_files_properties(triangle.cpp PROPERTIES LANGUAGE OBJCXX)
-    target_link_libraries(triangle PRIVATE "-framework AppKit" "-framework QuartzCore")
-elseif(WIN32)
-    target_link_libraries(triangle PRIVATE user32 gdi32)
+    target_link_libraries(triangle PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
 
 set(GOLDY_EXAMPLES triangle)
@@ -17,8 +25,6 @@ set(GOLDY_EXAMPLES triangle)
 if(GOLDY_FFI_LIB)
     foreach(example IN LISTS GOLDY_EXAMPLES)
         if(WIN32)
-            # Copy DLL to output directory on Windows (GOLDY_FFI_DLL is the runtime DLL;
-            # GOLDY_FFI_LIB is the import lib used only at link time)
             if(GOLDY_FFI_DLL)
                 add_custom_command(TARGET ${example} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -28,12 +34,10 @@ if(GOLDY_FFI_LIB)
                 )
             endif()
         elseif(APPLE)
-            # Set rpath for macOS to find the dylib at runtime
             set_target_properties(${example} PROPERTIES
                 BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../target/release;${CMAKE_CURRENT_SOURCE_DIR}/../../target/debug"
                 INSTALL_RPATH "@executable_path/../lib;@executable_path"
             )
-            # Copy dylib to output directory
             add_custom_command(TARGET ${example} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${GOLDY_FFI_LIB}"
@@ -41,12 +45,10 @@ if(GOLDY_FFI_LIB)
                 COMMENT "Copying libgoldy_ffi.dylib to output directory"
             )
         else()
-            # Set rpath for Linux to find the .so at runtime
             set_target_properties(${example} PROPERTIES
                 BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../target/release;${CMAKE_CURRENT_SOURCE_DIR}/../../target/debug"
                 INSTALL_RPATH "$ORIGIN/../lib:$ORIGIN"
             )
-            # Copy .so to output directory
             add_custom_command(TARGET ${example} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${GOLDY_FFI_LIB}"
@@ -54,8 +56,7 @@ if(GOLDY_FFI_LIB)
                 COMMENT "Copying libgoldy_ffi.so to output directory"
             )
         endif()
-        
-        # Copy Slang libraries to output directory (required for runtime)
+
         if(SLANG_LIBS)
             foreach(slang_lib IN LISTS SLANG_LIBS)
                 add_custom_command(TARGET ${example} POST_BUILD
@@ -68,4 +69,3 @@ if(GOLDY_FFI_LIB)
         endif()
     endforeach()
 endif()
-

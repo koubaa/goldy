@@ -1,25 +1,49 @@
 #!/usr/bin/env python3
-"""Triangle example — render a colored triangle via TaskGraph (headless).
+"""Triangle example — animated colored triangle in a window via TaskGraph.
 
-Renders to an offscreen RenderTarget, submits through TaskGraph, and verifies
-readback. For windowed presentation, combine Surface.submit_graph_to_frame with
-the same graph pattern (see goldy/examples/triangle.rs).
+Offscreen RenderTarget -> render_pass -> copy_render_target_to_swapchain -> present.
+
+Requires: pip install glfw
 
 Usage:
     python triangle.py
 """
 
+from __future__ import annotations
+
+import math
+import sys
+
+import glfw
 import goldy
 import numpy as np
 
 
-def main():
-    print("Goldy Python Triangle (TaskGraph)")
+def make_scene_rt(device: goldy.Device, surface: goldy.Surface) -> goldy.RenderTarget:
+    width = max(surface.width, 1)
+    height = max(surface.height, 1)
+    return goldy.RenderTarget(device, width, height, surface.format)
+
+
+def main() -> int:
+    print("Goldy Python Triangle Window (TaskGraph)")
     print("=" * 40)
+    print("Press Escape or close the window to exit\n")
+
+    if not glfw.init():
+        print("Failed to initialize GLFW", file=sys.stderr)
+        return 1
+
+    glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
+    window = glfw.create_window(800, 600, "Goldy - Animated Triangle (Python)", None, None)
+    if not window:
+        glfw.terminate()
+        print("Failed to create GLFW window", file=sys.stderr)
+        return 1
 
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
-    print(f"Backend: {instance.backend_type}")
+    surface = goldy.Surface.from_glfw(device, window)
 
     shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
     pipeline = goldy.RenderPipeline(
@@ -28,7 +52,7 @@ def main():
         shader,
         goldy.RenderPipelineDesc(
             vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
-            target_format=goldy.TextureFormat.RGBA8_UNORM,
+            target_format=surface.format,
         ),
     )
 
@@ -57,29 +81,50 @@ def main():
     )
     vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 
-    width, height = 100, 100
-    target = goldy.RenderTarget(device, width, height, goldy.TextureFormat.RGBA8_UNORM)
+    scene_rt = make_scene_rt(device, surface)
+    frame_graph = goldy.TaskGraph()
+    frame_count = 0
 
-    graph = goldy.TaskGraph()
-    with graph.render_pass("triangle", target) as rp:
-        (
-            rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
-            .clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
-            .set_pipeline(pipeline)
-            .set_vertex_buffer(0, vertex_buffer)
-            .draw(range(3))
-        )
+    try:
+        while not glfw.window_should_close(window):
+            fb_width, fb_height = glfw.get_framebuffer_size(window)
+            if fb_width > 0 and fb_height > 0:
+                if fb_width != surface.width or fb_height != surface.height:
+                    surface.resize(fb_width, fb_height)
+                    scene_rt = make_scene_rt(device, surface)
 
-    graph.dispatch(device)
+            t = math.sin(frame_count * 0.02) * 0.5 + 0.5
+            bg = goldy.Color(0.1 + t * 0.1, 0.1 + t * 0.05, 0.2 + t * 0.1, 1.0)
 
-    pixels = target.read_to_cpu()
-    assert pixels.shape == (height, width, 4)
-    assert pixels.dtype == np.uint8
-    assert np.any(pixels[:, :, :3] > 0), "triangle should write non-black pixels"
+            frame_graph.clear()
+            with frame_graph.render_pass("triangle", scene_rt) as rp:
+                (
+                    rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+                    .clear(bg)
+                    .set_pipeline(pipeline)
+                    .set_vertex_buffer(0, vertex_buffer)
+                    .draw(range(3))
+                )
 
-    print(f"Rendered {width}x{height}, readback OK")
+            swapchain = frame_graph.declare_swapchain_output()
+            frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
+
+            frame = surface.acquire()
+            surface.submit_graph_to_frame(frame_graph, frame)
+            surface.present(frame)
+
+            frame_count += 1
+            glfw.poll_events()
+
+            if glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS:
+                break
+    finally:
+        glfw.destroy_window(window)
+        glfw.terminate()
+
     print("Done!")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

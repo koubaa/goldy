@@ -77,16 +77,22 @@ impl PySurface {
 
         #[cfg(target_os = "linux")]
         let surface = {
-            // On Linux/X11, get the X11 window and display
-            let get_x11_window = glfw.getattr("get_x11_window")?;
-            let get_x11_display = glfw.getattr("get_x11_display")?;
+            // Vulkan on Linux requires Wayland handles (see goldy Vulkan surface backend).
+            let get_wayland_window = glfw.getattr("get_wayland_window")?;
+            let get_wayland_display = glfw.getattr("get_wayland_display")?;
 
-            let x11_window: u64 = get_x11_window.call1((glfw_window,))?.extract()?;
-            let x11_display: isize = get_x11_display.call1(())?.extract()?;
+            let wl_surface: isize = get_wayland_window.call1((glfw_window,))?.extract()?;
+            let wl_display: isize = get_wayland_display.call1(())?.extract()?;
 
-            let window_wrapper = X11WindowWrapper {
-                window: x11_window as u32,
-                display: x11_display as *mut std::ffi::c_void,
+            if wl_surface == 0 || wl_display == 0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "Wayland handles unavailable — run under a Wayland session (X11 is not supported by the Vulkan backend)",
+                ));
+            }
+
+            let window_wrapper = WaylandWindowWrapper {
+                display: wl_display as *mut std::ffi::c_void,
+                surface: wl_surface as *mut std::ffi::c_void,
             };
             goldy::Surface::new(&context, &window_wrapper).into_py_result()?
         };
@@ -229,30 +235,34 @@ impl raw_window_handle::HasDisplayHandle for Win32WindowWrapper {
 }
 
 #[cfg(target_os = "linux")]
-struct X11WindowWrapper {
-    window: u32,
+struct WaylandWindowWrapper {
     display: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
 }
 
 #[cfg(target_os = "linux")]
-unsafe impl Send for X11WindowWrapper {}
+unsafe impl Send for WaylandWindowWrapper {}
 #[cfg(target_os = "linux")]
-unsafe impl Sync for X11WindowWrapper {}
+unsafe impl Sync for WaylandWindowWrapper {}
 
 #[cfg(target_os = "linux")]
-impl raw_window_handle::HasWindowHandle for X11WindowWrapper {
+impl raw_window_handle::HasWindowHandle for WaylandWindowWrapper {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let mut handle = raw_window_handle::XlibWindowHandle::new(self.window as _);
-        let raw = raw_window_handle::RawWindowHandle::Xlib(handle);
+        let handle = raw_window_handle::WaylandWindowHandle::new(
+            std::ptr::NonNull::new(self.surface).expect("wayland surface"),
+        );
+        let raw = raw_window_handle::RawWindowHandle::Wayland(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }
 }
 
 #[cfg(target_os = "linux")]
-impl raw_window_handle::HasDisplayHandle for X11WindowWrapper {
+impl raw_window_handle::HasDisplayHandle for WaylandWindowWrapper {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let handle = raw_window_handle::XlibDisplayHandle::new(std::ptr::NonNull::new(self.display), 0);
-        let raw = raw_window_handle::RawDisplayHandle::Xlib(handle);
+        let handle = raw_window_handle::WaylandDisplayHandle::new(
+            std::ptr::NonNull::new(self.display).expect("wayland display"),
+        );
+        let raw = raw_window_handle::RawDisplayHandle::Wayland(handle);
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })
     }
 }

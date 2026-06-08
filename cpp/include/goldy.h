@@ -618,6 +618,16 @@ struct GoldySurfaceFrame *goldy_surface_acquire(const struct GoldySurface *surfa
 // - The view must outlive the surface.
 struct GoldySurface *goldy_surface_create_appkit(const struct GoldyDevice *device, void *ns_view);
 
+// Create a surface from Wayland `wl_display` and `wl_surface` pointers.
+//
+// # Safety
+// - `device` must be valid.
+// - `display` and `surface` must be valid Wayland handles for the window.
+// - They must outlive the surface.
+struct GoldySurface *goldy_surface_create_wayland(const struct GoldyDevice *device,
+                                                  void *display,
+                                                  void *surface);
+
 // Create a surface from a Win32 HWND.
 //
 // # Arguments
