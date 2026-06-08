@@ -25,6 +25,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use super::ir::{BarrierSet, BarrierUsage, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, UsageKindFlags, Wave};
 // NodeAccess is used in the test module via `super::*`
 #[cfg(test)]
@@ -32,7 +34,15 @@ use super::ir::NodeAccess;
 use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
-use anyhow::Result;
+
+fn push_compute_resource_bind(commands: &mut Vec<GpuCommand>, slots: &[u32], user_slots: &[u32]) {
+    if !slots.is_empty() || !user_slots.is_empty() {
+        commands.push(GpuCommand::BindResourcesRaw {
+            indices: slots.to_vec(),
+            user: user_slots.to_vec(),
+        });
+    }
+}
 
 /// Returns true if byte range `[o1, o1+l1)` overlaps `[o2, o2+l2)`.
 ///
@@ -700,12 +710,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                             None => resource_slots.clone(),
                         };
                         commands.push(GpuCommand::SetPipeline(*pipeline));
-                        if !slots.is_empty() || !user_slots.is_empty() {
-                            commands.push(GpuCommand::BindResourcesRaw {
-                                indices: slots,
-                                user: user_slots.clone(),
-                            });
-                        }
+                        push_compute_resource_bind(&mut commands, &slots, user_slots);
                         commands.push(GpuCommand::DispatchIndirect {
                             label: Some(node.label),
                             buffer: *buffer,
@@ -742,12 +747,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let d = &run[0];
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
                     let slots = d.resource_slots.as_slice();
-                    if !slots.is_empty() || !d.user_slots.is_empty() {
-                        commands.push(GpuCommand::BindResourcesRaw {
-                            indices: slots.to_vec(),
-                            user: d.user_slots.clone(),
-                        });
-                    }
+                    push_compute_resource_bind(&mut commands, slots, d.user_slots);
                     commands.push(GpuCommand::Dispatch {
                         label: Some(d.label),
                         workgroups_x: d.x,
@@ -984,11 +984,10 @@ pub(crate) fn emit_graph_commands_for_waves(
                         None => resource_slots.clone(),
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
-                    if !slots.is_empty() || !user_slots.is_empty() {
-                        commands.push(GraphCommand::Compute(GpuCommand::BindResourcesRaw {
-                            indices: slots,
-                            user: user_slots.clone(),
-                        }));
+                    let mut bind_cmds = Vec::new();
+                    push_compute_resource_bind(&mut bind_cmds, &slots, user_slots);
+                    for cmd in bind_cmds {
+                        commands.push(GraphCommand::Compute(cmd));
                     }
                     match dispatch {
                         super::ir::DispatchDim::Direct { x, y, z } => {

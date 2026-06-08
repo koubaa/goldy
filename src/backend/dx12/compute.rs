@@ -16,22 +16,39 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+use crate::types::ResourceCategory;
+
+fn buffer_stride_for_bindless_index(
+    buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+    index: u32,
+    cat: ResourceCategory,
+) -> Option<u32> {
+    for b in buffers.values() {
+        match cat {
+            ResourceCategory::Scattered => {
+                if b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index) {
+                    return b.element_stride;
+                }
+            }
+            ResourceCategory::Broadcast => {
+                if b.bindless_offset == Some(index) {
+                    return b.element_stride;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 /// Collect bindless heap indices referenced by a flat GPU command stream.
 fn collect_bindless_slots_from_gpu_commands(
     commands: &[GpuCommand],
-    buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+    _buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
 ) -> Vec<DeferredSlot> {
     let mut slots = Vec::new();
     for cmd in commands {
         match cmd {
-            GpuCommand::BindResources { buffers: buf_handles } => {
-                for h in buf_handles {
-                    if let Some(offset) = buffers.get(h).and_then(|b| b.bindless_offset) {
-                        slots.push(DeferredSlot::CbvSrvUav(offset));
-                    }
-                }
-            }
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 slots.extend(indices.iter().copied().map(DeferredSlot::CbvSrvUav));
             }
@@ -689,51 +706,22 @@ fn record_gpu_command(
                 }
             }
         }
-        GpuCommand::BindResources { buffers } => {
-            if crate::slang::layout_validation_enabled() {
-                if let Some(pipeline) = ctx
-                    .current_compute_pipeline
-                    .and_then(|h| state.compute_pipelines.get(&h))
-                {
-                    if !pipeline.binding_element_strides.is_empty() {
-                        let actual: Vec<Option<u32>> = buffers
-                            .iter()
-                            .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
-                            .collect();
-                        crate::backend::validate_binding_strides(
-                            &actual,
-                            &pipeline.binding_element_strides,
-                            &pipeline.shader_debug_name,
-                        )?;
-                    }
-                }
-            }
-            let mut layout = types::PushLayout::default();
-            shared::fill_bindless(
-                &mut layout,
-                buffers.iter().map(|h| {
-                    let offset = state.buffers.get(h).and_then(|b| b.bindless_offset).unwrap_or(0);
-                    tracing::trace!("Compute BindResources: buffer {} -> UAV offset {}", h, offset);
-                    offset
-                }),
-            );
-            tracing::trace!(
-                "Setting compute root constants (bindless): {:?}",
-                &layout.bindless[..buffers.len().min(types::MAX_BINDLESS_SLOTS)]
-            );
-            unsafe {
-                cl.SetComputeRoot32BitConstants(
-                    0,
-                    (types::TOTAL_PUSH_BYTES / 4) as u32,
-                    &layout as *const _ as *const std::ffi::c_void,
-                    0,
-                );
-            }
-        }
         GpuCommand::BindResourcesRaw {
             indices: raw_indices,
             user: raw_user,
         } => {
+            if let Some(pipeline) = ctx
+                .current_compute_pipeline
+                .and_then(|h| state.compute_pipelines.get(&h))
+            {
+                crate::backend::validate_raw_binding_strides(
+                    raw_indices,
+                    &pipeline.push_constant_categories,
+                    &pipeline.binding_element_strides,
+                    |idx, cat| buffer_stride_for_bindless_index(&state.buffers, idx, cat),
+                    &pipeline.shader_debug_name,
+                )?;
+            }
             let mut layout = types::PushLayout::default();
             shared::fill_raw(&mut layout, raw_indices, raw_user);
             unsafe {

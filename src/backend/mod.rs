@@ -166,6 +166,49 @@ pub(crate) fn validate_binding_strides(
     }
 }
 
+/// Validate buffer element strides for a compute dispatch bound via raw bindless indices.
+///
+/// For each push-constant slot with a reflected stride expectation, resolves the bound
+/// buffer's `element_stride` through `resolve_stride(index, category)` and delegates
+/// to [`validate_binding_strides`].
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_raw_binding_strides(
+    indices: &[u32],
+    categories: &[Option<crate::types::ResourceCategory>],
+    expected: &[Option<u32>],
+    mut resolve_stride: impl FnMut(u32, crate::types::ResourceCategory) -> Option<u32>,
+    shader_name: &str,
+) -> Result<()> {
+    if !crate::slang::layout_validation_enabled() || expected.is_empty() {
+        return Ok(());
+    }
+    let mut actual: Vec<Option<u32>> = vec![None; expected.len()];
+    for (slot, exp) in expected.iter().enumerate() {
+        if exp.is_none() {
+            continue;
+        }
+        let Some(cat) = categories.get(slot).and_then(|c| *c) else {
+            continue;
+        };
+        if !matches!(
+            cat,
+            crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::Broadcast
+        ) {
+            continue;
+        }
+        let Some(&idx) = indices.get(slot) else {
+            continue;
+        };
+        actual[slot] = resolve_stride(idx, cat);
+    }
+    validate_binding_strides(&actual, expected, shader_name)
+}
+
 // Re-export raw_window_handle for Surface API users
 pub use raw_window_handle;
 
@@ -269,8 +312,6 @@ pub enum RenderCommand {
 pub enum GpuCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
-    /// Bind resource slots (fully bindless mode - buffer indices passed directly).
-    BindResources { buffers: Vec<BufferHandle> },
     /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
     /// `indices` go to region A (bindless, packed as u16).
@@ -360,10 +401,8 @@ pub enum GpuCommand {
         arg_data: Arc<[u8]>,
         count: u32,
     },
-    /// Manual memory barrier inserted via [`crate::ComputePass::barrier`].
+    /// Conservative global memory barrier (legacy command-list path).
     ///
-    /// This is the non-graph path: it carries no Koubaa-level access semantics,
-    /// so backends emit a conservative global sync covering all prior work.
     /// Within a [`crate::task_graph::TaskGraph`] submission, prefer
     /// `ResourceBarrier` which is produced by the scheduler with precise
     /// `src_usage` / `dst_usage` derived from the dependency graph.
@@ -856,13 +895,6 @@ pub trait GpuBackend: Send + Sync {
 
     /// Destroy a compute pipeline.
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
-
-    /// Execute compute commands.
-    /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(&mut self, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<()> {
-        let v = self.submit_standalone(ctx, commands)?;
-        self.wait_until(ctx, v)
-    }
 
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap

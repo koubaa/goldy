@@ -1193,7 +1193,7 @@ impl TaskGraph {
                     pipeline,
                     resource_slots,
                     user_slots,
-                    dispatch,
+                        dispatch,
                 } => {
                     0u8.hash(&mut h);
                     pipeline.hash(&mut h);
@@ -1573,6 +1573,33 @@ impl<'a> NodeBuilder<'a> {
     /// Convenience wrapper that copies a slice into owned storage.
     pub fn bind_resources_raw_slice(self, indices: &[u32]) -> Self {
         self.bind_resources_raw(indices.to_vec())
+    }
+
+    /// Bind buffer resource slots and declare read/write dependencies.
+    ///
+    /// Slot indices are each buffer's UAV bindless index in shader parameter order.
+    pub fn bind_resources(mut self, buffers: &[&Buffer]) -> Self {
+        use crate::types::ResourceAccess;
+        let mut indices = Vec::with_capacity(buffers.len());
+        for buf in buffers {
+            self.bindings.push(ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::ReadWrite,
+            });
+            let idx = buf
+                .resource_index(ResourceAccess::ReadWrite)
+                .or_else(|| buf.resource_index(ResourceAccess::Read))
+                .expect("bind_resources: buffer has no bindless index");
+            indices.push(idx);
+        }
+        self.resource_slots = indices;
+        self
+    }
+
+    /// Bind resource slots from typed [`ResourceHandle`]s (region A indices only).
+    pub fn bind_resources_typed(mut self, handles: &[ResourceHandle]) -> Self {
+        self.resource_slots = handles.iter().map(|h| h.index()).collect();
+        self
     }
 
     /// Set user scalar parameters for this node's dispatch (region B).

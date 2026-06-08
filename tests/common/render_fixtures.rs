@@ -1,10 +1,9 @@
 //! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
 
 use goldy::{
-    BufferKind, Color, CompareFunction, ComputeEncoder, ComputePipeline, DepthFormat, DepthStencilState, Device,
-    DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    RequestAdapterOptions, ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, DeviceDescriptor,
+    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 fn graph_render(
@@ -216,18 +215,19 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let workgroups_y = GOL_GRID_HEIGHT.div_ceil(8);
 
     for _ in 0..updates {
-        let mut compute_encoder = ComputeEncoder::new();
-        {
-            let mut pass = compute_encoder.begin_compute_pass();
-            pass.set_pipeline(&compute_pipeline);
-            if use_buffer_a {
-                pass.bind_resources(&[&buffer_a, &buffer_b]);
-            } else {
-                pass.bind_resources(&[&buffer_b, &buffer_a]);
-            }
-            pass.dispatch(workgroups_x, workgroups_y, 1);
+        let mut graph = TaskGraph::new();
+        if use_buffer_a {
+            graph
+                .node("gol_update", &compute_pipeline)
+                .bind_resources(&[&buffer_a, &buffer_b])
+                .dispatch(workgroups_x, workgroups_y, 1);
+        } else {
+            graph
+                .node("gol_update", &compute_pipeline)
+                .bind_resources(&[&buffer_b, &buffer_a])
+                .dispatch(workgroups_x, workgroups_y, 1);
         }
-        compute_encoder.dispatch(&ctx).expect("Compute dispatch failed");
+        graph.dispatch(&ctx).expect("Compute dispatch failed");
         use_buffer_a = !use_buffer_a;
     }
 

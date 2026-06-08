@@ -65,7 +65,7 @@ pub use vram_allocator::{DeferredPayload, ParcelType};
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
-pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
+pub use compute::ComputePipeline;
 pub use signal::{OversubscribedReason, Signal};
 pub use timeline::{Epoch, ReferenceTable, TimelineValue};
 

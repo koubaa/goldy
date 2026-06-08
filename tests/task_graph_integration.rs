@@ -8,7 +8,7 @@
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    Buffer, BufferKind, ComputeEncoder, ComputePipeline, NodeAccess, RetainedPool, ShaderModule, TaskGraph,
+    Buffer, BufferKind, ComputePipeline, NodeAccess, RetainedPool, ShaderModule, TaskGraph,
 };
 use std::sync::Arc;
 
@@ -309,9 +309,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     }
 }
 
-/// TaskGraph produces the same result as manual ComputeEncoder for the same workload.
+/// Two-pass chained compute through TaskGraph (double then add ten).
 #[test]
-fn graph_matches_encoder() {
+fn graph_two_pass_chained_compute() {
     let device = make_device();
     let ctx = submission_context(&device);
 
@@ -321,69 +321,32 @@ fn graph_matches_encoder() {
     let add_pipe = ComputePipeline::new(&device, &add_shader).unwrap();
 
     let input: Vec<u32> = (0..64).collect();
-
-    // --- Run via ComputeEncoder (manual barriers) ---
-    let src_enc = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
-    let dst_enc = device
+    let src = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
+    let dst = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .unwrap();
 
-    // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (UAV on DX12). Use ReadWrite
-    // for the UAV index; ResourceAccess::Read returns the SRV slot and reads zeros on WARP.
-    let src_enc_idx = src_enc.resource_index(ResourceAccess::ReadWrite).unwrap();
-    let dst_enc_idx = dst_enc.resource_index(ResourceAccess::Write).unwrap();
-
-    {
-        let mut encoder = ComputeEncoder::new();
-        {
-            let mut pass = encoder.begin_compute_pass();
-            pass.set_pipeline(&double_pipe);
-            pass.bind_resources_raw(&[src_enc_idx, dst_enc_idx]);
-            pass.dispatch(1, 1, 1);
-        }
-        encoder.dispatch(&ctx).unwrap();
-    }
-    {
-        let mut encoder = ComputeEncoder::new();
-        {
-            let mut pass = encoder.begin_compute_pass();
-            pass.set_pipeline(&add_pipe);
-            pass.bind_resources_raw(&[dst_enc_idx]);
-            pass.dispatch(1, 1, 1);
-        }
-        encoder.dispatch(&ctx).unwrap();
-    }
-
-    let result_enc = readback_u32(&device, &dst_enc, 64);
-
-    // --- Run via TaskGraph ---
-    let src_graph = device.alloc_buffer_with_data(&input, BufferKind::Scattered).unwrap();
-    let dst_graph = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .unwrap();
-
-    // Same: `Scattered<uint> input` in DOUBLE_SHADER requires the UAV index.
-    let src_graph_idx = src_graph.resource_index(ResourceAccess::ReadWrite).unwrap();
-    let dst_graph_idx = dst_graph.resource_index(ResourceAccess::Write).unwrap();
+    let src_idx = src.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let dst_idx = dst.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
-        .bind_buffer(&src_graph, NodeAccess::Read)
-        .bind_buffer(&dst_graph, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_graph_idx, dst_graph_idx])
+        .bind_buffer(&src, NodeAccess::Read)
+        .bind_buffer(&dst, NodeAccess::Write)
+        .bind_resources_raw_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
     graph
         .node("add_ten", &add_pipe)
-        .bind_buffer(&dst_graph, NodeAccess::ReadWrite)
-        .bind_resources_raw_slice(&[dst_graph_idx])
+        .bind_buffer(&dst, NodeAccess::ReadWrite)
+        .bind_resources_raw_slice(&[dst_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).unwrap();
 
-    let result_graph = readback_u32(&device, &dst_graph, 64);
-
-    // Both should produce identical results
-    assert_eq!(result_enc, result_graph, "TaskGraph should match ComputeEncoder output");
+    let result = readback_u32(&device, &dst, 64);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, (i as u32) * 2 + 10, "element {i}");
+    }
 }
 
 /// Non-blocking submit via TaskGraph.
