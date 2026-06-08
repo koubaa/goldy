@@ -40,3 +40,11 @@ path = "examples/compute_simple.rs"
 [[example]]
 name = "triangle_headless"
 path = "examples/triangle_headless.rs"
+
+[[example]]
+name = "game_of_life"
+path = "examples/game_of_life.rs"
+
+[[example]]
+name = "game_of_life_headless"
+path = "examples/game_of_life_headless.rs"

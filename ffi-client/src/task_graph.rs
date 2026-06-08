@@ -5,7 +5,7 @@ use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::sys::{self, GoldySwapchainOutput, GoldyTaskGraph};
-use crate::types::{Color, NodeAccess};
+use crate::types::{Color, NodeAccess, ResourceHandle};
 use std::ffi::CString;
 use std::ops::Range;
 
@@ -134,6 +134,27 @@ impl RenderPassBuilder<'_> {
                 vertices.end - vertices.start,
                 instances.start,
                 instances.end - instances.start,
+            )
+        });
+        self
+    }
+
+    pub fn draw_fullscreen(&mut self) -> &mut Self {
+        expect_ok(unsafe { sys::goldy_task_graph_render_pass_draw_fullscreen(self.graph.ptr) });
+        self
+    }
+
+    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+        let mut flat = Vec::with_capacity(handles.len() * 2);
+        for h in handles {
+            flat.push(h.category as u32);
+            flat.push(h.index);
+        }
+        expect_ok(unsafe {
+            sys::goldy_task_graph_render_pass_bind_resources_typed(
+                self.graph.ptr,
+                flat.as_ptr(),
+                handles.len() as u32,
             )
         });
         self

@@ -128,6 +128,8 @@ pub type FnGoldyTaskGraphRenderPassBindBuffer =
     unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyBuffer, GoldyNodeAccess) -> GoldyResult;
 pub type FnGoldyTaskGraphRenderPassBindResources =
     unsafe extern "C" fn(*mut GoldyTaskGraph, *const *const GoldyBuffer, u32) -> GoldyResult;
+pub type FnGoldyTaskGraphRenderPassBindResourcesTyped =
+    unsafe extern "C" fn(*mut GoldyTaskGraph, *const u32, u32) -> GoldyResult;
 pub type FnGoldyTaskGraphRenderPassClear = unsafe extern "C" fn(*mut GoldyTaskGraph, GoldyColor) -> GoldyResult;
 pub type FnGoldyTaskGraphRenderPassClearDepth = unsafe extern "C" fn(*mut GoldyTaskGraph, f32) -> GoldyResult;
 pub type FnGoldyTaskGraphRenderPassDraw = unsafe extern "C" fn(*mut GoldyTaskGraph, u32, u32, u32, u32) -> GoldyResult;

@@ -94,6 +94,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_task_graph_render_pass_begin: FnGoldyTaskGraphRenderPassBegin,
     pub goldy_task_graph_render_pass_bind_buffer: FnGoldyTaskGraphRenderPassBindBuffer,
     pub goldy_task_graph_render_pass_bind_resources: FnGoldyTaskGraphRenderPassBindResources,
+    pub goldy_task_graph_render_pass_bind_resources_typed: FnGoldyTaskGraphRenderPassBindResourcesTyped,
     pub goldy_task_graph_render_pass_clear: FnGoldyTaskGraphRenderPassClear,
     pub goldy_task_graph_render_pass_clear_depth: FnGoldyTaskGraphRenderPassClearDepth,
     pub goldy_task_graph_render_pass_draw: FnGoldyTaskGraphRenderPassDraw,
@@ -256,6 +257,10 @@ impl GoldyFfi {
             goldy_task_graph_render_pass_bind_resources: sym!(
                 "goldy_task_graph_render_pass_bind_resources",
                 FnGoldyTaskGraphRenderPassBindResources
+            ),
+            goldy_task_graph_render_pass_bind_resources_typed: sym!(
+                "goldy_task_graph_render_pass_bind_resources_typed",
+                FnGoldyTaskGraphRenderPassBindResourcesTyped
             ),
             goldy_task_graph_render_pass_clear: sym!(
                 "goldy_task_graph_render_pass_clear",

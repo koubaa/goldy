@@ -139,8 +139,23 @@ impl From<NodeAccess> for GoldyNodeAccess {
     }
 }
 
-/// Bindless resource slot access for shader binding.
+/// Bindless resource category for [`ResourceHandle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceCategory {
+    Scattered = 0,
+    Broadcast = 1,
+    StorageImage = 2,
+    Texture = 3,
+    Sampler = 4,
+}
+
+/// Typed bindless handle (category + slot index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceHandle {
+    pub category: ResourceCategory,
+    pub index: u32,
+}
+
 pub enum ResourceAccess {
     Read,
     Write,

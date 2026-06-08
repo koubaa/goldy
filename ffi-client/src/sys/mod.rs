@@ -409,6 +409,14 @@ pub unsafe fn goldy_task_graph_render_pass_bind_resources(
     (lib().goldy_task_graph_render_pass_bind_resources)(graph, buffers, buffer_count)
 }
 
+pub unsafe fn goldy_task_graph_render_pass_bind_resources_typed(
+    graph: *mut GoldyTaskGraph,
+    indices: *const u32,
+    handle_count: u32,
+) -> GoldyResult {
+    (lib().goldy_task_graph_render_pass_bind_resources_typed)(graph, indices, handle_count)
+}
+
 pub unsafe fn goldy_task_graph_render_pass_clear(graph: *mut GoldyTaskGraph, color: GoldyColor) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_clear)(graph, color)
 }
