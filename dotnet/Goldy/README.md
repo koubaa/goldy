@@ -11,12 +11,19 @@ using Goldy;
 using var instance = new Instance();
 using var device = instance.RequestAdapter().RequestDevice();
 
-// Compute example (graphics uses TaskGraph in Rust — see goldy/examples/)
-using var pipeline = new ComputePipeline(device, computeShader);
-using var encoder = new ComputeEncoder();
-encoder.SetPipeline(pipeline);
-encoder.Dispatch(1, 1, 1);
-encoder.Execute(device);
+// Headless triangle via TaskGraph
+using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
+using var pipeline = new RenderPipeline(device, shader, shader, new RenderPipelineDesc
+{
+    VertexAttributes = VertexLayouts.Vertex2D,
+    TargetFormat = TextureFormat.Rgba8Unorm,
+});
+using var target = new RenderTarget(device, 100, 100, TextureFormat.Rgba8Unorm);
+using var graph = new TaskGraph();
+using (var pass = graph.RenderPass("clear", target))
+    pass.Clear(Color.CornflowerBlue);
+graph.Dispatch(device);
+byte[] pixels = target.ReadToCpu();
 ```
 
 ## Features

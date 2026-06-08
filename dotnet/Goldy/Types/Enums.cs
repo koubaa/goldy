@@ -204,6 +204,16 @@ public enum FilterMode
 }
 
 /// <summary>
+/// Per-node resource access for task graph bindings.
+/// </summary>
+public enum NodeAccess
+{
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
+/// <summary>
 /// Shader stages flags.
 /// </summary>
 [Flags]

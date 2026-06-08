@@ -13,10 +13,19 @@ namespace Goldy;
 /// // Create surface from a window handle (platform-specific)
 /// var surface = Surface.CreateWin32(device, windowHandle);
 /// 
-/// // Render loop (graphics via TaskGraph is Rust-only today; present empty frames or use compute)
+/// var graph = new TaskGraph();
+/// var sceneRt = new RenderTarget(device, surface.Width, surface.Height, surface.Format);
 /// while (running)
 /// {
+///     graph.Clear();
+///     using (var pass = graph.RenderPass("main", sceneRt))
+///     {
+///         pass.Clear(Color.CornflowerBlue).SetPipeline(pipeline).Draw(3);
+///     }
+///     var swapchain = graph.DeclareSwapchainOutput();
+///     graph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
 ///     var frame = surface.Acquire();
+///     surface.SubmitGraphToFrame(graph, frame);
 ///     surface.Present(frame);
 /// }
 /// </code>
@@ -107,6 +116,20 @@ public sealed class Surface : IDisposable
     }
 
     /// <summary>
+    /// Submit a task graph to an acquired swapchain frame.
+    /// The graph must declare swapchain output and include a blit node.
+    /// </summary>
+    public void SubmitGraphToFrame(TaskGraph graph, SurfaceFrame frame)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        graph.ThrowIfDisposed();
+
+        var result = NativeMethods.SurfaceSubmitGraphToFrame(Handle, graph.Handle, frame.NativeHandle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Surface submit_graph_to_frame");
+    }
+
+    /// <summary>
     /// Present a rendered frame to the screen.
     /// This submits the frame to be displayed and returns immediately.
     /// </summary>
@@ -158,7 +181,12 @@ public sealed class SurfaceFrame
     public uint Height => NativeMethods.SurfaceFrameHeight(_handle);
 
     /// <summary>
-    /// Take ownership of the native handle (for internal use).
+    /// Native frame box pointer (for submit_graph_to_frame).
+    /// </summary>
+    internal nint NativeHandle => _handle;
+
+    /// <summary>
+    /// Take ownership of the native handle (for present).
     /// </summary>
     internal nint TakeHandle()
     {

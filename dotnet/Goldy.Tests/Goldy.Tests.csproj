@@ -25,5 +25,12 @@
     <ProjectReference Include="..\Goldy\Goldy.csproj" />
   </ItemGroup>
 
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <Content Include="..\Goldy\runtimes\win-x64\native\*.*">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
 

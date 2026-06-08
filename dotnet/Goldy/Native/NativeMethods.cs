@@ -234,6 +234,72 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_height")]
     internal static partial uint SurfaceFrameHeight(nint frame);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_surface_submit_graph_to_frame")]
+    internal static partial GoldyResult SurfaceSubmitGraphToFrame(nint surface, nint graph, nint frame);
+
+    // ========================================================================
+    // TaskGraph
+    // ========================================================================
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_create")]
+    internal static partial nint TaskGraphCreate();
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_destroy")]
+    internal static partial void TaskGraphDestroy(nint graph);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_clear")]
+    internal static partial GoldyResult TaskGraphClear(nint graph);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_dispatch")]
+    internal static partial GoldyResult TaskGraphDispatch(nint graph, nint device);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_declare_swapchain_output")]
+    internal static partial nint TaskGraphDeclareSwapchainOutput(nint graph);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_copy_render_target_to_swapchain")]
+    internal static partial GoldyResult TaskGraphCopyRenderTargetToSwapchain(nint graph, nint src, nint swapchain);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_begin", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial GoldyResult TaskGraphRenderPassBegin(nint graph, string label, nint target);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_buffer")]
+    internal static partial GoldyResult TaskGraphRenderPassBindBuffer(nint graph, nint buffer, NodeAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_resources")]
+    internal static partial GoldyResult TaskGraphRenderPassBindResources(nint graph, nint buffers, uint bufferCount);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_clear")]
+    internal static partial GoldyResult TaskGraphRenderPassClear(nint graph, Color color);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_clear_depth")]
+    internal static partial GoldyResult TaskGraphRenderPassClearDepth(nint graph, float depth);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_set_pipeline")]
+    internal static partial GoldyResult TaskGraphRenderPassSetPipeline(nint graph, nint pipeline);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_set_vertex_buffer")]
+    internal static partial GoldyResult TaskGraphRenderPassSetVertexBuffer(nint graph, uint slot, nint buffer);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_set_vertex_buffer_offset")]
+    internal static partial GoldyResult TaskGraphRenderPassSetVertexBufferOffset(nint graph, uint slot, nint buffer, ulong offset);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_set_index_buffer")]
+    internal static partial GoldyResult TaskGraphRenderPassSetIndexBuffer(nint graph, nint buffer, IndexFormat format);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_draw")]
+    internal static partial GoldyResult TaskGraphRenderPassDraw(
+        nint graph, uint firstVertex, uint vertexCount, uint firstInstance, uint instanceCount);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_draw_indexed")]
+    internal static partial GoldyResult TaskGraphRenderPassDrawIndexed(
+        nint graph, uint firstIndex, uint indexCount, int baseVertex, uint firstInstance, uint instanceCount);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_draw_fullscreen")]
+    internal static partial GoldyResult TaskGraphRenderPassDrawFullscreen(nint graph);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_finish")]
+    internal static partial GoldyResult TaskGraphRenderPassFinish(nint graph);
+
     // ========================================================================
     // Surface - Platform-specific creation
     // ========================================================================
