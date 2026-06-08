@@ -75,6 +75,36 @@ public sealed class TaskGraph : IDisposable
         return new RenderPassScope(this);
     }
 
+    /// <summary>
+    /// Begin recording a compute dispatch node. Finish with <see cref="ComputeNodeScope.Dispose"/>.
+    /// </summary>
+    public ComputeNodeScope ComputeNode(string label, ComputePipeline pipeline, uint workgroupsX = 1, uint workgroupsY = 1, uint workgroupsZ = 1)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var result = NativeMethods.TaskGraphComputeNodeBegin(Handle, label, pipeline.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("TaskGraph compute_node_begin");
+        return new ComputeNodeScope(this, workgroupsX, workgroupsY, workgroupsZ);
+    }
+
+    /// <summary>
+    /// Add a CPU→GPU buffer upload node.
+    /// </summary>
+    public void WriteBuffer(Buffer buffer, ulong offset, ReadOnlySpan<byte> data)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        unsafe
+        {
+            fixed (byte* p = data)
+            {
+                var result = NativeMethods.TaskGraphWriteBuffer(
+                    Handle, buffer.Handle, offset, (nint)p, (nuint)data.Length);
+                if (result != GoldyResult.Ok)
+                    throw GoldyException.FromLastError("TaskGraph write_buffer");
+            }
+        }
+    }
+
     internal void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -116,6 +146,32 @@ public sealed class RenderPassScope : IDisposable
         var result = NativeMethods.TaskGraphRenderPassBindBuffer(_graph.Handle, buffer.Handle, access);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("TaskGraph render_pass_bind_buffer");
+        return this;
+    }
+
+    public RenderPassScope BindBufferView(BufferView view, NodeAccess access)
+    {
+        EnsureOpen();
+        var result = NativeMethods.TaskGraphRenderPassBindBufferView(_graph.Handle, view.Handle, access);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("TaskGraph render_pass_bind_buffer_view");
+        return this;
+    }
+
+    public RenderPassScope BindResourceIndex(uint scatteredIndex)
+    {
+        EnsureOpen();
+        unsafe
+        {
+            uint category = 0; // Scattered
+            Span<uint> pair = stackalloc uint[] { category, scatteredIndex };
+            fixed (uint* p = pair)
+            {
+                var result = NativeMethods.TaskGraphRenderPassBindResourcesTyped(_graph.Handle, (nint)p, 1);
+                if (result != GoldyResult.Ok)
+                    throw GoldyException.FromLastError("TaskGraph render_pass_bind_resources_typed");
+            }
+        }
         return this;
     }
 
@@ -245,5 +301,84 @@ public sealed class RenderPassScope : IDisposable
     {
         if (_finished)
             throw new InvalidOperationException("Render pass already finished");
+    }
+}
+
+/// <summary>
+/// Active compute-node recording scope. Call <see cref="Dispose"/> to dispatch and finish the node.
+/// </summary>
+public sealed class ComputeNodeScope : IDisposable
+{
+    private readonly TaskGraph _graph;
+    private readonly uint _wgX;
+    private readonly uint _wgY;
+    private readonly uint _wgZ;
+    private bool _finished;
+
+    internal ComputeNodeScope(TaskGraph graph, uint wgX, uint wgY, uint wgZ)
+    {
+        _graph = graph;
+        _wgX = wgX;
+        _wgY = wgY;
+        _wgZ = wgZ;
+    }
+
+    public ComputeNodeScope BindBuffer(Buffer buffer, NodeAccess access)
+    {
+        EnsureOpen();
+        var result = NativeMethods.TaskGraphComputeNodeBindBuffer(_graph.Handle, buffer.Handle, access);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("TaskGraph compute_node_bind_buffer");
+        return this;
+    }
+
+    public ComputeNodeScope BindBufferView(BufferView view, NodeAccess access)
+    {
+        EnsureOpen();
+        var result = NativeMethods.TaskGraphComputeNodeBindBufferView(_graph.Handle, view.Handle, access);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("TaskGraph compute_node_bind_buffer_view");
+        return this;
+    }
+
+    public ComputeNodeScope BindResourcesRaw(uint index) =>
+        BindResourcesRaw(stackalloc uint[] { index });
+
+    public ComputeNodeScope BindResourcesRaw(ReadOnlySpan<uint> indices)
+    {
+        EnsureOpen();
+        unsafe
+        {
+            fixed (uint* p = indices)
+            {
+                var result = NativeMethods.TaskGraphComputeNodeBindResourcesRaw(
+                    _graph.Handle, (nint)p, (uint)indices.Length);
+                if (result != GoldyResult.Ok)
+                    throw GoldyException.FromLastError("TaskGraph compute_node_bind_resources_raw");
+            }
+        }
+        return this;
+    }
+
+    public void Dispatch(uint workgroupsX, uint workgroupsY = 1, uint workgroupsZ = 1)
+    {
+        EnsureOpen();
+        _finished = true;
+        var result = NativeMethods.TaskGraphComputeNodeDispatch(
+            _graph.Handle, workgroupsX, workgroupsY, workgroupsZ);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("TaskGraph compute_node_dispatch");
+    }
+
+    public void Dispose()
+    {
+        if (!_finished)
+            Dispatch(_wgX, _wgY, _wgZ);
+    }
+
+    private void EnsureOpen()
+    {
+        if (_finished)
+            throw new InvalidOperationException("Compute node already finished");
     }
 }

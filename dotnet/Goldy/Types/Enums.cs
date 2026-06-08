@@ -214,6 +214,16 @@ public enum NodeAccess
 }
 
 /// <summary>
+/// Shader resource binding access (SRV vs UAV).
+/// </summary>
+public enum ResourceAccess
+{
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
+/// <summary>
 /// Shader stages flags.
 /// </summary>
 [Flags]

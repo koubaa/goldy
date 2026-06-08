@@ -92,4 +92,50 @@ public class TaskGraphTests
             // No GPU in CI — skip gracefully.
         }
     }
+
+    [Fact]
+    public void TaskGraph_ComputeNode_FillsBufferWith42()
+    {
+        const string fillShader = """
+            import goldy_exp;
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Scattered<uint> data, ThreadId id) {
+                data[id.x] = 42;
+            }
+            """;
+
+        try
+        {
+            using var instance = new Instance();
+            using var device = instance.RequestAdapter().RequestDevice();
+
+            uint[] initial = Enumerable.Range(0, 64).Select(i => (uint)i).ToArray();
+            using var buffer = Goldy.Buffer.WithData<uint>(device, initial, BufferKind.Scattered);
+            using var shader = new ShaderModule(device, fillShader);
+            using var pipeline = new ComputePipeline(device, shader);
+            using var graph = new TaskGraph();
+
+            var idx = buffer.ResourceIndex(ResourceAccess.Write);
+            using (var node = graph.ComputeNode("fill", pipeline))
+            {
+                node
+                    .BindBuffer(buffer, NodeAccess.Write)
+                    .BindResourcesRaw(idx)
+                    .Dispatch(1, 1, 1);
+            }
+
+            graph.Dispatch(device);
+
+            var bytes = buffer.ReadToCpu(device);
+            var values = MemoryMarshal.Cast<byte, uint>(bytes);
+            foreach (var v in values)
+                Assert.Equal(42u, v);
+        }
+        catch (GoldyException ex) when (ex.Message.Contains("adapter", StringComparison.OrdinalIgnoreCase))
+        {
+            // No GPU in CI — skip gracefully.
+        }
+    }
 }

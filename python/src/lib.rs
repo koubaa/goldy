@@ -10,6 +10,7 @@
 #![allow(clippy::wrong_self_convention)]
 
 mod buffer;
+mod buffer_pool;
 mod compute;
 mod device;
 mod error;
@@ -43,6 +44,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyDepthFormat>()?;
     m.add_class::<types::PyCompareFunction>()?;
     m.add_class::<types::PyNodeAccess>()?;
+    m.add_class::<types::PyResourceAccess>()?;
     m.add_class::<types::PyColor>()?;
     m.add_class::<types::PyVertexAttribute>()?;
     m.add_class::<types::PyVertexBufferLayout>()?;
@@ -53,6 +55,8 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<instance::PyAdapter>()?;
     m.add_class::<device::PyDevice>()?;
     m.add_class::<buffer::PyBuffer>()?;
+    m.add_class::<buffer_pool::PyBufferPool>()?;
+    m.add_class::<buffer_pool::PyBufferView>()?;
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
@@ -60,6 +64,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<task_graph::PyTaskGraph>()?;
     m.add_class::<task_graph::PyRenderPass>()?;
     m.add_class::<task_graph::PySwapchainOutput>()?;
+    m.add_class::<task_graph::PyComputeNode>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;

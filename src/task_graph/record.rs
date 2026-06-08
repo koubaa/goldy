@@ -4,10 +4,11 @@
 //! FFI calls while commands accumulate, then committed with [`RenderPassRecord::commit`].
 
 use super::graph::TaskGraph;
-use super::ir::{NodeKind, NodeAccess, ResourceBinding, TaskNode};
+use super::ir::{DispatchDim, NodeKind, NodeAccess, ResourceBinding, TaskNode};
 use super::ResourceId;
 use crate::backend::RenderCommand;
-use crate::buffer::{Buffer, BufferSource};
+use crate::buffer::{Buffer, BufferSource, BufferView};
+use crate::compute::ComputePipeline;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::types::{Color, IndexFormat, ResourceHandle};
@@ -33,6 +34,18 @@ impl RenderPassRecord {
     pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::BufferRange {
+                parent: view.parent_handle(),
+                offset: view.offset(),
+                len: view.size(),
+            },
             access,
         });
         self
@@ -152,6 +165,65 @@ impl RenderPassRecord {
             kind: NodeKind::RenderPass {
                 target: self.target,
                 commands: self.commands,
+            },
+        });
+    }
+}
+
+/// Accumulates one compute dispatch node before [`Self::commit_dispatch`].
+pub struct ComputeNodeRecord {
+    label: &'static str,
+    pipeline: crate::backend::ComputePipelineHandle,
+    bindings: Vec<ResourceBinding>,
+    resource_slots: Vec<u32>,
+    user_slots: Vec<u32>,
+}
+
+impl ComputeNodeRecord {
+    pub fn new(label: &'static str, pipeline: &ComputePipeline) -> Self {
+        Self {
+            label,
+            pipeline: pipeline.handle,
+            bindings: Vec::new(),
+            resource_slots: Vec::new(),
+            user_slots: Vec::new(),
+        }
+    }
+
+    pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Buffer(buf.handle),
+            access,
+        });
+        self
+    }
+
+    pub fn bind_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::BufferRange {
+                parent: view.parent_handle(),
+                offset: view.offset(),
+                len: view.size(),
+            },
+            access,
+        });
+        self
+    }
+
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+        self.resource_slots = indices.to_vec();
+        self
+    }
+
+    pub fn commit_dispatch(self, graph: &mut TaskGraph, x: u32, y: u32, z: u32) {
+        graph.push_task_node(TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Direct { x, y, z },
             },
         });
     }

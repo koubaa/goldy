@@ -1,12 +1,15 @@
 //! FFI bindings for [`goldy::TaskGraph`] and offscreen render-pass recording.
 
 use crate::buffer::GoldyBuffer;
+use crate::buffer_pool::GoldyBufferView;
+use crate::compute::GoldyComputePipeline;
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::render_target::GoldyRenderTarget;
 use crate::types::{GoldyColor, GoldyIndexFormat, GoldyNodeAccess};
-use goldy::task_graph::{NodeAccess, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
+use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
+use goldy::types::{ResourceCategory, ResourceHandle};
 use std::ffi::CStr;
 use std::ptr;
 
@@ -14,6 +17,7 @@ use std::ptr;
 pub struct GoldyTaskGraph {
     pub(crate) inner: TaskGraph,
     active_pass: Option<RenderPassRecord>,
+    active_compute: Option<ComputeNodeRecord>,
     /// Per-graph sentinel returned by [`goldy_task_graph_declare_swapchain_output`] (no heap alloc).
     swapchain_token: GoldySwapchainOutput,
     /// Keeps render-pass label strings alive for nodes in `inner` (cleared with the graph).
@@ -23,6 +27,10 @@ pub struct GoldyTaskGraph {
 impl GoldyTaskGraph {
     pub(crate) fn has_active_render_pass(&self) -> bool {
         self.active_pass.is_some()
+    }
+
+    fn has_active_recorder(&self) -> bool {
+        self.active_pass.is_some() || self.active_compute.is_some()
     }
 
     fn intern_label(&mut self, label: &str) -> &'static str {
@@ -71,12 +79,20 @@ fn active_pass_mut(graph: &mut GoldyTaskGraph) -> Result<&mut RenderPassRecord, 
     })
 }
 
+fn active_compute_mut(graph: &mut GoldyTaskGraph) -> Result<&mut ComputeNodeRecord, GoldyResult> {
+    graph.active_compute.as_mut().ok_or_else(|| {
+        set_last_error("No compute node is being recorded; call goldy_task_graph_compute_node_begin first");
+        GoldyResult::InvalidArgument
+    })
+}
+
 /// Create a new task graph.
 #[no_mangle]
 pub extern "C" fn goldy_task_graph_create() -> *mut GoldyTaskGraph {
     Box::into_raw(Box::new(GoldyTaskGraph {
         inner: TaskGraph::new(),
         active_pass: None,
+        active_compute: None,
         swapchain_token: GoldySwapchainOutput { _private: [] },
         labels: Vec::new(),
     }))
@@ -93,6 +109,18 @@ pub unsafe extern "C" fn goldy_task_graph_destroy(graph: *mut GoldyTaskGraph) {
     }
 }
 
+/// Number of task nodes recorded in the graph (for tests and diagnostics).
+///
+/// # Safety
+/// The graph pointer must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_len(graph: *const GoldyTaskGraph) -> u32 {
+    if graph.is_null() {
+        return 0;
+    }
+    (*graph).inner.len() as u32
+}
+
 /// Reset the graph to empty while retaining internal capacity.
 ///
 /// # Safety
@@ -104,6 +132,7 @@ pub unsafe extern "C" fn goldy_task_graph_clear(graph: *mut GoldyTaskGraph) -> G
     }
     (*graph).inner.clear();
     (*graph).active_pass = None;
+    (*graph).active_compute = None;
     (*graph).labels.clear();
     GoldyResult::Ok
 }
@@ -153,6 +182,68 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_buffer(
         Err(e) => return e,
     };
     pass.bind_buffer(&(*buffer).inner, node_access(access));
+    GoldyResult::Ok
+}
+
+/// Declare a buffer-view dependency for the active render pass.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_buffer_view(
+    graph: *mut GoldyTaskGraph,
+    view: *const GoldyBufferView,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || view.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let pass = match active_pass_mut(&mut *graph) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    pass.bind_buffer_view(&(*view).inner, node_access(access));
+    GoldyResult::Ok
+}
+
+/// Bind typed resource handles (category + index pairs) for the active render pass.
+///
+/// `indices` is a flat array of u32 values: `[category0, index0, category1, index1, ...]`.
+/// Use `GoldyResourceCategory::Scattered` (0) for buffer views.
+///
+/// # Safety
+/// All pointers must be valid. `indices` must contain `handle_count * 2` elements.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_resources_typed(
+    graph: *mut GoldyTaskGraph,
+    indices: *const u32,
+    handle_count: u32,
+) -> GoldyResult {
+    if graph.is_null() || (handle_count > 0 && indices.is_null()) {
+        return GoldyResult::NullPointer;
+    }
+    let pass = match active_pass_mut(&mut *graph) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let mut handles = Vec::with_capacity(handle_count as usize);
+    for i in 0..handle_count as usize {
+        let category = *indices.add(i * 2);
+        let index = *indices.add(i * 2 + 1);
+        let cat = match category {
+            0 => ResourceCategory::Scattered,
+            1 => ResourceCategory::Broadcast,
+            2 => ResourceCategory::StorageImage,
+            3 => ResourceCategory::Texture,
+            4 => ResourceCategory::Sampler,
+            _ => {
+                set_last_error("Invalid resource category in bind_resources_typed");
+                return GoldyResult::InvalidArgument;
+            }
+        };
+        handles.push(ResourceHandle::new(cat, index));
+    }
+    pass.bind_resources_typed(&handles);
     GoldyResult::Ok
 }
 
@@ -397,6 +488,158 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_finish(graph: *mut GoldyTa
     GoldyResult::Ok
 }
 
+/// Begin recording a compute dispatch node.
+///
+/// Only one recorder (render pass or compute node) may be open at a time per graph.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_begin(
+    graph: *mut GoldyTaskGraph,
+    label: *const libc::c_char,
+    pipeline: *const GoldyComputePipeline,
+) -> GoldyResult {
+    if graph.is_null() || pipeline.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    if (*graph).has_active_recorder() {
+        set_last_error("Another graph node is already being recorded");
+        return GoldyResult::InvalidArgument;
+    }
+    let label = match parse_label(label) {
+        Ok(l) => (*graph).intern_label(&l),
+        Err(e) => return e,
+    };
+    (*graph).active_compute = Some(ComputeNodeRecord::new(label, &(*pipeline).inner));
+    GoldyResult::Ok
+}
+
+/// Declare a buffer dependency for the active compute node.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_buffer(
+    graph: *mut GoldyTaskGraph,
+    buffer: *const GoldyBuffer,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || buffer.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *graph) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    node.bind_buffer(&(*buffer).inner, node_access(access));
+    GoldyResult::Ok
+}
+
+/// Declare a buffer-view dependency for the active compute node.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_buffer_view(
+    graph: *mut GoldyTaskGraph,
+    view: *const GoldyBufferView,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || view.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *graph) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    node.bind_buffer_view(&(*view).inner, node_access(access));
+    GoldyResult::Ok
+}
+
+/// Set bindless resource slot indices for the active compute node.
+///
+/// # Safety
+/// All pointers must be valid. `indices` must contain `count` elements.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_resources_raw(
+    graph: *mut GoldyTaskGraph,
+    indices: *const u32,
+    count: u32,
+) -> GoldyResult {
+    if graph.is_null() || (count > 0 && indices.is_null()) {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *graph) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let slice = if count > 0 {
+        std::slice::from_raw_parts(indices, count as usize)
+    } else {
+        &[]
+    };
+    node.bind_resources_raw(slice);
+    GoldyResult::Ok
+}
+
+/// Finalize the active compute node with a direct dispatch.
+///
+/// # Safety
+/// The graph pointer must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_dispatch(
+    graph: *mut GoldyTaskGraph,
+    workgroups_x: u32,
+    workgroups_y: u32,
+    workgroups_z: u32,
+) -> GoldyResult {
+    if graph.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match (*graph).active_compute.take() {
+        Some(n) => n,
+        None => {
+            set_last_error("No compute node is being recorded");
+            return GoldyResult::InvalidArgument;
+        }
+    };
+    node.commit_dispatch(&mut (*graph).inner, workgroups_x, workgroups_y, workgroups_z);
+    GoldyResult::Ok
+}
+
+/// Add a CPU→GPU buffer upload node to the graph.
+///
+/// # Safety
+/// All pointers must be valid. `data` must point to at least `size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_write_buffer(
+    graph: *mut GoldyTaskGraph,
+    buffer: *const GoldyBuffer,
+    offset: u64,
+    data: *const u8,
+    size: usize,
+) -> GoldyResult {
+    if graph.is_null() || buffer.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    if data.is_null() && size > 0 {
+        return GoldyResult::NullPointer;
+    }
+    if (*graph).has_active_recorder() {
+        set_last_error("Cannot add write_buffer while recording a pass or compute node");
+        return GoldyResult::InvalidArgument;
+    }
+
+    let bytes = if size > 0 {
+        std::slice::from_raw_parts(data, size).to_vec()
+    } else {
+        Vec::new()
+    };
+    (*graph).inner.write_buffer(&(*buffer).inner, offset, bytes);
+    GoldyResult::Ok
+}
+
 /// Declare that this graph will copy to the swapchain at submit time.
 ///
 /// Returns a pointer to a per-graph sentinel (not heap-allocated). The pointer is
@@ -447,8 +690,8 @@ pub unsafe extern "C" fn goldy_task_graph_dispatch(
     if graph.is_null() || device.is_null() {
         return GoldyResult::NullPointer;
     }
-    if (*graph).active_pass.is_some() {
-        set_last_error("Cannot dispatch while a render pass is being recorded; call render_pass_finish first");
+    if (*graph).has_active_recorder() {
+        set_last_error("Cannot dispatch while recording a pass or compute node");
         return GoldyResult::InvalidArgument;
     }
 

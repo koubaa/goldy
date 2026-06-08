@@ -154,7 +154,7 @@ impl PySurface {
 
     /// Submit a task graph to an acquired frame, then present with [`Self::present`].
     fn submit_graph_to_frame(&mut self, graph: &PyTaskGraph, frame: &mut PySurfaceFrame) -> PyResult<()> {
-        graph.ensure_no_active_pass()?;
+        graph.ensure_no_active_recorder()?;
         let frame_val = frame
             .inner
             .take()

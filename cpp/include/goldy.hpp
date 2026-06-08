@@ -69,6 +69,8 @@ class RenderPipeline;
 class RenderTarget;
 class Surface;
 class TaskGraph;
+class BufferPool;
+class BufferView;
 class ComputePipeline;
 class ComputeEncoder;
 class Texture;
@@ -180,6 +182,12 @@ enum class NodeAccess {
     ReadWrite = GOLDY_NODE_ACCESS_READ_WRITE,
 };
 
+enum class ResourceAccess {
+    Read = GOLDY_RESOURCE_ACCESS_READ,
+    Write = GOLDY_RESOURCE_ACCESS_WRITE,
+    ReadWrite = GOLDY_RESOURCE_ACCESS_READ_WRITE,
+};
+
 /**
  * @brief Texture flags for copy and render operations.
  */
@@ -210,6 +218,14 @@ struct DeviceDeleter {
 
 struct BufferDeleter {
     void operator()(GoldyBuffer* p) const { if (p) goldy_buffer_destroy(p); }
+};
+
+struct BufferPoolDeleter {
+    void operator()(GoldyBufferPool* p) const { if (p) goldy_buffer_pool_destroy(p); }
+};
+
+struct BufferViewDeleter {
+    void operator()(GoldyBufferView* p) const { if (p) goldy_buffer_view_destroy(p); }
 };
 
 struct ShaderDeleter {
@@ -541,13 +557,21 @@ public:
     }
 
     /**
-     * @brief Create a buffer from typed data.
+     * @brief Create a buffer from typed data with the correct element stride.
      */
     template<typename T>
-    Buffer(const Device& device, std::span<const T> data, BufferKind access)
-        : Buffer(device, std::span<const uint8_t>(
+    Buffer(const Device& device, std::span<const T> data, BufferKind access) {
+        GoldyBuffer* ptr = goldy_buffer_create_with_data_stride(
+            device.get(),
             reinterpret_cast<const uint8_t*>(data.data()),
-            data.size() * sizeof(T)), access) {}
+            data.size() * sizeof(T),
+            static_cast<GoldyBufferKind>(access),
+            static_cast<uint32_t>(sizeof(T)));
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
 
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
@@ -582,9 +606,87 @@ public:
      */
     GoldyBuffer* get() const { return ptr_.get(); }
 
+    uint32_t resource_index(ResourceAccess access) const {
+        uint32_t idx = goldy_buffer_resource_index(ptr_.get(), static_cast<GoldyResourceAccess>(access));
+        if (idx == UINT32_MAX) {
+            throw Exception::from_last_error();
+        }
+        return idx;
+    }
+
 private:
     std::unique_ptr<GoldyBuffer, detail::BufferDeleter> ptr_;
 };
+
+// =============================================================================
+// BufferPool / BufferView
+// =============================================================================
+
+class BufferPool {
+public:
+    BufferPool(const Device& device, uint64_t capacity) {
+        GoldyBufferPool* ptr = goldy_buffer_pool_create(device.get(), capacity);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    BufferPool(const BufferPool&) = delete;
+    BufferPool& operator=(const BufferPool&) = delete;
+    BufferPool(BufferPool&&) = default;
+    BufferPool& operator=(BufferPool&&) = default;
+
+    BufferView alloc_u32(uint64_t count);
+
+    void write_backing(uint64_t byte_offset, std::span<const uint8_t> data) {
+        GoldyResult result = goldy_buffer_pool_write_backing(
+            ptr_.get(), byte_offset, data.data(), data.size());
+        if (result != GOLDY_RESULT_OK) {
+            throw Exception::from_last_error();
+        }
+    }
+
+    GoldyBufferPool* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyBufferPool, detail::BufferPoolDeleter> ptr_;
+};
+
+class BufferView {
+public:
+    BufferView() = default;
+
+    explicit BufferView(GoldyBufferView* ptr) { ptr_.reset(ptr); }
+
+    BufferView(const BufferView&) = delete;
+    BufferView& operator=(const BufferView&) = delete;
+    BufferView(BufferView&&) = default;
+    BufferView& operator=(BufferView&&) = default;
+
+    uint64_t offset() const { return goldy_buffer_view_offset(ptr_.get()); }
+
+    uint32_t resource_index(ResourceAccess access) const {
+        uint32_t idx = goldy_buffer_view_resource_index(ptr_.get(), static_cast<GoldyResourceAccess>(access));
+        if (idx == UINT32_MAX) {
+            throw Exception::from_last_error();
+        }
+        return idx;
+    }
+
+    GoldyBufferView* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyBufferView, detail::BufferViewDeleter> ptr_;
+};
+
+inline BufferView BufferPool::alloc_u32(uint64_t count) {
+    GoldyBufferView* view = goldy_buffer_pool_alloc_u32(ptr_.get(), count);
+    if (!view) {
+        throw Exception::from_last_error();
+    }
+    return BufferView(view);
+}
 
 // =============================================================================
 // ShaderModule
@@ -966,6 +1068,11 @@ public:
 
     [[nodiscard]] RenderPass render_pass(const char* label, const RenderTarget& target);
 
+    class ComputeNode;
+    [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);
+
+    void write_buffer(const Buffer& buffer, uint64_t offset, std::span<const uint8_t> data);
+
     GoldyTaskGraph* get() const { return ptr_.get(); }
 
 private:
@@ -1003,6 +1110,19 @@ public:
     RenderPass& bind_buffer(const Buffer& buffer, NodeAccess access) {
         detail::throw_on_result(goldy_task_graph_render_pass_bind_buffer(
             graph_.ptr_.get(), buffer.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    RenderPass& bind_buffer_view(const BufferView& view, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_buffer_view(
+            graph_.ptr_.get(), view.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    RenderPass& bind_resource_index(uint32_t scattered_index) {
+        const uint32_t pair[2] = {0, scattered_index};
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_resources_typed(
+            graph_.ptr_.get(), pair, 1));
         return *this;
     }
 
@@ -1088,6 +1208,73 @@ private:
 
 inline TaskGraph::RenderPass TaskGraph::render_pass(const char* label, const RenderTarget& target) {
     return RenderPass(*this, label, target);
+}
+
+/**
+ * @brief RAII scope for recording one compute dispatch node on a task graph.
+ */
+class TaskGraph::ComputeNode {
+public:
+    ComputeNode(TaskGraph& graph, const char* label, const ComputePipeline& pipeline,
+                uint32_t wg_x = 1, uint32_t wg_y = 1, uint32_t wg_z = 1)
+        : graph_(graph), wg_x_(wg_x), wg_y_(wg_y), wg_z_(wg_z) {
+        detail::throw_on_result(goldy_task_graph_compute_node_begin(
+            graph_.ptr_.get(), label, pipeline.get()));
+        active_ = true;
+    }
+
+    ~ComputeNode() noexcept {
+        if (active_) {
+            goldy_task_graph_compute_node_dispatch(graph_.ptr_.get(), wg_x_, wg_y_, wg_z_);
+            active_ = false;
+        }
+    }
+
+    ComputeNode(const ComputeNode&) = delete;
+    ComputeNode& operator=(const ComputeNode&) = delete;
+    ComputeNode(ComputeNode&&) = delete;
+    ComputeNode& operator=(ComputeNode&&) = delete;
+
+    ComputeNode& bind_buffer(const Buffer& buffer, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_bind_buffer(
+            graph_.ptr_.get(), buffer.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    ComputeNode& bind_buffer_view(const BufferView& view, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_bind_buffer_view(
+            graph_.ptr_.get(), view.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    ComputeNode& bind_resources_raw(std::span<const uint32_t> indices) {
+        detail::throw_on_result(goldy_task_graph_compute_node_bind_resources_raw(
+            graph_.ptr_.get(), indices.data(), static_cast<uint32_t>(indices.size())));
+        return *this;
+    }
+
+    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
+        if (!active_) return;
+        detail::throw_on_result(goldy_task_graph_compute_node_dispatch(
+            graph_.ptr_.get(), x, y, z));
+        active_ = false;
+    }
+
+private:
+    TaskGraph& graph_;
+    uint32_t wg_x_;
+    uint32_t wg_y_;
+    uint32_t wg_z_;
+    bool active_ = false;
+};
+
+inline TaskGraph::ComputeNode TaskGraph::compute_node(const char* label, const ComputePipeline& pipeline) {
+    return ComputeNode(*this, label, pipeline);
+}
+
+inline void TaskGraph::write_buffer(const Buffer& buffer, uint64_t offset, std::span<const uint8_t> data) {
+    detail::throw_on_result(goldy_task_graph_write_buffer(
+        ptr_.get(), buffer.get(), offset, data.data(), data.size()));
 }
 
 inline SurfaceFrame Surface::submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame) {

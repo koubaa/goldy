@@ -69,8 +69,12 @@ from goldy._goldy import (
     RenderTarget,
     TaskGraph,
     RenderPass,
+    ComputeNode,
     SwapchainOutput,
     NodeAccess,
+    ResourceAccess,
+    BufferPool,
+    BufferView,
     # Shader builtins
     Builtins,
     # Compute
@@ -112,8 +116,12 @@ __all__ = [
     "RenderTarget",
     "TaskGraph",
     "RenderPass",
+    "ComputeNode",
     "SwapchainOutput",
     "NodeAccess",
+    "ResourceAccess",
+    "BufferPool",
+    "BufferView",
     # Shader builtins
     "Builtins",
     # Compute

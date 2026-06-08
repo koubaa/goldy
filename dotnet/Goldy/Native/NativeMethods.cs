@@ -76,6 +76,13 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_create_with_data")]
     internal static partial nint BufferCreateWithData(nint device, nint data, nuint size, BufferKind access);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_create_with_data_stride")]
+    internal static partial nint BufferCreateWithDataStride(
+        nint device, nint data, nuint size, BufferKind access, uint elementStride);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_read_to_cpu")]
+    internal static partial GoldyResult BufferReadToCpu(nint buffer, nint device, nint output, nuint outputSize);
+
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_destroy")]
     internal static partial void BufferDestroy(nint buffer);
 
@@ -299,6 +306,54 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_finish")]
     internal static partial GoldyResult TaskGraphRenderPassFinish(nint graph);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_buffer_view")]
+    internal static partial GoldyResult TaskGraphRenderPassBindBufferView(nint graph, nint view, NodeAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_resources_typed")]
+    internal static partial GoldyResult TaskGraphRenderPassBindResourcesTyped(nint graph, nint indices, uint handleCount);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_begin", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial GoldyResult TaskGraphComputeNodeBegin(nint graph, string label, nint pipeline);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_buffer")]
+    internal static partial GoldyResult TaskGraphComputeNodeBindBuffer(nint graph, nint buffer, NodeAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_buffer_view")]
+    internal static partial GoldyResult TaskGraphComputeNodeBindBufferView(nint graph, nint view, NodeAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_resources_raw")]
+    internal static partial GoldyResult TaskGraphComputeNodeBindResourcesRaw(nint graph, nint indices, uint count);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_dispatch")]
+    internal static partial GoldyResult TaskGraphComputeNodeDispatch(nint graph, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_write_buffer")]
+    internal static partial GoldyResult TaskGraphWriteBuffer(nint graph, nint buffer, ulong offset, nint data, nuint size);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_resource_index")]
+    internal static partial uint BufferResourceIndex(nint buffer, ResourceAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_pool_create")]
+    internal static partial nint BufferPoolCreate(nint device, ulong capacity);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_pool_destroy")]
+    internal static partial void BufferPoolDestroy(nint pool);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_pool_write_backing")]
+    internal static partial GoldyResult BufferPoolWriteBacking(nint pool, ulong byteOffset, nint data, nuint size);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_pool_alloc_u32")]
+    internal static partial nint BufferPoolAllocU32(nint pool, ulong count);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_view_destroy")]
+    internal static partial void BufferViewDestroy(nint view);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_view_resource_index")]
+    internal static partial uint BufferViewResourceIndex(nint view, ResourceAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_view_offset")]
+    internal static partial ulong BufferViewOffset(nint view);
 
     // ========================================================================
     // Surface - Platform-specific creation

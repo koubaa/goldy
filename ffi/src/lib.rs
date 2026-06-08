@@ -4,6 +4,7 @@
 //! other languages (C#, Python via ctypes, etc.).
 
 mod buffer;
+mod buffer_pool;
 mod compute;
 mod device;
 mod error;
@@ -18,6 +19,7 @@ mod texture;
 mod types;
 
 pub use buffer::*;
+pub use buffer_pool::*;
 pub use compute::*;
 pub use device::*;
 pub use error::*;

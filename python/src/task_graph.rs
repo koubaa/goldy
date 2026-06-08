@@ -1,12 +1,15 @@
 //! Python wrappers for TaskGraph and render-pass recording.
 
 use crate::buffer::PyBuffer;
+use crate::buffer_pool::PyBufferView;
+use crate::compute::PyComputePipeline;
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
 use crate::pipeline::PyRenderPipeline;
 use crate::render_target::PyRenderTarget;
 use crate::types::{PyColor, PyIndexFormat, PyNodeAccess};
-use goldy::task_graph::{RenderPassRecord, SwapchainOutputHandle, TaskGraph};
+use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
+use goldy::types::{ResourceCategory, ResourceHandle};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -21,15 +24,16 @@ pub struct PySwapchainOutput;
 pub struct PyTaskGraph {
     pub(crate) inner: RefCell<TaskGraph>,
     active_pass: RefCell<Option<RenderPassRecord>>,
+    active_compute: RefCell<Option<ComputeNodeRecord>>,
     labels: RefCell<Vec<String>>,
     swapchain: RefCell<Option<SwapchainOutputHandle>>,
 }
 
 impl PyTaskGraph {
-    pub(crate) fn ensure_no_active_pass(&self) -> PyResult<()> {
-        if self.active_pass.borrow().is_some() {
+    pub(crate) fn ensure_no_active_recorder(&self) -> PyResult<()> {
+        if self.active_pass.borrow().is_some() || self.active_compute.borrow().is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "A render pass is still open; finish it before submitting the graph",
+                "A render pass or compute node is still open; finish it before submitting the graph",
             ));
         }
         Ok(())
@@ -65,6 +69,32 @@ impl PyTaskGraph {
         pass.commit(&mut *self.inner.borrow_mut());
         Ok(())
     }
+
+    fn finish_compute_node(&self, workgroups: (u32, u32, u32)) -> PyResult<()> {
+        let node = self
+            .active_compute
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node to finish"))?;
+        node.commit_dispatch(
+            &mut *self.inner.borrow_mut(),
+            workgroups.0,
+            workgroups.1,
+            workgroups.2,
+        );
+        Ok(())
+    }
+
+    fn with_active_compute<F, R>(&self, f: F) -> PyResult<R>
+    where
+        F: FnOnce(&mut ComputeNodeRecord) -> R,
+    {
+        let mut node = self.active_compute.borrow_mut();
+        let node = node.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("No compute node is open")
+        })?;
+        Ok(f(node))
+    }
 }
 
 /// Parse a Python `range` or `slice` into `(start, count)` with step 1.
@@ -99,6 +129,7 @@ impl PyTaskGraph {
         PyTaskGraph {
             inner: RefCell::new(TaskGraph::new()),
             active_pass: RefCell::new(None),
+            active_compute: RefCell::new(None),
             labels: RefCell::new(Vec::new()),
             swapchain: RefCell::new(None),
         }
@@ -108,8 +139,18 @@ impl PyTaskGraph {
     fn clear(&self) -> PyResult<()> {
         self.inner.borrow_mut().clear();
         *self.active_pass.borrow_mut() = None;
+        *self.active_compute.borrow_mut() = None;
         self.labels.borrow_mut().clear();
         *self.swapchain.borrow_mut() = None;
+        Ok(())
+    }
+
+    /// Upload CPU bytes into a buffer via the task graph.
+    fn write_buffer(&self, buffer: &PyBuffer, offset: u64, data: &[u8]) -> PyResult<()> {
+        self.ensure_no_active_recorder()?;
+        self.inner
+            .borrow_mut()
+            .write_buffer(buffer.inner.as_ref(), offset, data.to_vec());
         Ok(())
     }
 
@@ -117,9 +158,9 @@ impl PyTaskGraph {
     fn render_pass(slf: Py<Self>, py: Python<'_>, label: String, target: &PyRenderTarget) -> PyResult<PyRenderPass> {
         {
             let graph = slf.borrow_mut(py);
-            if graph.active_pass.borrow().is_some() {
+            if graph.active_pass.borrow().is_some() || graph.active_compute.borrow().is_some() {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "Only one render pass may be open per graph",
+                    "Only one recorder may be open per graph",
                 ));
             }
             let static_label = graph.intern_label(&label)?;
@@ -128,9 +169,37 @@ impl PyTaskGraph {
         Ok(PyRenderPass { graph: slf })
     }
 
+    /// Begin recording a compute dispatch node. Returns a context manager.
+    #[pyo3(signature = (label, pipeline, workgroups=(1, 1, 1)))]
+    fn compute_node(
+        slf: Py<Self>,
+        py: Python<'_>,
+        label: String,
+        pipeline: &PyComputePipeline,
+        workgroups: (u32, u32, u32),
+    ) -> PyResult<PyComputeNode> {
+        {
+            let graph = slf.borrow_mut(py);
+            if graph.active_pass.borrow().is_some() || graph.active_compute.borrow().is_some() {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "Only one recorder may be open per graph",
+                ));
+            }
+            let static_label = graph.intern_label(&label)?;
+            *graph.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(
+                static_label,
+                &pipeline.inner,
+            ));
+        }
+        Ok(PyComputeNode {
+            graph: slf,
+            workgroups,
+        })
+    }
+
     /// Declare the swapchain output for windowed presentation.
     fn declare_swapchain_output(&self) -> PyResult<PySwapchainOutput> {
-        self.ensure_no_active_pass()?;
+        self.ensure_no_active_recorder()?;
         let handle = self.inner.borrow_mut().declare_swapchain_output();
         *self.swapchain.borrow_mut() = Some(handle);
         Ok(PySwapchainOutput)
@@ -142,7 +211,7 @@ impl PyTaskGraph {
         target: &PyRenderTarget,
         _swapchain: &PySwapchainOutput,
     ) -> PyResult<()> {
-        self.ensure_no_active_pass()?;
+        self.ensure_no_active_recorder()?;
         let handle = self.swapchain.borrow().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
                 "Call declare_swapchain_output() before copy_render_target_to_swapchain()",
@@ -156,7 +225,7 @@ impl PyTaskGraph {
 
     /// Submit the graph on a device context and block until complete (headless).
     fn dispatch(&self, device: &PyDevice) -> PyResult<()> {
-        self.ensure_no_active_pass()?;
+        self.ensure_no_active_recorder()?;
         let ctx = device.inner.create_context().into_py_result()?;
         self.inner.borrow_mut().dispatch(&ctx).into_py_result()
     }
@@ -182,6 +251,27 @@ impl PyRenderPass {
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
             pass.bind_buffer(buffer.inner.as_ref(), access.into());
+        })?;
+        Ok(slf)
+    }
+
+    fn bind_buffer_view<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        view: &PyBufferView,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.bind_buffer_view(&view.inner, access.into());
+        })?;
+        Ok(slf)
+    }
+
+    /// Bind a scattered buffer resource by bindless index (from `BufferView.resource_index`).
+    fn bind_resource_index<'py>(slf: PyRef<'py, Self>, py: Python<'py>, index: u32) -> PyResult<PyRef<'py, Self>> {
+        let handle = ResourceHandle::new(ResourceCategory::Scattered, index);
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.bind_resources_typed(&[handle]);
         })?;
         Ok(slf)
     }
@@ -360,5 +450,70 @@ impl PyRenderPass {
 
     fn __repr__(&self) -> String {
         "RenderPass(recording)".to_string()
+    }
+}
+
+/// Records a compute dispatch node on a task graph.
+#[pyclass(name = "ComputeNode", module = "goldy", unsendable)]
+pub struct PyComputeNode {
+    graph: Py<PyTaskGraph>,
+    workgroups: (u32, u32, u32),
+}
+
+#[pymethods]
+impl PyComputeNode {
+    fn bind_buffer<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_compute(|node| {
+            node.bind_buffer(buffer.inner.as_ref(), access.into());
+        })?;
+        Ok(slf)
+    }
+
+    fn bind_buffer_view<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        view: &PyBufferView,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_compute(|node| {
+            node.bind_buffer_view(&view.inner, access.into());
+        })?;
+        Ok(slf)
+    }
+
+    fn bind_resources_raw<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        indices: Vec<u32>,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_compute(|node| {
+            node.bind_resources_raw(&indices);
+        })?;
+        Ok(slf)
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_val: Option<&Bound<'_, PyAny>>,
+        _exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.graph.borrow(py).finish_compute_node(self.workgroups)?;
+        Ok(false)
+    }
+
+    fn __repr__(&self) -> String {
+        "ComputeNode(recording)".to_string()
     }
 }
