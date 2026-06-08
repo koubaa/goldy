@@ -1,0 +1,29 @@
+<Project>
+  <!--
+    Copy libgoldy_ffi + Slang native dependencies into the app output directory.
+    Imported by Goldy.Examples, Goldy.Tests, and packed for NuGet (buildTransitive).
+    Run dotnet/build-native.sh (or build-native.ps1) before building locally.
+  -->
+  <PropertyGroup>
+    <GoldyRuntimeId Condition="'$(GoldyRuntimeId)' == '' And '$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</GoldyRuntimeId>
+    <GoldyRuntimeId Condition="'$(GoldyRuntimeId)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">win-x64</GoldyRuntimeId>
+    <GoldyRuntimeId Condition="'$(GoldyRuntimeId)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux-x64</GoldyRuntimeId>
+    <GoldyRuntimeId Condition="'$(GoldyRuntimeId)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And Exists('$(MSBuildThisFileDirectory)runtimes/osx-arm64/native/libgoldy_ffi.dylib')">osx-arm64</GoldyRuntimeId>
+    <GoldyRuntimeId Condition="'$(GoldyRuntimeId)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">osx-x64</GoldyRuntimeId>
+    <GoldyNativeDir>$(MSBuildThisFileDirectory)runtimes/$(GoldyRuntimeId)/native/</GoldyNativeDir>
+  </PropertyGroup>
+
+  <Target Name="CopyGoldyNativeLibraries" AfterTargets="Build">
+    <ItemGroup Condition="Exists('$(GoldyNativeDir)')">
+      <_GoldyNativeFile Include="$(GoldyNativeDir)*.*" />
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(_GoldyNativeFile)"
+      DestinationFolder="$(OutputPath)"
+      SkipUnchangedFiles="true"
+      Condition="'@(_GoldyNativeFile)' != ''" />
+    <Warning
+      Text="Goldy native libraries not found at $(GoldyNativeDir). Run dotnet/build-native.sh first."
+      Condition="'@(_GoldyNativeFile)' == ''" />
+  </Target>
+</Project>

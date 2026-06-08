@@ -43,7 +43,16 @@ cargo build --release -p goldy-ffi --target $TARGET
 # Copy FFI library to runtime folder
 RUNTIME_DIR="dotnet/Goldy/runtimes/$RUNTIME/native"
 mkdir -p "$RUNTIME_DIR"
-cp "target/$TARGET/release/$ARTIFACT" "$RUNTIME_DIR/"
+ARTIFACT_PATH="target/$TARGET/release/$ARTIFACT"
+if [ ! -f "$ARTIFACT_PATH" ]; then
+    # Host == target: cargo may place the artifact in target/release/ instead.
+    ARTIFACT_PATH="target/release/$ARTIFACT"
+fi
+if [ ! -f "$ARTIFACT_PATH" ]; then
+    echo "Error: $ARTIFACT not found under target/$TARGET/release/ or target/release/"
+    exit 1
+fi
+cp "$ARTIFACT_PATH" "$RUNTIME_DIR/"
 
 echo "Built $ARTIFACT for $RUNTIME"
 

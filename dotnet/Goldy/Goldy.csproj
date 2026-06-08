@@ -30,6 +30,7 @@
     <!-- Include native libraries (goldy_ffi + Slang dependencies) -->
     <!-- Build scripts copy both goldy_ffi and slang-*.dll to runtimes/{rid}/native/ -->
     <None Include="runtimes\**\*" Pack="true" PackagePath="runtimes\" />
+    <None Include="Goldy.Native.targets" Pack="true" PackagePath="buildTransitive\$(PackageId).targets" />
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
