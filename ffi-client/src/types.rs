@@ -1,8 +1,8 @@
 //! Rust-friendly types mirroring the native Goldy API.
 
 use crate::sys::{
-    self, GoldyBufferKind, GoldyCompareFunction, GoldyDepthFormat, GoldyNodeAccess,
-    GoldyPrimitiveTopology, GoldyTextureFormat, GoldyVertexFormat,
+    self, GoldyBufferKind, GoldyCompareFunction, GoldyDepthFormat, GoldyNodeAccess, GoldyPrimitiveTopology,
+    GoldyTextureFormat, GoldyVertexFormat,
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -285,12 +285,8 @@ impl From<PrimitiveTopology> for GoldyPrimitiveTopology {
             PrimitiveTopology::PointList => GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_POINT_LIST,
             PrimitiveTopology::LineList => GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_LINE_LIST,
             PrimitiveTopology::LineStrip => GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_LINE_STRIP,
-            PrimitiveTopology::TriangleList => {
-                GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-            }
-            PrimitiveTopology::TriangleStrip => {
-                GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
-            }
+            PrimitiveTopology::TriangleList => GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            PrimitiveTopology::TriangleStrip => GoldyPrimitiveTopology::GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
         }
     }
 }
@@ -311,13 +307,9 @@ impl From<DepthFormat> for GoldyDepthFormat {
         match f {
             DepthFormat::Depth16Unorm => GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH16_UNORM,
             DepthFormat::Depth24Plus => GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH24_PLUS,
-            DepthFormat::Depth24PlusStencil8 => {
-                GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH24_PLUS_STENCIL8
-            }
+            DepthFormat::Depth24PlusStencil8 => GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH24_PLUS_STENCIL8,
             DepthFormat::Depth32Float => GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT,
-            DepthFormat::Depth32FloatStencil8 => {
-                GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT_STENCIL8
-            }
+            DepthFormat::Depth32FloatStencil8 => GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH32_FLOAT_STENCIL8,
         }
     }
 }
@@ -345,9 +337,7 @@ impl From<CompareFunction> for GoldyCompareFunction {
             CompareFunction::LessEqual => GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_LESS_EQUAL,
             CompareFunction::Greater => GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_GREATER,
             CompareFunction::NotEqual => GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_NOT_EQUAL,
-            CompareFunction::GreaterEqual => {
-                GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_GREATER_EQUAL
-            }
+            CompareFunction::GreaterEqual => GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_GREATER_EQUAL,
             CompareFunction::Always => GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_ALWAYS,
         }
     }
@@ -419,22 +409,16 @@ pub(crate) fn render_pipeline_desc_to_ffi(
         })
         .collect();
 
-    let (depth_enabled, depth_format, depth_write_enabled, depth_compare) =
-        if let Some(ds) = &desc.depth_stencil {
-            (
-                true,
-                ds.format.into(),
-                ds.depth_write_enabled,
-                ds.depth_compare.into(),
-            )
-        } else {
-            (
-                false,
-                GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH24_PLUS,
-                true,
-                GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_LESS,
-            )
-        };
+    let (depth_enabled, depth_format, depth_write_enabled, depth_compare) = if let Some(ds) = &desc.depth_stencil {
+        (true, ds.format.into(), ds.depth_write_enabled, ds.depth_compare.into())
+    } else {
+        (
+            false,
+            GoldyDepthFormat::GOLDY_DEPTH_FORMAT_DEPTH24_PLUS,
+            true,
+            GoldyCompareFunction::GOLDY_COMPARE_FUNCTION_LESS,
+        )
+    };
 
     let ffi = sys::GoldyRenderPipelineDesc {
         vertex_attributes: attributes.as_ptr(),

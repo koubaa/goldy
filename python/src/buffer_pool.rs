@@ -29,10 +29,7 @@ impl PyBufferPool {
 
     /// Write bytes into the backing buffer at a byte offset.
     fn write_backing(&self, byte_offset: u64, data: &[u8]) -> PyResult<()> {
-        self.inner
-            .backing_buffer()
-            .write(byte_offset, data)
-            .into_py_result()
+        self.inner.backing_buffer().write(byte_offset, data).into_py_result()
     }
 
     fn __repr__(&self) -> String {

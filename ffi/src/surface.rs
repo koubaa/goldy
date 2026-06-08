@@ -133,9 +133,7 @@ pub unsafe extern "C" fn goldy_surface_submit_graph_to_frame(
         return GoldyResult::NullPointer;
     }
     if (*graph).has_active_render_pass() {
-        set_last_error(
-            "Cannot submit graph while a render pass is being recorded; call render_pass_finish first",
-        );
+        set_last_error("Cannot submit graph while a render pass is being recorded; call render_pass_finish first");
         return GoldyResult::InvalidArgument;
     }
 
@@ -145,10 +143,7 @@ pub unsafe extern "C" fn goldy_surface_submit_graph_to_frame(
         let _ = Box::into_raw(frame_box);
         return GoldyResult::InvalidArgument;
     };
-    match (*surface)
-        .inner
-        .submit_graph_to_frame(&mut (*graph).inner, goldy_frame)
-    {
+    match (*surface).inner.submit_graph_to_frame(&mut (*graph).inner, goldy_frame) {
         Ok(updated) => {
             frame_box.inner = Some(updated);
             let _ = Box::into_raw(frame_box);
@@ -225,8 +220,7 @@ mod appkit_surface {
     use super::*;
     use crate::device::GoldyDevice;
     use raw_window_handle::{
-        AppKitDisplayHandle, AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
-        RawWindowHandle,
+        AppKitDisplayHandle, AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     };
     use std::ffi::c_void;
     use std::ptr::NonNull;
@@ -389,8 +383,7 @@ mod wayland_surface {
     use super::*;
     use crate::device::GoldyDevice;
     use raw_window_handle::{
-        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle,
-        WaylandWindowHandle,
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
     };
     use std::ffi::c_void;
     use std::ptr::NonNull;

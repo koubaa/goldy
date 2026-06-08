@@ -39,9 +39,7 @@ impl Instance {
                 name: [0; 256],
                 vendor: [0; 64],
             };
-            if unsafe { sys::goldy_instance_get_adapter(self.ptr, i, &mut info) }
-                == sys::GoldyResult::GOLDY_RESULT_OK
-            {
+            if unsafe { sys::goldy_instance_get_adapter(self.ptr, i, &mut info) } == sys::GoldyResult::GOLDY_RESULT_OK {
                 adapters.push(AdapterInfo {
                     id: info.id,
                     device_type: info.device_type.into(),
@@ -54,26 +52,17 @@ impl Instance {
     }
 
     /// Request an adapter matching the given options (wgpu-style).
-    pub fn request_adapter<'a>(
-        &'a self,
-        opts: &RequestAdapterOptions,
-    ) -> Result<Adapter<'a>> {
+    pub fn request_adapter<'a>(&'a self, opts: &RequestAdapterOptions) -> Result<Adapter<'a>> {
         let adapters = self.enumerate_adapters();
         if adapters.is_empty() {
-            return Err(crate::error::GoldyError::from_message(
-                "No GPU adapters available",
-            ));
+            return Err(crate::error::GoldyError::from_message("No GPU adapters available"));
         }
 
         let selected = match opts.power_preference {
             PowerPreference::HighPerformance => adapters
                 .iter()
                 .find(|a| a.device_type == DeviceType::DiscreteGpu)
-                .or_else(|| {
-                    adapters
-                        .iter()
-                        .find(|a| a.device_type == DeviceType::IntegratedGpu)
-                })
+                .or_else(|| adapters.iter().find(|a| a.device_type == DeviceType::IntegratedGpu))
                 .or_else(|| adapters.iter().find(|a| a.device_type == DeviceType::Other))
                 .or(adapters.first()),
             PowerPreference::LowPower => adapters
@@ -89,9 +78,7 @@ impl Instance {
     }
 
     pub fn create_device_for_adapter(&self, adapter_id: u32) -> Result<Device> {
-        let ptr = non_null(unsafe {
-            sys::goldy_instance_create_device_for_adapter(self.ptr, adapter_id)
-        })?;
+        let ptr = non_null(unsafe { sys::goldy_instance_create_device_for_adapter(self.ptr, adapter_id) })?;
         Ok(Device { ptr })
     }
 }
@@ -106,9 +93,5 @@ impl Drop for Instance {
 }
 
 fn cstr_field(buf: &[std::ffi::c_char]) -> String {
-    unsafe {
-        CStr::from_ptr(buf.as_ptr())
-            .to_string_lossy()
-            .into_owned()
-    }
+    unsafe { CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned() }
 }

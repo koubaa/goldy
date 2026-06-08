@@ -10,9 +10,7 @@ pub struct RenderTarget {
 
 impl RenderTarget {
     pub fn new(device: &Device, width: u32, height: u32, format: TextureFormat) -> Result<Self> {
-        let ptr = non_null(unsafe {
-            sys::goldy_render_target_create(device.as_ptr(), width, height, format.into())
-        })?;
+        let ptr = non_null(unsafe { sys::goldy_render_target_create(device.as_ptr(), width, height, format.into()) })?;
         Ok(Self { ptr })
     }
 

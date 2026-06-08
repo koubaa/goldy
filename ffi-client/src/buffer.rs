@@ -11,20 +11,13 @@ pub struct Buffer {
 impl Buffer {
     pub fn from_bytes(device: &Device, data: &[u8], kind: BufferKind) -> Result<Self> {
         let ptr = non_null(unsafe {
-            sys::goldy_buffer_create_with_data(
-                device.as_ptr(),
-                data.as_ptr(),
-                data.len(),
-                kind.into(),
-            )
+            sys::goldy_buffer_create_with_data(device.as_ptr(), data.as_ptr(), data.len(), kind.into())
         })?;
         Ok(Self { ptr })
     }
 
     pub fn from_slice<T>(device: &Device, data: &[T], kind: BufferKind) -> Result<Self> {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data))
-        };
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
         Self::from_bytes(device, bytes, kind)
     }
 

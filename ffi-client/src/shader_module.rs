@@ -1,5 +1,5 @@
 use crate::device::Device;
-use crate::error::{GoldyError, non_null, Result};
+use crate::error::{non_null, GoldyError, Result};
 use crate::sys::{self, GoldyShaderModule};
 use std::ffi::CString;
 

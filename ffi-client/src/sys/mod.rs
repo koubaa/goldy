@@ -13,11 +13,7 @@ pub unsafe fn goldy_buffer_access(buffer: *const GoldyBuffer) -> GoldyBufferKind
     (lib().goldy_buffer_access)(buffer)
 }
 
-pub unsafe fn goldy_buffer_create(
-    device: *const GoldyDevice,
-    size: u64,
-    access: GoldyBufferKind,
-) -> *mut GoldyBuffer {
+pub unsafe fn goldy_buffer_create(device: *const GoldyDevice, size: u64, access: GoldyBufferKind) -> *mut GoldyBuffer {
     (lib().goldy_buffer_create)(device, size, access)
 }
 
@@ -38,12 +34,7 @@ pub unsafe fn goldy_buffer_size(buffer: *const GoldyBuffer) -> u64 {
     (lib().goldy_buffer_size)(buffer)
 }
 
-pub unsafe fn goldy_buffer_write(
-    buffer: *const GoldyBuffer,
-    offset: u64,
-    data: *const u8,
-    size: usize,
-) -> GoldyResult {
+pub unsafe fn goldy_buffer_write(buffer: *const GoldyBuffer, offset: u64, data: *const u8, size: usize) -> GoldyResult {
     (lib().goldy_buffer_write)(buffer, offset, data, size)
 }
 
@@ -216,10 +207,7 @@ pub unsafe fn goldy_render_target_width(target: *const GoldyRenderTarget) -> u32
     (lib().goldy_render_target_width)(target)
 }
 
-pub unsafe fn goldy_sampler_create(
-    device: *const GoldyDevice,
-    desc: *const GoldySamplerDesc,
-) -> *mut GoldySampler {
+pub unsafe fn goldy_sampler_create(device: *const GoldyDevice, desc: *const GoldySamplerDesc) -> *mut GoldySampler {
     (lib().goldy_sampler_create)(device, desc)
 }
 
@@ -259,10 +247,7 @@ pub unsafe fn goldy_surface_create_appkit(
 }
 
 #[cfg(windows)]
-pub unsafe fn goldy_surface_create_win32(
-    device: *const GoldyDevice,
-    hwnd: *mut std::ffi::c_void,
-) -> *mut GoldySurface {
+pub unsafe fn goldy_surface_create_win32(device: *const GoldyDevice, hwnd: *mut std::ffi::c_void) -> *mut GoldySurface {
     (lib().goldy_surface_create_win32)(device, hwnd)
 }
 
@@ -286,10 +271,7 @@ pub unsafe fn goldy_surface_height(surface: *const GoldySurface) -> u32 {
     (lib().goldy_surface_height)(surface)
 }
 
-pub unsafe fn goldy_surface_present(
-    surface: *const GoldySurface,
-    frame: *mut GoldySurfaceFrame,
-) -> GoldyResult {
+pub unsafe fn goldy_surface_present(surface: *const GoldySurface, frame: *mut GoldySurfaceFrame) -> GoldyResult {
     (lib().goldy_surface_present)(surface, frame)
 }
 
@@ -325,9 +307,7 @@ pub unsafe fn goldy_task_graph_create() -> *mut GoldyTaskGraph {
     (lib().goldy_task_graph_create)()
 }
 
-pub unsafe fn goldy_task_graph_declare_swapchain_output(
-    graph: *mut GoldyTaskGraph,
-) -> *mut GoldySwapchainOutput {
+pub unsafe fn goldy_task_graph_declare_swapchain_output(graph: *mut GoldyTaskGraph) -> *mut GoldySwapchainOutput {
     (lib().goldy_task_graph_declare_swapchain_output)(graph)
 }
 
@@ -335,10 +315,7 @@ pub unsafe fn goldy_task_graph_destroy(graph: *mut GoldyTaskGraph) {
     (lib().goldy_task_graph_destroy)(graph)
 }
 
-pub unsafe fn goldy_task_graph_dispatch(
-    graph: *mut GoldyTaskGraph,
-    device: *const GoldyDevice,
-) -> GoldyResult {
+pub unsafe fn goldy_task_graph_dispatch(graph: *mut GoldyTaskGraph, device: *const GoldyDevice) -> GoldyResult {
     (lib().goldy_task_graph_dispatch)(graph, device)
 }
 
@@ -366,17 +343,11 @@ pub unsafe fn goldy_task_graph_render_pass_bind_resources(
     (lib().goldy_task_graph_render_pass_bind_resources)(graph, buffers, buffer_count)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_clear(
-    graph: *mut GoldyTaskGraph,
-    color: GoldyColor,
-) -> GoldyResult {
+pub unsafe fn goldy_task_graph_render_pass_clear(graph: *mut GoldyTaskGraph, color: GoldyColor) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_clear)(graph, color)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_clear_depth(
-    graph: *mut GoldyTaskGraph,
-    depth: f32,
-) -> GoldyResult {
+pub unsafe fn goldy_task_graph_render_pass_clear_depth(graph: *mut GoldyTaskGraph, depth: f32) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_clear_depth)(graph, depth)
 }
 
@@ -387,13 +358,7 @@ pub unsafe fn goldy_task_graph_render_pass_draw(
     first_instance: u32,
     instance_count: u32,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_draw)(
-        graph,
-        first_vertex,
-        vertex_count,
-        first_instance,
-        instance_count,
-    )
+    (lib().goldy_task_graph_render_pass_draw)(graph, first_vertex, vertex_count, first_instance, instance_count)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_draw_fullscreen(graph: *mut GoldyTaskGraph) -> GoldyResult {

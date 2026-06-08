@@ -5,8 +5,8 @@
 
 use goldy::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat, Instance,
-    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
-    TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 fn graph_render(

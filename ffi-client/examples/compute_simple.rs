@@ -3,8 +3,7 @@
 //! Run from `goldy/ffi-client`: `cargo run --example compute_simple`
 
 use goldy_ffi_client::{
-    BufferKind, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions,
-    ShaderModule,
+    BufferKind, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule,
 };
 
 const COMPUTE_SRC: &str = r#"

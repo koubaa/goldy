@@ -68,18 +68,9 @@ impl App {
         })
     }
 
-    fn create_scene_rt(
-        device: &goldy_ffi_client::Device,
-        surface: &Surface,
-    ) -> anyhow::Result<RenderTarget> {
+    fn create_scene_rt(device: &goldy_ffi_client::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
         let (width, height) = surface.size();
-        RenderTarget::new(
-            device,
-            width.max(1),
-            height.max(1),
-            surface.format(),
-        )
-        .map_err(Into::into)
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -150,8 +141,7 @@ impl App {
         pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(scene_rt, swapchain);
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
 
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;

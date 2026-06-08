@@ -6,9 +6,8 @@ use goldy_ffi::{
     goldy_render_target_buffer_size, goldy_render_target_create, goldy_render_target_destroy,
     goldy_render_target_read_to_buffer, goldy_task_graph_clear, goldy_task_graph_create,
     goldy_task_graph_declare_swapchain_output, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_clear,
-    goldy_task_graph_render_pass_finish, GoldyAdapterInfo, GoldyColor, GoldyDevice, GoldyDeviceType,
-    GoldyInstance, GoldyResult, GoldyTextureFormat,
+    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_finish,
+    GoldyAdapterInfo, GoldyColor, GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyResult, GoldyTextureFormat,
 };
 use std::ffi::CStr;
 

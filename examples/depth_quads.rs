@@ -12,9 +12,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
-    NodeAccess, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface,
-    TaskGraph, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -207,8 +207,7 @@ impl App {
         pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(scene_rt, swapchain);
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
 
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;

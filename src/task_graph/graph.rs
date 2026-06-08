@@ -936,7 +936,7 @@ impl TaskGraph {
     ///
     /// Record this after a [`Self::render_pass`] that targets the same `src` render target.
     /// The analyzer orders the copy after the render pass via the shared
-    /// [`ResourceId::RenderTarget`] binding.
+    /// render-target resource binding.
     pub fn copy_render_target_to_swapchain(&mut self, src: &RenderTarget, _dst: SwapchainOutputHandle) {
         let src_h = src.backend_handle();
         self.ir.nodes.push(TaskNode {
@@ -1738,8 +1738,7 @@ impl<'a> RenderPassBuilder<'a> {
     ///
     /// Pipeline is bound before root constants (required on D3D12: root signature first).
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
-        self.commands
-            .push(RenderCommand::SetPipeline(pipeline.handle));
+        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
         if !self.push_constant_handles.is_empty() {
             self.commands.push(RenderCommand::BindResourcesTyped {
                 handles: self.push_constant_handles.clone(),
@@ -1896,7 +1895,7 @@ impl<'a> RenderPassBuilder<'a> {
         });
     }
 
-    /// Finalize the node with recorded [`RenderCommand`]s (e.g. from [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish)).
+    /// Finalize the node with recorded [`RenderCommand`]s (e.g. from a command encoder).
     pub fn finish(self, commands: Vec<RenderCommand>) {
         self.push_node(commands);
     }
@@ -2051,10 +2050,7 @@ mod tests {
             .iter()
             .position(|c| matches!(c, RenderCommand::BindResourcesTyped { .. }))
             .expect("BindResourcesTyped");
-        assert!(
-            set_pipe < bind,
-            "D3D12 requires SetPipeline before BindResourcesTyped"
-        );
+        assert!(set_pipe < bind, "D3D12 requires SetPipeline before BindResourcesTyped");
     }
 
     #[test]

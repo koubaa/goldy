@@ -215,17 +215,11 @@ pub unsafe extern "C" fn goldy_buffer_read_to_cpu(
 /// # Safety
 /// The buffer pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_resource_index(
-    buffer: *const GoldyBuffer,
-    access: GoldyResourceAccess,
-) -> u32 {
+pub unsafe extern "C" fn goldy_buffer_resource_index(buffer: *const GoldyBuffer, access: GoldyResourceAccess) -> u32 {
     if buffer.is_null() {
         return u32::MAX;
     }
-    (*buffer)
-        .inner
-        .resource_index(access.into())
-        .unwrap_or(u32::MAX)
+    (*buffer).inner.resource_index(access.into()).unwrap_or(u32::MAX)
 }
 
 /// Get the buffer's access pattern.

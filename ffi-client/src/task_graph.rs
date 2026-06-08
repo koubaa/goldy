@@ -27,29 +27,15 @@ impl TaskGraph {
         SwapchainOutputHandle { _token: ptr }
     }
 
-    pub fn copy_render_target_to_swapchain(
-        &mut self,
-        src: &RenderTarget,
-        _dst: SwapchainOutputHandle,
-    ) {
+    pub fn copy_render_target_to_swapchain(&mut self, src: &RenderTarget, _dst: SwapchainOutputHandle) {
         expect_ok(unsafe {
-            sys::goldy_task_graph_copy_render_target_to_swapchain(
-                self.ptr,
-                src.as_ptr(),
-                _dst._token,
-            )
+            sys::goldy_task_graph_copy_render_target_to_swapchain(self.ptr, src.as_ptr(), _dst._token)
         });
     }
 
-    pub fn render_pass<'a>(
-        &'a mut self,
-        label: &'static str,
-        target: &RenderTarget,
-    ) -> RenderPassBuilder<'a> {
+    pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         let label = CString::new(label).expect("render pass label contains interior null byte");
-        expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr())
-        });
+        expect_ok(unsafe { sys::goldy_task_graph_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr()) });
         RenderPassBuilder {
             graph: self,
             active: true,
@@ -87,11 +73,7 @@ pub struct RenderPassBuilder<'a> {
 impl RenderPassBuilder<'_> {
     pub fn bind_buffer_mut(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_bind_buffer(
-                self.graph.ptr,
-                buffer.as_ptr(),
-                access.into(),
-            )
+            sys::goldy_task_graph_render_pass_bind_buffer(self.graph.ptr, buffer.as_ptr(), access.into())
         });
         self
     }
@@ -102,19 +84,13 @@ impl RenderPassBuilder<'_> {
     }
 
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
-        expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_set_pipeline(self.graph.ptr, pipeline.as_ptr())
-        });
+        expect_ok(unsafe { sys::goldy_task_graph_render_pass_set_pipeline(self.graph.ptr, pipeline.as_ptr()) });
         self
     }
 
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_set_vertex_buffer(
-                self.graph.ptr,
-                slot,
-                buffer.as_ptr(),
-            )
+            sys::goldy_task_graph_render_pass_set_vertex_buffer(self.graph.ptr, slot, buffer.as_ptr())
         });
         self
     }

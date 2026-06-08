@@ -6,8 +6,8 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, TaskGraph, TextureFormat, Vertex2D,
+    shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, ShaderModule, TaskGraph, TextureFormat, Vertex2D,
 };
 
 fn make_device() -> Option<goldy::Device> {

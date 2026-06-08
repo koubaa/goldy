@@ -1,15 +1,14 @@
 //! Headless integration test: compute dispatch via TaskGraph FFI.
 
 use goldy_ffi::{
-    goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_resource_index,
-    goldy_buffer_size, goldy_device_destroy, goldy_get_last_error, goldy_instance_adapter_count,
-    goldy_instance_create, goldy_instance_create_device_for_adapter, goldy_instance_destroy,
-    goldy_instance_get_adapter, goldy_shader_create, goldy_shader_destroy,
+    goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_resource_index, goldy_buffer_size,
+    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_get_last_error,
+    goldy_instance_adapter_count, goldy_instance_create, goldy_instance_create_device_for_adapter,
+    goldy_instance_destroy, goldy_instance_get_adapter, goldy_shader_create, goldy_shader_destroy,
     goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_buffer,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch,
-    goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, GoldyAdapterInfo, GoldyBufferKind,
-    GoldyDevice, GoldyDeviceType, GoldyInstance, GoldyResourceAccess, GoldyResult,
+    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
+    goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyAdapterInfo, GoldyBufferKind, GoldyDevice,
+    GoldyDeviceType, GoldyInstance, GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::{CStr, CString};
 
@@ -98,11 +97,7 @@ fn task_graph_compute_node_doubles_buffer_values() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_bind_buffer(
-                graph,
-                buffer,
-                goldy_ffi::GoldyNodeAccess::Write
-            ),
+            goldy_task_graph_compute_node_bind_buffer(graph, buffer, goldy_ffi::GoldyNodeAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

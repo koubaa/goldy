@@ -11,9 +11,7 @@ pub struct ComputePipeline {
 
 impl ComputePipeline {
     pub fn new(device: &Device, shader: &ShaderModule) -> Result<Self> {
-        let ptr = non_null(unsafe {
-            sys::goldy_compute_pipeline_create(device.as_ptr(), shader.as_ptr())
-        })?;
+        let ptr = non_null(unsafe { sys::goldy_compute_pipeline_create(device.as_ptr(), shader.as_ptr()) })?;
         Ok(Self { ptr })
     }
 
@@ -51,11 +49,7 @@ impl ComputeEncoder {
     pub fn bind_resources(&mut self, buffers: &[&Buffer]) {
         let ptrs: Vec<_> = buffers.iter().map(|b| b.as_ptr()).collect();
         unsafe {
-            sys::goldy_compute_encoder_bind_resources(
-                self.ptr,
-                ptrs.as_ptr(),
-                ptrs.len() as u32,
-            );
+            sys::goldy_compute_encoder_bind_resources(self.ptr, ptrs.as_ptr(), ptrs.len() as u32);
         }
     }
 

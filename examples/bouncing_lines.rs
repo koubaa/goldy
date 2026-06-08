@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
+    TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -153,9 +153,7 @@ impl RenderState {
         self.frame_graph
             .node("update_lines", &self.compute_pipeline)
             .bind_buffer(&self.line_buffer, NodeAccess::ReadWrite)
-            .bind_resources_raw_slice(&[
-                self.line_buffer.resource_index(ResourceAccess::Write).unwrap(),
-            ])
+            .bind_resources_raw_slice(&[self.line_buffer.resource_index(ResourceAccess::Write).unwrap()])
             .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
 
         let bg_color = Color {

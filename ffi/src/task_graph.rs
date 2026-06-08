@@ -56,12 +56,10 @@ fn parse_label(label: *const libc::c_char) -> Result<String, GoldyResult> {
         return Err(GoldyResult::NullPointer);
     }
     let s = unsafe { CStr::from_ptr(label) };
-    s.to_str()
-        .map(|s| s.to_string())
-        .map_err(|e| {
-            set_last_error_from_anyhow(&anyhow::anyhow!("Invalid UTF-8 label: {e}"));
-            GoldyResult::InvalidArgument
-        })
+    s.to_str().map(|s| s.to_string()).map_err(|e| {
+        set_last_error_from_anyhow(&anyhow::anyhow!("Invalid UTF-8 label: {e}"));
+        GoldyResult::InvalidArgument
+    })
 }
 
 fn node_access(access: GoldyNodeAccess) -> NodeAccess {
@@ -423,9 +421,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_draw_indexed(
 /// # Safety
 /// The graph pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_render_pass_draw_fullscreen(
-    graph: *mut GoldyTaskGraph,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_task_graph_render_pass_draw_fullscreen(graph: *mut GoldyTaskGraph) -> GoldyResult {
     if graph.is_null() {
         return GoldyResult::NullPointer;
     }

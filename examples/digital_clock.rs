@@ -8,8 +8,8 @@
 
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    Buffer, BufferKind, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
+    Buffer, BufferKind, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc, RenderTarget,
+    RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -162,8 +162,7 @@ impl App {
         pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(scene_rt, swapchain);
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
 
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;

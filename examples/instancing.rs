@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
+    TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -108,13 +108,7 @@ impl RenderState {
                 let cx = nx * 0.85;
                 let cy = ny * 0.85;
 
-                instances.push(Instance2D::new(
-                    cx,
-                    cy,
-                    0.0,
-                    QUAD_SIZE,
-                    [1.0, 1.0, 1.0, 1.0],
-                ));
+                instances.push(Instance2D::new(cx, cy, 0.0, QUAD_SIZE, [1.0, 1.0, 1.0, 1.0]));
             }
         }
 

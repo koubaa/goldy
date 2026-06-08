@@ -20,10 +20,7 @@ pub struct GoldyBufferView {
 /// # Safety
 /// The device pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_pool_create(
-    device: *const GoldyDevice,
-    capacity: u64,
-) -> *mut GoldyBufferPool {
+pub unsafe extern "C" fn goldy_buffer_pool_create(device: *const GoldyDevice, capacity: u64) -> *mut GoldyBufferPool {
     if device.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Device is null"));
         return std::ptr::null_mut();
@@ -89,10 +86,7 @@ pub unsafe extern "C" fn goldy_buffer_pool_write_backing(
 /// # Safety
 /// The pool pointer must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_pool_alloc_u32(
-    pool: *mut GoldyBufferPool,
-    count: u64,
-) -> *mut GoldyBufferView {
+pub unsafe extern "C" fn goldy_buffer_pool_alloc_u32(pool: *mut GoldyBufferPool, count: u64) -> *mut GoldyBufferView {
     if pool.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("Pool is null"));
         return std::ptr::null_mut();
@@ -156,10 +150,7 @@ pub unsafe extern "C" fn goldy_buffer_view_resource_index(
     if view.is_null() {
         return u32::MAX;
     }
-    (*view)
-        .inner
-        .resource_index(access.into())
-        .unwrap_or(u32::MAX)
+    (*view).inner.resource_index(access.into()).unwrap_or(u32::MAX)
 }
 
 /// Write u32 cells into the view (`data` is `count * 4` bytes).

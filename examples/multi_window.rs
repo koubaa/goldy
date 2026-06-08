@@ -8,9 +8,9 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 // Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
@@ -373,9 +373,7 @@ impl WindowState {
 
         self.frame_graph.clear();
 
-        let mut pass = self
-            .frame_graph
-            .render_pass(self.effect_type.title(), &self.scene_rt);
+        let mut pass = self.frame_graph.render_pass(self.effect_type.title(), &self.scene_rt);
         pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&self.pipeline);

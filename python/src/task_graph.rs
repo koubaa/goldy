@@ -76,12 +76,7 @@ impl PyTaskGraph {
             .borrow_mut()
             .take()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node to finish"))?;
-        node.commit_dispatch(
-            &mut *self.inner.borrow_mut(),
-            workgroups.0,
-            workgroups.1,
-            workgroups.2,
-        );
+        node.commit_dispatch(&mut *self.inner.borrow_mut(), workgroups.0, workgroups.1, workgroups.2);
         Ok(())
     }
 
@@ -90,9 +85,9 @@ impl PyTaskGraph {
         F: FnOnce(&mut ComputeNodeRecord) -> R,
     {
         let mut node = self.active_compute.borrow_mut();
-        let node = node.as_mut().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("No compute node is open")
-        })?;
+        let node = node
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is open"))?;
         Ok(f(node))
     }
 }
@@ -186,15 +181,9 @@ impl PyTaskGraph {
                 ));
             }
             let static_label = graph.intern_label(&label)?;
-            *graph.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(
-                static_label,
-                &pipeline.inner,
-            ));
+            *graph.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(static_label, &pipeline.inner));
         }
-        Ok(PyComputeNode {
-            graph: slf,
-            workgroups,
-        })
+        Ok(PyComputeNode { graph: slf, workgroups })
     }
 
     /// Declare the swapchain output for windowed presentation.
@@ -206,11 +195,7 @@ impl PyTaskGraph {
     }
 
     /// Blit an offscreen render target to the swapchain output.
-    fn copy_render_target_to_swapchain(
-        &self,
-        target: &PyRenderTarget,
-        _swapchain: &PySwapchainOutput,
-    ) -> PyResult<()> {
+    fn copy_render_target_to_swapchain(&self, target: &PyRenderTarget, _swapchain: &PySwapchainOutput) -> PyResult<()> {
         self.ensure_no_active_recorder()?;
         let handle = self.swapchain.borrow().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -390,9 +375,8 @@ impl PyRenderPass {
         } else {
             (
                 first_index,
-                index_count.ok_or_else(|| {
-                    PyValueError::new_err("draw_indexed requires indices=range(...) or index_count=")
-                })?,
+                index_count
+                    .ok_or_else(|| PyValueError::new_err("draw_indexed requires indices=range(...) or index_count="))?,
             )
         };
         let (inst_start, inst_count) = if let Some(i) = instances {

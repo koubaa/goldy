@@ -9,9 +9,9 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferPool, BufferView, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    BufferPool, BufferView, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
+    TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -248,16 +248,10 @@ impl RenderState {
             self.use_buffer_a = !self.use_buffer_a;
         }
 
-        let current_view = if self.use_buffer_a {
-            &self.view_a
-        } else {
-            &self.view_b
-        };
+        let current_view = if self.use_buffer_a { &self.view_a } else { &self.view_b };
         let current_handle = current_view.handle(ResourceAccess::Read).unwrap();
 
-        let mut pass = self
-            .frame_graph
-            .render_pass("game_of_life_render", &self.scene_rt);
+        let mut pass = self.frame_graph.render_pass("game_of_life_render", &self.scene_rt);
         pass.bind_buffer_view_mut(current_view, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&self.render_pipeline);

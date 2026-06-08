@@ -15,11 +15,7 @@ impl Device {
     }
 
     /// Upload a typed slice into a new GPU buffer.
-    pub fn alloc_buffer_with_data<T: Pod>(
-        &self,
-        data: &[T],
-        kind: BufferKind,
-    ) -> Result<Buffer> {
+    pub fn alloc_buffer_with_data<T: Pod>(&self, data: &[T], kind: BufferKind) -> Result<Buffer> {
         Buffer::from_slice(self, data, kind)
     }
 }

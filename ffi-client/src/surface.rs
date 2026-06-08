@@ -54,10 +54,7 @@ impl Surface {
     /// Begin the next frame (acquire swapchain image).
     pub fn begin(&self) -> Result<Frame> {
         let ptr = non_null(unsafe { sys::goldy_surface_acquire(self.ptr) })?;
-        Ok(Frame {
-            surface: self.ptr,
-            ptr,
-        })
+        Ok(Frame { surface: self.ptr, ptr })
     }
 
     pub fn submit_graph_to_frame(&self, graph: &mut TaskGraph, frame: Frame) -> Result<Frame> {
@@ -67,13 +64,8 @@ impl Surface {
             ));
         }
         let ptr = frame.into_raw();
-        check(unsafe {
-            sys::goldy_surface_submit_graph_to_frame(self.ptr, graph.as_mut_ptr(), ptr)
-        })?;
-        Ok(Frame {
-            surface: self.ptr,
-            ptr,
-        })
+        check(unsafe { sys::goldy_surface_submit_graph_to_frame(self.ptr, graph.as_mut_ptr(), ptr) })?;
+        Ok(Frame { surface: self.ptr, ptr })
     }
 }
 

@@ -15,9 +15,7 @@ extern "system" {
 static GOLDY_FFI: OnceLock<GoldyFfi> = OnceLock::new();
 
 pub(crate) fn lib() -> &'static GoldyFfi {
-    GOLDY_FFI.get_or_init(|| {
-        GoldyFfi::load().unwrap_or_else(|e| panic!("failed to load goldy_ffi: {e}"))
-    })
+    GOLDY_FFI.get_or_init(|| GoldyFfi::load().unwrap_or_else(|e| panic!("failed to load goldy_ffi: {e}")))
 }
 
 pub(crate) struct GoldyFfi {
@@ -97,8 +95,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_task_graph_render_pass_set_index_buffer: FnGoldyTaskGraphRenderPassSetIndexBuffer,
     pub goldy_task_graph_render_pass_set_pipeline: FnGoldyTaskGraphRenderPassSetPipeline,
     pub goldy_task_graph_render_pass_set_vertex_buffer: FnGoldyTaskGraphRenderPassSetVertexBuffer,
-    pub goldy_task_graph_render_pass_set_vertex_buffer_offset:
-        FnGoldyTaskGraphRenderPassSetVertexBufferOffset,
+    pub goldy_task_graph_render_pass_set_vertex_buffer_offset: FnGoldyTaskGraphRenderPassSetVertexBufferOffset,
     pub goldy_texture_create: FnGoldyTextureCreate,
     pub goldy_texture_destroy: FnGoldyTextureDestroy,
     pub goldy_texture_format: FnGoldyTextureFormat,
@@ -112,8 +109,8 @@ impl GoldyFfi {
         #[cfg(windows)]
         set_dll_directory_for_dependencies(&lib_path)?;
 
-        let library = unsafe { Library::new(&lib_path) }
-            .map_err(|e| format!("failed to open {}: {e}", lib_path.display()))?;
+        let library =
+            unsafe { Library::new(&lib_path) }.map_err(|e| format!("failed to open {}: {e}", lib_path.display()))?;
 
         macro_rules! sym {
             ($name:literal, $ty:ty) => {{
@@ -129,10 +126,7 @@ impl GoldyFfi {
         Ok(Self {
             goldy_buffer_access: sym!("goldy_buffer_access", FnGoldyBufferAccess),
             goldy_buffer_create: sym!("goldy_buffer_create", FnGoldyBufferCreate),
-            goldy_buffer_create_with_data: sym!(
-                "goldy_buffer_create_with_data",
-                FnGoldyBufferCreateWithData
-            ),
+            goldy_buffer_create_with_data: sym!("goldy_buffer_create_with_data", FnGoldyBufferCreateWithData),
             goldy_buffer_destroy: sym!("goldy_buffer_destroy", FnGoldyBufferDestroy),
             goldy_buffer_size: sym!("goldy_buffer_size", FnGoldyBufferSize),
             goldy_buffer_write: sym!("goldy_buffer_write", FnGoldyBufferWrite),
@@ -141,106 +135,49 @@ impl GoldyFfi {
                 "goldy_compute_encoder_bind_resources",
                 FnGoldyComputeEncoderBindResources
             ),
-            goldy_compute_encoder_create: sym!(
-                "goldy_compute_encoder_create",
-                FnGoldyComputeEncoderCreate
-            ),
-            goldy_compute_encoder_destroy: sym!(
-                "goldy_compute_encoder_destroy",
-                FnGoldyComputeEncoderDestroy
-            ),
-            goldy_compute_encoder_dispatch: sym!(
-                "goldy_compute_encoder_dispatch",
-                FnGoldyComputeEncoderDispatch
-            ),
-            goldy_compute_encoder_execute: sym!(
-                "goldy_compute_encoder_execute",
-                FnGoldyComputeEncoderExecute
-            ),
+            goldy_compute_encoder_create: sym!("goldy_compute_encoder_create", FnGoldyComputeEncoderCreate),
+            goldy_compute_encoder_destroy: sym!("goldy_compute_encoder_destroy", FnGoldyComputeEncoderDestroy),
+            goldy_compute_encoder_dispatch: sym!("goldy_compute_encoder_dispatch", FnGoldyComputeEncoderDispatch),
+            goldy_compute_encoder_execute: sym!("goldy_compute_encoder_execute", FnGoldyComputeEncoderExecute),
             goldy_compute_encoder_set_pipeline: sym!(
                 "goldy_compute_encoder_set_pipeline",
                 FnGoldyComputeEncoderSetPipeline
             ),
-            goldy_compute_pipeline_create: sym!(
-                "goldy_compute_pipeline_create",
-                FnGoldyComputePipelineCreate
-            ),
-            goldy_compute_pipeline_destroy: sym!(
-                "goldy_compute_pipeline_destroy",
-                FnGoldyComputePipelineDestroy
-            ),
+            goldy_compute_pipeline_create: sym!("goldy_compute_pipeline_create", FnGoldyComputePipelineCreate),
+            goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),
             goldy_device_destroy: sym!("goldy_device_destroy", FnGoldyDeviceDestroy),
             goldy_device_has_library: sym!("goldy_device_has_library", FnGoldyDeviceHasLibrary),
             goldy_device_is_valid: sym!("goldy_device_is_valid", FnGoldyDeviceIsValid),
             goldy_get_last_error: sym!("goldy_get_last_error", FnGoldyGetLastError),
-            goldy_instance_adapter_count: sym!(
-                "goldy_instance_adapter_count",
-                FnGoldyInstanceAdapterCount
-            ),
-            goldy_instance_backend_type: sym!(
-                "goldy_instance_backend_type",
-                FnGoldyInstanceBackendType
-            ),
+            goldy_instance_adapter_count: sym!("goldy_instance_adapter_count", FnGoldyInstanceAdapterCount),
+            goldy_instance_backend_type: sym!("goldy_instance_backend_type", FnGoldyInstanceBackendType),
             goldy_instance_create: sym!("goldy_instance_create", FnGoldyInstanceCreate),
             goldy_instance_create_device_for_adapter: sym!(
                 "goldy_instance_create_device_for_adapter",
                 FnGoldyInstanceCreateDeviceForAdapter
             ),
             goldy_instance_destroy: sym!("goldy_instance_destroy", FnGoldyInstanceDestroy),
-            goldy_instance_get_adapter: sym!(
-                "goldy_instance_get_adapter",
-                FnGoldyInstanceGetAdapter
-            ),
-            goldy_render_pipeline_create: sym!(
-                "goldy_render_pipeline_create",
-                FnGoldyRenderPipelineCreate
-            ),
-            goldy_render_pipeline_destroy: sym!(
-                "goldy_render_pipeline_destroy",
-                FnGoldyRenderPipelineDestroy
-            ),
-            goldy_render_target_buffer_size: sym!(
-                "goldy_render_target_buffer_size",
-                FnGoldyRenderTargetBufferSize
-            ),
-            goldy_render_target_create: sym!(
-                "goldy_render_target_create",
-                FnGoldyRenderTargetCreate
-            ),
+            goldy_instance_get_adapter: sym!("goldy_instance_get_adapter", FnGoldyInstanceGetAdapter),
+            goldy_render_pipeline_create: sym!("goldy_render_pipeline_create", FnGoldyRenderPipelineCreate),
+            goldy_render_pipeline_destroy: sym!("goldy_render_pipeline_destroy", FnGoldyRenderPipelineDestroy),
+            goldy_render_target_buffer_size: sym!("goldy_render_target_buffer_size", FnGoldyRenderTargetBufferSize),
+            goldy_render_target_create: sym!("goldy_render_target_create", FnGoldyRenderTargetCreate),
             goldy_render_target_create_with_depth: sym!(
                 "goldy_render_target_create_with_depth",
                 FnGoldyRenderTargetCreateWithDepth
             ),
-            goldy_render_target_destroy: sym!(
-                "goldy_render_target_destroy",
-                FnGoldyRenderTargetDestroy
-            ),
-            goldy_render_target_format: sym!(
-                "goldy_render_target_format",
-                FnGoldyRenderTargetFormat
-            ),
-            goldy_render_target_has_depth: sym!(
-                "goldy_render_target_has_depth",
-                FnGoldyRenderTargetHasDepth
-            ),
-            goldy_render_target_height: sym!(
-                "goldy_render_target_height",
-                FnGoldyRenderTargetHeight
-            ),
+            goldy_render_target_destroy: sym!("goldy_render_target_destroy", FnGoldyRenderTargetDestroy),
+            goldy_render_target_format: sym!("goldy_render_target_format", FnGoldyRenderTargetFormat),
+            goldy_render_target_has_depth: sym!("goldy_render_target_has_depth", FnGoldyRenderTargetHasDepth),
+            goldy_render_target_height: sym!("goldy_render_target_height", FnGoldyRenderTargetHeight),
             goldy_render_target_read_to_buffer: sym!(
                 "goldy_render_target_read_to_buffer",
                 FnGoldyRenderTargetReadToBuffer
             ),
-            goldy_render_target_width: sym!(
-                "goldy_render_target_width",
-                FnGoldyRenderTargetWidth
-            ),
+            goldy_render_target_width: sym!("goldy_render_target_width", FnGoldyRenderTargetWidth),
             goldy_sampler_create: sym!("goldy_sampler_create", FnGoldySamplerCreate),
-            goldy_sampler_create_default: sym!(
-                "goldy_sampler_create_default",
-                FnGoldySamplerCreateDefault
-            ),
+            goldy_sampler_create_default: sym!("goldy_sampler_create_default", FnGoldySamplerCreateDefault),
             goldy_sampler_destroy: sym!("goldy_sampler_destroy", FnGoldySamplerDestroy),
             goldy_shader_builtin_vertex_color_2d: sym!(
                 "goldy_shader_builtin_vertex_color_2d",
@@ -250,18 +187,12 @@ impl GoldyFfi {
             goldy_shader_destroy: sym!("goldy_shader_destroy", FnGoldyShaderDestroy),
             goldy_surface_acquire: sym!("goldy_surface_acquire", FnGoldySurfaceAcquire),
             #[cfg(target_os = "macos")]
-            goldy_surface_create_appkit: sym!(
-                "goldy_surface_create_appkit",
-                FnGoldySurfaceCreateAppkit
-            ),
+            goldy_surface_create_appkit: sym!("goldy_surface_create_appkit", FnGoldySurfaceCreateAppkit),
             #[cfg(windows)]
             goldy_surface_create_win32: sym!("goldy_surface_create_win32", FnGoldySurfaceCreateWin32),
             goldy_surface_destroy: sym!("goldy_surface_destroy", FnGoldySurfaceDestroy),
             goldy_surface_format: sym!("goldy_surface_format", FnGoldySurfaceFormat),
-            goldy_surface_frame_height: sym!(
-                "goldy_surface_frame_height",
-                FnGoldySurfaceFrameHeight
-            ),
+            goldy_surface_frame_height: sym!("goldy_surface_frame_height", FnGoldySurfaceFrameHeight),
             goldy_surface_frame_width: sym!("goldy_surface_frame_width", FnGoldySurfaceFrameWidth),
             goldy_surface_height: sym!("goldy_surface_height", FnGoldySurfaceHeight),
             goldy_surface_present: sym!("goldy_surface_present", FnGoldySurfacePresent),

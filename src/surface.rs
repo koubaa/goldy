@@ -774,8 +774,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&ctx, &window).unwrap();
-        let scene_rt =
-            RenderTarget::new(&device, surface.width(), surface.height(), surface.format()).unwrap();
+        let scene_rt = RenderTarget::new(&device, surface.width(), surface.height(), surface.format()).unwrap();
 
         let mut graph = TaskGraph::new();
         let mut pass = graph.render_pass("clear", &scene_rt);

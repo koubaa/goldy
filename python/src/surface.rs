@@ -248,9 +248,8 @@ unsafe impl Sync for WaylandWindowWrapper {}
 #[cfg(target_os = "linux")]
 impl raw_window_handle::HasWindowHandle for WaylandWindowWrapper {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let handle = raw_window_handle::WaylandWindowHandle::new(
-            std::ptr::NonNull::new(self.surface).expect("wayland surface"),
-        );
+        let handle =
+            raw_window_handle::WaylandWindowHandle::new(std::ptr::NonNull::new(self.surface).expect("wayland surface"));
         let raw = raw_window_handle::RawWindowHandle::Wayland(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }

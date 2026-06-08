@@ -23,10 +23,7 @@ impl<'a> Adapter<'a> {
     pub fn request_device(&self, desc: &DeviceDescriptor) -> Result<Device> {
         let _ = desc;
         let ptr = non_null(unsafe {
-            crate::sys::goldy_instance_create_device_for_adapter(
-                self.instance.as_ptr(),
-                self.info.id,
-            )
+            crate::sys::goldy_instance_create_device_for_adapter(self.instance.as_ptr(), self.info.id)
         })?;
         Ok(Device { ptr })
     }

@@ -9,9 +9,8 @@
 //! `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, LayoutCheckable, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
-    VertexBufferLayout,
+    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, LayoutCheckable, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -144,8 +143,7 @@ impl App {
         pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(scene_rt, swapchain);
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
 
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;

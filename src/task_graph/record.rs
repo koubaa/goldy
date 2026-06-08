@@ -4,7 +4,7 @@
 //! FFI calls while commands accumulate, then committed with [`RenderPassRecord::commit`].
 
 use super::graph::TaskGraph;
-use super::ir::{DispatchDim, NodeKind, NodeAccess, ResourceBinding, TaskNode};
+use super::ir::{DispatchDim, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use super::ResourceId;
 use crate::backend::RenderCommand;
 use crate::buffer::{Buffer, BufferSource, BufferView};
@@ -62,8 +62,7 @@ impl RenderPassRecord {
     }
 
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
-        self.commands
-            .push(RenderCommand::SetPipeline(pipeline.handle));
+        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
         self
     }
 
