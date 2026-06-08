@@ -5,8 +5,8 @@
 //! Run with: cargo run --example window
 
 use goldy::{
-    shader::builtins, Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor,
-    Instance, RequestAdapterOptions, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface,
+    shader::builtins, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
     Vertex2D,
 };
 use std::sync::Arc;
@@ -29,6 +29,8 @@ struct App {
     // Window resources
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
 
     // Animation
     frame_count: u64,
@@ -45,8 +47,15 @@ impl App {
             shader: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             frame_count: 0,
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -78,6 +87,7 @@ impl App {
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(Self::create_scene_rt(&device, &surface)?);
 
         Ok(())
     }
@@ -93,6 +103,7 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
 
         // Animate background color
         let t = (self.frame_count as f32 * 0.02).sin() * 0.5 + 0.5;
@@ -103,10 +114,8 @@ impl App {
             a: 1.0,
         };
 
-        // Acquire next frame from swapchain
-        let frame = surface.begin()?;
+        self.frame_graph.clear();
 
-        // Build render commands
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -116,10 +125,17 @@ impl App {
             pass.draw(0..3, 0..1);
         }
 
-        // Render to swapchain image (zero-copy!)
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("window", scene_rt)
+            .bind_buffer(vertex_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
 
-        // Present to screen
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(scene_rt, swapchain);
+
+        let frame = surface.begin()?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.frame_count += 1;
@@ -130,6 +146,11 @@ impl App {
         if new_size.width > 0 && new_size.height > 0 {
             if let Some(surface) = &mut self.surface {
                 let _ = surface.resize(new_size.width, new_size.height);
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+                    self.scene_rt = Some(rt);
+                }
             }
         }
     }

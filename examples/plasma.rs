@@ -3,8 +3,8 @@
 //! Run with: cargo run --example plasma
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ShaderModule, Surface, VertexBufferLayout,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +31,8 @@ struct App {
     uniform_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
     start_time: Instant,
     frame_count: u32,
 }
@@ -45,9 +47,16 @@ impl App {
             uniform_buffer: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             start_time: Instant::now(),
             frame_count: 0,
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -84,11 +93,14 @@ impl App {
             goldy::BufferFlags::empty(),
         )?;
 
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.uniform_buffer = Some(uniform_buffer);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
 
         Ok(())
     }
@@ -104,6 +116,7 @@ impl App {
 
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
 
         // Update uniform buffer with current time
@@ -111,8 +124,7 @@ impl App {
         let uniforms = Uniforms { time };
         uniform_buffer.write_data(0, &[uniforms])?;
 
-        // Acquire frame
-        let frame = surface.begin()?;
+        self.frame_graph.clear();
 
         let mut encoder = CommandEncoder::new();
         {
@@ -125,7 +137,17 @@ impl App {
             pass.draw_fullscreen();
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("plasma", scene_rt)
+            .bind_buffer(uniform_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(scene_rt, swapchain);
+
+        let frame = surface.begin()?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         Ok(())
@@ -135,6 +157,11 @@ impl App {
         if new_size.width > 0 && new_size.height > 0 {
             if let Some(surface) = &mut self.surface {
                 let _ = surface.resize(new_size.width, new_size.height);
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+                    self.scene_rt = Some(rt);
+                }
             }
         }
     }
