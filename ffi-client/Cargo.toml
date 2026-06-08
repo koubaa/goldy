@@ -11,10 +11,10 @@ build = "build.rs"
 [dependencies]
 bytemuck = { version = "1.21", features = ["derive"] }
 libc = "0.2"
+libloading = "0.9"
 
 [build-dependencies]
 goldy-ffi = { path = "../ffi", default-features = false, features = ["vulkan", "dx12", "metal"] }
-bindgen = "0.71"
 
 [dev-dependencies]
 anyhow = "1.0"

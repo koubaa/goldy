@@ -1,30 +1,10 @@
-//! Generate C bindings from `goldy.h` and link `libgoldy_ffi` dynamically.
+//! Locate `goldy_ffi` for runtime loading (no link-time bindgen or dylib link).
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let header = manifest_dir.join("../cpp/include/goldy.h");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-
-    println!("cargo:rerun-if-changed={}", header.display());
-
-    let bindings = bindgen::Builder::default()
-        .header(header.to_str().expect("header path is valid UTF-8"))
-        .allowlist_function("goldy_.*")
-        .allowlist_type("Goldy.*")
-        .allowlist_var("GOLDY_.*")
-        .default_enum_style(bindgen::EnumVariation::Rust {
-            non_exhaustive: false,
-        })
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .expect("bindgen failed on goldy.h");
-
-    bindings
-        .write_to_file(out_dir.join("bindings.rs"))
-        .expect("failed to write bindings.rs");
 
     let lib_dir = env::var("DEP_GOLDY_FFI_LINK_LIB_DIR")
         .map(PathBuf::from)
@@ -38,13 +18,8 @@ fn main() {
         );
     }
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=goldy_ffi");
-
-    // So `cargo run` finds libgoldy_ffi without setting DYLD_LIBRARY_PATH.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
-    }
+    println!("cargo:rustc-env=GOLDY_FFI_LIB_DIR={}", lib_dir.display());
+    println!("cargo:rerun-if-changed=build.rs");
 }
 
 fn dylib_filename() -> &'static str {

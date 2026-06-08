@@ -1,7 +1,7 @@
 //! Rust RAII client for the Goldy C ABI (`libgoldy_ffi`).
 //!
 //! This crate links **`libgoldy_ffi` dynamically** and calls the stable C API
-//! via bindgen-generated bindings — the same path as C++/Python/.NET clients.
+//! via runtime-loaded C bindings (libloading) — the same path as C++/Python/.NET clients.
 //! Wraps raw FFI with `Result`, resource ownership, and builder-style
 //! task-graph recording.
 
