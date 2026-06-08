@@ -8,8 +8,9 @@
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    Buffer, BufferKind, ComputeEncoder, ComputePipeline, NodeAccess, ShaderModule, TaskGraph,
+    Buffer, BufferKind, ComputeEncoder, ComputePipeline, NodeAccess, RetainedPool, ShaderModule, TaskGraph,
 };
+use std::sync::Arc;
 
 mod common;
 #[path = "common/submission.rs"]
@@ -521,6 +522,58 @@ fn write_then_dispatch_reads_uploaded_data() {
             "element {i}: expected {expected} after write_buffer, got {val}"
         );
     }
+}
+
+/// `graph.write_parcel()` on a retained buffer parcel, then a dispatch that reads it.
+///
+/// Mirrors [`write_then_dispatch_reads_uploaded_data`] but uses the opaque parcel
+/// path that goldy-doom will use for per-frame uniform uploads.
+#[test]
+fn write_parcel_then_dispatch_reads_uploaded_data() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let copy_shader = ShaderModule::from_slang(&device, COPY_SHADER).unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &copy_shader).unwrap();
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let parcel = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .unwrap();
+    let out = device
+        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
+        .unwrap();
+
+    let known_data: Vec<u32> = (200..264).collect();
+    let data_bytes: Vec<u8> = bytemuck::cast_slice(&known_data).to_vec();
+
+    let src_idx = parcel.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
+
+    let mut graph = TaskGraph::new();
+    graph.write_parcel(&parcel, 0, data_bytes).unwrap();
+    graph
+        .node("copy", &copy_pipe)
+        .bind_parcel(&parcel, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_slice(&[src_idx, out_idx])
+        .dispatch(1, 1, 1);
+
+    let tv = graph.submit(&ctx).unwrap();
+    ctx.wait_until(tv).unwrap();
+
+    let result = readback_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = known_data[i];
+        assert_eq!(
+            val, expected,
+            "element {i}: expected {expected} after write_parcel, got {val}"
+        );
+    }
+
+    let refs = parcel.last_referenced();
+    assert_eq!(refs.len(), 1, "bind_parcel should stamp at submit");
+    assert_eq!(*refs.values().next().unwrap(), tv);
 }
 
 // ---------------------------------------------------------------------------

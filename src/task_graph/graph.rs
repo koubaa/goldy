@@ -822,6 +822,29 @@ impl TaskGraph {
         });
     }
 
+    /// Add a CPU→GPU write node for a retained buffer [`crate::Parcel`].
+    ///
+    /// Like [`Self::write_buffer`], but accepts an opaque parcel instead of a
+    /// [`Buffer`] handle. Valid only for non-mosaic buffer parcels (the same
+    /// restriction as [`crate::Parcel::copy_into`]). The analyzer inserts
+    /// barriers between this write and any subsequent reader in the graph.
+    pub fn write_parcel(&mut self, parcel: &crate::Parcel, offset: u64, data: Vec<u8>) -> Result<()> {
+        let (buffer, resource) = parcel.write_buffer_target()?;
+        self.ir.nodes.push(TaskNode {
+            label: "write_parcel",
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer,
+                offset,
+                data: Arc::from(data),
+            },
+        });
+        Ok(())
+    }
+
     /// Add a CPU→GPU texture upload node (full image).
     ///
     /// Data length must match [`Texture::byte_size`]. The upload is batched with
@@ -1612,6 +1635,19 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
+    /// Declare that this render pass accesses a retained [`crate::Parcel`].
+    ///
+    /// Like [`NodeBuilder::bind_parcel`], the parcel is stamped at graph submit
+    /// time so [`crate::Parcel::last_referenced`] is updated automatically.
+    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
     /// Finalize the node with recorded [`RenderCommand`]s (e.g. from [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish)).
     pub fn finish(self, commands: Vec<RenderCommand>) {
         self.graph.ir.nodes.push(TaskNode {
@@ -1700,6 +1736,74 @@ mod tests {
         );
 
         graph.submit(&ctx).unwrap();
+    }
+
+    #[test]
+    fn write_parcel_then_render_pass_inserts_barrier() {
+        let device = mock_device();
+        let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
+        let parcel = retained_buffer_parcel(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.write_parcel(&parcel, 0, vec![1, 2, 3, 4]).unwrap();
+
+        let mut enc = CommandEncoder::new();
+        {
+            let mut pass = enc.begin_render_pass();
+            pass.clear(Color::RED);
+        }
+        graph
+            .render_pass("draw", &target)
+            .bind_parcel(&parcel, NodeAccess::Read)
+            .finish_encoder(enc);
+
+        let gcs = graph.compile_graph_commands();
+        assert!(
+            gcs.iter()
+                .any(|c| matches!(c, GraphCommand::Compute(GpuCommand::ResourceBarrier { .. }))),
+            "expected ResourceBarrier between write_parcel and render read"
+        );
+    }
+
+    #[test]
+    fn write_parcel_rejects_mosaic_parcel() {
+        let device = Arc::new(mock_device());
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let mut mosaic = pool.mosaic();
+        let _slot = mosaic.emplace(&[0u32, 1, 2, 3]);
+        let parcel = mosaic.build().unwrap();
+
+        let mut graph = TaskGraph::new();
+        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
+        assert!(
+            err.to_string().contains("non-mosaic buffer parcels"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn render_pass_bind_parcel_submit_stamps_last_referenced() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut enc = CommandEncoder::new();
+        {
+            let mut pass = enc.begin_render_pass();
+            pass.clear(Color::BLUE);
+        }
+
+        let mut graph = TaskGraph::new();
+        graph
+            .render_pass("draw", &target)
+            .bind_parcel(&parcel, NodeAccess::Read)
+            .finish_encoder(enc);
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]

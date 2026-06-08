@@ -4,7 +4,7 @@
 //! Resource indices for shader binding are exposed via [`Parcel::resource_index`];
 //! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
-use crate::backend::ContextHandle;
+use crate::backend::{BufferHandle, ContextHandle};
 use crate::buffer::{Buffer, BufferPool, BufferView};
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
@@ -253,6 +253,22 @@ impl Parcel {
 
     pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
         &self.stamp.home_device
+    }
+
+    /// Backend buffer handle and graph resource id for [`crate::TaskGraph::write_parcel`].
+    ///
+    /// Valid only for non-mosaic buffer parcels acquired via
+    /// [`crate::RetainedPool::acquire_buffer`].
+    pub(crate) fn write_buffer_target(&self) -> anyhow::Result<(BufferHandle, ResourceId)> {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => {
+                let h = b.gpu_buffer_handle();
+                Ok((h, ResourceId::Buffer(h)))
+            }
+            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
+                anyhow::bail!("write_parcel is only valid for non-mosaic buffer parcels")
+            }
+        }
     }
 
     /// Task-graph resource identity (runtime only).

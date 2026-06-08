@@ -54,7 +54,7 @@
 //! |---------------------------|------------------------------------|
 //! | [`TaskGraph::node`]       | Compute dispatch (direct/indirect) |
 //! | [`TaskGraph::clear_buffer`] / [`TaskGraph::clear_buffer_view`] | GPU-side buffer zero-fill |
-//! | [`TaskGraph::write_buffer`] | CPU→GPU buffer upload              |
+//! | [`TaskGraph::write_buffer`] / [`TaskGraph::write_parcel`] | CPU→GPU buffer upload |
 //!
 //! # SWMR scheduling
 //!
