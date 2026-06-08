@@ -1,17 +1,15 @@
 //! Instancing example - render many objects efficiently.
 //!
-//! Demonstrates the Goldy-native compute+graphics pattern:
-//! 1. Compute shader updates instance transforms/colors each frame
-//! 2. Graphics shader renders quads from the instance buffer
-//! 3. No CPU vertex generation, no vertex buffer - all GPU-driven
+//! Demonstrates GPU compute + graphics in a single task graph:
+//! instance update dispatch → offscreen render → swapchain blit.
 //!
 //! Run with: cargo run --example instancing
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance, Instance2D,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
-    VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -64,22 +62,30 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    context: goldy::Context,
+    device: Arc<goldy::Device>,
     surface: Surface,
-    // Compute resources
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    // Graphics resources
     render_pipeline: RenderPipeline,
-    // Buffers
     instance_buffer: Buffer,
     params_buffer: Buffer,
-    // State
     start_time: Instant,
     last_time: f32,
     frame_count: u32,
 }
 
 impl RenderState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
+        let (width, height) = surface.size();
+        Ok(RenderTarget::new(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+        )?)
+    }
+
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
@@ -89,17 +95,14 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
-        // Load shaders
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/instancing_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/instancing_render.slang"))?;
 
-        // Create instance buffer with initial positions
-        // Positions are static, compute shader updates rotation and color
         let mut instances = Vec::with_capacity(NUM_QUADS as usize);
         for i in 0..GRID_SIZE {
             for j in 0..GRID_SIZE {
-                // Position in grid (static)
                 let nx = (i as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let ny = (j as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let cx = nx * 0.85;
@@ -108,16 +111,15 @@ impl RenderState {
                 instances.push(Instance2D::new(
                     cx,
                     cy,
-                    0.0, // rotation - will be updated by compute
+                    0.0,
                     QUAD_SIZE,
-                    [1.0, 1.0, 1.0, 1.0], // color - will be updated by compute
+                    [1.0, 1.0, 1.0, 1.0],
                 ));
             }
         }
 
         let instance_buffer = device.alloc_buffer_with_data(&instances, BufferKind::Scattered)?;
 
-        // Create params buffer
         let params = AnimParams {
             time: 0.0,
             delta_time: 0.016,
@@ -126,10 +128,8 @@ impl RenderState {
         };
         let params_buffer = device.alloc_buffer_with_data(&[params], BufferKind::Broadcast)?;
 
-        // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline - no vertex buffer needed
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -149,8 +149,10 @@ impl RenderState {
 
         Ok(Self {
             window,
-            context: ctx,
+            device,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             compute_pipeline,
             render_pipeline,
             instance_buffer,
@@ -168,7 +170,6 @@ impl RenderState {
         let delta_time = time - self.last_time;
         self.last_time = time;
 
-        // Update params buffer
         let params = AnimParams {
             time,
             delta_time,
@@ -177,20 +178,16 @@ impl RenderState {
         };
         self.params_buffer.write_data(0, &[params])?;
 
-        // Run compute pass to update instance transforms and colors
-        let mut compute_encoder = ComputeEncoder::new();
-        {
-            let mut pass = compute_encoder.begin_compute_pass();
-            pass.set_pipeline(&self.compute_pipeline);
-            pass.bind_resources(&[&self.instance_buffer, &self.params_buffer]);
-            // Dispatch enough workgroups for all instances (64 threads per group)
-            let workgroups = NUM_QUADS.div_ceil(64);
-            pass.dispatch(workgroups, 1, 1);
-        }
-        compute_encoder.dispatch(&self.context)?;
-
-        // Render quads from instance buffer
-        let frame = self.surface.begin()?;
+        self.frame_graph.clear();
+        self.frame_graph
+            .node("update_instances", &self.compute_pipeline)
+            .bind_buffer(&self.instance_buffer, NodeAccess::ReadWrite)
+            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_resources_raw_slice(&[
+                self.instance_buffer.resource_index(ResourceAccess::Write).unwrap(),
+                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
+            ])
+            .dispatch(NUM_QUADS.div_ceil(64), 1, 1);
 
         let bg_color = Color {
             r: 0.02,
@@ -205,11 +202,20 @@ impl RenderState {
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
             pass.bind_resources(&[&self.instance_buffer]);
-            // Draw 6 vertices (quad) per instance - no vertex buffer!
             pass.draw_quads(NUM_QUADS);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("instancing", &self.scene_rt)
+            .bind_buffer(&self.instance_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.begin()?;
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.window.request_redraw();
@@ -272,6 +278,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                            state.scene_rt = rt;
+                        }
                     }
                 }
             }

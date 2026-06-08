@@ -1,15 +1,15 @@
 //! Starfield example - classic 3D starfield flying through space.
 //!
-//! Demonstrates GPU compute + graphics integration using Surface API.
-//! The compute shader updates star positions, the graphics shader renders them.
+//! Demonstrates GPU compute + graphics in a single task graph:
+//! star update dispatch → offscreen render → swapchain blit.
 //!
 //! Run with: cargo run --example starfield
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
-    VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -35,7 +35,7 @@ struct Star {
     x: f32,
     y: f32,
     z: f32,
-    star_type: f32, // 0=normal, 1=galaxy, 2=quasar, 3=white dwarf
+    star_type: f32,
 }
 
 /// Uniform parameters for the compute shader
@@ -50,7 +50,6 @@ struct StarfieldParams {
 impl goldy::StructuredBufferElement for Star {}
 impl goldy::StructuredBufferElement for StarfieldParams {}
 
-// Simple pseudo-random for initialization
 static mut SEED: u32 = 12345;
 fn rand_f32() -> f32 {
     unsafe {
@@ -86,22 +85,30 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    context: goldy::Context,
+    device: Arc<goldy::Device>,
     surface: Surface,
-    // Compute resources
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    // Buffers
     star_buffer: Buffer,
     params_buffer: Buffer,
-    // Graphics resources
     render_pipeline: RenderPipeline,
-    // State
     speed: f32,
     frame_count: f32,
     start_time: std::time::Instant,
 }
 
 impl RenderState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
+        let (width, height) = surface.size();
+        Ok(RenderTarget::new(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+        )?)
+    }
+
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
@@ -111,19 +118,13 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
-        // Compute shader for star movement
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
-
-        // Render shader for visualization
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
 
-        // Create star buffer with initial random positions and types
-        // Start with z close to 1.0 so stars are immediately visible (small projection)
         let mut stars = Vec::with_capacity(NUM_STARS as usize);
         for _ in 0..NUM_STARS {
-            // Assign star types with different probabilities:
-            // 70% normal stars, 15% galaxies, 5% quasars, 10% white dwarfs
             let type_roll = rand_f32();
             let star_type = if type_roll < 0.70 {
                 STAR_TYPE_NORMAL
@@ -136,28 +137,25 @@ impl RenderState {
             };
 
             stars.push(Star {
-                x: (rand_f32() - 0.5) * 0.8, // Smaller spread so projection stays on screen
+                x: (rand_f32() - 0.5) * 0.8,
                 y: (rand_f32() - 0.5) * 0.8,
-                z: 0.5 + rand_f32() * 0.5, // z from 0.5 to 1.0 (closer to 1.0 = smaller projection)
+                z: 0.5 + rand_f32() * 0.5,
                 star_type,
             });
         }
 
         let star_buffer = device.alloc_buffer_with_data(&stars, BufferKind::Scattered)?;
 
-        // Create params buffer
         let initial_params = StarfieldParams {
-            speed: 0.01, // Per-frame speed, same as original CPU version
+            speed: 0.01,
             frame: 0.0,
             _pad1: 0.0,
             _pad2: 0.0,
         };
         let params_buffer = device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
 
-        // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -174,8 +172,10 @@ impl RenderState {
 
         Ok(Self {
             window,
-            context: ctx,
+            device,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             compute_pipeline,
             star_buffer,
             params_buffer,
@@ -189,7 +189,6 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1.0;
 
-        // Update params buffer with current speed and frame
         let params = StarfieldParams {
             speed: self.speed,
             frame: self.frame_count,
@@ -198,34 +197,37 @@ impl RenderState {
         };
         self.params_buffer.write_data(0, &[params])?;
 
-        // Run compute pass to update stars
-        let mut compute_encoder = ComputeEncoder::new();
-        {
-            let mut pass = compute_encoder.begin_compute_pass();
-            pass.set_pipeline(&self.compute_pipeline);
-            // Pass buffer indices via push constants
-            pass.bind_resources(&[&self.star_buffer, &self.params_buffer]);
-            let workgroups = NUM_STARS.div_ceil(64);
-            pass.dispatch(workgroups, 1, 1);
-        }
-        compute_encoder.dispatch(&self.context)?;
-
-        // Render stars
-        let frame = self.surface.begin()?;
+        self.frame_graph.clear();
+        self.frame_graph
+            .node("update_stars", &self.compute_pipeline)
+            .bind_buffer(&self.star_buffer, NodeAccess::ReadWrite)
+            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_resources_raw_slice(&[
+                self.star_buffer.resource_index(ResourceAccess::Write).unwrap(),
+                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
+            ])
+            .dispatch(NUM_STARS.div_ceil(64), 1, 1);
 
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(&self.render_pipeline);
-            // Pass buffer indices via push constants
-            // Render shader only needs the star buffer (read-only)
             pass.bind_resources(&[&self.star_buffer]);
-            // Draw 6 vertices (quad) per star instance
             pass.draw(0..6, 0..NUM_STARS);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("starfield", &self.scene_rt)
+            .bind_buffer(&self.star_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.begin()?;
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.window.request_redraw();
@@ -300,6 +302,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                            state.scene_rt = rt;
+                        }
                     }
                 }
             }

@@ -1,16 +1,15 @@
 //! GPU Particle Simulation Example
 //!
-//! This example demonstrates compute + graphics integration:
-//! 1. Compute shader updates particle positions/velocities
-//! 2. Graphics shader renders particles as colored quads (instanced)
+//! Demonstrates compute + graphics in a single task graph:
+//! particle update dispatch → offscreen render → swapchain blit.
 //!
 //! Run with: `cargo run --example compute_particles`
 
 use anyhow::Result;
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ShaderModule,
-    Surface, TaskGraph, VertexBufferLayout,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -63,8 +62,10 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    context: goldy::Context,
+    device: Arc<goldy::Device>,
     surface: Surface,
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     particle_buffer: Buffer,
     params_buffer: Buffer,
@@ -75,6 +76,16 @@ struct RenderState {
 }
 
 impl RenderState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
+        let (width, height) = surface.size();
+        Ok(RenderTarget::new(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+        )?)
+    }
+
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
@@ -84,22 +95,17 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
-        // Compute shader for particle simulation
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_update.slang"))?;
-
-        // Render shader for visualization
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_render.slang"))?;
 
-        // Create particle buffer with initial scattered positions
         let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
         for i in 0..NUM_PARTICLES {
-            // Distribute particles in a spiral pattern
             let t = i as f32 / NUM_PARTICLES as f32;
-            let angle = t * std::f32::consts::TAU * 5.0; // 5 rotations
-            let radius = 0.1 + t * 0.6; // Spiral outward
+            let angle = t * std::f32::consts::TAU * 5.0;
+            let radius = 0.1 + t * 0.6;
 
-            // Add some randomness via deterministic noise
             let noise_x = ((i * 17) % 100) as f32 / 100.0 - 0.5;
             let noise_y = ((i * 31) % 100) as f32 / 100.0 - 0.5;
 
@@ -114,7 +120,6 @@ impl RenderState {
 
         let particle_buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
 
-        // Per-frame simulation params (dt written each frame before dispatch)
         let params_buffer = device.alloc_buffer(
             std::mem::size_of::<SimParams>() as u64,
             BufferKind::Broadcast,
@@ -122,16 +127,14 @@ impl RenderState {
             BufferFlags::empty(),
         )?;
 
-        // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
             &render_shader,
             &RenderPipelineDesc {
-                vertex_layout: VertexBufferLayout::empty(), // Shader uses SV_VertexID, not vertex attributes
+                vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::TriangleList,
                 target_format: surface.format(),
                 ..Default::default()
@@ -143,8 +146,10 @@ impl RenderState {
 
         Ok(Self {
             window,
-            context: ctx,
+            device,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             compute_pipeline,
             particle_buffer,
             params_buffer,
@@ -162,10 +167,10 @@ impl RenderState {
         self.last_frame_time = std::time::Instant::now();
         self.params_buffer.write_data(0, &[SimParams { delta_time: dt }])?;
 
-        // Run compute pass to update particles
         let workgroups = NUM_PARTICLES.div_ceil(64);
-        let mut graph = TaskGraph::new();
-        graph
+
+        self.frame_graph.clear();
+        self.frame_graph
             .node("update_particles", &self.compute_pipeline)
             .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
             .bind_buffer(&self.params_buffer, NodeAccess::Read)
@@ -174,12 +179,7 @@ impl RenderState {
                 self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
             ])
             .dispatch(workgroups, 1, 1);
-        graph.dispatch(&self.context)?;
 
-        // Render particles
-        let frame = self.surface.begin()?;
-
-        // Dark blue-purple background
         let bg_color = Color {
             r: 0.03,
             g: 0.02,
@@ -192,18 +192,24 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            // Pass buffer indices via push constants
             pass.bind_resources(&[&self.particle_buffer]);
-            // Draw 6 vertices (quad) per particle instance
             pass.draw(0..6, 0..NUM_PARTICLES);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("particles", &self.scene_rt)
+            .bind_buffer(&self.particle_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.begin()?;
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
-        // Request redraw for continuous animation
         self.window.request_redraw();
-
         Ok(())
     }
 }
@@ -239,7 +245,6 @@ impl ApplicationHandler for App {
             match RenderState::new(window.clone()) {
                 Ok(state) => {
                     self.state = Some(state);
-                    // Request initial redraw to start the render loop
                     window.request_redraw();
                 }
                 Err(e) => {
@@ -264,6 +269,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                            state.scene_rt = rt;
+                        }
                     }
                 }
             }

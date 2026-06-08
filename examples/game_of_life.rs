@@ -1,17 +1,17 @@
 //! Conway's Game of Life - Compute + Graphics Example
 //!
-//! This example demonstrates:
-//! 1. Compute shader running cellular automaton rules
-//! 2. Graphics shader rendering the grid
-//! 3. Ping-pong buffer technique for in-place updates
+//! Demonstrates a unified task graph:
+//! 1. Compute shader running cellular automaton rules (ping-pong buffers)
+//! 2. Graphics shader rendering the grid to an offscreen target
+//! 3. Swapchain blit and present
 //!
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
 use goldy::{
     BufferPool, BufferView, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ShaderModule,
-    Surface, TaskGraph, VertexBufferLayout,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -50,11 +50,11 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    context: goldy::Context,
+    device: Arc<goldy::Device>,
     surface: Surface,
-    // Compute resources
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    // Graphics resources
     render_pipeline: RenderPipeline,
     // Single pool holding both ping-pong buffers as views.
     // One GPU allocation instead of two.
@@ -140,6 +140,16 @@ fn create_initial_state() -> Vec<u32> {
 }
 
 impl RenderState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
+        let (width, height) = surface.size();
+        Ok(RenderTarget::new(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+        )?)
+    }
+
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
 
@@ -150,6 +160,7 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         // Load shaders
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
@@ -191,8 +202,10 @@ impl RenderState {
 
         Ok(Self {
             window,
-            context: ctx,
+            device,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             compute_pipeline,
             render_pipeline,
             _pool: pool,
@@ -212,18 +225,17 @@ impl RenderState {
         let now = std::time::Instant::now();
         let should_update = now.duration_since(self.last_update).as_millis() > 33;
 
+        self.frame_graph.clear();
+
         if should_update {
             self.last_update = now;
 
-            // Run compute pass with ping-pong buffers.
-            // Order matters: [current_state, next_state] matching shader slots.
             let (read_view, write_view) = if self.use_buffer_a {
-                (&self.view_a, &self.view_b) // A -> B
+                (&self.view_a, &self.view_b)
             } else {
-                (&self.view_b, &self.view_a) // B -> A
+                (&self.view_b, &self.view_a)
             };
-            let mut graph = TaskGraph::new();
-            graph
+            self.frame_graph
                 .node("game_of_life", &self.compute_pipeline)
                 .bind_buffer_view(read_view, NodeAccess::Read)
                 .bind_buffer_view(write_view, NodeAccess::Write)
@@ -232,34 +244,37 @@ impl RenderState {
                     write_view.handle(ResourceAccess::Write).unwrap().index(),
                 ])
                 .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
-            graph.dispatch(&self.context)?;
 
-            // Toggle buffer for next frame
             self.use_buffer_a = !self.use_buffer_a;
         }
 
-        // Render
-        let frame = self.surface.begin()?;
+        let current_view = if self.use_buffer_a {
+            &self.view_a
+        } else {
+            &self.view_b
+        };
+        let current_handle = current_view.handle(ResourceAccess::Read).unwrap();
 
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
             pass.clear(Color::BLACK);
             pass.set_pipeline(&self.render_pipeline);
-
-            // Read from the view that is now "current" (after the ping-pong swap).
-            let current_handle = if self.use_buffer_a {
-                self.view_a.handle(ResourceAccess::Read).unwrap()
-            } else {
-                self.view_b.handle(ResourceAccess::Read).unwrap()
-            };
             pass.bind_resources_typed(&[current_handle]);
-
-            // Draw fullscreen triangle
             pass.draw(0..3, 0..1);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("game_of_life_render", &self.scene_rt)
+            .bind_buffer_view(current_view, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.begin()?;
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.window.request_redraw();
@@ -323,6 +338,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                            state.scene_rt = rt;
+                        }
                     }
                 }
             }

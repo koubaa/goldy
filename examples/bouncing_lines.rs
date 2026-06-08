@@ -1,15 +1,15 @@
 //! Bouncing lines example - animated lines bouncing off walls.
 //!
-//! Demonstrates GPU compute + graphics integration with line primitives.
-//! The compute shader updates line endpoint positions, the graphics shader renders them.
+//! Demonstrates GPU compute + graphics in a single task graph:
+//! line physics dispatch → offscreen render → swapchain blit.
 //!
 //! Run with: cargo run --example bouncing_lines
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface,
-    VertexBufferLayout,
+    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -26,11 +26,11 @@ const NUM_LINES: u32 = 20;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Line {
-    p1: [f32; 2],     // First endpoint position
-    v1: [f32; 2],     // First endpoint velocity
-    p2: [f32; 2],     // Second endpoint position
-    v2: [f32; 2],     // Second endpoint velocity
-    color_index: u32, // Color lookup index
+    p1: [f32; 2],
+    v1: [f32; 2],
+    p2: [f32; 2],
+    v2: [f32; 2],
+    color_index: u32,
     _pad1: u32,
     _pad2: u32,
     _pad3: u32,
@@ -63,20 +63,28 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    context: goldy::Context,
+    device: Arc<goldy::Device>,
     surface: Surface,
-    // Compute resources
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    // Buffer
     line_buffer: Buffer,
-    // Graphics resources
     render_pipeline: RenderPipeline,
-    // Frame counter
     frame_count: u32,
     start_time: std::time::Instant,
 }
 
 impl RenderState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
+        let (width, height) = surface.size();
+        Ok(RenderTarget::new(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+        )?)
+    }
+
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
@@ -86,14 +94,11 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
-        // Compute shader for line physics
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
-
-        // Render shader for visualization
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
 
-        // Create line buffer with initial positions matching the original example
         let mut lines = Vec::with_capacity(NUM_LINES as usize);
         for idx in 0..NUM_LINES {
             let angle = (idx as f32 / NUM_LINES as f32) * std::f32::consts::PI * 2.0;
@@ -111,10 +116,8 @@ impl RenderState {
 
         let line_buffer = device.alloc_buffer_with_data(&lines, BufferKind::Scattered)?;
 
-        // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -131,8 +134,10 @@ impl RenderState {
 
         Ok(Self {
             window,
-            context: ctx,
+            device,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             compute_pipeline,
             line_buffer,
             render_pipeline,
@@ -144,21 +149,14 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        // Run compute pass to update line positions
-        let mut compute_encoder = ComputeEncoder::new();
-        {
-            let mut pass = compute_encoder.begin_compute_pass();
-            pass.set_pipeline(&self.compute_pipeline);
-            // Pass buffer indices via push constants
-            pass.bind_resources(&[&self.line_buffer]);
-            // Only 20 lines, but dispatch at least 1 workgroup
-            let workgroups = NUM_LINES.div_ceil(64);
-            pass.dispatch(workgroups.max(1), 1, 1);
-        }
-        compute_encoder.dispatch(&self.context)?;
-
-        // Render lines
-        let frame = self.surface.begin()?;
+        self.frame_graph.clear();
+        self.frame_graph
+            .node("update_lines", &self.compute_pipeline)
+            .bind_buffer(&self.line_buffer, NodeAccess::ReadWrite)
+            .bind_resources_raw_slice(&[
+                self.line_buffer.resource_index(ResourceAccess::Write).unwrap(),
+            ])
+            .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
 
         let bg_color = Color {
             r: 0.05,
@@ -172,13 +170,21 @@ impl RenderState {
             let mut pass = encoder.begin_render_pass();
             pass.clear(bg_color);
             pass.set_pipeline(&self.render_pipeline);
-            // Pass buffer indices via push constants
             pass.bind_resources(&[&self.line_buffer]);
-            // Draw 2 vertices (line) per instance
             pass.draw(0..2, 0..NUM_LINES);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("bouncing_lines", &self.scene_rt)
+            .bind_buffer(&self.line_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.begin()?;
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.window.request_redraw();
@@ -241,6 +247,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                            state.scene_rt = rt;
+                        }
                     }
                 }
             }
