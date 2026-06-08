@@ -79,8 +79,6 @@ from goldy._goldy import (
     Builtins,
     # Compute
     ComputePipeline,
-    ComputeEncoder,
-    ComputePass,
     # Surface (windowed rendering)
     Surface,
     SurfaceFrame,
@@ -126,8 +124,6 @@ __all__ = [
     "Builtins",
     # Compute
     "ComputePipeline",
-    "ComputeEncoder",
-    "ComputePass",
     # Surface (windowed rendering)
     "Surface",
     "SurfaceFrame",

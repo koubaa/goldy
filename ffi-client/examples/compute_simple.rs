@@ -3,7 +3,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example compute_simple`
 
 use goldy_ffi_client::{
-    BufferKind, ComputeEncoder, ComputePipeline, DeviceDescriptor, Instance, RequestAdapterOptions, ShaderModule,
+    BufferKind, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, TaskGraph,
 };
 
 const COMPUTE_SRC: &str = r#"
@@ -33,11 +34,13 @@ fn main() -> goldy_ffi_client::Result<()> {
     let shader = ShaderModule::from_slang(&device, COMPUTE_SRC)?;
     let pipeline = ComputePipeline::new(&device, &shader)?;
 
-    let mut encoder = ComputeEncoder::new();
-    encoder.set_pipeline(&pipeline);
-    encoder.bind_resources(&[&buffer]);
-    encoder.dispatch(1, 1, 1);
-    encoder.execute(&device)?;
+    let idx = buffer.resource_index(ResourceAccess::Write)?;
+    let mut graph = TaskGraph::new();
+    let mut node = graph.compute_node("double", &pipeline);
+    node.bind_buffer(&buffer, NodeAccess::ReadWrite);
+    node.bind_resources_raw(&[idx]);
+    node.dispatch(1, 1, 1);
+    graph.dispatch(&device)?;
 
     let bytes = buffer.read_to_cpu(&device)?;
     let values: &[f32] = bytemuck::cast_slice(&bytes);

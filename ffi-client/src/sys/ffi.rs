@@ -19,15 +19,6 @@ pub type FnGoldyBufferWrite = unsafe extern "C" fn(*const GoldyBuffer, u64, *con
 
 pub type FnGoldyClearError = unsafe extern "C" fn();
 
-pub type FnGoldyComputeEncoderBindResources =
-    unsafe extern "C" fn(*mut GoldyComputeEncoder, *const *const GoldyBuffer, u32);
-pub type FnGoldyComputeEncoderCreate = unsafe extern "C" fn() -> *mut GoldyComputeEncoder;
-pub type FnGoldyComputeEncoderDestroy = unsafe extern "C" fn(*mut GoldyComputeEncoder);
-pub type FnGoldyComputeEncoderDispatch = unsafe extern "C" fn(*mut GoldyComputeEncoder, u32, u32, u32);
-pub type FnGoldyComputeEncoderExecute =
-    unsafe extern "C" fn(*const GoldyComputeEncoder, *const GoldyDevice) -> GoldyResult;
-pub type FnGoldyComputeEncoderSetPipeline = unsafe extern "C" fn(*mut GoldyComputeEncoder, *const GoldyComputePipeline);
-
 pub type FnGoldyComputePipelineCreate =
     unsafe extern "C" fn(*const GoldyDevice, *const GoldyShaderModule) -> *mut GoldyComputePipeline;
 pub type FnGoldyComputePipelineDestroy = unsafe extern "C" fn(*mut GoldyComputePipeline);

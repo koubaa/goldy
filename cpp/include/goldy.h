@@ -178,9 +178,6 @@ typedef struct GoldyBufferPool GoldyBufferPool;
 // Opaque handle to a Goldy BufferView (sub-range of a pool backing buffer).
 typedef struct GoldyBufferView GoldyBufferView;
 
-// Opaque handle to a Goldy ComputeEncoder.
-typedef struct GoldyComputeEncoder GoldyComputeEncoder;
-
 // Opaque handle to a Goldy ComputePipeline.
 typedef struct GoldyComputePipeline GoldyComputePipeline;
 
@@ -449,50 +446,6 @@ enum GoldyResult goldy_buffer_write(const struct GoldyBuffer *buffer,
 
 // Clear the last error message.
 void goldy_clear_error(void);
-
-// Bind resource slots for compute.
-//
-// Pass the buffers whose indices should be bound to shader resource slots.
-// The indices are bound in order, so `buffers[0]` becomes slot 0,
-// `buffers[1]` becomes slot 1, etc.
-//
-// # Safety
-// All pointers must be valid. The buffers array must contain buffer_count elements.
-void goldy_compute_encoder_bind_resources(struct GoldyComputeEncoder *encoder,
-                                          const struct GoldyBuffer *const *buffers,
-                                          uint32_t buffer_count);
-
-// Create a new compute encoder.
-struct GoldyComputeEncoder *goldy_compute_encoder_create(void);
-
-// Destroy a compute encoder without dispatching.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_compute_encoder_destroy(struct GoldyComputeEncoder *encoder);
-
-// Dispatch compute workgroups.
-//
-// # Safety
-// The encoder pointer must be valid.
-void goldy_compute_encoder_dispatch(struct GoldyComputeEncoder *encoder,
-                                    uint32_t workgroups_x,
-                                    uint32_t workgroups_y,
-                                    uint32_t workgroups_z);
-
-// Execute the compute commands on the device.
-//
-// # Safety
-// Both pointers must be valid.
-enum GoldyResult goldy_compute_encoder_execute(const struct GoldyComputeEncoder *encoder,
-                                               const struct GoldyDevice *device);
-
-// Set the compute pipeline.
-//
-// # Safety
-// Both pointers must be valid.
-void goldy_compute_encoder_set_pipeline(struct GoldyComputeEncoder *encoder,
-                                        const struct GoldyComputePipeline *pipeline);
 
 // Create a new compute pipeline.
 //

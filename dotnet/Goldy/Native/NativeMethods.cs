@@ -160,24 +160,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_compute_pipeline_destroy")]
     internal static partial void ComputePipelineDestroy(nint pipeline);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_create")]
-    internal static partial nint ComputeEncoderCreate();
-
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_destroy")]
-    internal static partial void ComputeEncoderDestroy(nint encoder);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_set_pipeline")]
-    internal static partial void ComputeEncoderSetPipeline(nint encoder, nint pipeline);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_bind_resources")]
-    internal static partial void ComputeEncoderBindResources(nint encoder, nint buffers, uint bufferCount);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_dispatch")]
-    internal static partial void ComputeEncoderDispatch(nint encoder, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_compute_encoder_execute")]
-    internal static partial GoldyResult ComputeEncoderExecute(nint encoder, nint device);
-
     // ========================================================================
     // Texture
     // ========================================================================

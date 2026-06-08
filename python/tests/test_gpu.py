@@ -220,15 +220,13 @@ void cs_main(Scattered<float> data, ThreadId id) {
         # Create compute pipeline
         pipeline = goldy.ComputePipeline(device, shader)
         
-        # Dispatch compute work
-        encoder = goldy.ComputeEncoder()
-        with encoder.begin_compute_pass() as cp:
-            cp.set_pipeline(pipeline)
-            cp.bind_resources([buffer])
-            # 256 elements / 64 threads per workgroup = 4 workgroups
-            cp.dispatch(4, 1, 1)
-        
-        encoder.dispatch(device)
+        graph = goldy.TaskGraph()
+        idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+        with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
+            node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+            node.bind_resources_raw([idx])
+
+        graph.dispatch(device)
         
         # Compute shader executed without error
         # (Full readback verification would require COPY_SRC staging buffer)

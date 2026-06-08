@@ -30,12 +30,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_buffer_size: FnGoldyBufferSize,
     pub goldy_buffer_write: FnGoldyBufferWrite,
     pub goldy_clear_error: FnGoldyClearError,
-    pub goldy_compute_encoder_bind_resources: FnGoldyComputeEncoderBindResources,
-    pub goldy_compute_encoder_create: FnGoldyComputeEncoderCreate,
-    pub goldy_compute_encoder_destroy: FnGoldyComputeEncoderDestroy,
-    pub goldy_compute_encoder_dispatch: FnGoldyComputeEncoderDispatch,
-    pub goldy_compute_encoder_execute: FnGoldyComputeEncoderExecute,
-    pub goldy_compute_encoder_set_pipeline: FnGoldyComputeEncoderSetPipeline,
     pub goldy_compute_pipeline_create: FnGoldyComputePipelineCreate,
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
     pub goldy_device_adapter_id: FnGoldyDeviceAdapterId,
@@ -146,18 +140,6 @@ impl GoldyFfi {
             goldy_buffer_size: sym!("goldy_buffer_size", FnGoldyBufferSize),
             goldy_buffer_write: sym!("goldy_buffer_write", FnGoldyBufferWrite),
             goldy_clear_error: sym!("goldy_clear_error", FnGoldyClearError),
-            goldy_compute_encoder_bind_resources: sym!(
-                "goldy_compute_encoder_bind_resources",
-                FnGoldyComputeEncoderBindResources
-            ),
-            goldy_compute_encoder_create: sym!("goldy_compute_encoder_create", FnGoldyComputeEncoderCreate),
-            goldy_compute_encoder_destroy: sym!("goldy_compute_encoder_destroy", FnGoldyComputeEncoderDestroy),
-            goldy_compute_encoder_dispatch: sym!("goldy_compute_encoder_dispatch", FnGoldyComputeEncoderDispatch),
-            goldy_compute_encoder_execute: sym!("goldy_compute_encoder_execute", FnGoldyComputeEncoderExecute),
-            goldy_compute_encoder_set_pipeline: sym!(
-                "goldy_compute_encoder_set_pipeline",
-                FnGoldyComputeEncoderSetPipeline
-            ),
             goldy_compute_pipeline_create: sym!("goldy_compute_pipeline_create", FnGoldyComputePipelineCreate),
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),

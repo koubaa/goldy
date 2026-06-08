@@ -737,7 +737,10 @@ fn test_compute_batched_clear_before_dispatch() {
 
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&input_buf, 0, 0);
-    graph.node("n0", &pipeline).bind_resources(&[&input_buf, &output_buf]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&input_buf, &output_buf])
+        .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; 64 * 4];
@@ -775,9 +778,15 @@ fn test_compute_clear_between_dispatches() {
         .expect("output");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &copy_pipeline).bind_resources(&[&input_buf, &output_buf]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &copy_pipeline)
+        .bind_resources(&[&input_buf, &output_buf])
+        .dispatch(1, 1, 1);
     graph.clear_buffer(&output_buf, 0, 0);
-    graph.node("n1", &inc_pipeline).bind_resources(&[&output_buf]).dispatch(1, 1, 1);
+    graph
+        .node("n1", &inc_pipeline)
+        .bind_resources(&[&output_buf])
+        .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; 64 * 4];
@@ -818,7 +827,10 @@ fn test_compute_dispatch_indirect() {
         .expect("data buffer");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&data_buf]).dispatch_indirect(&args_buf, 0);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&data_buf])
+        .dispatch_indirect(&args_buf, 0);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
@@ -894,7 +906,10 @@ fn test_compute_many_resource_slots() {
         .expect("out");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&a, &b, &c, &d, &e, &out]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&a, &b, &c, &d, &e, &out])
+        .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 4];
@@ -1011,7 +1026,10 @@ fn test_buffer_view_copy_between_sub_regions() {
         .expect("view B bindless index");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources_raw_slice(&[idx_a, idx_b]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources_raw_slice(&[idx_a, idx_b])
+        .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     // Read back the entire pool buffer and check the second half
@@ -1059,7 +1077,10 @@ fn test_buffer_view_isolation() {
     let idx = view.resource_index(ResourceAccess::Write).expect("view bindless index");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources_raw_slice(&[idx]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources_raw_slice(&[idx])
+        .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 2 * 4];
@@ -1114,7 +1135,10 @@ fn test_buffer_pool_alloc_and_dispatch() {
         .expect("dst bindless index");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources_raw_slice(&[src_idx, dst_idx]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     // Read back entire pool and verify the destination region
@@ -1437,7 +1461,10 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
 
     let workgroups = (ELEM_COUNT as u32).div_ceil(64);
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]).dispatch(workgroups, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]])
+        .dispatch(workgroups, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; BUF_SIZE as usize];
@@ -2179,7 +2206,8 @@ fn stride_validation_disabled_allows_mismatch() {
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
-    graph.dispatch(&ctx)
+    graph
+        .dispatch(&ctx)
         .expect("dispatch must succeed when validation is off");
 }
 
@@ -2207,7 +2235,10 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
         .expect("create data buf with stride 4");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&params, &data_buf]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&params, &data_buf])
+        .dispatch(1, 1, 1);
     let result = graph.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
@@ -2243,7 +2274,10 @@ fn stride_validation_multi_binding_all_correct_passes() {
         .expect("create data buf with stride 16");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&params, &data_buf]).dispatch(1, 1, 1);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&params, &data_buf])
+        .dispatch(1, 1, 1);
     let result = graph.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
@@ -2279,9 +2313,9 @@ fn transient_allocator_smoke_all_strategies() {
         let view = a.alloc(&device, 256, Some(4)).expect("alloc");
         // Submit empty work to advance the timeline.
         let tv = {
-        let mut graph = TaskGraph::new();
-        graph.submit(&ctx).expect("submit")
-    };
+            let mut graph = TaskGraph::new();
+            graph.submit(&ctx).expect("submit")
+        };
         drop(view);
         a.end_frame(&device, tv);
         // Next frame: should not panic, and BumpReset should wait for tv internally.
@@ -2344,9 +2378,9 @@ fn transient_allocator_clear_resets_state() {
         a.begin_frame(&device, 0).expect("begin");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
         let tv = {
-        let mut graph = TaskGraph::new();
-        graph.submit(&ctx).expect("submit")
-    };
+            let mut graph = TaskGraph::new();
+            graph.submit(&ctx).expect("submit")
+        };
         a.end_frame(&device, tv);
         ctx.wait_until(tv).expect("wait");
         a.clear();
@@ -3049,7 +3083,10 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
     let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
     let mut graph_enc = TaskGraph::new();
-    graph_enc.node("n0", &write_pipeline).bind_resources_raw_slice(&[storage_idx]).dispatch(1, 1, 1);
+    graph_enc
+        .node("n0", &write_pipeline)
+        .bind_resources_raw_slice(&[storage_idx])
+        .dispatch(1, 1, 1);
     graph_enc.dispatch(&ctx).expect("write dispatch");
 
     // Read pass (SRV + sampler).
@@ -3157,11 +3194,17 @@ fn two_contexts_both_submit_and_complete() {
 
     // Submit from both contexts.
     let mut graph_enc_a = TaskGraph::new();
-    graph_enc_a.node("n0", &pipeline).bind_resources(&[&buf_a]).dispatch(1, 1, 1);
+    graph_enc_a
+        .node("n0", &pipeline)
+        .bind_resources(&[&buf_a])
+        .dispatch(1, 1, 1);
     let tv_a = graph_enc_a.submit(&ctx_a).expect("ctx_a submit");
 
     let mut graph_enc_b = TaskGraph::new();
-    graph_enc_b.node("n0", &pipeline).bind_resources(&[&buf_b]).dispatch(1, 1, 1);
+    graph_enc_b
+        .node("n0", &pipeline)
+        .bind_resources(&[&buf_b])
+        .dispatch(1, 1, 1);
     let tv_b = graph_enc_b.submit(&ctx_b).expect("ctx_b submit");
 
     ctx_a.wait_until(tv_a).expect("ctx_a wait");

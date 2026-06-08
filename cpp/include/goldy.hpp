@@ -72,7 +72,6 @@ class TaskGraph;
 class BufferPool;
 class BufferView;
 class ComputePipeline;
-class ComputeEncoder;
 class Texture;
 class Sampler;
 
@@ -250,10 +249,6 @@ struct TaskGraphDeleter {
 
 struct ComputePipelineDeleter {
     void operator()(GoldyComputePipeline* p) const { if (p) goldy_compute_pipeline_destroy(p); }
-};
-
-struct ComputeEncoderDeleter {
-    void operator()(GoldyComputeEncoder* p) const { if (p) goldy_compute_encoder_destroy(p); }
 };
 
 struct TextureDeleter {
@@ -1324,62 +1319,6 @@ private:
 inline TaskGraph::ComputeNode TaskGraph::compute_node(const char* label, const ComputePipeline& pipeline) {
     return ComputeNode(*this, label, pipeline);
 }
-
-// =============================================================================
-// ComputeEncoder
-// =============================================================================
-
-/**
- * @brief Records compute commands.
- */
-class ComputeEncoder {
-public:
-    /**
-     * @brief Create a new compute encoder.
-     */
-    ComputeEncoder() {
-        ptr_.reset(goldy_compute_encoder_create());
-    }
-
-    ComputeEncoder(const ComputeEncoder&) = delete;
-    ComputeEncoder& operator=(const ComputeEncoder&) = delete;
-    ComputeEncoder(ComputeEncoder&&) = default;
-    ComputeEncoder& operator=(ComputeEncoder&&) = default;
-
-    /**
-     * @brief Set the compute pipeline.
-     */
-    void set_pipeline(const ComputePipeline& pipeline) {
-        goldy_compute_encoder_set_pipeline(ptr_.get(), pipeline.get());
-    }
-
-    /**
-     * @brief Dispatch compute workgroups.
-     */
-    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
-        goldy_compute_encoder_dispatch(ptr_.get(), x, y, z);
-    }
-
-    /**
-     * @brief Execute the compute commands.
-     * @param device The device to execute on.
-     * @throws Exception if execution fails.
-     */
-    void execute(const Device& device) {
-        GoldyResult result = goldy_compute_encoder_execute(ptr_.get(), device.get());
-        if (result != GOLDY_RESULT_OK) {
-            throw Exception::from_last_error();
-        }
-    }
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyComputeEncoder* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyComputeEncoder, detail::ComputeEncoderDeleter> ptr_;
-};
 
 // =============================================================================
 // Texture

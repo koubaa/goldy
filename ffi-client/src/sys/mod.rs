@@ -65,45 +65,6 @@ pub unsafe fn goldy_clear_error() {
     (lib().goldy_clear_error)()
 }
 
-pub unsafe fn goldy_compute_encoder_bind_resources(
-    encoder: *mut GoldyComputeEncoder,
-    buffers: *const *const GoldyBuffer,
-    buffer_count: u32,
-) {
-    (lib().goldy_compute_encoder_bind_resources)(encoder, buffers, buffer_count)
-}
-
-pub unsafe fn goldy_compute_encoder_create() -> *mut GoldyComputeEncoder {
-    (lib().goldy_compute_encoder_create)()
-}
-
-pub unsafe fn goldy_compute_encoder_destroy(encoder: *mut GoldyComputeEncoder) {
-    (lib().goldy_compute_encoder_destroy)(encoder)
-}
-
-pub unsafe fn goldy_compute_encoder_dispatch(
-    encoder: *mut GoldyComputeEncoder,
-    workgroups_x: u32,
-    workgroups_y: u32,
-    workgroups_z: u32,
-) {
-    (lib().goldy_compute_encoder_dispatch)(encoder, workgroups_x, workgroups_y, workgroups_z)
-}
-
-pub unsafe fn goldy_compute_encoder_execute(
-    encoder: *const GoldyComputeEncoder,
-    device: *const GoldyDevice,
-) -> GoldyResult {
-    (lib().goldy_compute_encoder_execute)(encoder, device)
-}
-
-pub unsafe fn goldy_compute_encoder_set_pipeline(
-    encoder: *mut GoldyComputeEncoder,
-    pipeline: *const GoldyComputePipeline,
-) {
-    (lib().goldy_compute_encoder_set_pipeline)(encoder, pipeline)
-}
-
 pub unsafe fn goldy_compute_pipeline_create(
     device: *const GoldyDevice,
     shader: *const GoldyShaderModule,

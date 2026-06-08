@@ -15,11 +15,7 @@ const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
 use crate::types::{BufferKind, ResourceCategory};
 
-fn buffer_stride_for_arg_index(
-    state: &MetalState,
-    index: u32,
-    cat: ResourceCategory,
-) -> Option<u32> {
+fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCategory) -> Option<u32> {
     let expected_kind = match cat {
         ResourceCategory::Scattered => BufferKind::Scattered,
         ResourceCategory::Broadcast => BufferKind::Broadcast,

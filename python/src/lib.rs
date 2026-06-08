@@ -71,8 +71,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
-    m.add_class::<compute::PyComputeEncoder>()?;
-    m.add_class::<compute::PyComputePass>()?;
 
     // Surface (windowed rendering)
     m.add_class::<surface::PySurface>()?;

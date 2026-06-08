@@ -51,15 +51,13 @@ def main():
     pipeline = goldy.ComputePipeline(device, shader)
     print("Created compute pipeline")
     
-    # Dispatch compute work
-    encoder = goldy.ComputeEncoder()
-    with encoder.begin_compute_pass() as cp:
-        cp.set_pipeline(pipeline)
-        cp.bind_resources([buffer])
-        # 256 elements / 64 threads per workgroup = 4 workgroups
-        cp.dispatch(4, 1, 1)
-    
-    encoder.dispatch(device)
+    graph = goldy.TaskGraph()
+    idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+    with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
+        node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+        node.bind_resources_raw([idx])
+
+    graph.dispatch(device)
     print("Dispatched compute shader")
     
     # Note: To read back results, you'd need a staging buffer with COPY_SRC

@@ -1193,7 +1193,7 @@ impl TaskGraph {
                     pipeline,
                     resource_slots,
                     user_slots,
-                        dispatch,
+                    dispatch,
                 } => {
                     0u8.hash(&mut h);
                     pipeline.hash(&mut h);

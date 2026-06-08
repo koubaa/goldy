@@ -156,7 +156,6 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 | `goldy::TaskGraph` | Task graph (render passes, swapchain blit, dispatch) |
 | `goldy::Surface` | Window swapchain (Win32 / macOS only) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
-| `goldy::ComputeEncoder` | Records compute commands |
 | `goldy::Texture` | GPU texture |
 | `goldy::Sampler` | Texture sampler |
 
