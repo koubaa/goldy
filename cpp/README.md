@@ -89,8 +89,14 @@ cargo build --package goldy-ffi --release
 # Configure with CMake
 cd cpp
 cmake -B build -DGOLDY_BUILD_FROM_SOURCE=ON
-cmake --build build
+cmake --build build --target triangle
 ```
+
+On Windows, if MSVC cannot find `stdarg.h`, either:
+
+- Re-configure from any shell (CMake auto-detects MSVC/SDK paths for Ninja), or
+- Use **x64 Native Tools Command Prompt for VS 2022**, or
+- Run `cpp/build.bat` which calls `vcvars64.bat` first.
 
 ## Requirements
 

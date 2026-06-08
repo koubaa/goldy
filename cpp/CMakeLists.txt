@@ -7,6 +7,10 @@ project(goldy
     LANGUAGES CXX
 )
 
+# Ninja + MSVC from non-Developer shells (Git Bash, IDE terminals) need explicit
+# Windows SDK / MSVC include and link paths.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InitMSVCEnvironment.cmake")
+
 # Options
 option(GOLDY_BUILD_EXAMPLES "Build examples" ON)
 option(GOLDY_BUILD_FROM_SOURCE "Build goldy-ffi from Rust source" OFF)
