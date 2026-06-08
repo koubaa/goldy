@@ -309,11 +309,6 @@ impl Context {
         Ok(tv)
     }
 
-    /// Record that this context's submission at `tv` referenced `parcel`.
-    pub fn stamp_parcel(&self, parcel: &crate::Parcel, tv: TimelineValue) {
-        parcel.mark_referenced(self.backend_handle(), tv);
-    }
-
     /// True when every context in `refs` has retired the stamped timeline values.
     pub fn parcel_ready(&self, refs: &ReferenceTable) -> bool {
         if refs.is_empty() {

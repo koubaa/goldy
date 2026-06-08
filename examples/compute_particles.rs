@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -187,19 +187,13 @@ impl RenderState {
             a: 1.0,
         };
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(bg_color);
-            pass.set_pipeline(&self.render_pipeline);
-            pass.bind_resources(&[&self.particle_buffer]);
-            pass.draw(0..6, 0..NUM_PARTICLES);
-        }
-
-        self.frame_graph
-            .render_pass("particles", &self.scene_rt)
-            .bind_buffer(&self.particle_buffer, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("particles", &self.scene_rt);
+        pass.bind_buffer_mut(&self.particle_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(&self.render_pipeline);
+        pass.bind_resources(&[&self.particle_buffer]);
+        pass.draw(0..6, 0..NUM_PARTICLES);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

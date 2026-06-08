@@ -117,9 +117,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_render_target_buffer_size")]
     internal static partial nuint RenderTargetBufferSize(nint target);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_render_target_render")]
-    internal static partial GoldyResult RenderTargetRender(nint target, nint encoder);
-
     [LibraryImport(LibName, EntryPoint = "goldy_render_target_read_to_buffer")]
     internal static partial GoldyResult RenderTargetReadToBuffer(nint target, nint output, nuint outputSize);
 
@@ -145,43 +142,6 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_render_pipeline_destroy")]
     internal static partial void RenderPipelineDestroy(nint pipeline);
-
-    // ========================================================================
-    // CommandEncoder
-    // ========================================================================
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_create")]
-    internal static partial nint EncoderCreate();
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_destroy")]
-    internal static partial void EncoderDestroy(nint encoder);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_clear")]
-    internal static partial void EncoderClear(nint encoder, Color color);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_clear_depth")]
-    internal static partial void EncoderClearDepth(nint encoder, float depth);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_pipeline")]
-    internal static partial void EncoderSetPipeline(nint encoder, nint pipeline);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_vertex_buffer")]
-    internal static partial void EncoderSetVertexBuffer(nint encoder, uint slot, nint buffer);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_vertex_buffer_offset")]
-    internal static partial void EncoderSetVertexBufferOffset(nint encoder, uint slot, nint buffer, ulong offset);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_set_index_buffer")]
-    internal static partial void EncoderSetIndexBuffer(nint encoder, nint buffer, IndexFormat format);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_draw")]
-    internal static partial void EncoderDraw(nint encoder, uint vertexStart, uint vertexCount, uint instanceStart, uint instanceCount);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_draw_indexed")]
-    internal static partial void EncoderDrawIndexed(nint encoder, uint indexStart, uint indexCount, int baseVertex, uint instanceStart, uint instanceCount);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_encoder_bind_resources")]
-    internal static partial void EncoderBindResources(nint encoder, nint buffers, uint bufferCount);
 
     // ========================================================================
     // Compute
@@ -267,9 +227,6 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_surface_present")]
     internal static partial GoldyResult SurfacePresent(nint surface, nint frame);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_render")]
-    internal static partial GoldyResult SurfaceFrameRender(nint frame, nint encoder);
 
     [LibraryImport(LibName, EntryPoint = "goldy_surface_frame_width")]
     internal static partial uint SurfaceFrameWidth(nint frame);

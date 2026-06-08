@@ -42,13 +42,11 @@ using var instance = new Instance();
 using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
 using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);
 
-var encoder = new CommandEncoder();
-encoder.Clear(new Color(0.2f, 0.3f, 0.8f, 1.0f));
-
-target.Render(encoder);
-
-byte[] pixels = target.ReadToCpu();
-Console.WriteLine($"Rendered {pixels.Length} bytes ({target.Width}x{target.Height})");
+using var pipeline = new ComputePipeline(device, computeShader);
+using var encoder = new ComputeEncoder();
+encoder.SetPipeline(pipeline);
+encoder.Dispatch(1, 1, 1);
+encoder.Execute(device);
 ```
 
 ### Windowed Rendering
@@ -63,13 +61,7 @@ using var surface = new Surface(device, windowHandle);
 while (running)
 {
     using var frame = surface.Acquire();
-
-    var encoder = new CommandEncoder();
-    encoder.Clear(Color.CornflowerBlue);
-    // ... draw calls ...
-
-    frame.Render(encoder);
-    surface.Present(frame);
+    surface.Present(frame);  // graphics via TaskGraph is Rust-only today
 }
 ```
 
@@ -191,25 +183,7 @@ public sealed class RenderPipelineDesc
 }
 ```
 
-### CommandEncoder / RenderPass
-
-```csharp
-public sealed class CommandEncoder
-{
-    public CommandEncoder();
-    public void Clear(Color color);
-    public RenderPass BeginRenderPass();
-}
-
-public sealed class RenderPass : IDisposable
-{
-    public void SetPipeline(RenderPipeline pipeline);
-    public void SetVertexBuffer(uint slot, Buffer buffer);
-    public void Draw(uint vertexStart, uint vertexCount,
-                     uint instanceStart = 0, uint instanceCount = 1);
-    public void DrawIndexed(uint indexCount, uint instanceCount = 1);
-}
-```
+`CommandEncoder`, `RenderPass`, and `Render`/`SurfaceFrame.Render` were removed. Graphics rendering uses the Rust `TaskGraph` API; .NET bindings retain compute.
 
 ### RenderTarget
 
@@ -217,7 +191,6 @@ public sealed class RenderPass : IDisposable
 public sealed class RenderTarget : IDisposable
 {
     public RenderTarget(Device device, uint width, uint height, TextureFormat format);
-    public void Render(CommandEncoder encoder);
     public byte[] ReadToCpu();
     public void ReadToBuffer(byte[] output);
     public uint Width { get; }
@@ -242,7 +215,8 @@ public sealed class Surface : IDisposable
 
 public sealed class SurfaceFrame : IDisposable
 {
-    public void Render(CommandEncoder encoder);
+    public uint Width { get; }
+    public uint Height { get; }
 }
 ```
 

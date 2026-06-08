@@ -11,22 +11,20 @@ A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets 
 ## Quick Example
 
 ```rust
-use goldy::{
-    Color, CommandEncoder, DeviceType, Instance, RenderTarget, TextureFormat,
-};
+use goldy::{Color, DeviceType, Instance, RenderTarget, TaskGraph, TextureFormat};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
     let device = instance.create_device(DeviceType::DiscreteGpu)?;
+    let ctx = device.create_context()?;
 
     let target = RenderTarget::new(&device, 800, 600, TextureFormat::Rgba8Unorm)?;
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
-        pass.clear(Color::CORNFLOWER_BLUE);
-    }
+    let mut graph = TaskGraph::new();
+    let mut pass = graph.render_pass("clear", &target);
+    pass.clear(Color::CORNFLOWER_BLUE);
+    pass.finish_recorded();
+    graph.dispatch(&ctx)?;
 
-    target.render(encoder)?;
     let _pixels = target.read_to_cpu()?;
     Ok(())
 }

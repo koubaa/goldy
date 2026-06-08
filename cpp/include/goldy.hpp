@@ -66,7 +66,6 @@ class Buffer;
 class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
-class CommandEncoder;
 class ComputePipeline;
 class ComputeEncoder;
 class Texture;
@@ -177,10 +176,6 @@ struct RenderPipelineDeleter {
 
 struct RenderTargetDeleter {
     void operator()(GoldyRenderTarget* p) const { if (p) goldy_render_target_destroy(p); }
-};
-
-struct CommandEncoderDeleter {
-    void operator()(GoldyCommandEncoder* p) const { if (p) goldy_encoder_destroy(p); }
 };
 
 struct ComputePipelineDeleter {
@@ -513,138 +508,6 @@ private:
 };
 
 // =============================================================================
-// CommandEncoder
-// =============================================================================
-
-/**
- * @brief Records rendering commands.
- */
-class CommandEncoder {
-public:
-    /**
-     * @brief Create a new command encoder.
-     */
-    CommandEncoder() {
-        ptr_.reset(goldy_encoder_create());
-    }
-
-    CommandEncoder(const CommandEncoder&) = delete;
-    CommandEncoder& operator=(const CommandEncoder&) = delete;
-    CommandEncoder(CommandEncoder&&) = default;
-    CommandEncoder& operator=(CommandEncoder&&) = default;
-
-    /**
-     * @brief Clear the color target.
-     */
-    void clear(const Color& color) {
-        goldy_encoder_clear(ptr_.get(), color);
-    }
-
-    /**
-     * @brief Clear the depth buffer.
-     */
-    void clear_depth(float depth = 1.0f) {
-        goldy_encoder_clear_depth(ptr_.get(), depth);
-    }
-
-    /**
-     * @brief Set the render pipeline.
-     */
-    void set_pipeline(const RenderPipeline& pipeline) {
-        goldy_encoder_set_pipeline(ptr_.get(), pipeline.get());
-    }
-
-    /**
-     * @brief Set a vertex buffer.
-     */
-    void set_vertex_buffer(uint32_t slot, const Buffer& buffer) {
-        goldy_encoder_set_vertex_buffer(ptr_.get(), slot, buffer.get());
-    }
-
-    /**
-     * @brief Set a vertex buffer with offset.
-     */
-    void set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint64_t offset) {
-        goldy_encoder_set_vertex_buffer_offset(ptr_.get(), slot, buffer.get(), offset);
-    }
-
-    /**
-     * @brief Set an index buffer.
-     */
-    void set_index_buffer(const Buffer& buffer, GoldyIndexFormat format) {
-        goldy_encoder_set_index_buffer(ptr_.get(), buffer.get(), format);
-    }
-
-    /**
-     * @brief Bind resource slots for rendering.
-     *
-     * Pass the buffers whose indices should be bound to shader resource slots.
-     * The indices are bound in order, so buffers[0] becomes slot 0,
-     * buffers[1] becomes slot 1, etc.
-     *
-     * @param buffers Span of buffer pointers to bind to shader resource slots.
-     */
-    void bind_resources(std::span<const Buffer* const> buffers) {
-        if (buffers.empty()) return;
-        
-        std::vector<const GoldyBuffer*> ptrs;
-        ptrs.reserve(buffers.size());
-        for (const auto* buf : buffers) {
-            ptrs.push_back(buf->get());
-        }
-        goldy_encoder_bind_resources(ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size()));
-    }
-
-    /**
-     * @brief Bind a single buffer to a resource slot (convenience overload).
-     */
-    void bind_resources(const Buffer& buffer) {
-        const GoldyBuffer* ptr = buffer.get();
-        goldy_encoder_bind_resources(ptr_.get(), &ptr, 1);
-    }
-
-    /**
-     * @brief Bind resource slots from an initializer list (convenience overload).
-     */
-    void bind_resources(std::initializer_list<const Buffer*> buffers) {
-        bind_resources(std::span<const Buffer* const>{buffers.begin(), buffers.size()});
-    }
-
-    /**
-     * @brief Draw primitives.
-     */
-    void draw(uint32_t vertex_count, uint32_t instance_count = 1,
-              uint32_t first_vertex = 0, uint32_t first_instance = 0) {
-        goldy_encoder_draw(ptr_.get(), first_vertex, vertex_count, first_instance, instance_count);
-    }
-
-    /**
-     * @brief Draw indexed primitives.
-     */
-    void draw_indexed(uint32_t index_count, uint32_t instance_count = 1,
-                      uint32_t first_index = 0, int32_t base_vertex = 0,
-                      uint32_t first_instance = 0) {
-        goldy_encoder_draw_indexed(ptr_.get(), first_index, index_count,
-                                   base_vertex, first_instance, instance_count);
-    }
-
-    /**
-     * @brief Release ownership of the underlying pointer.
-     *
-     * Used when passing to render target. After this call, the encoder is invalid.
-     */
-    GoldyCommandEncoder* release() { return ptr_.release(); }
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyCommandEncoder* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyCommandEncoder, detail::CommandEncoderDeleter> ptr_;
-};
-
-// =============================================================================
 // RenderTarget
 // =============================================================================
 
@@ -712,20 +575,6 @@ public:
      * @brief Get buffer size in bytes for CPU readback.
      */
     size_t buffer_size() const { return goldy_render_target_buffer_size(ptr_.get()); }
-
-    /**
-     * @brief Render commands to the target.
-     *
-     * This consumes the encoder.
-     * @param encoder The command encoder (moved from).
-     * @throws Exception if rendering fails.
-     */
-    void render(CommandEncoder encoder) {
-        GoldyResult result = goldy_render_target_render(ptr_.get(), encoder.release());
-        if (result != GOLDY_RESULT_OK) {
-            throw Exception::from_last_error();
-        }
-    }
 
     /**
      * @brief Read rendered pixels to CPU memory.

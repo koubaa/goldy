@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferPool, BufferView, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    BufferPool, BufferView, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -255,19 +255,15 @@ impl RenderState {
         };
         let current_handle = current_view.handle(ResourceAccess::Read).unwrap();
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color::BLACK);
-            pass.set_pipeline(&self.render_pipeline);
-            pass.bind_resources_typed(&[current_handle]);
-            pass.draw(0..3, 0..1);
-        }
-
-        self.frame_graph
-            .render_pass("game_of_life_render", &self.scene_rt)
-            .bind_buffer_view(current_view, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self
+            .frame_graph
+            .render_pass("game_of_life_render", &self.scene_rt);
+        pass.bind_buffer_view_mut(current_view, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(&self.render_pipeline);
+        pass.bind_resources_typed(&[current_handle]);
+        pass.draw(0..3, 0..1);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

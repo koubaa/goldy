@@ -26,23 +26,20 @@ use crate::types::{Color, IndexFormat, ResourceHandle};
 /// let commands = encoder.finish();
 /// // Submit to render target or surface
 /// ```
-pub struct CommandEncoder {
+pub(crate) struct CommandEncoder {
     pub(crate) commands: Vec<RenderCommand>,
 }
 
 impl CommandEncoder {
-    /// Create a new command encoder.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { commands: Vec::new() }
     }
 
-    /// Begin a render pass.
-    pub fn begin_render_pass(&mut self) -> RenderPass<'_> {
+    pub(crate) fn begin_render_pass(&mut self) -> RenderPass<'_> {
         RenderPass { encoder: self }
     }
 
-    /// Get the recorded commands.
-    pub fn finish(self) -> Vec<RenderCommand> {
+    pub(crate) fn finish(self) -> Vec<RenderCommand> {
         self.commands
     }
 }
@@ -53,8 +50,7 @@ impl Default for CommandEncoder {
     }
 }
 
-/// A render pass for drawing operations.
-pub struct RenderPass<'a> {
+pub(crate) struct RenderPass<'a> {
     encoder: &'a mut CommandEncoder,
 }
 

@@ -82,18 +82,20 @@ More complex examples combining multiple Goldy features or demonstrating interac
 ### Surface API Render Loop (Rust)
 
 ```rust
+frame_graph.clear();
+let mut pass = frame_graph.render_pass("main", &scene_rt);
+pass.bind_buffer_mut(&vertices, NodeAccess::Read);
+pass.clear(background_color);
+pass.set_pipeline(&pipeline);
+pass.set_vertex_buffer(0, &vertices);
+pass.draw(0..vertex_count, 0..1);
+pass.finish_recorded();
+
+let swapchain = frame_graph.declare_swapchain_output();
+frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
+
 let frame = surface.begin()?;
-
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-    pass.clear(background_color);
-    pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, &vertices);
-    pass.draw(0..vertex_count, 0..1);
-}
-
-frame.render(encoder)?;
+let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
 frame.present()?;
 ```
 

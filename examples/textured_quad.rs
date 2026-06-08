@@ -6,7 +6,7 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
     RenderPipelineDesc, RenderTarget, RequestAdapterOptions, Sampler, ShaderModule, Surface, TaskGraph, Texture,
     Vertex2DUv,
 };
@@ -245,27 +245,20 @@ impl App {
 
         self.frame_graph.clear();
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.1,
-                g: 0.1,
-                b: 0.15,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
-            // Pass texture and sampler indices via push constants
-            pass.bind_resources_typed(&[tex_handle, samp_handle]);
-            pass.set_vertex_buffer(0, vertex_buffer);
-            pass.draw(0..6, 0..1);
-        }
-
-        self.frame_graph
-            .render_pass("textured_quad", scene_rt)
-            .bind_buffer(vertex_buffer, NodeAccess::Read)
-            .bind_texture(texture, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("textured_quad", scene_rt);
+        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.bind_texture_mut(texture, NodeAccess::Read);
+        pass.clear(Color {
+            r: 0.1,
+            g: 0.1,
+            b: 0.15,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        pass.bind_resources_typed(&[tex_handle, samp_handle]);
+        pass.set_vertex_buffer(0, vertex_buffer);
+        pass.draw(0..6, 0..1);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

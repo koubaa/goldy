@@ -6,8 +6,8 @@ This tutorial draws a colored triangle in a window using Goldy's render pipeline
 
 ```rust
 use goldy::{
-    shader::builtins, Buffer, Color, CommandEncoder, BufferKind, DeviceType,
-    Instance, RenderPipeline, RenderPipelineDesc, ShaderModule, Surface, Vertex2D,
+    shader::builtins, Buffer, BufferKind, Color, DeviceType, Instance, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -24,6 +24,8 @@ struct App {
     pipeline: Option<RenderPipeline>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
 }
 
 impl App {
@@ -35,6 +37,8 @@ impl App {
             pipeline: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
         })
     }
 
@@ -62,10 +66,13 @@ impl App {
             },
         )?;
 
+        let scene_rt = RenderTarget::new(&device, surface.width(), surface.height(), surface.format())?;
+
         self.device = Some(device);
         self.vertex_buffer = Some(vertex_buffer);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
         Ok(())
     }
 
@@ -79,19 +86,22 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
+
+        self.frame_graph.clear();
+        let mut pass = self.frame_graph.render_pass("triangle", scene_rt);
+        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.clear(Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 });
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish_recorded();
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
 
         let frame = surface.begin()?;
-
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 });
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, vertex_buffer);
-            pass.draw(0..3, 0..1);
-        }
-
-        frame.render(encoder)?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
         Ok(())
     }
@@ -184,22 +194,13 @@ The pipeline takes the same shader module for both vertex and fragment stages �
 
 ```rust
 let surface = Surface::new(&device, window.as_ref())?;
-let frame = surface.begin()?;
+let scene_rt = RenderTarget::new(&device, surface.width(), surface.height(), surface.format())?;
 
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-    pass.clear(Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 });
-    pass.set_pipeline(pipeline);
-    pass.set_vertex_buffer(0, vertex_buffer);
-    pass.draw(0..3, 0..1);
-}
-
-frame.render(encoder)?;
-frame.present()?;
+// Per frame: render_pass on scene_rt → blit → submit_graph_to_frame → present
+// See examples/triangle.rs for resize handling and animation.
 ```
 
-`Surface` manages the swapchain. `begin()` acquires the next swapchain image. Commands are recorded into a `CommandEncoder`, rendered to the frame with `frame.render()`, then presented with `frame.present()`. Rendering happens directly on the GPU — no CPU readback.
+`Surface` manages the swapchain. Scene color is rendered to an offscreen `RenderTarget`, copied to the swapchain via the task graph, then presented. Rendering stays on the GPU — no CPU readback.
 
 ## Run It
 

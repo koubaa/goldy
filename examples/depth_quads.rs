@@ -12,7 +12,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
+    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
     NodeAccess, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface,
     TaskGraph, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
@@ -194,25 +194,17 @@ impl App {
 
         self.frame_graph.clear();
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color::BLACK);
-            pass.clear_depth(1.0);
-            pass.set_pipeline(pipeline);
-
-            pass.set_vertex_buffer(0, &warm_vb);
-            pass.draw(0..6, 0..1);
-
-            pass.set_vertex_buffer(0, &cool_vb);
-            pass.draw(0..6, 0..1);
-        }
-
-        self.frame_graph
-            .render_pass("depth_quads", scene_rt)
-            .bind_buffer(&warm_vb, NodeAccess::Read)
-            .bind_buffer(&cool_vb, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("depth_quads", scene_rt);
+        pass.bind_buffer_mut(&warm_vb, NodeAccess::Read);
+        pass.bind_buffer_mut(&cool_vb, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.clear_depth(1.0);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, &warm_vb);
+        pass.draw(0..6, 0..1);
+        pass.set_vertex_buffer(0, &cool_vb);
+        pass.draw(0..6, 0..1);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

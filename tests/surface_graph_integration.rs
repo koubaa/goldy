@@ -6,9 +6,8 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    shader::builtins, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, TaskGraph,
-    TextureFormat, Vertex2D,
+    shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, TaskGraph, TextureFormat, Vertex2D,
 };
 
 fn make_device() -> Option<goldy::Device> {
@@ -60,20 +59,14 @@ fn render_pass_task_graph_triangle_readback() {
     )
     .expect("pipeline");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
-        pass.clear(clear);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.draw(0..3, 0..1);
-    }
-
     let mut graph = TaskGraph::new();
-    graph
-        .render_pass("triangle", &target)
-        .bind_buffer(&vertex_buffer, NodeAccess::Read)
-        .finish_encoder(encoder);
+    let mut pass = graph.render_pass("triangle", &target);
+    pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+    pass.clear(clear);
+    pass.set_pipeline(&pipeline);
+    pass.set_vertex_buffer(0, &vertex_buffer);
+    pass.draw(0..3, 0..1);
+    pass.finish_recorded();
     graph.submit(&ctx).expect("graph submit");
 
     let pixels = target.read_to_cpu().expect("readback");

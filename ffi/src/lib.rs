@@ -6,7 +6,6 @@
 mod buffer;
 mod compute;
 mod device;
-mod encoder;
 mod error;
 mod instance;
 mod pipeline;
@@ -27,7 +26,6 @@ pub mod winit_surface;
 pub use buffer::*;
 pub use compute::*;
 pub use device::*;
-pub use encoder::*;
 pub use error::*;
 pub use instance::*;
 pub use pipeline::*;

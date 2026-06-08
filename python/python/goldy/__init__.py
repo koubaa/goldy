@@ -9,17 +9,13 @@ Example:
     >>> instance = goldy.Instance()
     >>> device = instance.request_adapter().request_device()
     >>> 
-    >>> # Create a render target
-    >>> target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
-    >>> 
-    >>> # Render
-    >>> encoder = goldy.CommandEncoder()
-    >>> with encoder.begin_render_pass() as rp:
-    ...     rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
-    >>> target.render(encoder)
-    >>> 
-    >>> # Read pixels as numpy array
-    >>> pixels = target.read_to_cpu()
+    >>> # Compute example (graphics uses TaskGraph in Rust; see goldy/examples/)
+    >>> pipeline = goldy.ComputePipeline(device, shader)
+    >>> encoder = goldy.ComputeEncoder()
+    >>> with encoder.begin_compute_pass() as cp:
+    ...     cp.set_pipeline(pipeline)
+    ...     cp.dispatch(1, 1, 1)
+    >>> encoder.execute(device)
 """
 
 import os as _os
@@ -70,8 +66,6 @@ from goldy._goldy import (
     RenderPipeline,
     RenderPipelineDesc,
     RenderTarget,
-    CommandEncoder,
-    RenderPass,
     # Shader builtins
     Builtins,
     # Compute
@@ -111,8 +105,6 @@ __all__ = [
     "RenderPipeline",
     "RenderPipelineDesc",
     "RenderTarget",
-    "CommandEncoder",
-    "RenderPass",
     # Shader builtins
     "Builtins",
     # Compute

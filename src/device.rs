@@ -4,22 +4,22 @@
 //!
 //! Goldy uses a single-threaded command submission model with lock-free command recording:
 //!
-//! - **Command Recording**: [`CommandEncoder`](crate::CommandEncoder) is completely lock-free.
-//!   You can create and record commands on any thread without any synchronization.
+//! - **Graph Recording**: [`RenderPassBuilder`](crate::RenderPassBuilder) and [`TaskGraph`](crate::TaskGraph)
+//!   record commands without touching the GPU backend. You can build graphs on any thread.
 //!   
 //! - **Resource Creation**: Creating resources ([`crate::Buffer`],
 //!   [`RenderPipeline`](crate::RenderPipeline), etc.) acquires the backend lock.
 //!   These operations are safe from any thread but serialize internally.
 //!
-//! - **Command Submission**: Submitting commands via [`RenderTarget::render()`](crate::RenderTarget::render)
-//!   or [`Frame::render`](crate::surface::Frame::render) acquires the backend lock.
+//! - **Command Submission**: Submitting via [`TaskGraph::dispatch`](crate::TaskGraph::dispatch) or
+//!   [`Surface::submit_graph_to_frame`](crate::Surface::submit_graph_to_frame) acquires the backend lock.
 //!
 //! ## Best Practices
 //!
 //! For optimal performance:
 //! 1. Create resources during initialization, not per-frame
-//! 2. Record commands lock-free using `CommandEncoder` on any thread
-//! 3. Submit commands from a single thread (typically the main/render thread)
+//! 2. Build task graphs on any thread; declare buffer/parcel dependencies on each node
+//! 3. Submit graphs from a single thread (typically the main/render thread)
 //!
 //! This model is sufficient for most applications. Future versions may add
 //! multi-queue support for parallel command submission if needed.
@@ -395,8 +395,8 @@ impl Default for DeviceCapabilities {
 ///
 /// Internally, `Device` uses a `Mutex` to serialize backend operations. This means:
 /// - Resource creation is thread-safe but serializes internally
-/// - Command recording via [`CommandEncoder`](crate::CommandEncoder) is lock-free
-/// - Command submission acquires the lock
+/// - Task graph recording via [`RenderPassBuilder`](crate::RenderPassBuilder) is lock-free
+/// - Graph submission acquires the lock
 ///
 /// See the [module documentation](self) for best practices.
 ///

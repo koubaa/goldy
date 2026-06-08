@@ -52,12 +52,6 @@ typedef enum GoldyResult {
     GOLDY_RESULT_INTERNAL_ERROR = 6,
 } GoldyResult;
 
-// Index format.
-typedef enum GoldyIndexFormat {
-    GOLDY_INDEX_FORMAT_UINT16 = 0,
-    GOLDY_INDEX_FORMAT_UINT32 = 1,
-} GoldyIndexFormat;
-
 // Graphics backend type.
 typedef enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_VULKAN = 0,
@@ -158,9 +152,6 @@ typedef enum GoldyTextureKind {
 // Opaque handle to a Goldy Buffer.
 typedef struct GoldyBuffer GoldyBuffer;
 
-// Opaque handle to a Goldy CommandEncoder.
-typedef struct GoldyCommandEncoder GoldyCommandEncoder;
-
 // Opaque handle to a Goldy ComputeEncoder.
 typedef struct GoldyComputeEncoder GoldyComputeEncoder;
 
@@ -196,14 +187,6 @@ typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
 // Opaque handle to a Goldy Texture.
 typedef struct GoldyTexture GoldyTexture;
-
-// RGBA color with floating point components (0.0 - 1.0).
-typedef struct GoldyColor {
-    float r;
-    float g;
-    float b;
-    float a;
-} GoldyColor;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -410,92 +393,6 @@ bool goldy_device_has_library(const struct GoldyDevice *device, const char *name
 // The device pointer must be valid.
 bool goldy_device_is_valid(const struct GoldyDevice *device);
 
-// Bind resource slots for rendering.
-//
-// Pass the buffers whose indices should be bound to shader resource slots.
-// The indices are bound in order, so `buffers[0]` becomes slot 0,
-// `buffers[1]` becomes slot 1, etc.
-//
-// # Safety
-// All pointers must be valid. The buffers array must contain buffer_count elements.
-void goldy_encoder_bind_resources(struct GoldyCommandEncoder *encoder,
-                                  const struct GoldyBuffer *const *buffers,
-                                  uint32_t buffer_count);
-
-// Clear the color render target.
-//
-// # Safety
-// The encoder pointer must be valid.
-void goldy_encoder_clear(struct GoldyCommandEncoder *encoder, struct GoldyColor color);
-
-// Clear the depth buffer.
-//
-// # Safety
-// The encoder pointer must be valid.
-void goldy_encoder_clear_depth(struct GoldyCommandEncoder *encoder, float depth);
-
-// Create a new command encoder.
-struct GoldyCommandEncoder *goldy_encoder_create(void);
-
-// Destroy a command encoder without rendering.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_encoder_destroy(struct GoldyCommandEncoder *encoder);
-
-// Draw primitives.
-//
-// # Safety
-// The encoder pointer must be valid.
-void goldy_encoder_draw(struct GoldyCommandEncoder *encoder,
-                        uint32_t vertex_start,
-                        uint32_t vertex_count,
-                        uint32_t instance_start,
-                        uint32_t instance_count);
-
-// Draw indexed primitives.
-//
-// # Safety
-// The encoder pointer must be valid.
-void goldy_encoder_draw_indexed(struct GoldyCommandEncoder *encoder,
-                                uint32_t index_start,
-                                uint32_t index_count,
-                                int32_t base_vertex,
-                                uint32_t instance_start,
-                                uint32_t instance_count);
-
-// Set an index buffer.
-//
-// # Safety
-// All pointers must be valid.
-void goldy_encoder_set_index_buffer(struct GoldyCommandEncoder *encoder,
-                                    const struct GoldyBuffer *buffer,
-                                    enum GoldyIndexFormat format);
-
-// Set the render pipeline.
-//
-// # Safety
-// Both pointers must be valid.
-void goldy_encoder_set_pipeline(struct GoldyCommandEncoder *encoder,
-                                const struct GoldyRenderPipeline *pipeline);
-
-// Set a vertex buffer.
-//
-// # Safety
-// All pointers must be valid.
-void goldy_encoder_set_vertex_buffer(struct GoldyCommandEncoder *encoder,
-                                     uint32_t slot,
-                                     const struct GoldyBuffer *buffer);
-
-// Set a vertex buffer with offset.
-//
-// # Safety
-// All pointers must be valid.
-void goldy_encoder_set_vertex_buffer_offset(struct GoldyCommandEncoder *encoder,
-                                            uint32_t slot,
-                                            const struct GoldyBuffer *buffer,
-                                            uint64_t offset);
-
 // Get the last error message.
 //
 // Returns a pointer to a null-terminated string. The pointer is valid until
@@ -625,16 +522,6 @@ enum GoldyResult goldy_render_target_read_to_buffer(const struct GoldyRenderTarg
                                                     uint8_t *output,
                                                     size_t output_size);
 
-// Render commands to the target.
-//
-// This consumes the encoder.
-//
-// # Safety
-// Both pointers must be valid.
-// The encoder is consumed and must not be used after this call.
-enum GoldyResult goldy_render_target_render(const struct GoldyRenderTarget *target,
-                                            struct GoldyCommandEncoder *encoder);
-
 // Get the render target width.
 //
 // # Safety
@@ -725,16 +612,6 @@ enum GoldyTextureFormat goldy_surface_format(const struct GoldySurface *surface)
 // # Safety
 // The frame pointer must be valid.
 uint32_t goldy_surface_frame_height(const struct GoldySurfaceFrame *frame);
-
-// Render commands to a frame.
-//
-// This consumes the encoder.
-//
-// # Safety
-// Both pointers must be valid.
-// The encoder is consumed and must not be used after this call.
-enum GoldyResult goldy_surface_frame_render(const struct GoldySurfaceFrame *frame,
-                                            struct GoldyCommandEncoder *encoder);
 
 // Get the frame width.
 //

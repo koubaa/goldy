@@ -12,7 +12,6 @@
 mod buffer;
 mod compute;
 mod device;
-mod encoder;
 mod error;
 mod instance;
 mod pipeline;
@@ -56,8 +55,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
     m.add_class::<render_target::PyRenderTarget>()?;
-    m.add_class::<encoder::PyCommandEncoder>()?;
-    m.add_class::<encoder::PyRenderPass>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;

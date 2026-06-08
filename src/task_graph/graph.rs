@@ -12,6 +12,7 @@ use crate::backend::{
 use crate::buffer::{Buffer, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
+#[cfg(test)]
 use crate::encoder::CommandEncoder;
 use crate::error::GoldyError;
 use crate::pipeline::RenderPipeline;
@@ -829,7 +830,7 @@ impl TaskGraph {
     ///
     /// Like [`Self::write_buffer`], but accepts an opaque parcel instead of a
     /// [`Buffer`] handle. Valid only for non-mosaic buffer parcels (the same
-    /// restriction as [`crate::Parcel::copy_into`]). The analyzer inserts
+    /// restriction as a direct buffer write). The analyzer inserts
     /// barriers between this write and any subsequent reader in the graph.
     pub fn write_parcel(&mut self, parcel: &crate::Parcel, offset: u64, data: Vec<u8>) -> Result<()> {
         let (buffer, resource) = parcel.write_buffer_target()?;
@@ -1687,6 +1688,37 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
+    /// Like [`Self::bind_buffer`] but for use while recording on `&mut self`.
+    pub fn bind_buffer_mut(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Buffer(buf.handle),
+            access,
+        });
+        self
+    }
+
+    /// Like [`Self::bind_texture`] but for use while recording on `&mut self`.
+    pub fn bind_texture_mut(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Texture(tex.handle),
+            access,
+        });
+        self
+    }
+
+    /// Like [`Self::bind_buffer_view`] but for use while recording on `&mut self`.
+    pub fn bind_buffer_view_mut(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::BufferRange {
+                parent: view.parent_handle(),
+                offset: view.offset(),
+                len: view.size(),
+            },
+            access,
+        });
+        self
+    }
+
     pub fn clear(&mut self, color: Color) -> &mut Self {
         self.commands.push(RenderCommand::Clear(color));
         self
@@ -1741,6 +1773,46 @@ impl<'a> RenderPassBuilder<'a> {
             first_index: indices.start,
             base_vertex,
             first_instance: instances.start,
+        });
+        self
+    }
+
+    pub fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) -> &mut Self {
+        self.commands.push(RenderCommand::Draw {
+            vertex_count: vertices.end - vertices.start,
+            instance_count: instances.end - instances.start,
+            first_vertex: vertices.start,
+            first_instance: instances.start,
+        });
+        self
+    }
+
+    pub fn draw_fullscreen(&mut self) -> &mut Self {
+        self.draw(0..3, 0..1)
+    }
+
+    pub fn draw_quads(&mut self, count: u32) -> &mut Self {
+        self.draw(0..6, 0..count)
+    }
+
+    pub fn bind_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResources {
+            buffers: buffers.iter().map(|b| b.handle).collect(),
+        });
+        self
+    }
+
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: Vec::new(),
+        });
+        self
+    }
+
+    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResourcesTyped {
+            handles: handles.to_vec(),
         });
         self
     }
@@ -1840,8 +1912,8 @@ impl<'a> RenderPassBuilder<'a> {
         });
     }
 
-    /// Convenience: [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish) then [`Self::finish`].
-    pub fn finish_encoder(self, encoder: CommandEncoder) {
+    #[cfg(test)]
+    pub(crate) fn finish_encoder(self, encoder: CommandEncoder) {
         self.finish(encoder.finish())
     }
 }

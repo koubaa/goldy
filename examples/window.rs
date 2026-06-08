@@ -5,7 +5,7 @@
 //! Run with: cargo run --example window
 
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess,
+    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
     Vertex2D,
 };
@@ -116,19 +116,13 @@ impl App {
 
         self.frame_graph.clear();
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(bg_color);
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, vertex_buffer);
-            pass.draw(0..3, 0..1);
-        }
-
-        self.frame_graph
-            .render_pass("window", scene_rt)
-            .bind_buffer(vertex_buffer, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("window", scene_rt);
+        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

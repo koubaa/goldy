@@ -45,27 +45,22 @@ buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
 pipeline = goldy.RenderPipeline(device, shader, shader, goldy.RenderPipelineDesc())
 
-# Render
-target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
-encoder = goldy.CommandEncoder()
-with encoder.begin_render_pass() as rp:
-    rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
-    rp.set_pipeline(pipeline)
-    rp.set_vertex_buffer(0, buffer)
-    rp.draw(range(3))
-
-target.render(encoder)
-pixels = target.read_to_cpu()  # Returns numpy.ndarray with shape (600, 800, 4)
+# Compute (graphics rendering uses TaskGraph in Rust; see goldy/examples/)
+encoder = goldy.ComputeEncoder()
+with encoder.begin_compute_pass() as cp:
+    cp.set_pipeline(compute_pipeline)
+    cp.dispatch(1, 1, 1)
+encoder.execute(device)
 ```
 
 ## Examples
 
 See the `examples/` directory for complete examples:
 
-- **hello_triangle.py** - Basic triangle rendering
-- **gradient.py** - Custom shader with goldy_exp library
 - **adapter_info.py** - Print GPU adapter information
-- **compute_demo.py** - Compute shader placeholder
+- **compute_demo.py** - Compute shader example
+
+Graphics examples live in the Rust crate (`goldy/examples/`).
 
 Run an example:
 ```bash
@@ -91,12 +86,11 @@ pixels = target.read_to_cpu()  # Shape: (height, width, 4), dtype: uint8
 
 ### Context Managers
 
-Pythonic API with `with` statements for render passes:
+Pythonic API with `with` statements for compute passes:
 ```python
-with encoder.begin_render_pass() as rp:
-    rp.clear(goldy.Color.RED)
-    rp.set_pipeline(pipeline)
-    rp.draw(range(3))
+with encoder.begin_compute_pass() as cp:
+    cp.set_pipeline(pipeline)
+    cp.dispatch(8, 8, 1)
 ```
 
 ### Shader Libraries
@@ -131,9 +125,8 @@ device.register_library('mylib', '''
 | `Buffer` | GPU buffer for vertex/index/uniform data |
 | `ShaderModule` | Compiled Slang shader |
 | `RenderPipeline` | Complete render state |
-| `RenderTarget` | Off-screen render target |
-| `CommandEncoder` | Record render commands |
-| `RenderPass` | Draw commands within a pass |
+| `RenderTarget` | Off-screen render target (readback; rendering via TaskGraph is Rust-only) |
+| `ComputeEncoder` | Record compute commands |
 
 ### Enums
 

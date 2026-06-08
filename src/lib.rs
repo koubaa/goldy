@@ -18,7 +18,8 @@ pub mod common_types;
 pub mod compute;
 pub mod context;
 pub mod device;
-pub mod encoder;
+#[cfg(test)]
+pub(crate) mod encoder;
 pub mod error;
 pub mod examples;
 pub mod frame_orchestrator;
@@ -76,7 +77,6 @@ pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
 };
-pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};

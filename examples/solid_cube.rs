@@ -6,7 +6,7 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, IndexFormat, Instance, NodeAccess,
+    Buffer, BufferKind, Color, DeviceDescriptor, IndexFormat, Instance, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
     Surface, TaskGraph, Vertex2D,
 };
@@ -286,26 +286,20 @@ impl App {
 
         self.frame_graph.clear();
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.02,
-                g: 0.02,
-                b: 0.05,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
-            pass.draw_indexed(0..sorted_indices.len() as u32, 0, 0..1);
-        }
-
-        self.frame_graph
-            .render_pass("solid_cube", scene_rt)
-            .bind_buffer(&vertex_buffer, NodeAccess::Read)
-            .bind_buffer(&index_buffer, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("solid_cube", scene_rt);
+        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
+        pass.clear(Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.05,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
+        pass.draw_indexed(0..sorted_indices.len() as u32, 0, 0..1);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

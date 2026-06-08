@@ -11,18 +11,12 @@ using Goldy;
 using var instance = new Instance();
 using var device = instance.RequestAdapter().RequestDevice();
 
-// Create a render target
-using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);
-
-// Create and record commands
-var encoder = new CommandEncoder();
-encoder.Clear(new Color(0.2f, 0.3f, 0.8f, 1.0f));
-
-// Render
-target.Render(encoder);
-
-// Read pixels back to CPU
-byte[] pixels = target.ReadToCpu();
+// Compute example (graphics uses TaskGraph in Rust — see goldy/examples/)
+using var pipeline = new ComputePipeline(device, computeShader);
+using var encoder = new ComputeEncoder();
+encoder.SetPipeline(pipeline);
+encoder.Dispatch(1, 1, 1);
+encoder.Execute(device);
 ```
 
 ## Features

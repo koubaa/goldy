@@ -38,15 +38,12 @@ int main() {
     desc.target_format = GoldyTextureFormat::Rgba8Unorm;
     goldy::RenderPipeline pipeline(device, shader, shader, desc);
     
-    // Render
-    goldy::CommandEncoder encoder;
-    encoder.clear(goldy::Color::cornflower_blue());
-    encoder.set_pipeline(pipeline);
-    encoder.draw(3);
-    target.render(std::move(encoder));
-    
-    // Read back pixels
-    auto pixels = target.read_to_cpu();
+    // Graphics rendering uses the Rust TaskGraph API (see goldy/examples/).
+    // C++ bindings expose compute via goldy::ComputeEncoder.
+    goldy::ComputeEncoder encoder;
+    encoder.set_pipeline(compute_pipeline);
+    encoder.dispatch(1, 1, 1);
+    encoder.execute(device);
 }
 ```
 
@@ -117,8 +114,7 @@ cmake --build build
 | `goldy::Buffer` | GPU buffer (vertex, uniform, etc.) |
 | `goldy::ShaderModule` | Compiled Slang shader |
 | `goldy::RenderPipeline` | Graphics pipeline |
-| `goldy::RenderTarget` | Offscreen render target |
-| `goldy::CommandEncoder` | Records render commands |
+| `goldy::RenderTarget` | Offscreen render target (readback) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
 | `goldy::ComputeEncoder` | Records compute commands |
 | `goldy::Texture` | GPU texture |

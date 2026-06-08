@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -208,19 +208,13 @@ impl RenderState {
             ])
             .dispatch(NUM_STARS.div_ceil(64), 1, 1);
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color::BLACK);
-            pass.set_pipeline(&self.render_pipeline);
-            pass.bind_resources(&[&self.star_buffer]);
-            pass.draw(0..6, 0..NUM_STARS);
-        }
-
-        self.frame_graph
-            .render_pass("starfield", &self.scene_rt)
-            .bind_buffer(&self.star_buffer, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("starfield", &self.scene_rt);
+        pass.bind_buffer_mut(&self.star_buffer, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(&self.render_pipeline);
+        pass.bind_resources(&[&self.star_buffer]);
+        pass.draw(0..6, 0..NUM_STARS);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

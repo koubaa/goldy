@@ -13,23 +13,10 @@ namespace Goldy;
 /// // Create surface from a window handle (platform-specific)
 /// var surface = Surface.CreateWin32(device, windowHandle);
 /// 
-/// // Render loop
+/// // Render loop (graphics via TaskGraph is Rust-only today; present empty frames or use compute)
 /// while (running)
 /// {
-///     // Acquire next frame from swapchain
 ///     var frame = surface.Acquire();
-///     
-///     // Build render commands
-///     var encoder = new CommandEncoder();
-///     encoder.Clear(Color.CornflowerBlue);
-///     encoder.SetPipeline(pipeline);
-///     encoder.SetVertexBuffer(0, vertexBuffer);
-///     encoder.Draw(3);
-///     
-///     // Render to swapchain image (zero-copy!)
-///     frame.Render(encoder);
-///     
-///     // Present to screen
 ///     surface.Present(frame);
 /// }
 /// </code>
@@ -169,25 +156,6 @@ public sealed class SurfaceFrame
     /// Get the frame height in pixels.
     /// </summary>
     public uint Height => NativeMethods.SurfaceFrameHeight(_handle);
-
-    /// <summary>
-    /// Render commands to this frame.
-    /// This consumes the encoder.
-    /// </summary>
-    /// <param name="encoder">The command encoder with recorded commands.</param>
-    /// <exception cref="GoldyException">Thrown if rendering fails.</exception>
-    public void Render(CommandEncoder encoder)
-    {
-        if (_handle == nint.Zero)
-            throw new InvalidOperationException("Frame has already been consumed");
-        
-        var encoderHandle = encoder.TakeHandle();
-        var result = NativeMethods.SurfaceFrameRender(_handle, encoderHandle);
-        // Note: encoder handle is now owned by native code
-        
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("SurfaceFrame render");
-    }
 
     /// <summary>
     /// Take ownership of the native handle (for internal use).

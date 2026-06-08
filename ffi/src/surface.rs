@@ -5,7 +5,6 @@
 
 #[cfg(windows)]
 use crate::device::GoldyDevice;
-use crate::encoder::GoldyCommandEncoder;
 #[cfg(windows)]
 use crate::error::set_last_error;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
@@ -136,32 +135,6 @@ pub unsafe extern "C" fn goldy_surface_present(
     let frame = Box::from_raw(frame);
     match (*surface).inner.present(frame.inner) {
         Ok(_) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            GoldyResult::GpuError
-        }
-    }
-}
-
-/// Render commands to a frame.
-///
-/// This consumes the encoder.
-///
-/// # Safety
-/// Both pointers must be valid.
-/// The encoder is consumed and must not be used after this call.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_surface_frame_render(
-    frame: *const GoldySurfaceFrame,
-    encoder: *mut GoldyCommandEncoder,
-) -> GoldyResult {
-    if frame.is_null() || encoder.is_null() {
-        return GoldyResult::NullPointer;
-    }
-
-    let encoder = Box::from_raw(encoder);
-    match (*frame).inner.render(encoder.inner) {
-        Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error_from_anyhow(&e);
             GoldyResult::GpuError

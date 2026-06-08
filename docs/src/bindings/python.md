@@ -44,15 +44,12 @@ instance = goldy.Instance()
 device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
 
-# Render
-encoder = goldy.CommandEncoder()
-with encoder.begin_render_pass() as rp:
-    rp.clear(goldy.Color.CORNFLOWER_BLUE)
-target.render(encoder)
-
-# Read back as NumPy array and save
-pixels = target.read_to_cpu()              # shape (600, 800, 4), dtype uint8
-Image.fromarray(pixels, mode='RGBA').save('hello_goldy.png')
+# Compute (graphics rendering uses TaskGraph in Rust — see goldy/examples/)
+encoder = goldy.ComputeEncoder()
+with encoder.begin_compute_pass() as cp:
+    cp.set_pipeline(compute_pipeline)
+    cp.dispatch(1, 1, 1)
+encoder.execute(device)
 ```
 
 ## NumPy Integration
@@ -167,25 +164,7 @@ for _ in range(100):
 
 ### Combining Compute and Graphics
 
-Use compute results directly in a subsequent render pass through shared storage buffers:
-
-```python
-# Compute pass
-compute_encoder = goldy.ComputeEncoder()
-with compute_encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(compute_pipeline)
-    cp.bind_resources([buffer])
-    cp.dispatch(workgroups, 1, 1)
-compute_encoder.dispatch(device)
-
-# Render pass — reads the same buffer
-render_encoder = goldy.CommandEncoder()
-with render_encoder.begin_render_pass() as rp:
-    rp.set_pipeline(render_pipeline)
-    rp.bind_resources([buffer])
-    rp.draw(range(3))
-target.render(render_encoder)
-```
+Hybrid compute + raster workflows use a single Rust `TaskGraph` (see `goldy/examples/game_of_life.rs`). Python bindings expose compute only until `TaskGraph` bindings are added.
 
 ## Key Differences from Rust
 
@@ -194,7 +173,7 @@ target.render(render_encoder)
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
 | Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
-| Render pass | `encoder.begin_render_pass()` returns struct | Context manager (`with ... as rp`) |
+| Render pass | `RenderPassBuilder` on `TaskGraph` (Rust) | Not exposed in Python yet |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |
 | Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |
 
@@ -273,19 +252,7 @@ desc = goldy.RenderPipelineDesc(
 )
 ```
 
-#### `CommandEncoder` / `RenderPass`
-
-```python
-encoder = goldy.CommandEncoder()
-with encoder.begin_render_pass() as rp:
-    rp.clear(goldy.Color.BLACK)
-    rp.set_pipeline(pipeline)
-    rp.set_vertex_buffer(slot, buffer)
-    rp.set_index_buffer(buffer, format)
-    rp.bind_resources([buf1, buf2])
-    rp.draw(vertices, instances=range(1))
-    rp.draw_indexed(indices, base_vertex, instances)
-```
+Graphics rendering (`CommandEncoder`, `RenderPass`, `RenderTarget.render`) was removed from the Python bindings. Use the Rust `TaskGraph` API for raster workloads; Python retains compute via `ComputeEncoder`.
 
 ### Compute Classes
 

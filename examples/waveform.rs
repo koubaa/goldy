@@ -5,7 +5,7 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
     Vertex2D,
 };
@@ -195,29 +195,22 @@ impl App {
 
         self.frame_graph.clear();
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.02,
-                g: 0.02,
-                b: 0.08,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
-
-            // Draw each channel
-            for (ch, vb) in channel_buffers.iter().enumerate() {
-                pass.set_vertex_buffer(0, vb);
-                pass.draw(0..vertex_counts[ch], 0..1);
-            }
-        }
-
-        let mut pass_builder = self.frame_graph.render_pass("waveform", scene_rt);
+        let mut pass = self.frame_graph.render_pass("waveform", scene_rt);
         for vb in &channel_buffers {
-            pass_builder = pass_builder.bind_buffer(vb, NodeAccess::Read);
+            pass.bind_buffer_mut(vb, NodeAccess::Read);
         }
-        pass_builder.finish_encoder(encoder);
+        pass.clear(Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.08,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        for (ch, vb) in channel_buffers.iter().enumerate() {
+            pass.set_vertex_buffer(0, vb);
+            pass.draw(0..vertex_counts[ch], 0..1);
+        }
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

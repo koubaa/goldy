@@ -206,25 +206,6 @@ impl Parcel {
         }
     }
 
-    /// Overwrite a buffer parcel's contents in place.
-    ///
-    /// Observationally async: the backend may service this as a staged GPU copy (storage) or
-    /// a direct mapped write (uniform). We never expose write completion and do not support
-    /// readback on this path, so the synchronous case is an invisible special case of the
-    /// async contract. A future depth>1 consumer that needs ordering should add a GPU-side
-    /// queue wait (threading the device internally via the owned [`Buffer`]), not a
-    /// client-facing CPU gate.
-    ///
-    /// Valid only for non-mosaic buffer parcels acquired via [`crate::RetainedPool::acquire_buffer`].
-    pub fn copy_into<T: bytemuck::Pod>(&self, data: &[T]) -> anyhow::Result<()> {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => b.write_data(0, data),
-            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
-                anyhow::bail!("Parcel::copy_into is only valid for non-mosaic buffer parcels")
-            }
-        }
-    }
-
     /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
     ///
     /// Monotonic per context: only increases; a smaller epoch is ignored.

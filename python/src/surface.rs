@@ -1,7 +1,6 @@
 //! Python wrapper for Surface (windowed rendering).
 
 use crate::device::PyDevice;
-use crate::encoder::PyCommandEncoder;
 use crate::error::IntoPyResult;
 use crate::types::PyTextureFormat;
 use pyo3::prelude::*;
@@ -26,11 +25,7 @@ use pyo3::prelude::*;
 ///     >>>
 ///     >>> while not glfw.window_should_close(window):
 ///     ...     frame = surface.acquire()
-///     ...     encoder = goldy.CommandEncoder()
-///     ...     with encoder.begin_render_pass() as rp:
-///     ...         rp.clear(goldy.Color.CORNFLOWER_BLUE)
-///     ...     frame.render(encoder)
-///     ...     surface.present(frame)
+///     ...     surface.present(frame)  # graphics via TaskGraph is Rust-only today
 ///     ...     glfw.poll_events()
 #[pyclass(name = "Surface", module = "goldy")]
 pub struct PySurface {
@@ -170,17 +165,6 @@ pub struct PySurfaceFrame {
 
 #[pymethods]
 impl PySurfaceFrame {
-    /// Render commands to this frame.
-    fn render(&mut self, encoder: &PyCommandEncoder) -> PyResult<()> {
-        let frame = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Frame already consumed"))?;
-
-        let commands = encoder.take_inner();
-        frame.render(commands).into_py_result()
-    }
-
     fn __repr__(&self) -> String {
         if self.inner.is_some() {
             "SurfaceFrame(pending)".to_string()

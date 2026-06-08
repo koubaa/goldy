@@ -18,8 +18,6 @@ def test_import():
     assert hasattr(goldy, 'RenderTarget')
     assert hasattr(goldy, 'ShaderModule')
     assert hasattr(goldy, 'RenderPipeline')
-    assert hasattr(goldy, 'CommandEncoder')
-    assert hasattr(goldy, 'RenderPass')
     
     # Verify enums
     assert hasattr(goldy, 'DeviceType')
@@ -156,20 +154,6 @@ def test_builtins():
     # Check builtin shaders exist
     assert 'vs_main' in goldy.Builtins.VERTEX_COLOR_2D
     assert 'fs_main' in goldy.Builtins.VERTEX_COLOR_2D
-
-
-def test_command_encoder_context_manager():
-    """Test CommandEncoder as context manager."""
-    import goldy
-    
-    encoder = goldy.CommandEncoder()
-    
-    # The context manager pattern should work
-    with encoder.begin_render_pass() as rp:
-        rp.clear(goldy.Color.RED)
-    
-    # Encoder repr
-    assert 'CommandEncoder' in repr(encoder)
 
 
 if __name__ == '__main__':

@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -196,19 +196,13 @@ impl RenderState {
             a: 1.0,
         };
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(bg_color);
-            pass.set_pipeline(&self.render_pipeline);
-            pass.bind_resources(&[&self.instance_buffer]);
-            pass.draw_quads(NUM_QUADS);
-        }
-
-        self.frame_graph
-            .render_pass("instancing", &self.scene_rt)
-            .bind_buffer(&self.instance_buffer, NodeAccess::Read)
-            .finish_encoder(encoder);
+        let mut pass = self.frame_graph.render_pass("instancing", &self.scene_rt);
+        pass.bind_buffer_mut(&self.instance_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(&self.render_pipeline);
+        pass.bind_resources(&[&self.instance_buffer]);
+        pass.draw_quads(NUM_QUADS);
+        pass.finish_recorded();
 
         let swapchain = self.frame_graph.declare_swapchain_output();
         self.frame_graph

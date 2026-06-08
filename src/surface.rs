@@ -5,7 +5,6 @@
 
 use crate::backend::{FrameToken, GpuBackend, SurfaceHandle};
 use crate::context::Context as GpuContext;
-use crate::encoder::CommandEncoder;
 use crate::task_graph::TaskGraph;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
@@ -54,24 +53,6 @@ impl Surface {
         W: HasWindowHandle + HasDisplayHandle,
     {
         Self::new_with_config(context, window, SurfaceConfig::default())
-    }
-
-    pub fn new_with_depth<W>(
-        context: &GpuContext,
-        window: &W,
-        depth_format: Option<crate::types::DepthFormat>,
-    ) -> Result<Self>
-    where
-        W: HasWindowHandle + HasDisplayHandle,
-    {
-        Self::new_with_config(
-            context,
-            window,
-            SurfaceConfig {
-                depth_format,
-                ..Default::default()
-            },
-        )
     }
 
     /// Create a surface bound to `context`'s submission timeline.
@@ -531,12 +512,6 @@ impl Frame {
             .expect("swapchain texture is only cleared after present")
     }
 
-    pub fn render(&self, encoder: CommandEncoder) -> Result<()> {
-        let commands = encoder.finish();
-        let mut backend = self.backend.lock().unwrap();
-        backend.record_render(&self.token, &commands)
-    }
-
     /// Submit recorded GPU work for this frame. Does not present.
     ///
     /// Safe to call once per frame before [`Self::present`].
@@ -697,13 +672,21 @@ mod tests {
     }
 
     #[test]
-    fn test_surface_with_depth() {
+    fn test_surface_with_depth_config() {
         use crate::types::DepthFormat;
 
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth24Plus)).unwrap();
+        let surface = Surface::new_with_config(
+            &ctx,
+            &window,
+            SurfaceConfig {
+                depth_format: Some(DepthFormat::Depth24Plus),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -775,43 +758,54 @@ mod tests {
     }
 
     #[test]
-    fn test_surface_frame_render_and_present() {
+    fn test_surface_graph_render_and_present() {
+        use crate::render_target::RenderTarget;
+
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&ctx, &window).unwrap();
+        let scene_rt =
+            RenderTarget::new(&device, surface.width(), surface.height(), surface.format()).unwrap();
 
-        let frame = surface.begin().unwrap();
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("clear", &scene_rt);
+        pass.clear(crate::types::Color::RED);
+        pass.finish_recorded();
+        let swapchain = graph.declare_swapchain_output();
+        graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
 
-        let mut encoder = crate::encoder::CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(crate::types::Color::RED);
-        }
-
-        frame.render(encoder).unwrap();
+        let frame = surface.submit_graph(&mut graph).unwrap();
         frame.present().unwrap();
     }
 
     #[test]
-    fn test_surface_depth_frame_render() {
+    fn test_surface_graph_render_with_depth_rt() {
+        use crate::render_target::RenderTarget;
         use crate::types::DepthFormat;
 
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth32Float)).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
+        let scene_rt = RenderTarget::new_with_depth(
+            &device,
+            surface.width(),
+            surface.height(),
+            surface.format(),
+            Some(DepthFormat::Depth32Float),
+        )
+        .unwrap();
 
-        let frame = surface.begin().unwrap();
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("depth_clear", &scene_rt);
+        pass.clear(crate::types::Color::CORNFLOWER_BLUE);
+        pass.clear_depth(1.0);
+        pass.finish_recorded();
+        let swapchain = graph.declare_swapchain_output();
+        graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
 
-        let mut encoder = crate::encoder::CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(crate::types::Color::CORNFLOWER_BLUE);
-            pass.clear_depth(1.0);
-        }
-
-        frame.render(encoder).unwrap();
+        let frame = surface.submit_graph(&mut graph).unwrap();
         frame.present().unwrap();
     }
 
