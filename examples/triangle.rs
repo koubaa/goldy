@@ -1,12 +1,14 @@
 //! Triangle example - render a colored triangle in an interactive window.
 //!
-//! This example demonstrates the Surface API for zero-copy GPU presentation.
+//! Demonstrates the Surface API with task-graph submission: offscreen
+//! `RenderTarget` → `render_pass` → `copy_render_target_to_swapchain` → present.
 //!
-//! Run with: cargo run --example triangle
+//! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
+    shader::builtins, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
+    Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -28,6 +30,8 @@ struct App {
     // Window and surface
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
 
     // Animation
     frame_count: u64,
@@ -45,9 +49,22 @@ impl App {
             shader: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             frame_count: 0,
             start_time: std::time::Instant::now(),
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+        )
+        .map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -66,7 +83,7 @@ impl App {
         ];
         let vertex_buffer = device.alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-        // Create Surface for zero-copy presentation
+        // Create Surface for presentation
         let surface = Surface::new(&ctx, window.as_ref())?;
 
         // Create shader and pipeline using surface's actual format
@@ -78,11 +95,14 @@ impl App {
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
 
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
 
         Ok(())
     }
@@ -98,6 +118,7 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
 
         // Animate background color
         let t = (self.frame_count as f32 * 0.02).sin() * 0.5 + 0.5;
@@ -108,10 +129,8 @@ impl App {
             a: 1.0,
         };
 
-        // Acquire next frame from swapchain
-        let frame = surface.begin()?;
+        self.frame_graph.clear();
 
-        // Build render commands
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -121,10 +140,17 @@ impl App {
             pass.draw(0..3, 0..1);
         }
 
-        // Render to swapchain image (zero-copy - no CPU readback!)
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("triangle", scene_rt)
+            .bind_buffer(vertex_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
 
-        // Present to screen
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(scene_rt, swapchain);
+
+        let frame = surface.begin()?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.frame_count += 1;
@@ -136,6 +162,12 @@ impl App {
             if let Some(surface) = &mut self.surface {
                 if let Err(e) = surface.resize(new_size.width, new_size.height) {
                     tracing::error!("Failed to resize surface: {}", e);
+                }
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                match Self::create_scene_rt(device, surface) {
+                    Ok(rt) => self.scene_rt = Some(rt),
+                    Err(e) => tracing::error!("Failed to resize scene render target: {e:#}"),
                 }
             }
         }
@@ -216,7 +248,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("Goldy Surface API Example");
     println!("=======================");
-    println!("Rendering triangle with zero-copy GPU presentation");
+    println!("Rendering triangle via TaskGraph (offscreen RT → swapchain blit)");
     println!("Press Escape or close window to exit\n");
 
     let event_loop = EventLoop::new()?;
