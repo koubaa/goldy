@@ -48,6 +48,15 @@ pub struct Frame {
 }
 
 impl Surface {
+    /// Create a surface for any type that exposes window/display handles (e.g. winit, SDL).
+    ///
+    /// This only requires [`HasWindowHandle`] and [`HasDisplayHandle`] — it is not tied to a
+    /// particular window toolkit. The stable C ABI (`libgoldy_ffi`) currently exposes separate
+    /// platform entry points instead (`goldy_surface_create_win32`, `goldy_surface_create_appkit`),
+    /// which forces FFI clients and examples to extract raw handles themselves. That coupling
+    /// should be loosened over time (e.g. a portable surface-create descriptor in the C header)
+    /// so `goldy-ffi-client` can offer the same constructor shape without window-toolkit code
+    /// in application examples.
     pub fn new<W>(context: &GpuContext, window: &W) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,

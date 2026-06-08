@@ -220,6 +220,82 @@ pub unsafe extern "C" fn goldy_surface_frame_height(frame: *const GoldySurfaceFr
 
 // Platform-specific surface creation
 
+#[cfg(target_os = "macos")]
+mod appkit_surface {
+    use super::*;
+    use crate::device::GoldyDevice;
+    use raw_window_handle::{
+        AppKitDisplayHandle, AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle,
+    };
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    struct AppKitWindow {
+        ns_view: NonNull<c_void>,
+    }
+
+    impl HasWindowHandle for AppKitWindow {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let handle = AppKitWindowHandle::new(self.ns_view);
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for AppKitWindow {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            let handle = AppKitDisplayHandle::new();
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::AppKit(handle)) })
+        }
+    }
+
+    /// Create a surface from an AppKit `NSView` pointer.
+    ///
+    /// # Safety
+    /// - `device` must be valid.
+    /// - `ns_view` must be a valid `NSView*` for the window's content view.
+    /// - The view must outlive the surface.
+    #[no_mangle]
+    pub unsafe extern "C" fn goldy_surface_create_appkit(
+        device: *const GoldyDevice,
+        ns_view: *mut c_void,
+    ) -> *mut GoldySurface {
+        if device.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Device pointer is null"));
+            return ptr::null_mut();
+        }
+        if ns_view.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("NSView pointer is null"));
+            return ptr::null_mut();
+        }
+
+        let ns_view = match NonNull::new(ns_view) {
+            Some(v) => v,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("NSView pointer is null"));
+                return ptr::null_mut();
+            }
+        };
+
+        let window = AppKitWindow { ns_view };
+        let device = &(*device).inner;
+        let ctx = match device.create_context() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                return ptr::null_mut();
+            }
+        };
+        match goldy::Surface::new(&ctx, &window) {
+            Ok(surface) => Box::into_raw(Box::new(GoldySurface { inner: surface })),
+            Err(e) => {
+                set_last_error_from_anyhow(&e);
+                ptr::null_mut()
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 mod windows_surface {
     use super::*;

@@ -610,6 +610,14 @@ void goldy_shader_destroy(struct GoldyShaderModule *shader);
 // The surface pointer must be valid.
 struct GoldySurfaceFrame *goldy_surface_acquire(const struct GoldySurface *surface);
 
+// Create a surface from an AppKit `NSView` pointer.
+//
+// # Safety
+// - `device` must be valid.
+// - `ns_view` must be a valid `NSView*` for the window's content view.
+// - The view must outlive the surface.
+struct GoldySurface *goldy_surface_create_appkit(const struct GoldyDevice *device, void *ns_view);
+
 // Create a surface from a Win32 HWND.
 //
 // # Arguments

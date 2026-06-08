@@ -6,9 +6,10 @@ license = "LGPL-2.1-or-later"
 description = "C FFI bindings for the Goldy GPU library"
 repository = "https://github.com/koubaa/goldy"
 keywords = ["gpu", "graphics", "ffi", "c-bindings"]
+links = "goldy_ffi"
 
 [lib]
-# `rlib` is required for Rust integration tests / examples; C interop uses cdylib/staticlib.
+# `rlib` for in-crate tests/examples; `cdylib`/`staticlib` for C/C++/Python/.NET clients.
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
@@ -48,15 +49,12 @@ default = ["vulkan", "dx12", "metal"]
 vulkan = ["goldy/vulkan"]
 dx12 = ["goldy/dx12"]
 metal = ["goldy/metal"]
-# Interactive Rust examples (`ffi/examples/`); enables winit on this crate and goldy
-examples = ["dep:winit", "goldy/examples"]
+# winit window helpers (Rust-only; not part of the stable C header)
+winit = ["dep:winit"]
+# Interactive Rust examples (`ffi/examples/`)
+examples = ["winit", "goldy/examples"]
 
 [[example]]
 name = "compute_simple"
 path = "examples/compute_simple.rs"
-required-features = ["examples"]
-
-[[example]]
-name = "triangle"
-path = "examples/triangle.rs"
 required-features = ["examples"]

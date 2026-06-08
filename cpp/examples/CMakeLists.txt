@@ -1,8 +1,15 @@
 # Goldy C++ Examples
 
-# Triangle example - offscreen TaskGraph render + PPM readback
+# Triangle example - interactive Surface + TaskGraph render
 add_executable(triangle triangle.cpp)
 target_link_libraries(triangle PRIVATE goldy::goldy)
+
+if(APPLE)
+    set_source_files_properties(triangle.cpp PROPERTIES LANGUAGE OBJCXX)
+    target_link_libraries(triangle PRIVATE "-framework AppKit" "-framework QuartzCore")
+elseif(WIN32)
+    target_link_libraries(triangle PRIVATE user32 gdi32)
+endif()
 
 set(GOLDY_EXAMPLES triangle)
 

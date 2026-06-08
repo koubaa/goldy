@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "python", "ffi", "derive"]
+members = [".", "python", "ffi", "ffi-client", "derive"]
 resolver = "2"
 
 [package]

@@ -62,10 +62,12 @@ public:
 
 class Instance;
 class Device;
+class Adapter;
 class Buffer;
 class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
+class Surface;
 class TaskGraph;
 class ComputePipeline;
 class ComputeEncoder;
@@ -100,11 +102,45 @@ struct Color {
 };
 
 /**
+ * @brief GPU device type (mirrors native Goldy adapter metadata).
+ */
+enum class DeviceType {
+    DiscreteGpu = GOLDY_DEVICE_TYPE_DISCRETE_GPU,
+    IntegratedGpu = GOLDY_DEVICE_TYPE_INTEGRATED_GPU,
+    Cpu = GOLDY_DEVICE_TYPE_CPU,
+    Other = GOLDY_DEVICE_TYPE_OTHER,
+};
+
+/**
+ * @brief Power preference for adapter selection.
+ */
+enum class PowerPreference {
+    None,
+    LowPower,
+    HighPerformance,
+};
+
+/**
+ * @brief Options for Instance::request_adapter().
+ */
+struct RequestAdapterOptions {
+    PowerPreference power_preference = PowerPreference::HighPerformance;
+    bool force_fallback_adapter = false;
+};
+
+/**
+ * @brief Descriptor for Adapter::request_device().
+ */
+struct DeviceDescriptor {
+    std::optional<std::string> label;
+};
+
+/**
  * @brief Adapter information returned by Instance::enumerate_adapters().
  */
 struct AdapterInfo {
     uint32_t id;
-    GoldyDeviceType device_type;
+    DeviceType device_type;
     std::string name;
     std::string vendor;
 };
@@ -188,6 +224,10 @@ struct RenderTargetDeleter {
     void operator()(GoldyRenderTarget* p) const { if (p) goldy_render_target_destroy(p); }
 };
 
+struct SurfaceDeleter {
+    void operator()(GoldySurface* p) const { if (p) goldy_surface_destroy(p); }
+};
+
 struct TaskGraphDeleter {
     void operator()(GoldyTaskGraph* p) const { if (p) goldy_task_graph_destroy(p); }
 };
@@ -264,7 +304,7 @@ public:
             if (goldy_instance_get_adapter(ptr_.get(), i, &info) == GOLDY_RESULT_OK) {
                 adapters.push_back({
                     info.id,
-                    info.device_type,
+                    static_cast<DeviceType>(info.device_type),
                     std::string(info.name),
                     std::string(info.vendor)
                 });
@@ -272,6 +312,12 @@ public:
         }
         return adapters;
     }
+
+    /**
+     * @brief Request an adapter matching the given options (wgpu-style).
+     * @throws Exception if no adapters are available.
+     */
+    Adapter request_adapter(const RequestAdapterOptions& opts = {});
 
     /**
      * @brief Create a device for a specific adapter.
@@ -336,6 +382,7 @@ public:
 
 private:
     friend class Instance;
+    friend class Adapter;
     explicit Device(GoldyDevice* ptr) : ptr_(ptr) {}
     std::unique_ptr<GoldyDevice, detail::DeviceDeleter> ptr_;
 };
@@ -347,6 +394,106 @@ inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
         throw Exception::from_last_error();
     }
     return Device(ptr);
+}
+
+// =============================================================================
+// Adapter
+// =============================================================================
+
+/**
+ * @brief A physical GPU adapter returned by Instance::request_adapter().
+ */
+class Adapter {
+public:
+    Adapter(const Adapter&) = delete;
+    Adapter& operator=(const Adapter&) = delete;
+    Adapter(Adapter&&) = default;
+    Adapter& operator=(Adapter&&) = default;
+
+    const AdapterInfo& get_info() const { return info_; }
+
+    /**
+     * @brief Create a logical Device on this adapter.
+     */
+    Device request_device(const DeviceDescriptor& desc = {}) const {
+        (void)desc;
+        GoldyDevice* ptr = goldy_instance_create_device_for_adapter(instance_, info_.id);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        return Device(ptr);
+    }
+
+private:
+    friend class Instance;
+    Adapter(GoldyInstance* instance, AdapterInfo info)
+        : instance_(instance), info_(std::move(info)) {}
+
+    GoldyInstance* instance_;
+    AdapterInfo info_;
+};
+
+inline Adapter Instance::request_adapter(const RequestAdapterOptions& opts) {
+    auto adapters = enumerate_adapters();
+    if (adapters.empty()) {
+        throw Exception("No GPU adapters available");
+    }
+
+    const AdapterInfo* selected = nullptr;
+    switch (opts.power_preference) {
+    case PowerPreference::HighPerformance:
+        for (const auto& a : adapters) {
+            if (a.device_type == DeviceType::DiscreteGpu) {
+                selected = &a;
+                break;
+            }
+        }
+        if (!selected) {
+            for (const auto& a : adapters) {
+                if (a.device_type == DeviceType::IntegratedGpu) {
+                    selected = &a;
+                    break;
+                }
+            }
+        }
+        if (!selected) {
+            for (const auto& a : adapters) {
+                if (a.device_type == DeviceType::Other) {
+                    selected = &a;
+                    break;
+                }
+            }
+        }
+        if (!selected) {
+            selected = &adapters.front();
+        }
+        break;
+    case PowerPreference::LowPower:
+        for (const auto& a : adapters) {
+            if (a.device_type == DeviceType::IntegratedGpu) {
+                selected = &a;
+                break;
+            }
+        }
+        if (!selected) {
+            for (const auto& a : adapters) {
+                if (a.device_type == DeviceType::Cpu) {
+                    selected = &a;
+                    break;
+                }
+            }
+        }
+        if (!selected) {
+            selected = &adapters.front();
+        }
+        break;
+    case PowerPreference::None:
+        selected = &adapters.front();
+        break;
+    }
+
+    (void)opts.force_fallback_adapter;
+    return Adapter(ptr_.get(), *selected);
 }
 
 // =============================================================================
@@ -632,6 +779,115 @@ private:
 };
 
 // =============================================================================
+// Surface
+// =============================================================================
+
+/**
+ * @brief An acquired swapchain frame.
+ *
+ * Consumed by Surface::present() or updated by Surface::submit_graph_to_frame().
+ */
+class SurfaceFrame {
+public:
+    SurfaceFrame() = default;
+    SurfaceFrame(SurfaceFrame&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+    SurfaceFrame& operator=(SurfaceFrame&& other) noexcept {
+        if (this != &other) {
+            ptr_ = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
+    SurfaceFrame(const SurfaceFrame&) = delete;
+    SurfaceFrame& operator=(const SurfaceFrame&) = delete;
+
+    GoldySurfaceFrame* get() const { return ptr_; }
+
+private:
+    friend class Surface;
+    explicit SurfaceFrame(GoldySurfaceFrame* ptr) : ptr_(ptr) {}
+    GoldySurfaceFrame* release() {
+        GoldySurfaceFrame* p = ptr_;
+        ptr_ = nullptr;
+        return p;
+    }
+
+    GoldySurfaceFrame* ptr_ = nullptr;
+};
+
+/**
+ * @brief A window swapchain surface.
+ *
+ * Created from platform window handles via goldy_surface_create_win32 /
+ * goldy_surface_create_appkit. Window toolkit code stays in the application;
+ * this wrapper only wraps the stable C ABI.
+ */
+class Surface {
+public:
+#if defined(_WIN32)
+    Surface(const Device& device, void* hwnd) {
+        GoldySurface* ptr = goldy_surface_create_win32(device.get(), hwnd);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+#elif defined(__APPLE__)
+    Surface(const Device& device, void* ns_view) {
+        GoldySurface* ptr = goldy_surface_create_appkit(device.get(), ns_view);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+#endif
+
+    Surface(const Surface&) = delete;
+    Surface& operator=(const Surface&) = delete;
+    Surface(Surface&&) = default;
+    Surface& operator=(Surface&&) = default;
+
+    std::pair<uint32_t, uint32_t> size() const {
+        return {goldy_surface_width(ptr_.get()), goldy_surface_height(ptr_.get())};
+    }
+
+    uint32_t width() const { return goldy_surface_width(ptr_.get()); }
+    uint32_t height() const { return goldy_surface_height(ptr_.get()); }
+
+    GoldyTextureFormat format() const { return goldy_surface_format(ptr_.get()); }
+
+    void resize(uint32_t width, uint32_t height) {
+        detail::throw_on_result(goldy_surface_resize(ptr_.get(), width, height));
+    }
+
+    /**
+     * @brief Begin the next frame (acquire swapchain image).
+     */
+    SurfaceFrame begin() {
+        GoldySurfaceFrame* frame = goldy_surface_acquire(ptr_.get());
+        if (!frame) {
+            throw Exception::from_last_error();
+        }
+        return SurfaceFrame(frame);
+    }
+
+    /**
+     * @brief Submit a recorded task graph to an acquired frame.
+     */
+    SurfaceFrame submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame);
+
+    /**
+     * @brief Present a frame to the screen (consumes the frame).
+     */
+    void present(SurfaceFrame frame);
+
+    GoldySurface* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldySurface, detail::SurfaceDeleter> ptr_;
+};
+
+// =============================================================================
 // TaskGraph
 // =============================================================================
 
@@ -818,6 +1074,17 @@ private:
 
 inline TaskGraph::RenderPass TaskGraph::render_pass(const char* label, const RenderTarget& target) {
     return RenderPass(*this, label, target);
+}
+
+inline SurfaceFrame Surface::submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame) {
+    GoldySurfaceFrame* raw = frame.release();
+    detail::throw_on_result(
+        goldy_surface_submit_graph_to_frame(ptr_.get(), graph.get(), raw));
+    return SurfaceFrame(raw);
+}
+
+inline void Surface::present(SurfaceFrame frame) {
+    detail::throw_on_result(goldy_surface_present(ptr_.get(), frame.release()));
 }
 
 // =============================================================================

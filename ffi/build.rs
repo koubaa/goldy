@@ -19,6 +19,14 @@ fn main() {
 
     // Copy Slang libraries to output directory
     copy_slang_libraries(&crate_dir, &out_dir);
+
+    emit_link_metadata(&out_dir);
+}
+
+/// Emit library output directory for downstream crates (e.g. `goldy-ffi-client`).
+fn emit_link_metadata(out_dir: &Path) {
+    let lib_dir = find_target_output_dir(out_dir);
+    println!("cargo:LINK_LIB_DIR={}", lib_dir.display());
 }
 
 fn generate_c_header(crate_dir: &Path) {

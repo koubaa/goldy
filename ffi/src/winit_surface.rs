@@ -1,7 +1,7 @@
-//! Create a [`GoldySurface`](crate::surface::GoldySurface) from any winit window.
+//! Cross-platform surface creation for winit windows (Rust-only helper).
 //!
-//! This uses Goldy's `Surface::new` internally. Exposed for `goldy-ffi` examples; the
-//! stable C API provides `goldy_surface_create_win32` on Windows instead.
+//! C/C++ clients use platform entry points from the generated header (e.g. `goldy_surface_create_win32` on Windows).
+//! Enabled with the `winit` feature on `goldy-ffi`.
 
 use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;

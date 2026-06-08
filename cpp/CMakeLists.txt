@@ -7,6 +7,10 @@ project(goldy
     LANGUAGES CXX
 )
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 # Ninja + MSVC from non-Developer shells (Git Bash, IDE terminals) need explicit
 # Windows SDK / MSVC include and link paths.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InitMSVCEnvironment.cmake")

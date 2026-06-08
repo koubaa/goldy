@@ -1,14 +1,15 @@
 //! Triangle example - render a colored triangle in an interactive window.
 //!
-//! Demonstrates the Surface API with task-graph submission: offscreen
-//! `RenderTarget` → `render_pass` → `copy_render_target_to_swapchain` → present.
+//! Demonstrates the Surface API with task-graph submission via `libgoldy_ffi`:
+//! offscreen `RenderTarget` → `render_pass` → `copy_render_target_to_swapchain` → present.
 //!
-//! Run with: cargo run --example triangle --features examples
+//! Run from `goldy/ffi-client`: `cargo run --example triangle`
 
-use goldy::{
+use goldy_ffi_client::{
     shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
     RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -18,21 +19,33 @@ use winit::{
     window::{Window, WindowId},
 };
 
+fn surface_from_window(device: &goldy_ffi_client::Device, window: &Window) -> goldy_ffi_client::Result<Surface> {
+    let handle = window
+        .window_handle()
+        .map_err(|e| goldy_ffi_client::GoldyError::from_message(format!("window handle: {e}")))?;
+    unsafe {
+        match handle.as_raw() {
+            #[cfg(windows)]
+            RawWindowHandle::Win32(h) => Surface::from_win32(device, h.hwnd.get() as *mut _),
+            #[cfg(target_os = "macos")]
+            RawWindowHandle::AppKit(h) => Surface::from_appkit(device, h.ns_view.as_ptr()),
+            other => Err(goldy_ffi_client::GoldyError::from_message(format!(
+                "unsupported window handle for surface creation: {other:?}"
+            ))),
+        }
+    }
+}
+
 struct App {
-    // Goldy resources
     instance: Instance,
-    device: Option<Arc<goldy::Device>>,
+    device: Option<Arc<goldy_ffi_client::Device>>,
     vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-
-    // Window and surface
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
     frame_graph: TaskGraph,
-
-    // Animation
     frame_count: u64,
     start_time: std::time::Instant,
 }
@@ -55,7 +68,10 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+    fn create_scene_rt(
+        device: &goldy_ffi_client::Device,
+        surface: &Surface,
+    ) -> anyhow::Result<RenderTarget> {
         let (width, height) = surface.size();
         RenderTarget::new(
             device,
@@ -72,9 +88,7 @@ impl App {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let ctx = device.create_context()?;
 
-        // Create vertex buffer with a triangle
         let vertices = [
             Vertex2D::new(0.0, -0.5, Color::RED),
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
@@ -82,10 +96,8 @@ impl App {
         ];
         let vertex_buffer = device.alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-        // Create Surface for presentation
-        let surface = Surface::new(&ctx, window.as_ref())?;
+        let surface = surface_from_window(&device, window.as_ref())?;
 
-        // Create shader and pipeline using surface's actual format
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
         let pipeline_desc = RenderPipelineDesc {
             vertex_layout: Vertex2D::layout(),
@@ -119,7 +131,6 @@ impl App {
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
 
-        // Animate background color
         let t = (self.frame_count as f32 * 0.02).sin() * 0.5 + 0.5;
         let bg_color = Color {
             r: 0.1 + t * 0.1,
@@ -193,7 +204,6 @@ impl ApplicationHandler for App {
 
             self.window = Some(window.clone());
 
-            // Initialize GPU resources and create surface
             if let Err(e) = self.init_gpu(&window) {
                 tracing::error!("Failed to initialize GPU: {}", e);
             }
@@ -247,8 +257,8 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Surface API Example");
-    println!("=======================");
+    println!("Goldy Surface API Example (FFI client)");
+    println!("======================================");
     println!("Rendering triangle via TaskGraph (offscreen RT → swapchain blit)");
     println!("Press Escape or close window to exit\n");
 

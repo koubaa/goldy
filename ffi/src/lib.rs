@@ -21,7 +21,7 @@ mod types;
 ///
 /// C/C++ clients use platform entry points from the generated header (e.g. `goldy_surface_create_win32` on Windows).
 /// This helper is not part of the stable C header.
-#[cfg(feature = "examples")]
+#[cfg(feature = "winit")]
 pub mod winit_surface;
 
 pub use buffer::*;
