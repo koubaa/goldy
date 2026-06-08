@@ -135,6 +135,19 @@ typedef enum GoldyFilterMode {
     GOLDY_FILTER_MODE_LINEAR = 1,
 } GoldyFilterMode;
 
+// Per-node resource access for task graph bindings.
+typedef enum GoldyNodeAccess {
+    GOLDY_NODE_ACCESS_READ = 0,
+    GOLDY_NODE_ACCESS_WRITE = 1,
+    GOLDY_NODE_ACCESS_READ_WRITE = 2,
+} GoldyNodeAccess;
+
+// Index format.
+typedef enum GoldyIndexFormat {
+    GOLDY_INDEX_FORMAT_UINT16 = 0,
+    GOLDY_INDEX_FORMAT_UINT32 = 1,
+} GoldyIndexFormat;
+
 // Spatial access pattern for textures.
 //
 // - `Interpolated`: Hardware filtering between neighbors (texture units).
@@ -184,6 +197,9 @@ typedef struct GoldySurface GoldySurface;
 
 // Opaque handle to a Goldy SurfaceFrame.
 typedef struct GoldySurfaceFrame GoldySurfaceFrame;
+
+// Opaque handle to a Goldy TaskGraph.
+typedef struct GoldyTaskGraph GoldyTaskGraph;
 
 // Opaque handle to a Goldy Texture.
 typedef struct GoldyTexture GoldyTexture;
@@ -237,6 +253,21 @@ typedef struct GoldySamplerDesc {
     float lod_min_clamp;
     float lod_max_clamp;
 } GoldySamplerDesc;
+
+// Opaque token returned by [`goldy_task_graph_declare_swapchain_output`].
+//
+// Carries no data; exists for type safety at the C ABI boundary.
+typedef struct GoldySwapchainOutput {
+    uint8_t _private[0];
+} GoldySwapchainOutput;
+
+// RGBA color with floating point components (0.0 - 1.0).
+typedef struct GoldyColor {
+    float r;
+    float g;
+    float b;
+    float a;
+} GoldyColor;
 
 // Texture flags for copy and render operations.
 typedef struct GoldyTextureFlags {
@@ -648,6 +679,150 @@ enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
 // # Safety
 // The surface pointer must be valid.
 uint32_t goldy_surface_width(const struct GoldySurface *surface);
+
+// Reset the graph to empty while retaining internal capacity.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_clear(struct GoldyTaskGraph *graph);
+
+// Add a render-target → swapchain blit node to the graph.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_copy_render_target_to_swapchain(struct GoldyTaskGraph *graph,
+                                                                  const struct GoldyRenderTarget *src,
+                                                                  const struct GoldySwapchainOutput *_swapchain);
+
+// Create a new task graph.
+struct GoldyTaskGraph *goldy_task_graph_create(void);
+
+// Declare that this graph will copy to the swapchain at submit time.
+//
+// Returns an opaque token passed to [`goldy_task_graph_copy_render_target_to_swapchain`].
+// Phase 2 surface submit uses the same graph with a `SwapchainOutput` binding.
+//
+// # Safety
+// The graph pointer must be valid.
+struct GoldySwapchainOutput *goldy_task_graph_declare_swapchain_output(struct GoldyTaskGraph *graph);
+
+// Destroy a task graph.
+//
+// # Safety
+// The pointer must be valid and not used after this call.
+void goldy_task_graph_destroy(struct GoldyTaskGraph *graph);
+
+// Analyze the graph, submit GPU work, and block until complete.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_dispatch(struct GoldyTaskGraph *graph,
+                                           const struct GoldyDevice *device);
+
+// Begin recording an offscreen render pass on `target`.
+//
+// Only one render pass may be open at a time per graph.
+//
+// # Safety
+// All pointers must be valid. `target` must outlive the graph recording session.
+enum GoldyResult goldy_task_graph_render_pass_begin(struct GoldyTaskGraph *graph,
+                                                    const char *label,
+                                                    const struct GoldyRenderTarget *target);
+
+// Declare a graph dependency on a buffer for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_bind_buffer(struct GoldyTaskGraph *graph,
+                                                          const struct GoldyBuffer *buffer,
+                                                          enum GoldyNodeAccess access);
+
+// Bind shader resource slots from buffers for the active render pass.
+//
+// # Safety
+// All pointers must be valid. `buffers` must contain `buffer_count` elements.
+enum GoldyResult goldy_task_graph_render_pass_bind_resources(struct GoldyTaskGraph *graph,
+                                                             const struct GoldyBuffer *const *buffers,
+                                                             uint32_t buffer_count);
+
+// Clear the color attachment in the active render pass.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_render_pass_clear(struct GoldyTaskGraph *graph,
+                                                    struct GoldyColor color);
+
+// Clear the depth attachment in the active render pass.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_render_pass_clear_depth(struct GoldyTaskGraph *graph,
+                                                          float depth);
+
+// Draw non-indexed primitives in the active render pass.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_render_pass_draw(struct GoldyTaskGraph *graph,
+                                                   uint32_t first_vertex,
+                                                   uint32_t vertex_count,
+                                                   uint32_t first_instance,
+                                                   uint32_t instance_count);
+
+// Draw a fullscreen triangle (3 vertices, 1 instance) in the active render pass.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_render_pass_draw_fullscreen(struct GoldyTaskGraph *graph);
+
+// Draw indexed primitives in the active render pass.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_render_pass_draw_indexed(struct GoldyTaskGraph *graph,
+                                                           uint32_t first_index,
+                                                           uint32_t index_count,
+                                                           int32_t base_vertex,
+                                                           uint32_t first_instance,
+                                                           uint32_t instance_count);
+
+// Finalize the active render pass and append it to the graph.
+//
+// # Safety
+// The graph pointer must be valid.
+enum GoldyResult goldy_task_graph_render_pass_finish(struct GoldyTaskGraph *graph);
+
+// Bind an index buffer for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_set_index_buffer(struct GoldyTaskGraph *graph,
+                                                               const struct GoldyBuffer *buffer,
+                                                               enum GoldyIndexFormat format);
+
+// Set the render pipeline for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_set_pipeline(struct GoldyTaskGraph *graph,
+                                                           const struct GoldyRenderPipeline *pipeline);
+
+// Bind a vertex buffer slot for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer(struct GoldyTaskGraph *graph,
+                                                                uint32_t slot,
+                                                                const struct GoldyBuffer *buffer);
+
+// Bind a vertex buffer slot with a byte offset for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer_offset(struct GoldyTaskGraph *graph,
+                                                                       uint32_t slot,
+                                                                       const struct GoldyBuffer *buffer,
+                                                                       uint64_t offset);
 
 // Create a new texture with the specified spatial access pattern.
 //

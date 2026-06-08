@@ -86,9 +86,11 @@
 pub(crate) mod analysis;
 mod graph;
 mod ir;
+pub mod record;
 
 pub(crate) use graph::apply_stamp_targets;
 pub use graph::{NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph};
+pub use record::RenderPassRecord;
 pub use ir::{BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 
 use crate::backend::{BufferHandle, TextureHandle};

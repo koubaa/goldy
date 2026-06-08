@@ -1008,6 +1008,11 @@ impl TaskGraph {
         Ok(())
     }
 
+    /// Push a fully recorded task node (used by [`super::record::RenderPassRecord`] and tests).
+    pub(crate) fn push_task_node(&mut self, node: super::ir::TaskNode) {
+        self.ir.nodes.push(node);
+    }
+
     /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
     pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         RenderPassBuilder {

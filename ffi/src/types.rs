@@ -267,6 +267,15 @@ impl From<GoldyIndexFormat> for goldy::IndexFormat {
     }
 }
 
+/// Per-node resource access for task graph bindings.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyNodeAccess {
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
 /// Depth format.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
