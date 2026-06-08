@@ -417,6 +417,7 @@ impl TaskGraph {
                     | NodeKind::WriteTexture { .. }
                     | NodeKind::WriteTextureRegion { .. }
                     | NodeKind::CopyTexture { .. }
+                    | NodeKind::CopyRenderTarget { .. }
             )
         });
         let fp = Self::binding_fingerprint(ir);
@@ -922,6 +923,32 @@ impl TaskGraph {
                 },
             ],
             kind: NodeKind::CopyTexture {
+                src: src_h,
+                dst: ResourceId::SwapchainOutput,
+            },
+        });
+    }
+
+    /// Copy an offscreen [`crate::RenderTarget`] color buffer to the late-bound swapchain output.
+    ///
+    /// Record this after a [`Self::render_pass`] that targets the same `src` render target.
+    /// The analyzer orders the copy after the render pass via the shared
+    /// [`ResourceId::RenderTarget`] binding.
+    pub fn copy_render_target_to_swapchain(&mut self, src: &RenderTarget, _dst: SwapchainOutputHandle) {
+        let src_h = src.backend_handle();
+        self.ir.nodes.push(TaskNode {
+            label: "copy_render_target_to_swapchain",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::SwapchainOutput,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
                 src: src_h,
                 dst: ResourceId::SwapchainOutput,
             },
@@ -1780,6 +1807,29 @@ mod tests {
             err.to_string().contains("non-mosaic buffer parcels"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn render_pass_then_copy_render_target_emits_in_order() {
+        let device = mock_device();
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut enc = CommandEncoder::new();
+        {
+            let mut pass = enc.begin_render_pass();
+            pass.clear(Color::RED);
+        }
+
+        let mut graph = TaskGraph::new();
+        graph.render_pass("draw", &target).finish_encoder(enc);
+        let sc = graph.declare_swapchain_output();
+        graph.copy_render_target_to_swapchain(&target, sc);
+
+        let (schedule, split_wave) = graph.schedule_and_split_wave();
+        assert_eq!(schedule.waves.len(), 2, "render and copy must be in separate waves");
+        assert_eq!(split_wave, 1, "swapchain copy must be in the late partition");
+        assert_eq!(schedule.waves[0].node_indices.len(), 1);
+        assert_eq!(schedule.waves[1].node_indices.len(), 1);
     }
 
     #[test]

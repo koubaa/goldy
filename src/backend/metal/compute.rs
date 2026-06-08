@@ -734,6 +734,34 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
+            GpuCommand::CopyRenderTarget { src, dst } => {
+                ensure_blit_tex!(*dst);
+                let src_state = state
+                    .render_targets
+                    .get(src)
+                    .context("CopyRenderTarget: src render target not found")?;
+                let dst_state = state
+                    .textures
+                    .get(dst)
+                    .context("CopyRenderTarget: dst texture not found")?;
+                let w = src_state.width as u64;
+                let h = src_state.height as u64;
+                guard.blit.unwrap().copy_from_texture(
+                    &src_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    MTLSize {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    },
+                    &dst_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                );
+            }
             GpuCommand::Barrier => {
                 if let Some(enc) = guard.compute {
                     const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
@@ -911,6 +939,7 @@ fn stage_uploads(
             // Commands that open an encoder set would_have_gpu_work.
             GpuCommand::ClearBuffer { .. }
             | GpuCommand::CopyTexture { .. }
+            | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)
             | GpuCommand::BindResources { .. }
             | GpuCommand::BindResourcesRaw { .. }

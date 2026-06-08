@@ -55,6 +55,7 @@
 //! | [`TaskGraph::node`]       | Compute dispatch (direct/indirect) |
 //! | [`TaskGraph::clear_buffer`] / [`TaskGraph::clear_buffer_view`] | GPU-side buffer zero-fill |
 //! | [`TaskGraph::write_buffer`] / [`TaskGraph::write_parcel`] | CPU→GPU buffer upload |
+//! | [`TaskGraph::copy_render_target_to_swapchain`] | Offscreen render target → swapchain blit |
 //!
 //! # SWMR scheduling
 //!
@@ -170,6 +171,12 @@ pub(crate) enum ResourceId {
         len: u64,
     },
     Texture(TextureHandle),
+    /// Offscreen [`crate::RenderTarget`] color attachment.
+    ///
+    /// [`NodeKind::RenderPass`] nodes implicitly write their target; consumers
+    /// such as [`super::graph::TaskGraph::copy_render_target_to_swapchain`] declare
+    /// an explicit `Read` binding so the scheduler orders copy after render.
+    RenderTarget(crate::backend::RenderTargetHandle),
     /// Graph-scoped transient; lowered to [`ResourceId::BufferRange`] before submission.
     TransientBuffer(TransientId),
     /// Graph-scoped transient texture; lowered to [`crate::Texture`] before submission.
@@ -192,6 +199,7 @@ impl ResourceId {
             ResourceId::Buffer(h) => Some(h),
             ResourceId::BufferRange { parent, .. } => Some(parent),
             ResourceId::Texture(_) => None,
+            ResourceId::RenderTarget(_) => None,
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
             ResourceId::SwapchainOutput => None,

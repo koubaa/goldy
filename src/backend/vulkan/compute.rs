@@ -1197,6 +1197,72 @@ pub(super) fn submit(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2);
                     }
                 }
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    let _tz = tracy_zone!("vk.copy_render_target");
+                    let (src_image, width, height) = {
+                        let rt = state
+                            .render_targets
+                            .get(src)
+                            .context("CopyRenderTarget: src render target not found")?;
+                        (rt.image, rt.width, rt.height)
+                    };
+                    let dst_image = state
+                        .textures
+                        .get(dst)
+                        .context("CopyRenderTarget: dst texture not found")?
+                        .image;
+
+                    unsafe {
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+
+                        let region = vk::ImageCopy {
+                            src_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            dst_offset: vk::Offset3D::default(),
+                            extent: vk::Extent3D {
+                                width,
+                                height,
+                                depth: 1,
+                            },
+                        };
+                        logical_device.device.cmd_copy_image(
+                            cmd,
+                            src_image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            dst_image,
+                            vk::ImageLayout::GENERAL,
+                            std::slice::from_ref(&region),
+                        );
+
+                        let mem_barrier2 = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(
+                                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_COMMANDS,
+                            )
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep_info2 =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier2));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2);
+                    }
+                }
             }
         }
 
@@ -1977,6 +2043,71 @@ fn submit_graph_impl(
                             cmd,
                             src_image,
                             vk::ImageLayout::GENERAL,
+                            dst_image,
+                            vk::ImageLayout::GENERAL,
+                            std::slice::from_ref(&region),
+                        );
+
+                        let mem_barrier2 = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(
+                                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_COMMANDS,
+                            )
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep2 = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier2));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep2);
+                    }
+                }
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    let _tz = tracy_zone!("vk.copy_render_target");
+                    let (src_image, width, height) = {
+                        let rt = state
+                            .render_targets
+                            .get(src)
+                            .context("CopyRenderTarget: src render target not found")?;
+                        (rt.image, rt.width, rt.height)
+                    };
+                    let dst_image = state
+                        .textures
+                        .get(dst)
+                        .context("CopyRenderTarget: dst texture not found")?
+                        .image;
+
+                    unsafe {
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+
+                        let region = vk::ImageCopy {
+                            src_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            dst_offset: vk::Offset3D::default(),
+                            extent: vk::Extent3D {
+                                width,
+                                height,
+                                depth: 1,
+                            },
+                        };
+                        logical_device.device.cmd_copy_image(
+                            cmd,
+                            src_image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             dst_image,
                             vk::ImageLayout::GENERAL,
                             std::slice::from_ref(&region),

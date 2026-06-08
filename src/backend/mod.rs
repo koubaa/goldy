@@ -336,6 +336,15 @@ pub enum GpuCommand {
     /// Both textures must have compatible formats and identical dimensions.
     /// The backend inserts appropriate layout transitions and memory barriers.
     CopyTexture { src: TextureHandle, dst: TextureHandle },
+    /// Copy the color attachment of an offscreen render target into a texture.
+    ///
+    /// The source must have been rendered to earlier in the same submission (or
+    /// a prior submission whose timeline has completed). The backend transitions
+    /// the source from its post-render layout and copies into `dst`.
+    CopyRenderTarget {
+        src: RenderTargetHandle,
+        dst: TextureHandle,
+    },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
     /// Each entry packs `[PushLayout bytes | wg_x u32 | wg_y u32 | wg_z u32]` into

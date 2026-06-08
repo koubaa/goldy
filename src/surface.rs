@@ -260,21 +260,27 @@ impl Surface {
             self.build_resolver_for_submit_graph(graph, &node_waves)?
         };
 
-        // ── Step 3: emit early commands from the original IR + resolver ──────
-        let early_cmds = {
-            let _tz = tracy_zone!("surface.submit_graph.emit_early");
-            crate::task_graph::analysis::emit_waves_to_commands(
-                graph.ir(),
-                &schedule.waves[..split_wave],
-                resolver.as_ref(),
-            )
-        };
-
-        // ── Step 4: submit early commands ────────────────────────────────────
-        if !early_cmds.is_empty() {
+        // ── Step 3–4: emit + submit early partition ──────────────────────────
+        if split_wave > 0 {
+            let early_waves = &schedule.waves[..split_wave];
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_partition_early");
-            backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+            if crate::task_graph::analysis::waves_contain_render_pass(graph.ir(), early_waves) {
+                let early_g = crate::task_graph::analysis::emit_graph_commands_for_waves(
+                    graph.ir(),
+                    early_waves,
+                    resolver.as_ref(),
+                );
+                if !early_g.is_empty() {
+                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                }
+            } else {
+                let early_cmds =
+                    crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
+                if !early_cmds.is_empty() {
+                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                }
+            }
         }
 
         // ── Step 5: deferred surface acquire ─────────────────────────────────
@@ -348,18 +354,26 @@ impl Surface {
             self.build_resolver_for_submit_graph(graph, &node_waves)?
         };
 
-        let early_cmds = {
-            let _tz = tracy_zone!("surface.submit_graph_to_frame.emit_early");
-            crate::task_graph::analysis::emit_waves_to_commands(
-                graph.ir(),
-                &schedule.waves[..split_wave],
-                resolver.as_ref(),
-            )
-        };
-        if !early_cmds.is_empty() {
+        if split_wave > 0 {
+            let early_waves = &schedule.waves[..split_wave];
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_graph_to_frame.partition_early");
-            backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+            if crate::task_graph::analysis::waves_contain_render_pass(graph.ir(), early_waves) {
+                let early_g = crate::task_graph::analysis::emit_graph_commands_for_waves(
+                    graph.ir(),
+                    early_waves,
+                    resolver.as_ref(),
+                );
+                if !early_g.is_empty() {
+                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                }
+            } else {
+                let early_cmds =
+                    crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
+                if !early_cmds.is_empty() {
+                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                }
+            }
         }
 
         let swapchain_tex = frame.texture();
