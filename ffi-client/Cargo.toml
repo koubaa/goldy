@@ -36,3 +36,7 @@ path = "examples/triangle.rs"
 [[example]]
 name = "compute_simple"
 path = "examples/compute_simple.rs"
+
+[[example]]
+name = "triangle_headless"
+path = "examples/triangle_headless.rs"

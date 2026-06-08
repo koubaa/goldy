@@ -39,6 +39,16 @@ fn main() -> goldy_ffi_client::Result<()> {
     encoder.dispatch(1, 1, 1);
     encoder.execute(&device)?;
 
-    println!("Compute dispatch completed successfully.");
+    let bytes = buffer.read_to_cpu(&device)?;
+    let values: &[f32] = bytemuck::cast_slice(&bytes);
+    for (i, &v) in values.iter().enumerate().take(64) {
+        let expected = i as f32 * 2.0;
+        assert!(
+            (v - expected).abs() < 1e-4,
+            "index {i}: expected {expected}, got {v}"
+        );
+    }
+
+    println!("Compute dispatch verified: data[i] == i * 2 for 64 elements.");
     Ok(())
 }

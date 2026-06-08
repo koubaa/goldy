@@ -139,6 +139,24 @@ impl From<NodeAccess> for GoldyNodeAccess {
     }
 }
 
+/// Bindless resource slot access for shader binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl From<ResourceAccess> for sys::GoldyResourceAccess {
+    fn from(a: ResourceAccess) -> Self {
+        match a {
+            ResourceAccess::Read => sys::GoldyResourceAccess::GOLDY_RESOURCE_ACCESS_READ,
+            ResourceAccess::Write => sys::GoldyResourceAccess::GOLDY_RESOURCE_ACCESS_WRITE,
+            ResourceAccess::ReadWrite => sys::GoldyResourceAccess::GOLDY_RESOURCE_ACCESS_READ_WRITE,
+        }
+    }
+}
+
 /// GPU device type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceType {

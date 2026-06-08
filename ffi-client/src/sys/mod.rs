@@ -26,12 +26,35 @@ pub unsafe fn goldy_buffer_create_with_data(
     (lib().goldy_buffer_create_with_data)(device, data, size, access)
 }
 
+pub unsafe fn goldy_buffer_create_with_data_stride(
+    device: *const GoldyDevice,
+    data: *const u8,
+    size: usize,
+    access: GoldyBufferKind,
+    element_stride: u32,
+) -> *mut GoldyBuffer {
+    (lib().goldy_buffer_create_with_data_stride)(device, data, size, access, element_stride)
+}
+
 pub unsafe fn goldy_buffer_destroy(buffer: *mut GoldyBuffer) {
     (lib().goldy_buffer_destroy)(buffer)
 }
 
 pub unsafe fn goldy_buffer_size(buffer: *const GoldyBuffer) -> u64 {
     (lib().goldy_buffer_size)(buffer)
+}
+
+pub unsafe fn goldy_buffer_read_to_cpu(
+    buffer: *const GoldyBuffer,
+    device: *const GoldyDevice,
+    output: *mut u8,
+    output_size: usize,
+) -> GoldyResult {
+    (lib().goldy_buffer_read_to_cpu)(buffer, device, output, output_size)
+}
+
+pub unsafe fn goldy_buffer_resource_index(buffer: *const GoldyBuffer, access: GoldyResourceAccess) -> u32 {
+    (lib().goldy_buffer_resource_index)(buffer, access)
 }
 
 pub unsafe fn goldy_buffer_write(buffer: *const GoldyBuffer, offset: u64, data: *const u8, size: usize) -> GoldyResult {

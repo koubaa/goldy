@@ -142,6 +142,14 @@ pub enum GoldyNodeAccess {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyResourceAccess {
+    GOLDY_RESOURCE_ACCESS_READ = 0,
+    GOLDY_RESOURCE_ACCESS_WRITE = 1,
+    GOLDY_RESOURCE_ACCESS_READ_WRITE = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoldyIndexFormat {
     GOLDY_INDEX_FORMAT_UINT16 = 0,
     GOLDY_INDEX_FORMAT_UINT32 = 1,

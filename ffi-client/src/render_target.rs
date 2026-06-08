@@ -26,6 +26,15 @@ impl RenderTarget {
         unsafe { sys::goldy_render_target_format(self.ptr) }.into()
     }
 
+    pub fn read_to_cpu(&self) -> Result<Vec<u8>> {
+        let size = unsafe { sys::goldy_render_target_buffer_size(self.ptr) };
+        let mut pixels = vec![0u8; size];
+        crate::error::check(unsafe {
+            sys::goldy_render_target_read_to_buffer(self.ptr, pixels.as_mut_ptr(), pixels.len())
+        })?;
+        Ok(pixels)
+    }
+
     pub(crate) fn as_ptr(&self) -> *const GoldyRenderTarget {
         self.ptr
     }

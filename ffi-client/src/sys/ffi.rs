@@ -8,8 +8,19 @@ pub type FnGoldyBufferAccess = unsafe extern "C" fn(*const GoldyBuffer) -> Goldy
 pub type FnGoldyBufferCreate = unsafe extern "C" fn(*const GoldyDevice, u64, GoldyBufferKind) -> *mut GoldyBuffer;
 pub type FnGoldyBufferCreateWithData =
     unsafe extern "C" fn(*const GoldyDevice, *const u8, usize, GoldyBufferKind) -> *mut GoldyBuffer;
+pub type FnGoldyBufferCreateWithDataStride = unsafe extern "C" fn(
+    *const GoldyDevice,
+    *const u8,
+    usize,
+    GoldyBufferKind,
+    u32,
+) -> *mut GoldyBuffer;
 pub type FnGoldyBufferDestroy = unsafe extern "C" fn(*mut GoldyBuffer);
 pub type FnGoldyBufferSize = unsafe extern "C" fn(*const GoldyBuffer) -> u64;
+pub type FnGoldyBufferReadToCpu =
+    unsafe extern "C" fn(*const GoldyBuffer, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
+pub type FnGoldyBufferResourceIndex =
+    unsafe extern "C" fn(*const GoldyBuffer, GoldyResourceAccess) -> u32;
 pub type FnGoldyBufferWrite = unsafe extern "C" fn(*const GoldyBuffer, u64, *const u8, usize) -> GoldyResult;
 
 pub type FnGoldyClearError = unsafe extern "C" fn();

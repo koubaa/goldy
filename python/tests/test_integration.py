@@ -174,6 +174,36 @@ def test_render_clear_via_graph(device):
     assert np.all(pixels[:, :, 3] == 255)
 
 
+def test_compute_node_fills_buffer_with_42(device):
+    """Fill a buffer via TaskGraph compute_node and verify readback."""
+    import goldy
+
+    fill_shader = """
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = 42;
+}
+"""
+
+    buffer = goldy.Buffer.empty(device, 64 * 4, goldy.BufferKind.SCATTERED)
+    shader = goldy.ShaderModule.from_slang(device, fill_shader)
+    pipeline = goldy.ComputePipeline(device, shader)
+    idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+
+    graph = goldy.TaskGraph()
+    with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
+        node.bind_buffer(buffer, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
+
+    graph.dispatch(device)
+
+    values = np.frombuffer(buffer.read_to_cpu(device), dtype=np.uint32)
+    assert values.shape == (64,)
+    assert np.all(values == 42)
+
+
 def test_triangle_via_graph(device):
     """Render a triangle through TaskGraph and verify non-empty readback."""
     import goldy

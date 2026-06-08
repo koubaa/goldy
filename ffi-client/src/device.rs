@@ -18,6 +18,11 @@ impl Device {
     pub fn alloc_buffer_with_data<T: Pod>(&self, data: &[T], kind: BufferKind) -> Result<Buffer> {
         Buffer::from_slice(self, data, kind)
     }
+
+    /// Allocate an empty GPU buffer.
+    pub fn alloc_buffer(&self, size: u64, kind: BufferKind) -> Result<Buffer> {
+        Buffer::empty(self, size, kind)
+    }
 }
 
 impl Drop for Device {
