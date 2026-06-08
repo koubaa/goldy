@@ -7,6 +7,7 @@
 
 mod adapter;
 mod buffer;
+mod compute;
 mod device;
 mod error;
 mod instance;
@@ -20,6 +21,7 @@ mod types;
 
 pub use adapter::Adapter;
 pub use buffer::Buffer;
+pub use compute::{ComputeEncoder, ComputePipeline};
 pub use device::Device;
 pub use error::{GoldyError, Result};
 pub use instance::{AdapterInfo, Instance};

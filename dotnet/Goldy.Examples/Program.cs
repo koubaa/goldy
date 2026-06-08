@@ -6,6 +6,6 @@ class Program
         Console.WriteLine("Graphics rendering uses the Rust TaskGraph API (see goldy/examples/).");
         Console.WriteLine("Compute workloads remain available via ComputeEncoder.");
         Console.WriteLine();
-        Console.WriteLine("FFI example: goldy/ffi/examples/compute_simple.rs");
+        Console.WriteLine("FFI example: goldy/ffi-client/examples/compute_simple.rs");
     }
 }

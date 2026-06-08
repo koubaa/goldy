@@ -9,15 +9,12 @@ keywords = ["gpu", "graphics", "ffi", "c-bindings"]
 links = "goldy_ffi"
 
 [lib]
-# `rlib` for in-crate tests/examples; `cdylib`/`staticlib` for C/C++/Python/.NET clients.
+# `rlib` for in-crate tests; `cdylib`/`staticlib` for C/C++/Python/.NET clients.
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 # Core goldy library - default-features = false allows feature passthrough
 goldy = { path = "..", default-features = false }
-
-# Windowing for in-tree Rust examples (optional; see `examples` feature)
-winit = { version = "0.30", optional = true }
 
 # Error handling
 anyhow = "1.0"
@@ -49,12 +46,3 @@ default = ["vulkan", "dx12", "metal"]
 vulkan = ["goldy/vulkan"]
 dx12 = ["goldy/dx12"]
 metal = ["goldy/metal"]
-# winit window helpers (Rust-only; not part of the stable C header)
-winit = ["dep:winit"]
-# Interactive Rust examples (`ffi/examples/`)
-examples = ["winit", "goldy/examples"]
-
-[[example]]
-name = "compute_simple"
-path = "examples/compute_simple.rs"
-required-features = ["examples"]
