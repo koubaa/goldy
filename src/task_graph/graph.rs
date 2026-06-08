@@ -9,15 +9,17 @@ use super::{
 use crate::backend::{
     BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, TextureHandle,
 };
-use crate::buffer::{Buffer, BufferView};
+use crate::buffer::{Buffer, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::encoder::CommandEncoder;
 use crate::error::GoldyError;
+use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
+use crate::sampler::Sampler;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::TextureFormat;
+use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFormat};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -1012,6 +1014,8 @@ impl TaskGraph {
             label,
             target: target.backend_handle(),
             bindings: Vec::new(),
+            commands: Vec::new(),
+            push_constant_handles: Vec::new(),
         }
     }
 
@@ -1609,15 +1613,138 @@ impl<'a> NodeBuilder<'a> {
     }
 }
 
+/// One bindless push-constant slot in shader virtual-main parameter order.
+///
+/// Use with [`RenderPassBuilder::bind_shader_resources`]. Mosaic parcels belong in
+/// [`RenderPassBuilder::bind_parcel_mut`] (graph dependency + vertex views), not here.
+pub enum ShaderResourceSlot<'a> {
+    Parcel {
+        parcel: &'a crate::Parcel,
+        access: NodeAccess,
+    },
+    Sampler(&'a Sampler),
+}
+
+fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+    match access {
+        NodeAccess::Read => ResourceAccess::Read,
+        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+    }
+}
+
 /// Builder for a render pass targeting an offscreen [`crate::RenderTarget`].
 pub struct RenderPassBuilder<'a> {
     graph: &'a mut TaskGraph,
     label: &'static str,
     target: RenderTargetHandle,
     bindings: Vec<ResourceBinding>,
+    commands: Vec<RenderCommand>,
+    push_constant_handles: Vec<ResourceHandle>,
 }
 
 impl<'a> RenderPassBuilder<'a> {
+    /// Declare push-constant slots in shader parameter order and register graph bindings.
+    ///
+    /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
+    /// handles before each pipeline bind.
+    pub fn bind_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
+        for slot in slots {
+            match slot {
+                ShaderResourceSlot::Parcel { parcel, access } => {
+                    let resource_access = node_access_to_resource_access(*access);
+                    self.graph.stamp_targets.push(parcel.stamp_handle());
+                    self.bindings.push(ResourceBinding {
+                        resource: parcel.resource_id(),
+                        access: *access,
+                    });
+                    let handle = parcel.handle(resource_access).unwrap_or_else(|| {
+                        panic!(
+                            "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
+                             use bind_parcel_mut for geometry and bind views at draw time"
+                        )
+                    });
+                    self.push_constant_handles.push(handle);
+                }
+                ShaderResourceSlot::Sampler(sampler) => {
+                    let handle = sampler
+                        .handle(ResourceAccess::Read)
+                        .expect("ShaderResourceSlot::Sampler: missing bindless sampler index");
+                    self.push_constant_handles.push(handle);
+                }
+            }
+        }
+        self
+    }
+
+    /// Like [`Self::bind_parcel`] but for use while recording on `&mut self`.
+    pub fn bind_parcel_mut(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    pub fn clear(&mut self, color: Color) -> &mut Self {
+        self.commands.push(RenderCommand::Clear(color));
+        self
+    }
+
+    pub fn clear_depth(&mut self, depth: f32) -> &mut Self {
+        self.commands.push(RenderCommand::ClearDepth(depth));
+        self
+    }
+
+    /// Set the active pipeline and bind [`Self::bind_shader_resources`] slots when declared.
+    ///
+    /// Pipeline is bound before root constants (required on D3D12: root signature first).
+    pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
+        self.commands
+            .push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.push_constant_handles.is_empty() {
+            self.commands.push(RenderCommand::BindResourcesTyped {
+                handles: self.push_constant_handles.clone(),
+            });
+        }
+        self
+    }
+
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) -> &mut Self {
+        self.commands.push(RenderCommand::SetVertexBuffer {
+            slot,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
+        });
+        self
+    }
+
+    pub fn set_index_buffer(&mut self, buffer: &impl BufferSource, format: IndexFormat) -> &mut Self {
+        self.commands.push(RenderCommand::SetIndexBuffer {
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
+            format,
+        });
+        self
+    }
+
+    pub fn draw_indexed(
+        &mut self,
+        indices: std::ops::Range<u32>,
+        base_vertex: i32,
+        instances: std::ops::Range<u32>,
+    ) -> &mut Self {
+        self.commands.push(RenderCommand::DrawIndexed {
+            index_count: indices.end - indices.start,
+            instance_count: instances.end - instances.start,
+            first_index: indices.start,
+            base_vertex,
+            first_instance: instances.start,
+        });
+        self
+    }
+
     pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
@@ -1675,15 +1802,41 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
+    /// Finalize the node with commands recorded via [`Self::clear`], [`Self::set_pipeline`], etc.
+    pub fn finish_recorded(self) {
+        let RenderPassBuilder {
+            graph,
+            label,
+            target,
+            bindings,
+            commands,
+            push_constant_handles: _,
+        } = self;
+        graph.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::RenderPass { target, commands },
+        });
+    }
+
     /// Finalize the node with recorded [`RenderCommand`]s (e.g. from [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish)).
     pub fn finish(self, commands: Vec<RenderCommand>) {
-        self.graph.ir.nodes.push(TaskNode {
-            label: self.label,
-            bindings: self.bindings,
-            kind: NodeKind::RenderPass {
-                target: self.target,
-                commands,
-            },
+        self.push_node(commands);
+    }
+
+    fn push_node(self, commands: Vec<RenderCommand>) {
+        let RenderPassBuilder {
+            graph,
+            label,
+            target,
+            bindings,
+            push_constant_handles: _,
+            ..
+        } = self;
+        graph.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::RenderPass { target, commands },
         });
     }
 
@@ -1729,6 +1882,19 @@ mod tests {
         crate::compute::ComputePipeline::new(device, shader).unwrap()
     }
 
+    fn mock_render_pipeline(device: &Device, shader: &ShaderModule) -> RenderPipeline {
+        RenderPipeline::new(
+            device,
+            shader,
+            shader,
+            &crate::RenderPipelineDesc {
+                target_format: TextureFormat::Rgba8Unorm,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn compile_mixed_compute_render_inserts_barrier_and_submits_graph() {
         let device = mock_device();
@@ -1763,6 +1929,55 @@ mod tests {
         );
 
         graph.submit(&ctx).unwrap();
+    }
+
+    #[test]
+    fn render_pass_finish_recorded_auto_binds_shader_resources() {
+        use crate::backend::RenderCommand;
+
+        let device = mock_device();
+        let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
+        let parcel = retained_buffer_parcel(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_render_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &parcel,
+            access: NodeAccess::Read,
+        }]);
+        pass.clear(Color::GREEN);
+        pass.set_pipeline(&pipeline);
+        pass.finish_recorded();
+
+        let gcs = graph.compile_graph_commands();
+        let render_cmds = gcs
+            .iter()
+            .find_map(|c| match c {
+                GraphCommand::Render { commands, .. } => Some(commands.as_slice()),
+                _ => None,
+            })
+            .expect("render pass command");
+        assert!(
+            render_cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::BindResourcesTyped { .. })),
+            "set_pipeline should emit BindResourcesTyped from bind_shader_resources"
+        );
+        let set_pipe = render_cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::SetPipeline(_)))
+            .expect("SetPipeline");
+        let bind = render_cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::BindResourcesTyped { .. }))
+            .expect("BindResourcesTyped");
+        assert!(
+            set_pipe < bind,
+            "D3D12 requires SetPipeline before BindResourcesTyped"
+        );
     }
 
     #[test]

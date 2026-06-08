@@ -1,6 +1,7 @@
 //! Depth quads example - two fullscreen quads whose depths cross periodically.
 //!
-//! This example demonstrates `Surface::new_with_depth` and depth-tested rendering.
+//! Depth-tested rendering via an offscreen [`RenderTarget`] with a depth attachment
+//! (`RenderTarget::new_with_depth`), then blit to the swapchain through the task graph.
 //! A warm (red/orange) quad and a cool (teal/blue) quad both cover the entire
 //! screen.  They are *always drawn in the same order* (warm first, cool second),
 //! so without a depth buffer cool would always win.  With depth testing the quad
@@ -12,8 +13,8 @@
 use bytemuck::{Pod, Zeroable};
 use goldy::{
     BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    NodeAccess, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface,
+    TaskGraph, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -82,6 +83,8 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
     window: Option<Arc<Window>>,
     frame_count: u64,
     start_time: std::time::Instant,
@@ -95,10 +98,24 @@ impl App {
             device: None,
             pipeline: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             window: None,
             frame_count: 0,
             start_time: std::time::Instant::now(),
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new_with_depth(
+            device,
+            width.max(1),
+            height.max(1),
+            surface.format(),
+            Some(DepthFormat::Depth32Float),
+        )
+        .map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -109,8 +126,7 @@ impl App {
         );
         let ctx = device.create_context()?;
 
-        // Surface with a depth buffer for 3D depth testing
-        let surface = Surface::new_with_depth(&ctx, window.as_ref(), Some(DepthFormat::Depth32Float))?;
+        let surface = Surface::new(&ctx, window.as_ref())?;
 
         let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
 
@@ -130,9 +146,12 @@ impl App {
             },
         )?;
 
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
 
         Ok(())
     }
@@ -146,6 +165,7 @@ impl App {
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
 
         // Two independent sine-wave oscillations chosen so they cross ~twice per
         // second at 60 fps.  Both stay in (0.1, 0.9) so neither is ever clipped.
@@ -172,7 +192,7 @@ impl App {
             ));
         }
 
-        let frame = surface.begin()?;
+        self.frame_graph.clear();
 
         let mut encoder = CommandEncoder::new();
         {
@@ -188,7 +208,18 @@ impl App {
             pass.draw(0..6, 0..1);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass("depth_quads", scene_rt)
+            .bind_buffer(&warm_vb, NodeAccess::Read)
+            .bind_buffer(&cool_vb, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(scene_rt, swapchain);
+
+        let frame = surface.begin()?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.frame_count += 1;
@@ -200,6 +231,12 @@ impl App {
             if let Some(surface) = &mut self.surface {
                 if let Err(e) = surface.resize(new_size.width, new_size.height) {
                     tracing::error!("Failed to resize surface: {}", e);
+                }
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                match Self::create_scene_rt(device, surface) {
+                    Ok(rt) => self.scene_rt = Some(rt),
+                    Err(e) => tracing::error!("Failed to recreate scene render target: {}", e),
                 }
             }
         }

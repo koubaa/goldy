@@ -8,8 +8,9 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ShaderModule, Surface, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 
 // Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
@@ -249,6 +250,8 @@ impl EffectType {
 struct WindowState {
     window: Arc<Window>,
     surface: Surface,
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     pipeline: RenderPipeline,
     effect_type: EffectType,
 
@@ -268,9 +271,15 @@ struct WindowState {
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 impl WindowState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
+    }
+
     fn new(window: Arc<Window>, device: &Arc<goldy::Device>, effect_type: EffectType) -> anyhow::Result<Self> {
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(device, &surface)?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
         let pipeline = RenderPipeline::new(
             device,
@@ -286,6 +295,8 @@ impl WindowState {
         Ok(Self {
             window,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             pipeline,
             effect_type,
             start_time: Instant::now(),
@@ -360,6 +371,8 @@ impl WindowState {
             self.vertex_buffers.remove(0);
         }
 
+        self.frame_graph.clear();
+
         let mut encoder = CommandEncoder::new();
         {
             let mut pass = encoder.begin_render_pass();
@@ -369,16 +382,29 @@ impl WindowState {
             pass.draw(0..6, 0..1);
         }
 
-        frame.render(encoder)?;
+        self.frame_graph
+            .render_pass(self.effect_type.title(), &self.scene_rt)
+            .bind_buffer(&vertex_buffer, NodeAccess::Read)
+            .finish_encoder(encoder);
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.vertex_buffers.push(vertex_buffer);
         Ok(())
     }
 
-    fn handle_resize(&mut self, width: u32, height: u32) {
+    fn handle_resize(&mut self, device: &goldy::Device, width: u32, height: u32) {
         if width > 0 && height > 0 {
             let _ = self.surface.resize(width, height);
+            match Self::create_scene_rt(device, &self.surface) {
+                Ok(rt) => self.scene_rt = rt,
+                Err(e) => tracing::error!("[{}] Failed to recreate scene RT: {}", self.effect_type.title(), e),
+            }
         }
     }
 }
@@ -538,7 +564,9 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(new_size) => {
                 if let Some(s) = self.windows.get_mut(&window_id) {
-                    s.handle_resize(new_size.width, new_size.height);
+                    if let Some(device) = self.device.as_ref() {
+                        s.handle_resize(device, new_size.width, new_size.height);
+                    }
                 }
             }
 
