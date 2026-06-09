@@ -28,13 +28,30 @@ fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Op
 
 fn buffer_stride_for_bindless_index(
     buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    device_handle: DeviceHandle,
     index: u32,
-    _cat: crate::types::ResourceCategory,
+    cat: crate::types::ResourceCategory,
 ) -> Option<u32> {
-    buffers
-        .values()
-        .find(|b| b.bindless_index == Some(index))
-        .and_then(|b| b.element_stride)
+    // Uniform and storage buffers use separate bindless array indices; both may be 0.
+    for b in buffers.values() {
+        if b.device_handle != device_handle {
+            continue;
+        }
+        match cat {
+            crate::types::ResourceCategory::Scattered if b.is_storage => {
+                if b.bindless_index == Some(index) {
+                    return b.element_stride;
+                }
+            }
+            crate::types::ResourceCategory::Broadcast if !b.is_storage => {
+                if b.bindless_index == Some(index) {
+                    return b.element_stride;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn collect_slots_from_raw_bind(indices: &[u32], categories: &[Option<crate::types::ResourceCategory>]) -> Vec<SlotKey> {
@@ -838,7 +855,7 @@ pub(super) fn submit(
                             raw_indices,
                             &pipeline.push_constant_categories,
                             &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(buffers, idx, cat),
+                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
                             &pipeline.shader_debug_name,
                         )?;
                         let mut layout = PushLayout::default();
@@ -1696,7 +1713,7 @@ fn submit_graph_impl(
                             raw_indices,
                             &pipeline.push_constant_categories,
                             &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(buffers, idx, cat),
+                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
                             &pipeline.shader_debug_name,
                         )?;
                         let mut layout = PushLayout::default();

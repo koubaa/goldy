@@ -517,6 +517,12 @@ jobs:
       - name: Download Slang
         run: cd slang && chmod +x download.sh && ./download.sh
 
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libwayland-dev
+          rm -rf /var/lib/apt/lists/*
+
       - name: Verify lavapipe
         run: DISPLAY= vulkaninfo --summary | head -30
 

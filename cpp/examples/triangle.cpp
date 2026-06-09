@@ -7,6 +7,10 @@
  * Build: cmake --build build --target triangle
  */
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <goldy.hpp>
 
 #include <GLFW/glfw3.h>
