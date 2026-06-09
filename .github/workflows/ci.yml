@@ -520,7 +520,8 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libwayland-dev
+          # GLFW (FetchContent) requires Wayland + X11 dev packages on Linux.
+          apt-get install -y --no-install-recommends libwayland-dev libxkbcommon-dev xorg-dev
           rm -rf /var/lib/apt/lists/*
 
       - name: Verify lavapipe
