@@ -555,11 +555,10 @@ jobs:
         working-directory: cpp
         run: cmake --build build
 
-      - name: Run triangle example
+      - name: Run headless triangle example
         working-directory: cpp/build/examples
         run: |
-          ./triangle
-          # Verify output file was created
+          ./triangle_headless
           test -f triangle.ppm && echo "✓ triangle.ppm created successfully"
 
   # C++ bindings build and test (macOS with native Metal)
@@ -608,11 +607,10 @@ jobs:
         working-directory: cpp
         run: cmake --build build
 
-      - name: Run triangle example
+      - name: Run headless triangle example
         working-directory: cpp/build/examples
         run: |
-          ./triangle
-          # Verify output file was created
+          ./triangle_headless
           test -f triangle.ppm && echo "✓ triangle.ppm created successfully"
 
   # C++ bindings build (Windows)
