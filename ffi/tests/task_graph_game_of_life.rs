@@ -14,7 +14,7 @@ use goldy_ffi::{
     goldy_task_graph_compute_node_bind_buffer, goldy_task_graph_compute_node_bind_resources_raw,
     goldy_task_graph_compute_node_dispatch, goldy_task_graph_create, goldy_task_graph_destroy,
     goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_bind_buffer,
-    goldy_task_graph_render_pass_bind_resources_typed, goldy_task_graph_render_pass_clear,
+    goldy_task_graph_render_pass_bind_resources, goldy_task_graph_render_pass_clear,
     goldy_task_graph_render_pass_draw_fullscreen, goldy_task_graph_render_pass_finish,
     goldy_task_graph_render_pass_set_pipeline, GoldyBufferKind, GoldyColor, GoldyNodeAccess, GoldyRenderPipelineDesc,
     GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
@@ -92,7 +92,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
         let target = goldy_render_target_create(device, GRID_WIDTH, GRID_HEIGHT, GoldyTextureFormat::Rgba8Unorm);
         assert!(!target.is_null(), "{}", last_ffi_message());
 
-        let read_idx = goldy_buffer_resource_index(buf_a, GoldyResourceAccess::Read);
+        let read_idx = goldy_buffer_resource_index(buf_a, GoldyResourceAccess::ReadWrite);
         let write_idx = goldy_buffer_resource_index(buf_b, GoldyResourceAccess::Write);
         assert_ne!(read_idx, u32::MAX);
         assert_ne!(write_idx, u32::MAX);
@@ -133,10 +133,6 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let cells_idx = goldy_buffer_resource_index(buf_b, GoldyResourceAccess::Read);
-        assert_ne!(cells_idx, u32::MAX);
-        let typed = [0u32, cells_idx]; // Scattered + index
-
         let render_label = CString::new("game_of_life_render").unwrap();
         assert_eq!(
             goldy_task_graph_render_pass_begin(graph, render_label.as_ptr(), target),
@@ -170,8 +166,10 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             "{}",
             last_ffi_message()
         );
+        let render_buf = buf_b as *const goldy_ffi::GoldyBuffer;
+        let render_bufs = [render_buf];
         assert_eq!(
-            goldy_task_graph_render_pass_bind_resources_typed(graph, typed.as_ptr(), 1),
+            goldy_task_graph_render_pass_bind_resources(graph, render_bufs.as_ptr(), 1),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

@@ -240,6 +240,97 @@ pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types
     fragment_cats.or(fallback_cats).unwrap_or_default()
 }
 
+/// Extract per-slot DX12 bindless view expectations (`UAV` vs `SRV`) from `[goldy_*]` entry points.
+///
+/// Merging rules match [`extract_push_constant_categories`].
+pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate::types::BindlessSlotKind>> {
+    use crate::types::BindlessSlotKind;
+
+    let entries = find_all_entries(source);
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    fn slot_kind_for_param(param: &Param) -> Option<BindlessSlotKind> {
+        match &param.kind {
+            ParamKind::Resource => {
+                let ty = param.ty.trim();
+                if ty.starts_with("Scattered<") || ty == "ByteAddress" {
+                    Some(BindlessSlotKind::StorageUav)
+                } else if ty.starts_with("BufRO<") {
+                    Some(BindlessSlotKind::ReadOnlySrv)
+                } else {
+                    None
+                }
+            }
+            ParamKind::Broadcast => Some(BindlessSlotKind::UniformCbv),
+            _ => None,
+        }
+    }
+
+    fn extract_from_params(params: &[ParamItem]) -> Vec<Option<BindlessSlotKind>> {
+        let mut kinds: Vec<Option<BindlessSlotKind>> = Vec::new();
+        for item in params {
+            match item {
+                ParamItem::Single(p) => {
+                    if matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast) {
+                        kinds.push(slot_kind_for_param(p));
+                    }
+                }
+                ParamItem::Conditional {
+                    then_params,
+                    else_params,
+                    ..
+                } => {
+                    let then_count = then_params
+                        .iter()
+                        .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                        .count();
+                    let else_count = else_params
+                        .iter()
+                        .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                        .count();
+                    let max_slots = then_count.max(else_count);
+                    for i in 0..max_slots {
+                        let then_kind = then_params
+                            .iter()
+                            .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                            .nth(i)
+                            .and_then(slot_kind_for_param);
+                        let else_kind = else_params
+                            .iter()
+                            .filter(|p| matches!(p.kind, ParamKind::Resource | ParamKind::Broadcast))
+                            .nth(i)
+                            .and_then(slot_kind_for_param);
+                        if then_kind == else_kind {
+                            kinds.push(then_kind);
+                        } else {
+                            kinds.push(None);
+                        }
+                    }
+                }
+            }
+        }
+        kinds
+    }
+
+    let mut fragment_kinds: Option<Vec<Option<BindlessSlotKind>>> = None;
+    let mut fallback_kinds: Option<Vec<Option<BindlessSlotKind>>> = None;
+
+    for entry in &entries {
+        let kinds = extract_from_params(&entry.params);
+        if !kinds.is_empty() {
+            if entry.stage == Stage::Fragment {
+                fragment_kinds = Some(kinds);
+            } else if fallback_kinds.is_none() || entry.stage == Stage::Compute {
+                fallback_kinds = Some(kinds);
+            }
+        }
+    }
+
+    fragment_kinds.or(fallback_kinds).unwrap_or_default()
+}
+
 /// Transform a Slang source string that may contain `[goldy_*]` virtual entry
 /// points into a standard Slang source with generated `[shader(...)]` wrappers.
 ///
@@ -2033,6 +2124,20 @@ void cs_main(
         assert_eq!(cats[2], Some(ResourceCategory::Texture));
         assert_eq!(cats[3], Some(ResourceCategory::StorageImage));
         assert_eq!(cats[4], Some(ResourceCategory::Sampler));
+    }
+
+    #[test]
+    fn slot_kinds_scattered_vs_bufro() {
+        use crate::types::BindlessSlotKind;
+        let source = r#"
+[goldy_compute]
+[numthreads(8, 8, 1)]
+void cs_main(Scattered<uint> rw, BufRO<uint> ro, ThreadId id) {}
+"#;
+        let kinds = extract_push_constant_slot_kinds(source);
+        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds[0], Some(BindlessSlotKind::StorageUav));
+        assert_eq!(kinds[1], Some(BindlessSlotKind::ReadOnlySrv));
     }
 
     #[test]

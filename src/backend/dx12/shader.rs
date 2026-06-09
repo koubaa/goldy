@@ -113,6 +113,9 @@ pub(super) fn ensure_stage_compiled(
         if r.push_constant_categories.is_empty() {
             r.push_constant_categories = crate::slang::virtual_main::extract_push_constant_categories(&slang_source);
         }
+        if r.push_constant_slot_kinds.is_empty() {
+            r.push_constant_slot_kinds = crate::slang::virtual_main::extract_push_constant_slot_kinds(&slang_source);
+        }
         r
     };
 
@@ -151,6 +154,9 @@ pub(super) fn ensure_stage_compiled(
         }
         if existing.push_constant_categories.is_empty() {
             existing.push_constant_categories = new_reflection.push_constant_categories;
+        }
+        if existing.push_constant_slot_kinds.is_empty() {
+            existing.push_constant_slot_kinds = new_reflection.push_constant_slot_kinds;
         }
         if existing.binding_element_strides.is_empty() {
             existing.binding_element_strides = new_reflection.binding_element_strides;

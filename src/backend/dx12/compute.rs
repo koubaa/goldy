@@ -547,11 +547,17 @@ pub(super) fn create(
     let handle = state.next_compute_pipeline_handle;
     state.next_compute_pipeline_handle += 1;
 
-    let (cats, strides) = state
+    let (cats, slot_kinds, strides) = state
         .shaders
         .get(&compute_shader)
         .and_then(|s| s.reflection.as_ref())
-        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.push_constant_slot_kinds.clone(),
+                r.binding_element_strides.clone(),
+            )
+        })
         .unwrap_or_default();
 
     state.compute_pipelines.insert(
@@ -562,6 +568,7 @@ pub(super) fn create(
             root_signature,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: cats,
+            push_constant_slot_kinds: slot_kinds,
             binding_element_strides: strides,
             shader_debug_name,
         },
@@ -725,6 +732,12 @@ fn record_gpu_command(
                     |idx, cat| buffer_stride_for_bindless_index(&state.buffers, device_handle, idx, cat),
                     &pipeline.shader_debug_name,
                 )?;
+                crate::backend::validate_bindless_slot_kinds(
+                    raw_indices,
+                    &pipeline.push_constant_slot_kinds,
+                    |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                    &pipeline.shader_debug_name,
+                )?;
             }
             let mut layout = types::PushLayout::default();
             shared::fill_raw(&mut layout, raw_indices, raw_user);
@@ -745,6 +758,13 @@ fn record_gpu_command(
                 crate::backend::validate_typed_push_constants(
                     typed_handles,
                     &pipeline.push_constant_categories,
+                    &pipeline.shader_debug_name,
+                )?;
+                let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
+                crate::backend::validate_bindless_slot_kinds(
+                    &indices,
+                    &pipeline.push_constant_slot_kinds,
+                    |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
                     &pipeline.shader_debug_name,
                 )?;
             }

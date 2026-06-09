@@ -1625,6 +1625,31 @@ pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> 
     state.buffers.get(&buffer_handle).and_then(|b| b.bindless_offset)
 }
 
+/// Resolve which SRV/UAV/CBV view a bindless heap index refers to.
+pub(super) fn bindless_slot_kind_for_index(
+    state: &Dx12State,
+    device_handle: super::DeviceHandle,
+    index: u32,
+) -> Option<crate::types::BindlessSlotKind> {
+    use crate::types::BindlessSlotKind;
+    for b in state.buffers.values() {
+        if b.device_handle != device_handle {
+            continue;
+        }
+        if b.bindless_srv_offset == Some(index) {
+            return Some(BindlessSlotKind::ReadOnlySrv);
+        }
+        if b.bindless_offset == Some(index) {
+            return Some(if b.is_storage {
+                BindlessSlotKind::StorageUav
+            } else {
+                BindlessSlotKind::UniformCbv
+            });
+        }
+    }
+    None
+}
+
 /// Get the SRV (read-only / StructuredBuffer) bindless index for a storage buffer.
 /// Scattered buffers have both a UAV (at bindless_offset) and an SRV (at bindless_srv_offset).
 pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {

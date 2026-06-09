@@ -144,6 +144,30 @@ pub enum ResourceAccess {
     ReadWrite,
 }
 
+/// DX12 bindless descriptor view kind for a push-constant slot.
+///
+/// Scattered buffers get separate SRV and UAV heap indices; binding the wrong
+/// one compiles but reads zeros on WARP (and may misbehave on hardware).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BindlessSlotKind {
+    /// `StorageBuffer<T>` / `RWStructuredBuffer` (UAV).
+    StorageUav,
+    /// `BufRO<T>` / read-only `StructuredBuffer` (SRV).
+    ReadOnlySrv,
+    /// Broadcast uniform / CBV.
+    UniformCbv,
+}
+
+impl BindlessSlotKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::StorageUav => "storage UAV",
+            Self::ReadOnlySrv => "read-only SRV",
+            Self::UniformCbv => "uniform CBV",
+        }
+    }
+}
+
 /// Buffer kind / data access pattern for buffers.
 ///
 /// This describes how threads will access the buffer, which determines

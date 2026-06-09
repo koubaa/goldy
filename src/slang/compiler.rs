@@ -96,6 +96,11 @@ pub struct ShaderReflection {
     /// Used by backend validation when `BindResourcesTyped` is used to catch category
     /// mismatches against the shader's reflected expectations.
     pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    /// Per push-constant slot, the DX12 bindless view kind the shader expects
+    /// (`Scattered<T>` → UAV, `BufRO<T>` → SRV). Empty when source has no
+    /// `[goldy_*]` annotations. Re-derived from source at compile time (not serialized).
+    #[serde(skip)]
+    pub(crate) push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
     /// Per push-constant slot, the expected element stride (bytes) of the bound
     /// buffer. Populated from `[goldy_*]` source analysis + Slang reflection at
     /// compile time.  At dispatch time, backends compare each bound buffer's
@@ -1002,6 +1007,7 @@ impl SlangCompiler {
         Ok(ShaderReflection {
             parameter_blocks,
             push_constant_categories: Vec::new(),
+            push_constant_slot_kinds: Vec::new(),
             binding_element_strides: Vec::new(),
         })
     }

@@ -59,7 +59,7 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     let target = RenderTarget::new(&device, GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm)?;
 
-    let read_idx = buf_a.resource_index(ResourceAccess::Read)?;
+    let read_idx = buf_a.resource_index(ResourceAccess::ReadWrite)?;
     let write_idx = buf_b.resource_index(ResourceAccess::Write)?;
 
     let mut graph = TaskGraph::new();
@@ -72,15 +72,11 @@ fn main() -> goldy_ffi_client::Result<()> {
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
-    let cells_idx = buf_b.resource_index(ResourceAccess::Read)?;
     let mut pass = graph.render_pass("game_of_life_render", &target);
     pass.bind_buffer_mut(&buf_b, NodeAccess::Read);
     pass.clear(Color::BLACK);
     pass.set_pipeline(&render_pipeline);
-    pass.bind_resources_typed(&[ResourceHandle {
-        category: ResourceCategory::Scattered,
-        index: cells_idx,
-    }]);
+    pass.bind_resources(&[&buf_b]);
     pass.draw_fullscreen();
     pass.finish_recorded();
 

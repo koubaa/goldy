@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 pub(super) fn record(
     cmd: &ID3D12GraphicsCommandList7,
     commands: &[RenderCommand],
-    _device_handle: DeviceHandle,
+    device_handle: DeviceHandle,
     state: &Dx12State,
 ) -> anyhow::Result<()> {
     // COM: same pointer as ID3D12GraphicsCommandList for method calls.
@@ -61,20 +61,28 @@ pub(super) fn record(
                 }
             }
             RenderCommand::BindResources { buffers } => {
-                if crate::slang::layout_validation_enabled() {
-                    if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
-                        if !pipeline.binding_element_strides.is_empty() {
-                            let actual: Vec<Option<u32>> = buffers
-                                .iter()
-                                .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
-                                .collect();
-                            crate::backend::validate_binding_strides(
-                                &actual,
-                                &pipeline.binding_element_strides,
-                                &pipeline.shader_debug_name,
-                            )?;
-                        }
+                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
+                    if crate::slang::layout_validation_enabled() && !pipeline.binding_element_strides.is_empty() {
+                        let actual: Vec<Option<u32>> = buffers
+                            .iter()
+                            .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
+                            .collect();
+                        crate::backend::validate_binding_strides(
+                            &actual,
+                            &pipeline.binding_element_strides,
+                            &pipeline.shader_debug_name,
+                        )?;
                     }
+                    let indices: Vec<u32> = buffers
+                        .iter()
+                        .map(|h| state.buffers.get(h).and_then(|b| b.bindless_offset).unwrap_or(0))
+                        .collect();
+                    crate::backend::validate_bindless_slot_kinds(
+                        &indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                        &pipeline.shader_debug_name,
+                    )?;
                 }
                 let mut layout = types::PushLayout::default();
                 shared::fill_bindless(
@@ -96,6 +104,14 @@ pub(super) fn record(
                 indices: raw_indices,
                 user: raw_user,
             } => {
+                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
+                    crate::backend::validate_bindless_slot_kinds(
+                        raw_indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
                 let mut layout = types::PushLayout::default();
                 shared::fill_raw(&mut layout, raw_indices, raw_user);
                 unsafe {
@@ -112,6 +128,13 @@ pub(super) fn record(
                     crate::backend::validate_typed_push_constants(
                         typed_handles,
                         &pipeline.push_constant_categories,
+                        &pipeline.shader_debug_name,
+                    )?;
+                    let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
+                    crate::backend::validate_bindless_slot_kinds(
+                        &indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
                         &pipeline.shader_debug_name,
                     )?;
                 }

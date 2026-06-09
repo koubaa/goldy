@@ -69,7 +69,51 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     all(feature = "dx12", target_os = "windows"),
     all(feature = "metal", target_os = "macos"),
 ))]
-use crate::types::ResourceCategory;
+use crate::types::{BindlessSlotKind, ResourceCategory};
+
+/// Validate raw bindless indices against per-slot SRV/UAV expectations (DX12).
+///
+/// Only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
+/// `GOLDY_VALIDATION=layout`). Skips slots where reflection or index resolution
+/// is ambiguous.
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub(crate) fn validate_bindless_slot_kinds(
+    indices: &[u32],
+    expectations: &[Option<BindlessSlotKind>],
+    mut resolve: impl FnMut(u32) -> Option<BindlessSlotKind>,
+    shader_name: &str,
+) -> Result<()> {
+    if !crate::slang::layout_validation_enabled() || expectations.is_empty() {
+        return Ok(());
+    }
+    let mut mismatches: Vec<String> = Vec::new();
+    for (slot, &index) in indices.iter().enumerate() {
+        let Some(expected) = expectations.get(slot).copied().flatten() else {
+            continue;
+        };
+        let Some(actual) = resolve(index) else {
+            continue;
+        };
+        if actual != expected {
+            mismatches.push(format!(
+                "slot {slot}: shader expects {expected} bindless slot but index {index} resolves to {actual}",
+                expected = expected.name(),
+                actual = actual.name(),
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "bindless SRV/UAV mismatch in shader `{shader_name}`:\n  {}\n\
+             Hint: `Scattered<T>` / `StorageBuffer<T>` need `ResourceAccess::ReadWrite` or `Write` \
+             (UAV index); `BufRO<T>` needs `ResourceAccess::Read` (SRV index). \
+             Prefer `bind_resources(&[&buf])` or `Buffer::handle(access)` over raw indices.",
+            mismatches.join("\n  ")
+        );
+    }
+}
 
 /// Validate a typed push-constant array against per-slot category expectations
 /// reported by shader reflection.
@@ -1188,6 +1232,49 @@ mod push_constant_validation_tests {
             .to_string();
         assert!(err.contains("slot 0"), "should report slot 0: {err}");
         assert!(err.contains("slot 1"), "should report slot 1: {err}");
+    }
+}
+
+#[cfg(all(test, feature = "dx12", target_os = "windows"))]
+mod bindless_slot_validation_tests {
+    use super::validate_bindless_slot_kinds;
+    use crate::types::BindlessSlotKind;
+
+    #[test]
+    fn matching_srv_uav_passes() {
+        let expectations = vec![Some(BindlessSlotKind::StorageUav), Some(BindlessSlotKind::ReadOnlySrv)];
+        validate_bindless_slot_kinds(
+            &[10, 20],
+            &expectations,
+            |idx| {
+                Some(match idx {
+                    10 => BindlessSlotKind::StorageUav,
+                    20 => BindlessSlotKind::ReadOnlySrv,
+                    _ => return None,
+                })
+            },
+            "test_shader",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn srv_where_uav_expected_fails() {
+        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+        let expectations = vec![Some(BindlessSlotKind::StorageUav)];
+        let err = validate_bindless_slot_kinds(
+            &[5],
+            &expectations,
+            |_| Some(BindlessSlotKind::ReadOnlySrv),
+            "game_of_life_render",
+        )
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+        assert!(err.contains("SRV/UAV mismatch"), "{err}");
+        assert!(err.contains("slot 0"), "{err}");
+        assert!(err.contains("storage UAV"), "{err}");
+        assert!(err.contains("read-only SRV"), "{err}");
     }
 }
 
