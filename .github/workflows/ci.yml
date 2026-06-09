@@ -394,7 +394,7 @@ jobs:
         run: |
           python examples/adapter_info.py
           python examples/compute_demo.py
-          # game_of_life.py requires a display (GLFW window) - skipped on headless Linux CI
+          python examples/game_of_life_headless.py
 
   # Python bindings build and test (macOS with native Metal)
   python-macos:
@@ -447,7 +447,7 @@ jobs:
         run: |
           python examples/adapter_info.py
           python examples/compute_demo.py
-          python examples/game_of_life.py
+          python examples/game_of_life_headless.py
 
   # Python bindings build (Windows)
   python-windows:

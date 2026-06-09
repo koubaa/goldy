@@ -70,7 +70,9 @@ See the `examples/` directory for complete examples:
 
 - **triangle.py** / **triangle_headless.py** - Colored triangle via TaskGraph (headless readback)
 - **triangle_window.py** - Windowed triangle (requires GLFW)
+- **triangle_headless.py** - Headless triangle via TaskGraph (CI / no display)
 - **game_of_life.py** - Hybrid compute + render graph in a window (requires GLFW)
+- **game_of_life_headless.py** - Headless Game of Life smoke test (CI / no display)
 - **adapter_info.py** - Print GPU adapter information
 - **compute_demo.py** - Standalone compute shader example
 
