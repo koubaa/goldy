@@ -20,16 +20,26 @@ use crate::types::ResourceCategory;
 
 fn buffer_stride_for_bindless_index(
     buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+    device_handle: DeviceHandle,
     index: u32,
     cat: ResourceCategory,
 ) -> Option<u32> {
+    // DX12 uses a process-wide backend singleton; bindless indices are per-device heap
+    // offsets, so parallel tests must not resolve strides from another device's buffers.
     for b in buffers.values() {
+        if b.device_handle != device_handle {
+            continue;
+        }
         match cat {
-            ResourceCategory::Scattered if b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index) => {
-                return b.element_stride;
+            ResourceCategory::Scattered if b.is_storage => {
+                if b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index) {
+                    return b.element_stride;
+                }
             }
-            ResourceCategory::Broadcast if b.bindless_offset == Some(index) => {
-                return b.element_stride;
+            ResourceCategory::Broadcast if !b.is_storage => {
+                if b.bindless_offset == Some(index) {
+                    return b.element_stride;
+                }
             }
             _ => {}
         }
@@ -714,7 +724,7 @@ fn record_gpu_command(
                     raw_indices,
                     &pipeline.push_constant_categories,
                     &pipeline.binding_element_strides,
-                    |idx, cat| buffer_stride_for_bindless_index(&state.buffers, idx, cat),
+                    |idx, cat| buffer_stride_for_bindless_index(&state.buffers, device_handle, idx, cat),
                     &pipeline.shader_debug_name,
                 )?;
             }
