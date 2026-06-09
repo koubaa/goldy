@@ -6,8 +6,8 @@
 
 use goldy_ffi_client::{
     Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory,
-    ResourceHandle, ShaderModule, Surface, TaskGraph,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
+    TaskGraph,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -224,7 +224,7 @@ impl App {
                 (buf_b, buf_a)
             };
 
-            let read_idx = read_buf.resource_index(ResourceAccess::Read)?;
+            let read_idx = read_buf.resource_index(ResourceAccess::ReadWrite)?;
             let write_idx = write_buf.resource_index(ResourceAccess::Write)?;
 
             let mut node = self.frame_graph.compute_node("game_of_life", compute_pipeline);
@@ -237,16 +237,12 @@ impl App {
         }
 
         let current_buf = if self.use_buffer_a { buf_a } else { buf_b };
-        let cells_idx = current_buf.resource_index(ResourceAccess::Read)?;
 
         let mut pass = self.frame_graph.render_pass("game_of_life_render", scene_rt);
         pass.bind_buffer_mut(current_buf, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
-        pass.bind_resources_typed(&[ResourceHandle {
-            category: ResourceCategory::Scattered,
-            index: cells_idx,
-        }]);
+        pass.bind_resources(&[current_buf]);
         pass.draw_fullscreen();
         pass.finish_recorded();
 

@@ -6,8 +6,7 @@
 
 use goldy_ffi_client::{
     Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle,
-    ShaderModule, TaskGraph, TextureFormat,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, TaskGraph, TextureFormat,
 };
 
 const GRID_WIDTH: u32 = 128;
@@ -76,10 +75,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     pass.bind_buffer_mut(&buf_b, NodeAccess::Read);
     pass.clear(Color::BLACK);
     pass.set_pipeline(&render_pipeline);
-    pass.bind_resources_typed(&[ResourceHandle {
-        category: ResourceCategory::Scattered,
-        index: buf_b.resource_index(ResourceAccess::Read)?,
-    }]);
+    pass.bind_resources(&[&buf_b]);
     pass.draw_fullscreen();
     pass.finish_recorded();
 

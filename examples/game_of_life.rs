@@ -235,8 +235,8 @@ impl RenderState {
                 .bind_buffer_view(read_view, NodeAccess::Read)
                 .bind_buffer_view(write_view, NodeAccess::Write)
                 .bind_resources_raw_slice(&[
-                    read_view.handle(ResourceAccess::Read).unwrap().index(),
-                    write_view.handle(ResourceAccess::Write).unwrap().index(),
+                    read_view.resource_index(ResourceAccess::ReadWrite).unwrap(),
+                    write_view.resource_index(ResourceAccess::Write).unwrap(),
                 ])
                 .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
 
@@ -244,13 +244,12 @@ impl RenderState {
         }
 
         let current_view = if self.use_buffer_a { &self.view_a } else { &self.view_b };
-        let current_handle = current_view.handle(ResourceAccess::Read).unwrap();
 
         let mut pass = self.frame_graph.render_pass("game_of_life_render", &self.scene_rt);
         pass.bind_buffer_view_mut(current_view, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_typed(&[current_handle]);
+        pass.bind_resources_raw(&[current_view.resource_index(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..3, 0..1);
         pass.finish_recorded();
 

@@ -222,7 +222,7 @@ void render_frame(GpuState& gpu) {
         goldy::Buffer& read_buf = gpu.use_buffer_a ? gpu.buf_a : gpu.buf_b;
         goldy::Buffer& write_buf = gpu.use_buffer_a ? gpu.buf_b : gpu.buf_a;
 
-        const uint32_t read_idx = read_buf.resource_index(goldy::ResourceAccess::Read);
+        const uint32_t read_idx = read_buf.resource_index(goldy::ResourceAccess::ReadWrite);
         const uint32_t write_idx = write_buf.resource_index(goldy::ResourceAccess::Write);
         const uint32_t slots[] = {read_idx, write_idx};
 
@@ -238,14 +238,13 @@ void render_frame(GpuState& gpu) {
     }
 
     goldy::Buffer& current_buf = gpu.use_buffer_a ? gpu.buf_a : gpu.buf_b;
-    const uint32_t cells_idx = current_buf.resource_index(goldy::ResourceAccess::Read);
 
     {
         auto pass = gpu.frame_graph.render_pass("game_of_life_render", gpu.scene_rt);
         pass.bind_buffer(current_buf, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(gpu.render_pipeline)
-            .bind_resource_index(cells_idx)
+            .bind_resources(std::span<const goldy::Buffer* const>{&current_buf, 1})
             .draw_fullscreen();
     }
 

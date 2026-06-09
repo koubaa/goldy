@@ -94,7 +94,7 @@ static class GameOfLifeWindow
                     lastUpdate = now;
                     var readBuf = useBufferA ? bufA : bufB;
                     var writeBuf = useBufferA ? bufB : bufA;
-                    var readIdx = readBuf.ResourceIndex(ResourceAccess.Read);
+                    var readIdx = readBuf.ResourceIndex(ResourceAccess.ReadWrite);
                     var writeIdx = writeBuf.ResourceIndex(ResourceAccess.Write);
 
                     using (var node = frameGraph.ComputeNode("game_of_life", computePipeline))
@@ -110,7 +110,6 @@ static class GameOfLifeWindow
                 }
 
                 var currentBuf = useBufferA ? bufA : bufB;
-                var cellsIdx = currentBuf.ResourceIndex(ResourceAccess.Read);
 
                 using (var pass = frameGraph.RenderPass("game_of_life_render", sceneRt))
                 {
@@ -118,7 +117,7 @@ static class GameOfLifeWindow
                         .BindBuffer(currentBuf, NodeAccess.Read)
                         .Clear(Color.Black)
                         .SetPipeline(renderPipeline)
-                        .BindResourceIndex(cellsIdx)
+                        .BindResources(stackalloc Buffer[] { currentBuf })
                         .DrawFullscreen();
                 }
 
