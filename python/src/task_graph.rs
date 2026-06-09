@@ -66,7 +66,7 @@ impl PyTaskGraph {
             .borrow_mut()
             .take()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No render pass to finish"))?;
-        pass.commit(&mut *self.inner.borrow_mut());
+        pass.commit(&mut self.inner.borrow_mut());
         Ok(())
     }
 
@@ -76,7 +76,7 @@ impl PyTaskGraph {
             .borrow_mut()
             .take()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node to finish"))?;
-        node.commit_dispatch(&mut *self.inner.borrow_mut(), workgroups.0, workgroups.1, workgroups.2);
+        node.commit_dispatch(&mut self.inner.borrow_mut(), workgroups.0, workgroups.1, workgroups.2);
         Ok(())
     }
 
@@ -328,6 +328,7 @@ impl PyRenderPass {
     ///
     /// Pass a ``range`` for vertices/instances (e.g. ``draw(range(3))``) or use
     /// explicit ``first_vertex`` / ``vertex_count`` keyword arguments.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (vertices=None, *, first_vertex=0, vertex_count=None, instances=None, first_instance=0, instance_count=None))]
     fn draw<'py>(
         slf: PyRef<'py, Self>,
@@ -358,6 +359,7 @@ impl PyRenderPass {
     /// Draw indexed primitives.
     ///
     /// Pass a ``range`` for indices/instances or use explicit count keyword arguments.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (indices=None, *, first_index=0, index_count=None, base_vertex=0, instances=None, first_instance=0, instance_count=None))]
     fn draw_indexed<'py>(
         slf: PyRef<'py, Self>,

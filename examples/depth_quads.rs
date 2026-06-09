@@ -115,7 +115,6 @@ impl App {
             surface.format(),
             Some(DepthFormat::Depth32Float),
         )
-        .map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {

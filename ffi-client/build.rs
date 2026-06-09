@@ -11,7 +11,7 @@ fn main() {
         .unwrap_or_else(|_| find_target_output_dir(&out_dir));
 
     let dylib = dylib_filename();
-    if !lib_dir.join(&dylib).exists() {
+    if !lib_dir.join(dylib).exists() {
         panic!(
             "{dylib} not found in {}. Build it first with: cargo build -p goldy-ffi",
             lib_dir.display()

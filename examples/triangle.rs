@@ -57,7 +57,7 @@ impl App {
 
     fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
         let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {

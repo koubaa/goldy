@@ -243,6 +243,7 @@ pub fn extract_push_constant_categories(source: &str) -> Vec<Option<crate::types
 /// Extract per-slot DX12 bindless view expectations (`UAV` vs `SRV`) from `[goldy_*]` entry points.
 ///
 /// Merging rules match [`extract_push_constant_categories`].
+#[cfg(all(feature = "dx12", target_os = "windows"))]
 pub(crate) fn extract_push_constant_slot_kinds(source: &str) -> Vec<Option<crate::types::BindlessSlotKind>> {
     use crate::types::BindlessSlotKind;
 
@@ -2126,6 +2127,7 @@ void cs_main(
         assert_eq!(cats[4], Some(ResourceCategory::Sampler));
     }
 
+    #[cfg(all(test, feature = "dx12", target_os = "windows"))]
     #[test]
     fn slot_kinds_scattered_vs_bufro() {
         use crate::types::BindlessSlotKind;

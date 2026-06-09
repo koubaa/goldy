@@ -273,7 +273,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 impl WindowState {
     fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
         let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
     }
 
     fn new(window: Arc<Window>, device: &Arc<goldy::Device>, effect_type: EffectType) -> anyhow::Result<Self> {

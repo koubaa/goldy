@@ -117,7 +117,7 @@ fn create_initial_state() -> Vec<u32> {
 
 struct App {
     instance: Instance,
-    device: Option<Arc<goldy_ffi_client::Device>>,
+    device: Option<goldy_ffi_client::Device>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
@@ -158,11 +158,10 @@ impl App {
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(
-            self.instance
-                .request_adapter(&RequestAdapterOptions::default())?
-                .request_device(&DeviceDescriptor::default())?,
-        );
+        let device = self
+            .instance
+            .request_adapter(&RequestAdapterOptions::default())?
+            .request_device(&DeviceDescriptor::default())?;
 
         let surface = surface_from_window(&device, window.as_ref())?;
         let scene_rt = Self::create_scene_rt(&device, &surface)?;

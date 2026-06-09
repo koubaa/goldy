@@ -99,6 +99,7 @@ pub struct ShaderReflection {
     /// Per push-constant slot, the DX12 bindless view kind the shader expects
     /// (`Scattered<T>` → UAV, `BufRO<T>` → SRV). Empty when source has no
     /// `[goldy_*]` annotations. Re-derived from source at compile time (not serialized).
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
     #[serde(skip)]
     pub(crate) push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
     /// Per push-constant slot, the expected element stride (bytes) of the bound
@@ -1007,6 +1008,7 @@ impl SlangCompiler {
         Ok(ShaderReflection {
             parameter_blocks,
             push_constant_categories: Vec::new(),
+            #[cfg(all(feature = "dx12", target_os = "windows"))]
             push_constant_slot_kinds: Vec::new(),
             binding_element_strides: Vec::new(),
         })

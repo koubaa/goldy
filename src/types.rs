@@ -148,6 +148,7 @@ pub enum ResourceAccess {
 ///
 /// Scattered buffers get separate SRV and UAV heap indices; binding the wrong
 /// one compiles but reads zeros on WARP (and may misbehave on hardware).
+#[cfg(all(feature = "dx12", target_os = "windows"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BindlessSlotKind {
     /// `StorageBuffer<T>` / `RWStructuredBuffer` (UAV).
@@ -158,6 +159,7 @@ pub(crate) enum BindlessSlotKind {
     UniformCbv,
 }
 
+#[cfg(all(feature = "dx12", target_os = "windows"))]
 impl BindlessSlotKind {
     pub(crate) fn name(self) -> &'static str {
         match self {

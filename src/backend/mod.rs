@@ -63,13 +63,11 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
 }
 
-#[cfg(any(
-    test,
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
-))]
-use crate::types::{BindlessSlotKind, ResourceCategory};
+#[cfg(any(test, feature = "vulkan", all(feature = "metal", target_os = "macos"),))]
+use crate::types::ResourceCategory;
+
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+use crate::types::BindlessSlotKind;
 
 /// Validate raw bindless indices against per-slot SRV/UAV expectations (DX12).
 ///

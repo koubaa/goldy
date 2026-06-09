@@ -98,12 +98,7 @@ struct RenderState {
 impl RenderState {
     fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
         let (width, height) = surface.size();
-        Ok(RenderTarget::new(
-            device,
-            width.max(1),
-            height.max(1),
-            surface.format(),
-        )?)
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
     }
 
     fn new(window: Arc<Window>) -> Result<Self> {

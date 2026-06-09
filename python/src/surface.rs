@@ -161,7 +161,7 @@ impl PySurface {
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Frame already consumed"))?;
         let updated = self
             .inner
-            .submit_graph_to_frame(&mut *graph.inner.borrow_mut(), frame_val)
+            .submit_graph_to_frame(&mut graph.inner.borrow_mut(), frame_val)
             .into_py_result()?;
         frame.inner = Some(updated);
         Ok(())

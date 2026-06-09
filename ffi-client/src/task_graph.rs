@@ -14,6 +14,12 @@ pub struct TaskGraph {
     ptr: *mut GoldyTaskGraph,
 }
 
+impl Default for TaskGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskGraph {
     pub fn new() -> Self {
         let ptr = non_null_expect(unsafe { sys::goldy_task_graph_create() });
