@@ -21,6 +21,7 @@
 #elif defined(__APPLE__)
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3native.h>
+#include <objc/message.h>
 #include <objc/objc.h>
 #include <objc/runtime.h>
 #else
@@ -73,8 +74,9 @@ goldy::Surface create_surface(const goldy::Device& device, GLFWwindow* window) {
     if (!ns_window) {
         throw std::runtime_error("glfwGetCocoaWindow failed");
     }
+    using MsgSendFn = id (*)(id, SEL);
     void* ns_view = reinterpret_cast<void*>(
-        objc_msgSend(reinterpret_cast<id>(ns_window), sel_registerName("contentView")));
+        ((MsgSendFn)objc_msgSend)(reinterpret_cast<id>(ns_window), sel_registerName("contentView")));
     if (!ns_view) {
         throw std::runtime_error("NSWindow contentView is null");
     }
