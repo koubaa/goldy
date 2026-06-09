@@ -38,15 +38,15 @@ fn buffer_stride_for_bindless_index(
             continue;
         }
         match cat {
-            crate::types::ResourceCategory::Scattered if b.is_storage => {
-                if b.bindless_index == Some(index) {
-                    return b.element_stride;
-                }
+            crate::types::ResourceCategory::Scattered
+                if b.is_storage && b.bindless_index == Some(index) =>
+            {
+                return b.element_stride;
             }
-            crate::types::ResourceCategory::Broadcast if !b.is_storage => {
-                if b.bindless_index == Some(index) {
-                    return b.element_stride;
-                }
+            crate::types::ResourceCategory::Broadcast
+                if !b.is_storage && b.bindless_index == Some(index) =>
+            {
+                return b.element_stride;
             }
             _ => {}
         }

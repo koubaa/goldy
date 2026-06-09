@@ -31,15 +31,14 @@ fn buffer_stride_for_bindless_index(
             continue;
         }
         match cat {
-            ResourceCategory::Scattered if b.is_storage => {
-                if b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index) {
-                    return b.element_stride;
-                }
+            ResourceCategory::Scattered
+                if b.is_storage
+                    && (b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index)) =>
+            {
+                return b.element_stride;
             }
-            ResourceCategory::Broadcast if !b.is_storage => {
-                if b.bindless_offset == Some(index) {
-                    return b.element_stride;
-                }
+            ResourceCategory::Broadcast if !b.is_storage && b.bindless_offset == Some(index) => {
+                return b.element_stride;
             }
             _ => {}
         }
