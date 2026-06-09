@@ -25,15 +25,11 @@ fn buffer_stride_for_bindless_index(
 ) -> Option<u32> {
     for b in buffers.values() {
         match cat {
-            ResourceCategory::Scattered => {
-                if b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index) {
-                    return b.element_stride;
-                }
+            ResourceCategory::Scattered if b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index) => {
+                return b.element_stride;
             }
-            ResourceCategory::Broadcast => {
-                if b.bindless_offset == Some(index) {
-                    return b.element_stride;
-                }
+            ResourceCategory::Broadcast if b.bindless_offset == Some(index) => {
+                return b.element_stride;
             }
             _ => {}
         }

@@ -91,7 +91,7 @@ pub struct ParameterBlockLayout {
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
-    /// Per push-constant slot, the [`ResourceCategory`](crate::types::ResourceCategory)
+    /// Per push-constant slot, the [`ResourceCategory`]
     /// the shader expects. Populated from `[goldy_*]` entry-point analysis at compile time.
     /// Used by backend validation when `BindResourcesTyped` is used to catch category
     /// mismatches against the shader's reflected expectations.
@@ -664,8 +664,7 @@ impl SlangCompiler {
                     .map(|(i, opt_name)| {
                         let cat = binding_categories.get(i).copied().unwrap_or(None);
                         opt_name.as_deref().and_then(|name| {
-                            builtin_type_stride(name)
-                                .or_else(|| slf.reflect_binding_element_stride(request, name, cat))
+                            builtin_type_stride(name).or_else(|| slf.reflect_binding_element_stride(request, name, cat))
                         })
                     })
                     .collect();
@@ -794,8 +793,7 @@ impl SlangCompiler {
         layout_cat: SlangParameterCategory,
     ) -> Option<u32> {
         let layout_ptr = self.reflect_type_layout_ptr(request, type_name)?;
-        let size =
-            unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, layout_cat as i32) } as u32;
+        let size = unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, layout_cat as i32) } as u32;
         if size > 0 {
             Some(size)
         } else {
@@ -831,11 +829,9 @@ impl SlangCompiler {
             if field_type_layout.is_null() {
                 continue;
             }
-            let offset =
-                unsafe { (self.library.reflection_variable_layout_get_offset)(field_var, field_cat) } as u32;
-            let field_size = unsafe {
-                (self.library.reflection_type_layout_get_size)(field_type_layout, field_cat)
-            } as u32;
+            let offset = unsafe { (self.library.reflection_variable_layout_get_offset)(field_var, field_cat) } as u32;
+            let field_size =
+                unsafe { (self.library.reflection_type_layout_get_size)(field_type_layout, field_cat) } as u32;
             let field_extent = offset.saturating_add(field_size.max(1));
             extent = extent.max(field_extent);
         }
