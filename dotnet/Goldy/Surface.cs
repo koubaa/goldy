@@ -13,23 +13,19 @@ namespace Goldy;
 /// // Create surface from a window handle (platform-specific)
 /// var surface = Surface.CreateWin32(device, windowHandle);
 /// 
-/// // Render loop
+/// var graph = new TaskGraph();
+/// var sceneRt = new RenderTarget(device, surface.Width, surface.Height, surface.Format);
 /// while (running)
 /// {
-///     // Acquire next frame from swapchain
+///     graph.Clear();
+///     using (var pass = graph.RenderPass("main", sceneRt))
+///     {
+///         pass.Clear(Color.CornflowerBlue).SetPipeline(pipeline).Draw(3);
+///     }
+///     var swapchain = graph.DeclareSwapchainOutput();
+///     graph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
 ///     var frame = surface.Acquire();
-///     
-///     // Build render commands
-///     var encoder = new CommandEncoder();
-///     encoder.Clear(Color.CornflowerBlue);
-///     encoder.SetPipeline(pipeline);
-///     encoder.SetVertexBuffer(0, vertexBuffer);
-///     encoder.Draw(3);
-///     
-///     // Render to swapchain image (zero-copy!)
-///     frame.Render(encoder);
-///     
-///     // Present to screen
+///     surface.SubmitGraphToFrame(graph, frame);
 ///     surface.Present(frame);
 /// }
 /// </code>
@@ -63,6 +59,34 @@ public sealed class Surface : IDisposable
         if (handle == nint.Zero)
             throw GoldyException.FromLastError("Surface creation");
         
+        return new Surface(handle);
+    }
+
+    /// <summary>
+    /// Create a surface from an AppKit NSView pointer (macOS).
+    /// </summary>
+    public static Surface CreateAppKit(Device device, nint nsView)
+    {
+        device.ThrowIfDisposed();
+
+        var handle = NativeMethods.SurfaceCreateAppKit(device.Handle, nsView);
+        if (handle == nint.Zero)
+            throw GoldyException.FromLastError("Surface creation");
+
+        return new Surface(handle);
+    }
+
+    /// <summary>
+    /// Create a surface from Wayland wl_display and wl_surface pointers (Linux).
+    /// </summary>
+    public static Surface CreateWayland(Device device, nint display, nint surface)
+    {
+        device.ThrowIfDisposed();
+
+        var handle = NativeMethods.SurfaceCreateWayland(device.Handle, display, surface);
+        if (handle == nint.Zero)
+            throw GoldyException.FromLastError("Surface creation");
+
         return new Surface(handle);
     }
 
@@ -120,6 +144,20 @@ public sealed class Surface : IDisposable
     }
 
     /// <summary>
+    /// Submit a task graph to an acquired swapchain frame.
+    /// The graph must declare swapchain output and include a blit node.
+    /// </summary>
+    public void SubmitGraphToFrame(TaskGraph graph, SurfaceFrame frame)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        graph.ThrowIfDisposed();
+
+        var result = NativeMethods.SurfaceSubmitGraphToFrame(Handle, graph.Handle, frame.NativeHandle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Surface submit_graph_to_frame");
+    }
+
+    /// <summary>
     /// Present a rendered frame to the screen.
     /// This submits the frame to be displayed and returns immediately.
     /// </summary>
@@ -171,26 +209,12 @@ public sealed class SurfaceFrame
     public uint Height => NativeMethods.SurfaceFrameHeight(_handle);
 
     /// <summary>
-    /// Render commands to this frame.
-    /// This consumes the encoder.
+    /// Native frame box pointer (for submit_graph_to_frame).
     /// </summary>
-    /// <param name="encoder">The command encoder with recorded commands.</param>
-    /// <exception cref="GoldyException">Thrown if rendering fails.</exception>
-    public void Render(CommandEncoder encoder)
-    {
-        if (_handle == nint.Zero)
-            throw new InvalidOperationException("Frame has already been consumed");
-        
-        var encoderHandle = encoder.TakeHandle();
-        var result = NativeMethods.SurfaceFrameRender(_handle, encoderHandle);
-        // Note: encoder handle is now owned by native code
-        
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("SurfaceFrame render");
-    }
+    internal nint NativeHandle => _handle;
 
     /// <summary>
-    /// Take ownership of the native handle (for internal use).
+    /// Take ownership of the native handle (for present).
     /// </summary>
     internal nint TakeHandle()
     {

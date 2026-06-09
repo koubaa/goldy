@@ -60,7 +60,39 @@ public sealed class Buffer : IDisposable
     public static Buffer WithData<T>(Device device, ReadOnlySpan<T> data, BufferKind access) where T : unmanaged
     {
         var bytes = MemoryMarshal.AsBytes(data);
-        return new Buffer(device, bytes, access);
+        var stride = (uint)Marshal.SizeOf<T>();
+        return WithDataStride(device, bytes, access, stride);
+    }
+
+    /// <summary>
+    /// Create a buffer initialized with raw bytes and an explicit element stride.
+    /// </summary>
+    public static Buffer WithDataStride(Device device, ReadOnlySpan<byte> data, BufferKind access, uint elementStride)
+    {
+        device.ThrowIfDisposed();
+
+        nint handle;
+        unsafe
+        {
+            fixed (byte* ptr = data)
+            {
+                handle = NativeMethods.BufferCreateWithDataStride(
+                    device.Handle, (nint)ptr, (nuint)data.Length, access, elementStride);
+            }
+        }
+
+        if (handle == nint.Zero)
+            throw GoldyException.FromLastError("Buffer creation");
+
+        var buffer = new Buffer(handle, (ulong)data.Length, access);
+        return buffer;
+    }
+
+    private Buffer(nint handle, ulong size, BufferKind access)
+    {
+        Handle = handle;
+        Size = size;
+        Access = access;
     }
 
     /// <summary>
@@ -97,6 +129,39 @@ public sealed class Buffer : IDisposable
     public void Write<T>(ulong offset, ReadOnlySpan<T> data) where T : unmanaged
     {
         Write(offset, MemoryMarshal.AsBytes(data));
+    }
+
+    /// <summary>
+    /// Bindless resource slot index for shader binding.
+    /// </summary>
+    public uint ResourceIndex(ResourceAccess access)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var idx = NativeMethods.BufferResourceIndex(Handle, access);
+        if (idx == uint.MaxValue)
+            throw GoldyException.FromLastError("Buffer resource_index");
+        return idx;
+    }
+
+    /// <summary>
+    /// Read buffer contents back to CPU memory from offset 0.
+    /// </summary>
+    public byte[] ReadToCpu(Device device)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        device.ThrowIfDisposed();
+
+        var output = new byte[Size];
+        unsafe
+        {
+            fixed (byte* p = output)
+            {
+                var result = NativeMethods.BufferReadToCpu(Handle, device.Handle, (nint)p, (nuint)output.Length);
+                if (result != GoldyResult.Ok)
+                    throw GoldyException.FromLastError("Buffer read_to_cpu");
+            }
+        }
+        return output;
     }
 
     public void Dispose()

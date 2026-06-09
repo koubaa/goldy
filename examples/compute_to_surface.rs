@@ -2,7 +2,7 @@
 //!
 //! This example demonstrates the new Surface API where a compute shader
 //! writes directly to the swapchain texture via `frame.texture()`.
-//! No `RenderPipeline`, no `CommandEncoder`, no vertex buffers.
+//! No `RenderPipeline`, no raster pass, no vertex buffers.
 //!
 //! Run with: cargo run --example compute_to_surface
 

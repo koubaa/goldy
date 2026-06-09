@@ -76,22 +76,6 @@ public sealed class RenderTarget : IDisposable
     public nuint BufferSize => NativeMethods.RenderTargetBufferSize(Handle);
 
     /// <summary>
-    /// Render commands to this target.
-    /// This consumes the encoder.
-    /// </summary>
-    public void Render(CommandEncoder encoder)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        
-        var encoderHandle = encoder.TakeHandle();
-        var result = NativeMethods.RenderTargetRender(Handle, encoderHandle);
-        // Note: encoder handle is now owned by native code, don't destroy it
-        
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("RenderTarget render");
-    }
-
-    /// <summary>
     /// Read the rendered pixels to a CPU buffer.
     /// </summary>
     public byte[] ReadToCpu()

@@ -1,212 +1,101 @@
-# Command Encoding
+# Task Graph Rendering
 
-`CommandEncoder` records GPU rendering commands without executing them. It is completely lock-free and does not touch the GPU backend — you can create and fill encoders on any thread. The actual GPU work happens when you submit the commands through `Frame::render()` or `RenderTarget::render()`.
+Graphics commands are recorded through [`RenderPassBuilder`](../../src/task_graph/graph.rs) nodes inside a [`TaskGraph`](../../src/task_graph/graph.rs). The graph declares resource dependencies (buffers, textures, parcels) and submits all GPU work in one dispatch.
 
-## Recording Commands
+Windowed apps render to an offscreen [`RenderTarget`](../surfaces/overview.md), blit to the swapchain, then present. See [`examples/triangle.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/triangle.rs) for the canonical loop.
 
-```rust
-use goldy::{CommandEncoder, Color};
-
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-    pass.clear(Color::CORNFLOWER_BLUE);
-    pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, &vertices);
-    pass.draw(0..3, 0..1);
-} // pass ends when dropped
-
-let commands = encoder.finish();
-```
-
-## Render Pass
-
-A `RenderPass` is a borrow of the encoder that groups drawing commands. It begins with `begin_render_pass()` and ends when the `RenderPass` value is dropped.
+## Per-Frame Loop (windowed)
 
 ```rust
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-    // all draw commands go here
-}
+use goldy::{Color, NodeAccess, RenderTarget, Surface, TaskGraph};
+
+frame_graph.clear();
+
+let mut pass = frame_graph.render_pass("main", &scene_rt);
+pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+pass.clear(Color::CORNFLOWER_BLUE);
+pass.set_pipeline(&pipeline);
+pass.set_vertex_buffer(0, &vertex_buffer);
+pass.draw(0..3, 0..1);
+pass.finish_recorded();
+
+let swapchain = frame_graph.declare_swapchain_output();
+frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
+
+let frame = surface.begin()?;
+let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
+frame.present()?;
 ```
 
-Commands within a pass execute in recorded order.
+## Render Pass Builder
+
+`render_pass(label, target)` returns a builder that records draw commands for one offscreen target.
 
 ### Clearing
 
-Clear the color attachment, the depth buffer, or both:
-
 ```rust
 pass.clear(Color::BLACK);
-pass.clear_depth(1.0);  // standard depth clear (far plane)
-pass.clear_depth(0.0);  // reverse-Z depth clear
+pass.clear_depth(1.0);
 ```
 
-### Setting the Pipeline
-
-Bind the active `RenderPipeline`. You can switch pipelines within the same pass.
+### Pipeline and Buffers
 
 ```rust
-pass.set_pipeline(&scene_pipeline);
-// ... draw scene ...
-
-pass.set_pipeline(&ui_pipeline);
-// ... draw UI ...
+pass.set_pipeline(&pipeline);
+pass.set_vertex_buffer(0, &vertices);
+pass.set_index_buffer(&indices, IndexFormat::Uint16);
+pass.bind_resources(&[&uniforms, &textures]);
 ```
 
-### Vertex and Index Buffers
-
-Bind vertex data to a numbered slot. Both `Buffer` and `BufferView` are accepted — for pool-allocated views, the parent buffer and offset are resolved automatically.
+### Drawing
 
 ```rust
-pass.set_vertex_buffer(0, &vertex_buffer);
-
-// With an explicit additional offset:
-pass.set_vertex_buffer_offset(0, &vertex_buffer, byte_offset);
+pass.draw(0..3, 0..1);              // non-indexed
+pass.draw_indexed(0..6, 0..1);      // indexed
+pass.draw_fullscreen();             // 3-vertex fullscreen triangle
+pass.draw_quads(4);                 // instanced quads
 ```
 
-Bind an index buffer for indexed drawing:
+### Graph Dependencies
+
+Declare which resources the pass reads or writes so the runtime can track parcel lifetimes:
 
 ```rust
-use goldy::IndexFormat;
-
-pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
-
-// With an additional offset:
-pass.set_index_buffer_offset(&index_buffer, byte_offset, IndexFormat::Uint32);
+pass.bind_buffer_mut(&buf, NodeAccess::Read);
+pass.bind_texture_mut(&tex, NodeAccess::Read);
+pass.bind_parcel_mut(&parcel, NodeAccess::Write);
 ```
 
-### Binding Resources
+Call `finish_recorded()` when done recording commands for this pass node.
 
-Goldy's bindless model passes resource indices to shaders through push constants. There are three binding methods:
+## Offscreen-Only (tests, readback)
 
-**Typed handles** (preferred for new code) — each handle carries its `ResourceCategory`, enabling validation against shader reflection:
+For headless rendering without a window, dispatch the graph on a device context:
 
 ```rust
-let tex = texture.handle(ResourceAccess::Read).unwrap();
-let samp = sampler.handle(ResourceAccess::Read).unwrap();
-pass.bind_resources_typed(&[tex, samp]);
+let ctx = device.create_context()?;
+let mut graph = TaskGraph::new();
+let mut pass = graph.render_pass("clear", &target);
+pass.clear(Color::RED);
+pass.finish_recorded();
+graph.dispatch(&ctx)?;
+let pixels = target.read_to_cpu()?;
 ```
 
-**Buffer references** — extracts bindless indices from `Buffer` objects:
+## Hybrid Compute + Graphics
+
+Put compute `dispatch` nodes and `render_pass` nodes in the **same** graph, then submit once:
 
 ```rust
-pass.bind_resources(&[&uniform_buffer, &data_buffer]);
+frame_graph.write_buffer(&staging, &data);
+frame_graph.dispatch("sim", &compute_pipeline, (wg, 1, 1));
+// ... render_pass on scene_rt ...
+frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
+surface.submit_graph_to_frame(&mut frame_graph, frame)?;
 ```
 
-**Raw indices** — for manual control or when mixing resource types:
+## Notes
 
-```rust
-let tex_idx = texture.resource_index(ResourceAccess::Read).unwrap();
-let samp_idx = sampler.resource_index(ResourceAccess::Read).unwrap();
-pass.bind_resources_raw(&[tex_idx, samp_idx]);
-```
-
-Raw indices can also carry user scalars alongside bindless indices:
-
-```rust
-pass.bind_resources_raw_with_user(
-    &[buf_idx, tex_idx],  // bindless indices (region A)
-    &[frame_number],      // user scalars (region B)
-);
-```
-
-## Draw Calls
-
-### draw
-
-Draw non-indexed primitives:
-
-```rust
-// draw(vertex_range, instance_range)
-pass.draw(0..3, 0..1);      // 3 vertices, 1 instance
-pass.draw(0..6, 0..10);     // 6 vertices, 10 instances
-pass.draw(100..106, 0..1);  // 6 vertices starting at vertex 100
-```
-
-### draw_indexed
-
-Draw indexed primitives. Requires a prior `set_index_buffer()` call.
-
-```rust
-// draw_indexed(index_range, base_vertex, instance_range)
-pass.draw_indexed(0..36, 0, 0..1);
-
-// base_vertex is added to each index before vertex fetch
-pass.draw_indexed(0..6, 1000, 0..1);
-
-// negative base_vertex is allowed
-pass.draw_indexed(0..3, -50, 0..1);
-```
-
-### draw_fullscreen
-
-Draw a fullscreen triangle (3 vertices, no vertex buffer needed). Pair with `vs_fullscreen_triangle()` from `goldy_exp.vertex` or `fullscreen_position()`/`fullscreen_uv()` from `goldy_exp.primitives`.
-
-```rust
-pass.set_pipeline(&fullscreen_pipeline);
-pass.bind_resources(&[&uniform_buffer]);
-pass.draw_fullscreen();
-```
-
-This is more efficient than a fullscreen quad (3 vertices vs 6) and eliminates vertex buffer overhead entirely.
-
-### draw_quads
-
-Draw N instanced quads (6 vertices each, no vertex buffer needed). The shader reads per-instance data from a buffer and uses `quad_position()` from `goldy_exp.primitives` to generate vertex positions.
-
-```rust
-pass.set_pipeline(&instanced_pipeline);
-pass.bind_resources(&[&instance_buffer]);
-pass.draw_quads(400);  // draw 400 quads
-```
-
-## Submitting Commands
-
-After recording, submit the encoder to a surface frame or render target:
-
-```rust
-// Surface presentation
-let frame = surface.begin()?;
-frame.render(encoder)?;
-frame.present()?;
-
-// Headless render target
-target.render(encoder)?;
-```
-
-## Complete Example
-
-```rust
-let mut encoder = CommandEncoder::new();
-{
-    let mut pass = encoder.begin_render_pass();
-
-    pass.clear(Color::BLACK);
-    pass.clear_depth(1.0);
-
-    // Draw opaque geometry
-    pass.set_pipeline(&scene_pipeline);
-    pass.set_vertex_buffer(0, &mesh_vertices);
-    pass.set_index_buffer(&mesh_indices, IndexFormat::Uint32);
-    pass.bind_resources(&[&camera_uniforms]);
-    pass.draw_indexed(0..index_count, 0, 0..1);
-
-    // Draw fullscreen post-process
-    pass.set_pipeline(&post_pipeline);
-    pass.bind_resources(&[&post_uniforms]);
-    pass.draw_fullscreen();
-}
-
-let frame = surface.begin()?;
-frame.render(encoder)?;
-frame.present()?;
-```
-
-## Best Practices
-
-- **Batch draws by pipeline.** Pipeline switches are cheap but not free. Group objects that share the same pipeline.
-- **Clear once per pass.** Issue `clear()` at the start, then draw everything.
-- **Use convenience methods.** `draw_fullscreen()` and `draw_quads()` avoid unnecessary vertex buffer allocations.
-- **Encode on any thread.** `CommandEncoder` is lock-free; build command buffers in parallel if needed.
+- Depth buffers live on the offscreen `RenderTarget` (`RenderTarget::new_with_depth`), not on the swapchain surface.
+- Imperative graphics draw recording was removed; clients use `RenderPassBuilder::finish_recorded()`.
+- Compute-only swapchain output (no raster) uses `SwapchainOutput` directly — see [Compute to Surface](../compute/compute-to-surface.md).

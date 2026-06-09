@@ -5,7 +5,6 @@
 
 use crate::backend::{FrameToken, GpuBackend, SurfaceHandle};
 use crate::context::Context as GpuContext;
-use crate::encoder::CommandEncoder;
 use crate::task_graph::TaskGraph;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
@@ -49,29 +48,20 @@ pub struct Frame {
 }
 
 impl Surface {
+    /// Create a surface for any type that exposes window/display handles (e.g. winit, SDL).
+    ///
+    /// This only requires [`HasWindowHandle`] and [`HasDisplayHandle`] — it is not tied to a
+    /// particular window toolkit. The stable C ABI (`libgoldy_ffi`) currently exposes separate
+    /// platform entry points instead (`goldy_surface_create_win32`, `goldy_surface_create_appkit`),
+    /// which forces FFI clients and examples to extract raw handles themselves. That coupling
+    /// should be loosened over time (e.g. a portable surface-create descriptor in the C header)
+    /// so `goldy-ffi-client` can offer the same constructor shape without window-toolkit code
+    /// in application examples.
     pub fn new<W>(context: &GpuContext, window: &W) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
         Self::new_with_config(context, window, SurfaceConfig::default())
-    }
-
-    pub fn new_with_depth<W>(
-        context: &GpuContext,
-        window: &W,
-        depth_format: Option<crate::types::DepthFormat>,
-    ) -> Result<Self>
-    where
-        W: HasWindowHandle + HasDisplayHandle,
-    {
-        Self::new_with_config(
-            context,
-            window,
-            SurfaceConfig {
-                depth_format,
-                ..Default::default()
-            },
-        )
     }
 
     /// Create a surface bound to `context`'s submission timeline.
@@ -260,21 +250,27 @@ impl Surface {
             self.build_resolver_for_submit_graph(graph, &node_waves)?
         };
 
-        // ── Step 3: emit early commands from the original IR + resolver ──────
-        let early_cmds = {
-            let _tz = tracy_zone!("surface.submit_graph.emit_early");
-            crate::task_graph::analysis::emit_waves_to_commands(
-                graph.ir(),
-                &schedule.waves[..split_wave],
-                resolver.as_ref(),
-            )
-        };
-
-        // ── Step 4: submit early commands ────────────────────────────────────
-        if !early_cmds.is_empty() {
+        // ── Step 3–4: emit + submit early partition ──────────────────────────
+        if split_wave > 0 {
+            let early_waves = &schedule.waves[..split_wave];
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_partition_early");
-            backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+            if crate::task_graph::analysis::waves_contain_render_pass(graph.ir(), early_waves) {
+                let early_g = crate::task_graph::analysis::emit_graph_commands_for_waves(
+                    graph.ir(),
+                    early_waves,
+                    resolver.as_ref(),
+                );
+                if !early_g.is_empty() {
+                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                }
+            } else {
+                let early_cmds =
+                    crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
+                if !early_cmds.is_empty() {
+                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                }
+            }
         }
 
         // ── Step 5: deferred surface acquire ─────────────────────────────────
@@ -348,18 +344,26 @@ impl Surface {
             self.build_resolver_for_submit_graph(graph, &node_waves)?
         };
 
-        let early_cmds = {
-            let _tz = tracy_zone!("surface.submit_graph_to_frame.emit_early");
-            crate::task_graph::analysis::emit_waves_to_commands(
-                graph.ir(),
-                &schedule.waves[..split_wave],
-                resolver.as_ref(),
-            )
-        };
-        if !early_cmds.is_empty() {
+        if split_wave > 0 {
+            let early_waves = &schedule.waves[..split_wave];
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_graph_to_frame.partition_early");
-            backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+            if crate::task_graph::analysis::waves_contain_render_pass(graph.ir(), early_waves) {
+                let early_g = crate::task_graph::analysis::emit_graph_commands_for_waves(
+                    graph.ir(),
+                    early_waves,
+                    resolver.as_ref(),
+                );
+                if !early_g.is_empty() {
+                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                }
+            } else {
+                let early_cmds =
+                    crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
+                if !early_cmds.is_empty() {
+                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                }
+            }
         }
 
         let swapchain_tex = frame.texture();
@@ -515,12 +519,6 @@ impl Frame {
         self.texture
             .as_ref()
             .expect("swapchain texture is only cleared after present")
-    }
-
-    pub fn render(&self, encoder: CommandEncoder) -> Result<()> {
-        let commands = encoder.finish();
-        let mut backend = self.backend.lock().unwrap();
-        backend.record_render(&self.token, &commands)
     }
 
     /// Submit recorded GPU work for this frame. Does not present.
@@ -683,13 +681,21 @@ mod tests {
     }
 
     #[test]
-    fn test_surface_with_depth() {
+    fn test_surface_with_depth_config() {
         use crate::types::DepthFormat;
 
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth24Plus)).unwrap();
+        let surface = Surface::new_with_config(
+            &ctx,
+            &window,
+            SurfaceConfig {
+                depth_format: Some(DepthFormat::Depth24Plus),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(surface.width(), 800);
         assert_eq!(surface.height(), 600);
@@ -761,43 +767,53 @@ mod tests {
     }
 
     #[test]
-    fn test_surface_frame_render_and_present() {
+    fn test_surface_graph_render_and_present() {
+        use crate::render_target::RenderTarget;
+
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
         let surface = Surface::new(&ctx, &window).unwrap();
+        let scene_rt = RenderTarget::new(&device, surface.width(), surface.height(), surface.format()).unwrap();
 
-        let frame = surface.begin().unwrap();
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("clear", &scene_rt);
+        pass.clear(crate::types::Color::RED);
+        pass.finish_recorded();
+        let swapchain = graph.declare_swapchain_output();
+        graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
 
-        let mut encoder = crate::encoder::CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(crate::types::Color::RED);
-        }
-
-        frame.render(encoder).unwrap();
+        let frame = surface.submit_graph(&mut graph).unwrap();
         frame.present().unwrap();
     }
 
     #[test]
-    fn test_surface_depth_frame_render() {
+    fn test_surface_graph_render_with_depth_rt() {
+        use crate::render_target::RenderTarget;
         use crate::types::DepthFormat;
 
         let device = create_test_device();
         let ctx = device.create_context().unwrap();
         let window = MockWindow::new(800, 600);
-        let surface = Surface::new_with_depth(&ctx, &window, Some(DepthFormat::Depth32Float)).unwrap();
+        let surface = Surface::new(&ctx, &window).unwrap();
+        let scene_rt = RenderTarget::new_with_depth(
+            &device,
+            surface.width(),
+            surface.height(),
+            surface.format(),
+            Some(DepthFormat::Depth32Float),
+        )
+        .unwrap();
 
-        let frame = surface.begin().unwrap();
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("depth_clear", &scene_rt);
+        pass.clear(crate::types::Color::CORNFLOWER_BLUE);
+        pass.clear_depth(1.0);
+        pass.finish_recorded();
+        let swapchain = graph.declare_swapchain_output();
+        graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
 
-        let mut encoder = crate::encoder::CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(crate::types::Color::CORNFLOWER_BLUE);
-            pass.clear_depth(1.0);
-        }
-
-        frame.render(encoder).unwrap();
+        let frame = surface.submit_graph(&mut graph).unwrap();
         frame.present().unwrap();
     }
 
@@ -885,7 +901,7 @@ mod tests {
         use crate::retained_pool::RetainedPool;
         use crate::shader::ShaderModule;
         use crate::task_graph::NodeAccess;
-        use crate::types::{BufferFlags, BufferKind, ResourceAccess};
+        use crate::types::{BufferFlags, BufferKind};
 
         let device = Arc::new(create_test_device());
         let ctx = device.create_context().unwrap();
@@ -923,7 +939,7 @@ mod tests {
         use crate::retained_pool::RetainedPool;
         use crate::shader::ShaderModule;
         use crate::task_graph::NodeAccess;
-        use crate::types::{BufferFlags, BufferKind, ResourceAccess};
+        use crate::types::{BufferFlags, BufferKind};
 
         let device = Arc::new(create_test_device());
         let ctx = device.create_context().unwrap();

@@ -41,37 +41,43 @@ using Goldy;
 using var instance = new Instance();
 using var device = instance.CreateDevice(DeviceType.DiscreteGpu);
 using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);
+using var graph = new TaskGraph();
 
-var encoder = new CommandEncoder();
-encoder.Clear(new Color(0.2f, 0.3f, 0.8f, 1.0f));
+using (var pass = graph.RenderPass("clear", target))
+    pass.Clear(Color.CornflowerBlue);
 
-target.Render(encoder);
-
+graph.Dispatch(device);
 byte[] pixels = target.ReadToCpu();
-Console.WriteLine($"Rendered {pixels.Length} bytes ({target.Width}x{target.Height})");
 ```
+
+See `Goldy.Examples/TriangleHeadless.cs` for a full triangle readback demo.
 
 ### Windowed Rendering
 
-For interactive applications, use `Surface` with a window handle:
+Build a task graph each frame, blit an offscreen `RenderTarget` to the swapchain, then present:
 
 ```csharp
-using Goldy;
+using var graph = new TaskGraph();
+graph.Clear();
 
-using var surface = new Surface(device, windowHandle);
-
-while (running)
+using (var pass = graph.RenderPass("main", sceneRt))
 {
-    using var frame = surface.Acquire();
-
-    var encoder = new CommandEncoder();
-    encoder.Clear(Color.CornflowerBlue);
-    // ... draw calls ...
-
-    frame.Render(encoder);
-    surface.Present(frame);
+    pass.BindBuffer(vertexBuffer, NodeAccess.Read);
+    pass.Clear(Color.CornflowerBlue);
+    pass.SetPipeline(pipeline);
+    pass.SetVertexBuffer(0, vertexBuffer);
+    pass.Draw(3);
 }
+
+var swapchain = graph.DeclareSwapchainOutput();
+graph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
+
+using var frame = surface.Acquire();
+surface.SubmitGraphToFrame(graph, frame);
+surface.Present(frame);
 ```
+
+See `Goldy.Examples/TriangleWindow.cs` and `GameOfLifeWindow.cs`.
 
 ### Shaders (Slang)
 
@@ -191,25 +197,40 @@ public sealed class RenderPipelineDesc
 }
 ```
 
-### CommandEncoder / RenderPass
+### TaskGraph / RenderPass / ComputeNode
 
 ```csharp
-public sealed class CommandEncoder
+public sealed class TaskGraph : IDisposable
 {
-    public CommandEncoder();
-    public void Clear(Color color);
-    public RenderPass BeginRenderPass();
+    public TaskGraph();
+    public void Clear();
+    public void WriteBuffer(Buffer buffer, ulong offset, ReadOnlySpan<byte> data);
+    public RenderPassScope RenderPass(string label, RenderTarget target);
+    public ComputeNodeScope ComputeNode(string label, ComputePipeline pipeline,
+        uint workgroupsX = 1, uint workgroupsY = 1, uint workgroupsZ = 1);
+    public SwapchainOutput DeclareSwapchainOutput();
+    public void CopyRenderTargetToSwapchain(RenderTarget source, SwapchainOutput swapchain);
+    public void Dispatch(Device device);  // headless: submit and block
 }
 
-public sealed class RenderPass : IDisposable
+public sealed class RenderPassScope : IDisposable
 {
+    public void BindBuffer(Buffer buffer, NodeAccess access);
+    public void Clear(Color color);
     public void SetPipeline(RenderPipeline pipeline);
     public void SetVertexBuffer(uint slot, Buffer buffer);
-    public void Draw(uint vertexStart, uint vertexCount,
-                     uint instanceStart = 0, uint instanceCount = 1);
-    public void DrawIndexed(uint indexCount, uint instanceCount = 1);
+    public void Draw(uint vertexCount, uint instanceCount = 1);
+    public void DrawFullscreen();
+}
+
+public sealed class ComputeNodeScope : IDisposable
+{
+    public ComputeNodeScope BindBuffer(Buffer buffer, NodeAccess access);
+    public ComputeNodeScope BindResourcesRaw(ReadOnlySpan<uint> indices);
 }
 ```
+
+Graphics and compute both go through `TaskGraph`.
 
 ### RenderTarget
 
@@ -217,7 +238,6 @@ public sealed class RenderPass : IDisposable
 public sealed class RenderTarget : IDisposable
 {
     public RenderTarget(Device device, uint width, uint height, TextureFormat format);
-    public void Render(CommandEncoder encoder);
     public byte[] ReadToCpu();
     public void ReadToBuffer(byte[] output);
     public uint Width { get; }
@@ -234,6 +254,7 @@ public sealed class Surface : IDisposable
 {
     public Surface(Device device, nint windowHandle);
     public SurfaceFrame Acquire();
+    public void SubmitGraphToFrame(TaskGraph graph, SurfaceFrame frame);
     public void Present(SurfaceFrame frame);
     public void Resize(uint width, uint height);
     public uint Width { get; }
@@ -242,7 +263,8 @@ public sealed class Surface : IDisposable
 
 public sealed class SurfaceFrame : IDisposable
 {
-    public void Render(CommandEncoder encoder);
+    public uint Width { get; }
+    public uint Height { get; }
 }
 ```
 
@@ -253,20 +275,9 @@ public sealed class ComputePipeline : IDisposable
 {
     public ComputePipeline(Device device, ShaderModule computeShader);
 }
-
-public sealed class ComputeEncoder
-{
-    public ComputeEncoder();
-    public void SetPipeline(ComputePipeline pipeline);
-    public void BindResources(params Buffer[] buffers);
-    public void BindResourcesRaw(uint[] indices);
-    public void Dispatch(uint x, uint y, uint z);
-    public void DispatchIndirect(Buffer buffer, ulong offset);
-    public void ClearBuffer(Buffer buffer, ulong offset, ulong size);
-    public void Dispatch(Device device);     // dispatch and block
-    public ulong Submit(Device device);      // submit, return timeline value
-}
 ```
+
+Record compute via `TaskGraph.ComputeNode` (see `ComputeNodeScope` above). Headless submission uses `TaskGraph.Dispatch`.
 
 ### Texture / Sampler
 
@@ -321,14 +332,6 @@ public struct Color
 }
 ```
 
-### Non-Blocking Submissions
+### Headless vs windowed submission
 
-`ComputeEncoder.Submit` returns a `ulong` device timeline value. Poll or wait on it via `Device.GpuProgress` and `Device.WaitUntil`:
-
-```csharp
-ulong ticket = computeEncoder.Submit(device);
-
-// ... do other work ...
-
-device.WaitUntil(ticket);   // block until the GPU catches up
-```
+`TaskGraph.Dispatch(device)` analyzes the graph, submits GPU work, and blocks until complete. For windowed presentation, build the graph (render passes, compute nodes, optional swapchain blit), then call `Surface.SubmitGraphToFrame` followed by `Surface.Present`.

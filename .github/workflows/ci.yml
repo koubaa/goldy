@@ -143,6 +143,12 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --features vulkan --test '*'
 
+      - name: Run goldy-ffi integration tests
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test -p goldy-ffi --features vulkan
+
   # Full GPU tests using native Metal backend (macOS)
   test-metal:
     name: Metal Tests (macOS)
@@ -196,6 +202,12 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --test '*'
+
+      - name: Run goldy-ffi integration tests
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test -p goldy-ffi
 
   # Build documentation
   docs:
@@ -311,6 +323,13 @@ jobs:
           GOLDY_DX12_NO_DEBUG: "1"
         run: cargo nextest run --features dx12 --test-threads=1
 
+      - name: Run goldy-ffi integration tests (DX12 + WARP)
+        env:
+          GOLDY_BACKEND: dx12
+          GOLDY_DX12_ALLOW_WARP: "1"
+          GOLDY_DX12_NO_DEBUG: "1"
+        run: cargo nextest run -p goldy-ffi --features dx12 --test-threads=1
+
   # Python bindings build and test (Linux with lavapipe)
   python-linux:
     name: Python Bindings (Linux)
@@ -375,7 +394,7 @@ jobs:
         run: |
           python examples/adapter_info.py
           python examples/compute_demo.py
-          # game_of_life.py requires a display (GLFW window) - skipped on headless Linux CI
+          python examples/game_of_life_headless.py
 
   # Python bindings build and test (macOS with native Metal)
   python-macos:
@@ -428,7 +447,7 @@ jobs:
         run: |
           python examples/adapter_info.py
           python examples/compute_demo.py
-          python examples/game_of_life.py
+          python examples/game_of_life_headless.py
 
   # Python bindings build (Windows)
   python-windows:
@@ -498,6 +517,13 @@ jobs:
       - name: Download Slang
         run: cd slang && chmod +x download.sh && ./download.sh
 
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          # GLFW (FetchContent) requires Wayland + X11 dev packages on Linux.
+          apt-get install -y --no-install-recommends libwayland-dev libxkbcommon-dev xorg-dev
+          rm -rf /var/lib/apt/lists/*
+
       - name: Verify lavapipe
         run: DISPLAY= vulkaninfo --summary | head -30
 
@@ -529,11 +555,10 @@ jobs:
         working-directory: cpp
         run: cmake --build build
 
-      - name: Run triangle example
+      - name: Run headless triangle example
         working-directory: cpp/build/examples
         run: |
-          ./triangle
-          # Verify output file was created
+          ./triangle_headless
           test -f triangle.ppm && echo "✓ triangle.ppm created successfully"
 
   # C++ bindings build and test (macOS with native Metal)
@@ -582,11 +607,10 @@ jobs:
         working-directory: cpp
         run: cmake --build build
 
-      - name: Run triangle example
+      - name: Run headless triangle example
         working-directory: cpp/build/examples
         run: |
-          ./triangle
-          # Verify output file was created
+          ./triangle_headless
           test -f triangle.ppm && echo "✓ triangle.ppm created successfully"
 
   # C++ bindings build (Windows)

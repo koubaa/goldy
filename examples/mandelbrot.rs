@@ -3,8 +3,8 @@
 //! Run with: cargo run --example mandelbrot
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ShaderModule, Surface,
+    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
 };
 use std::sync::Arc;
 use winit::{
@@ -32,6 +32,8 @@ struct App {
     uniform_buffer: Option<Buffer>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
     center: [f32; 2],
     zoom: f32,
     start_time: std::time::Instant,
@@ -48,11 +50,18 @@ impl App {
             uniform_buffer: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             center: [-0.5, 0.0],
             zoom: 1.0,
             start_time: std::time::Instant::now(),
             frame_count: 0,
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -89,11 +98,14 @@ impl App {
             goldy::BufferFlags::empty(),
         )?;
 
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.uniform_buffer = Some(uniform_buffer);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
 
         Ok(())
     }
@@ -109,6 +121,7 @@ impl App {
 
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
 
         // Update uniform buffer with current view parameters
@@ -119,21 +132,21 @@ impl App {
         };
         uniform_buffer.write_data(0, &[uniforms])?;
 
-        // Acquire frame
+        self.frame_graph.clear();
+
+        let mut pass = self.frame_graph.render_pass("mandelbrot", scene_rt);
+        pass.bind_buffer_mut(uniform_buffer, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(pipeline);
+        pass.bind_resources(&[uniform_buffer]);
+        pass.draw_fullscreen();
+        pass.finish_recorded();
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
+
         let frame = surface.begin()?;
-
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color::BLACK);
-            pass.set_pipeline(pipeline);
-            // Pass buffer indices via push constants
-            pass.bind_resources(&[uniform_buffer]);
-            // No vertex buffer needed - shader uses SV_VertexID
-            pass.draw_fullscreen();
-        }
-
-        frame.render(encoder)?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         Ok(())
@@ -143,6 +156,11 @@ impl App {
         if new_size.width > 0 && new_size.height > 0 {
             if let Some(surface) = &mut self.surface {
                 let _ = surface.resize(new_size.width, new_size.height);
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+                    self.scene_rt = Some(rt);
+                }
             }
         }
     }

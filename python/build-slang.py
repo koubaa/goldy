@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Copy Slang libraries to the Python package directory for wheel building.
+"""Copy Slang libraries into the Python package tree for **release wheel** builds.
 
-Run this before `maturin build` to include Slang libraries in the wheel:
+Not used for local development: `pip install -e ".[dev]"` embeds Slang via
+`goldy/build.rs` at compile time.
+
+Run before `maturin build --release` (CI / PyPI publish):
 
     python build-slang.py
     maturin build --release
 
-The Slang libraries will be copied to python/goldy/ where maturin's
-include configuration will pick them up.
+Copies from `../slang/bin/{platform}/` to `python/goldy/` for `pyproject.toml`
+`include` globs.
 """
 
 import json

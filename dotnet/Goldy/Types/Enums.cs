@@ -204,6 +204,26 @@ public enum FilterMode
 }
 
 /// <summary>
+/// Per-node resource access for task graph bindings.
+/// </summary>
+public enum NodeAccess
+{
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
+/// <summary>
+/// Shader resource binding access (SRV vs UAV).
+/// </summary>
+public enum ResourceAccess
+{
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
+/// <summary>
 /// Shader stages flags.
 /// </summary>
 [Flags]

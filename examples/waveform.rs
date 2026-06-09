@@ -5,8 +5,8 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, DeviceDescriptor, Instance, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, ShaderModule, Surface, Vertex2D,
+    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,6 +67,8 @@ struct App {
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
     start_time: Instant,
     frame_count: u32,
     // Each frame may have multiple channel buffers
@@ -82,10 +84,17 @@ impl App {
             shader: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             start_time: Instant::now(),
             frame_count: 0,
             frame_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -108,10 +117,13 @@ impl App {
                 ..Default::default()
             },
         )?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
         Ok(())
     }
 
@@ -127,6 +139,7 @@ impl App {
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
         let time = self.start_time.elapsed().as_secs_f32();
 
         // Colors for each channel
@@ -174,32 +187,35 @@ impl App {
             );
         }
 
-        let frame = surface.begin()?;
-
         // Drop oldest frame's buffers now that GPU is done
         if self.frame_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.frame_buffers.remove(0);
         }
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.02,
-                g: 0.02,
-                b: 0.08,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
+        self.frame_graph.clear();
 
-            // Draw each channel
-            for (ch, vb) in channel_buffers.iter().enumerate() {
-                pass.set_vertex_buffer(0, vb);
-                pass.draw(0..vertex_counts[ch], 0..1);
-            }
+        let mut pass = self.frame_graph.render_pass("waveform", scene_rt);
+        for vb in &channel_buffers {
+            pass.bind_buffer_mut(vb, NodeAccess::Read);
         }
+        pass.clear(Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.08,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        for (ch, vb) in channel_buffers.iter().enumerate() {
+            pass.set_vertex_buffer(0, vb);
+            pass.draw(0..vertex_counts[ch], 0..1);
+        }
+        pass.finish_recorded();
 
-        frame.render(encoder)?;
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
+
+        let frame = surface.begin()?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         // Keep this frame's buffers alive
@@ -212,6 +228,11 @@ impl App {
         if new_size.width > 0 && new_size.height > 0 {
             if let Some(surface) = &mut self.surface {
                 let _ = surface.resize(new_size.width, new_size.height);
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+                    self.scene_rt = Some(rt);
+                }
             }
         }
     }

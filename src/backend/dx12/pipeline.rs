@@ -195,12 +195,18 @@ pub(super) fn create(
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
 
-    let (cats, strides) = state
+    let (cats, slot_kinds, strides) = state
         .shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
         .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
-        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.push_constant_slot_kinds.clone(),
+                r.binding_element_strides.clone(),
+            )
+        })
         .unwrap_or_default();
 
     state.pipelines.insert(
@@ -213,6 +219,7 @@ pub(super) fn create(
             topology,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: cats,
+            push_constant_slot_kinds: slot_kinds,
             binding_element_strides: strides,
             shader_debug_name,
         },
@@ -437,12 +444,18 @@ pub(super) fn create_with_depth(
     let handle = state.next_pipeline_handle;
     state.next_pipeline_handle += 1;
 
-    let (cats, strides) = state
+    let (cats, slot_kinds, strides) = state
         .shaders
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
         .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
-        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.push_constant_slot_kinds.clone(),
+                r.binding_element_strides.clone(),
+            )
+        })
         .unwrap_or_default();
 
     state.pipelines.insert(
@@ -455,6 +468,7 @@ pub(super) fn create_with_depth(
             topology,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: cats,
+            push_constant_slot_kinds: slot_kinds,
             binding_element_strides: strides,
             shader_debug_name,
         },

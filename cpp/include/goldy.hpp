@@ -62,13 +62,16 @@ public:
 
 class Instance;
 class Device;
+class Adapter;
 class Buffer;
 class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
-class CommandEncoder;
+class Surface;
+class TaskGraph;
+class BufferPool;
+class BufferView;
 class ComputePipeline;
-class ComputeEncoder;
 class Texture;
 class Sampler;
 
@@ -100,11 +103,45 @@ struct Color {
 };
 
 /**
+ * @brief GPU device type (mirrors native Goldy adapter metadata).
+ */
+enum class DeviceType {
+    DiscreteGpu = GOLDY_DEVICE_TYPE_DISCRETE_GPU,
+    IntegratedGpu = GOLDY_DEVICE_TYPE_INTEGRATED_GPU,
+    Cpu = GOLDY_DEVICE_TYPE_CPU,
+    Other = GOLDY_DEVICE_TYPE_OTHER,
+};
+
+/**
+ * @brief Power preference for adapter selection.
+ */
+enum class PowerPreference {
+    None,
+    LowPower,
+    HighPerformance,
+};
+
+/**
+ * @brief Options for Instance::request_adapter().
+ */
+struct RequestAdapterOptions {
+    PowerPreference power_preference = PowerPreference::HighPerformance;
+    bool force_fallback_adapter = false;
+};
+
+/**
+ * @brief Descriptor for Adapter::request_device().
+ */
+struct DeviceDescriptor {
+    std::optional<std::string> label;
+};
+
+/**
  * @brief Adapter information returned by Instance::enumerate_adapters().
  */
 struct AdapterInfo {
     uint32_t id;
-    GoldyDeviceType device_type;
+    DeviceType device_type;
     std::string name;
     std::string vendor;
 };
@@ -133,6 +170,21 @@ enum class TextureKind {
     Direct = 1,
     /// Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
     DirectInterpolated = 2,
+};
+
+/**
+ * @brief Logical access declared on a task-graph node.
+ */
+enum class NodeAccess {
+    Read = GOLDY_NODE_ACCESS_READ,
+    Write = GOLDY_NODE_ACCESS_WRITE,
+    ReadWrite = GOLDY_NODE_ACCESS_READ_WRITE,
+};
+
+enum class ResourceAccess {
+    Read = GOLDY_RESOURCE_ACCESS_READ,
+    Write = GOLDY_RESOURCE_ACCESS_WRITE,
+    ReadWrite = GOLDY_RESOURCE_ACCESS_READ_WRITE,
 };
 
 /**
@@ -167,6 +219,14 @@ struct BufferDeleter {
     void operator()(GoldyBuffer* p) const { if (p) goldy_buffer_destroy(p); }
 };
 
+struct BufferPoolDeleter {
+    void operator()(GoldyBufferPool* p) const { if (p) goldy_buffer_pool_destroy(p); }
+};
+
+struct BufferViewDeleter {
+    void operator()(GoldyBufferView* p) const { if (p) goldy_buffer_view_destroy(p); }
+};
+
 struct ShaderDeleter {
     void operator()(GoldyShaderModule* p) const { if (p) goldy_shader_destroy(p); }
 };
@@ -179,16 +239,16 @@ struct RenderTargetDeleter {
     void operator()(GoldyRenderTarget* p) const { if (p) goldy_render_target_destroy(p); }
 };
 
-struct CommandEncoderDeleter {
-    void operator()(GoldyCommandEncoder* p) const { if (p) goldy_encoder_destroy(p); }
+struct SurfaceDeleter {
+    void operator()(GoldySurface* p) const { if (p) goldy_surface_destroy(p); }
+};
+
+struct TaskGraphDeleter {
+    void operator()(GoldyTaskGraph* p) const { if (p) goldy_task_graph_destroy(p); }
 };
 
 struct ComputePipelineDeleter {
     void operator()(GoldyComputePipeline* p) const { if (p) goldy_compute_pipeline_destroy(p); }
-};
-
-struct ComputeEncoderDeleter {
-    void operator()(GoldyComputeEncoder* p) const { if (p) goldy_compute_encoder_destroy(p); }
 };
 
 struct TextureDeleter {
@@ -198,6 +258,12 @@ struct TextureDeleter {
 struct SamplerDeleter {
     void operator()(GoldySampler* p) const { if (p) goldy_sampler_destroy(p); }
 };
+
+inline void throw_on_result(GoldyResult result) {
+    if (result != GOLDY_RESULT_OK) {
+        throw Exception::from_last_error();
+    }
+}
 
 } // namespace detail
 
@@ -249,7 +315,7 @@ public:
             if (goldy_instance_get_adapter(ptr_.get(), i, &info) == GOLDY_RESULT_OK) {
                 adapters.push_back({
                     info.id,
-                    info.device_type,
+                    static_cast<DeviceType>(info.device_type),
                     std::string(info.name),
                     std::string(info.vendor)
                 });
@@ -257,6 +323,12 @@ public:
         }
         return adapters;
     }
+
+    /**
+     * @brief Request an adapter matching the given options (wgpu-style).
+     * @throws Exception if no adapters are available.
+     */
+    Adapter request_adapter(const RequestAdapterOptions& opts = {});
 
     /**
      * @brief Create a device for a specific adapter.
@@ -321,6 +393,7 @@ public:
 
 private:
     friend class Instance;
+    friend class Adapter;
     explicit Device(GoldyDevice* ptr) : ptr_(ptr) {}
     std::unique_ptr<GoldyDevice, detail::DeviceDeleter> ptr_;
 };
@@ -332,6 +405,106 @@ inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
         throw Exception::from_last_error();
     }
     return Device(ptr);
+}
+
+// =============================================================================
+// Adapter
+// =============================================================================
+
+/**
+ * @brief A physical GPU adapter returned by Instance::request_adapter().
+ */
+class Adapter {
+public:
+    Adapter(const Adapter&) = delete;
+    Adapter& operator=(const Adapter&) = delete;
+    Adapter(Adapter&&) = default;
+    Adapter& operator=(Adapter&&) = default;
+
+    const AdapterInfo& get_info() const { return info_; }
+
+    /**
+     * @brief Create a logical Device on this adapter.
+     */
+    Device request_device(const DeviceDescriptor& desc = {}) const {
+        (void)desc;
+        GoldyDevice* ptr = goldy_instance_create_device_for_adapter(instance_, info_.id);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        return Device(ptr);
+    }
+
+private:
+    friend class Instance;
+    Adapter(GoldyInstance* instance, AdapterInfo info)
+        : instance_(instance), info_(std::move(info)) {}
+
+    GoldyInstance* instance_;
+    AdapterInfo info_;
+};
+
+inline Adapter Instance::request_adapter(const RequestAdapterOptions& opts) {
+    auto adapters = enumerate_adapters();
+    if (adapters.empty()) {
+        throw Exception("No GPU adapters available");
+    }
+
+    const AdapterInfo* selected = nullptr;
+    switch (opts.power_preference) {
+    case PowerPreference::HighPerformance:
+        for (const auto& a : adapters) {
+            if (a.device_type == DeviceType::DiscreteGpu) {
+                selected = &a;
+                break;
+            }
+        }
+        if (!selected) {
+            for (const auto& a : adapters) {
+                if (a.device_type == DeviceType::IntegratedGpu) {
+                    selected = &a;
+                    break;
+                }
+            }
+        }
+        if (!selected) {
+            for (const auto& a : adapters) {
+                if (a.device_type == DeviceType::Other) {
+                    selected = &a;
+                    break;
+                }
+            }
+        }
+        if (!selected) {
+            selected = &adapters.front();
+        }
+        break;
+    case PowerPreference::LowPower:
+        for (const auto& a : adapters) {
+            if (a.device_type == DeviceType::IntegratedGpu) {
+                selected = &a;
+                break;
+            }
+        }
+        if (!selected) {
+            for (const auto& a : adapters) {
+                if (a.device_type == DeviceType::Cpu) {
+                    selected = &a;
+                    break;
+                }
+            }
+        }
+        if (!selected) {
+            selected = &adapters.front();
+        }
+        break;
+    case PowerPreference::None:
+        selected = &adapters.front();
+        break;
+    }
+
+    (void)opts.force_fallback_adapter;
+    return Adapter(ptr_.get(), *selected);
 }
 
 // =============================================================================
@@ -379,13 +552,21 @@ public:
     }
 
     /**
-     * @brief Create a buffer from typed data.
+     * @brief Create a buffer from typed data with the correct element stride.
      */
     template<typename T>
-    Buffer(const Device& device, std::span<const T> data, BufferKind access)
-        : Buffer(device, std::span<const uint8_t>(
+    Buffer(const Device& device, std::span<const T> data, BufferKind access) {
+        GoldyBuffer* ptr = goldy_buffer_create_with_data_stride(
+            device.get(),
             reinterpret_cast<const uint8_t*>(data.data()),
-            data.size() * sizeof(T)), access) {}
+            data.size() * sizeof(T),
+            static_cast<GoldyBufferKind>(access),
+            static_cast<uint32_t>(sizeof(T)));
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
 
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
@@ -420,9 +601,87 @@ public:
      */
     GoldyBuffer* get() const { return ptr_.get(); }
 
+    uint32_t resource_index(ResourceAccess access) const {
+        uint32_t idx = goldy_buffer_resource_index(ptr_.get(), static_cast<GoldyResourceAccess>(access));
+        if (idx == UINT32_MAX) {
+            throw Exception::from_last_error();
+        }
+        return idx;
+    }
+
 private:
     std::unique_ptr<GoldyBuffer, detail::BufferDeleter> ptr_;
 };
+
+// =============================================================================
+// BufferPool / BufferView
+// =============================================================================
+
+class BufferPool {
+public:
+    BufferPool(const Device& device, uint64_t capacity) {
+        GoldyBufferPool* ptr = goldy_buffer_pool_create(device.get(), capacity);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    BufferPool(const BufferPool&) = delete;
+    BufferPool& operator=(const BufferPool&) = delete;
+    BufferPool(BufferPool&&) = default;
+    BufferPool& operator=(BufferPool&&) = default;
+
+    BufferView alloc_u32(uint64_t count);
+
+    void write_backing(uint64_t byte_offset, std::span<const uint8_t> data) {
+        GoldyResult result = goldy_buffer_pool_write_backing(
+            ptr_.get(), byte_offset, data.data(), data.size());
+        if (result != GOLDY_RESULT_OK) {
+            throw Exception::from_last_error();
+        }
+    }
+
+    GoldyBufferPool* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyBufferPool, detail::BufferPoolDeleter> ptr_;
+};
+
+class BufferView {
+public:
+    BufferView() = default;
+
+    explicit BufferView(GoldyBufferView* ptr) { ptr_.reset(ptr); }
+
+    BufferView(const BufferView&) = delete;
+    BufferView& operator=(const BufferView&) = delete;
+    BufferView(BufferView&&) = default;
+    BufferView& operator=(BufferView&&) = default;
+
+    uint64_t offset() const { return goldy_buffer_view_offset(ptr_.get()); }
+
+    uint32_t resource_index(ResourceAccess access) const {
+        uint32_t idx = goldy_buffer_view_resource_index(ptr_.get(), static_cast<GoldyResourceAccess>(access));
+        if (idx == UINT32_MAX) {
+            throw Exception::from_last_error();
+        }
+        return idx;
+    }
+
+    GoldyBufferView* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyBufferView, detail::BufferViewDeleter> ptr_;
+};
+
+inline BufferView BufferPool::alloc_u32(uint64_t count) {
+    GoldyBufferView* view = goldy_buffer_pool_alloc_u32(ptr_.get(), count);
+    if (!view) {
+        throw Exception::from_last_error();
+    }
+    return BufferView(view);
+}
 
 // =============================================================================
 // ShaderModule
@@ -513,138 +772,6 @@ private:
 };
 
 // =============================================================================
-// CommandEncoder
-// =============================================================================
-
-/**
- * @brief Records rendering commands.
- */
-class CommandEncoder {
-public:
-    /**
-     * @brief Create a new command encoder.
-     */
-    CommandEncoder() {
-        ptr_.reset(goldy_encoder_create());
-    }
-
-    CommandEncoder(const CommandEncoder&) = delete;
-    CommandEncoder& operator=(const CommandEncoder&) = delete;
-    CommandEncoder(CommandEncoder&&) = default;
-    CommandEncoder& operator=(CommandEncoder&&) = default;
-
-    /**
-     * @brief Clear the color target.
-     */
-    void clear(const Color& color) {
-        goldy_encoder_clear(ptr_.get(), color);
-    }
-
-    /**
-     * @brief Clear the depth buffer.
-     */
-    void clear_depth(float depth = 1.0f) {
-        goldy_encoder_clear_depth(ptr_.get(), depth);
-    }
-
-    /**
-     * @brief Set the render pipeline.
-     */
-    void set_pipeline(const RenderPipeline& pipeline) {
-        goldy_encoder_set_pipeline(ptr_.get(), pipeline.get());
-    }
-
-    /**
-     * @brief Set a vertex buffer.
-     */
-    void set_vertex_buffer(uint32_t slot, const Buffer& buffer) {
-        goldy_encoder_set_vertex_buffer(ptr_.get(), slot, buffer.get());
-    }
-
-    /**
-     * @brief Set a vertex buffer with offset.
-     */
-    void set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint64_t offset) {
-        goldy_encoder_set_vertex_buffer_offset(ptr_.get(), slot, buffer.get(), offset);
-    }
-
-    /**
-     * @brief Set an index buffer.
-     */
-    void set_index_buffer(const Buffer& buffer, GoldyIndexFormat format) {
-        goldy_encoder_set_index_buffer(ptr_.get(), buffer.get(), format);
-    }
-
-    /**
-     * @brief Bind resource slots for rendering.
-     *
-     * Pass the buffers whose indices should be bound to shader resource slots.
-     * The indices are bound in order, so buffers[0] becomes slot 0,
-     * buffers[1] becomes slot 1, etc.
-     *
-     * @param buffers Span of buffer pointers to bind to shader resource slots.
-     */
-    void bind_resources(std::span<const Buffer* const> buffers) {
-        if (buffers.empty()) return;
-        
-        std::vector<const GoldyBuffer*> ptrs;
-        ptrs.reserve(buffers.size());
-        for (const auto* buf : buffers) {
-            ptrs.push_back(buf->get());
-        }
-        goldy_encoder_bind_resources(ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size()));
-    }
-
-    /**
-     * @brief Bind a single buffer to a resource slot (convenience overload).
-     */
-    void bind_resources(const Buffer& buffer) {
-        const GoldyBuffer* ptr = buffer.get();
-        goldy_encoder_bind_resources(ptr_.get(), &ptr, 1);
-    }
-
-    /**
-     * @brief Bind resource slots from an initializer list (convenience overload).
-     */
-    void bind_resources(std::initializer_list<const Buffer*> buffers) {
-        bind_resources(std::span<const Buffer* const>{buffers.begin(), buffers.size()});
-    }
-
-    /**
-     * @brief Draw primitives.
-     */
-    void draw(uint32_t vertex_count, uint32_t instance_count = 1,
-              uint32_t first_vertex = 0, uint32_t first_instance = 0) {
-        goldy_encoder_draw(ptr_.get(), first_vertex, vertex_count, first_instance, instance_count);
-    }
-
-    /**
-     * @brief Draw indexed primitives.
-     */
-    void draw_indexed(uint32_t index_count, uint32_t instance_count = 1,
-                      uint32_t first_index = 0, int32_t base_vertex = 0,
-                      uint32_t first_instance = 0) {
-        goldy_encoder_draw_indexed(ptr_.get(), first_index, index_count,
-                                   base_vertex, first_instance, instance_count);
-    }
-
-    /**
-     * @brief Release ownership of the underlying pointer.
-     *
-     * Used when passing to render target. After this call, the encoder is invalid.
-     */
-    GoldyCommandEncoder* release() { return ptr_.release(); }
-
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyCommandEncoder* get() const { return ptr_.get(); }
-
-private:
-    std::unique_ptr<GoldyCommandEncoder, detail::CommandEncoderDeleter> ptr_;
-};
-
-// =============================================================================
 // RenderTarget
 // =============================================================================
 
@@ -714,20 +841,6 @@ public:
     size_t buffer_size() const { return goldy_render_target_buffer_size(ptr_.get()); }
 
     /**
-     * @brief Render commands to the target.
-     *
-     * This consumes the encoder.
-     * @param encoder The command encoder (moved from).
-     * @throws Exception if rendering fails.
-     */
-    void render(CommandEncoder encoder) {
-        GoldyResult result = goldy_render_target_render(ptr_.get(), encoder.release());
-        if (result != GOLDY_RESULT_OK) {
-            throw Exception::from_last_error();
-        }
-    }
-
-    /**
      * @brief Read rendered pixels to CPU memory.
      * @return Vector containing pixel data.
      * @throws Exception if readback fails.
@@ -761,6 +874,352 @@ public:
 private:
     std::unique_ptr<GoldyRenderTarget, detail::RenderTargetDeleter> ptr_;
 };
+
+// =============================================================================
+// Surface
+// =============================================================================
+
+/**
+ * @brief An acquired swapchain frame.
+ *
+ * Consumed by Surface::present() or updated by Surface::submit_graph_to_frame().
+ */
+class SurfaceFrame {
+public:
+    SurfaceFrame() = default;
+    SurfaceFrame(SurfaceFrame&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+    SurfaceFrame& operator=(SurfaceFrame&& other) noexcept {
+        if (this != &other) {
+            ptr_ = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
+    SurfaceFrame(const SurfaceFrame&) = delete;
+    SurfaceFrame& operator=(const SurfaceFrame&) = delete;
+
+    GoldySurfaceFrame* get() const { return ptr_; }
+
+private:
+    friend class Surface;
+    explicit SurfaceFrame(GoldySurfaceFrame* ptr) : ptr_(ptr) {}
+    GoldySurfaceFrame* release() {
+        GoldySurfaceFrame* p = ptr_;
+        ptr_ = nullptr;
+        return p;
+    }
+
+    GoldySurfaceFrame* ptr_ = nullptr;
+};
+
+/**
+ * @brief A window swapchain surface.
+ *
+ * Created from platform window handles via goldy_surface_create_win32 /
+ * goldy_surface_create_appkit / goldy_surface_create_wayland. Window toolkit
+ * code stays in the application; this wrapper only wraps the stable C ABI.
+ */
+class Surface {
+public:
+    static constexpr bool is_supported() noexcept { return true; }
+
+#if defined(_WIN32)
+    Surface(const Device& device, void* hwnd) {
+        GoldySurface* ptr = goldy_surface_create_win32(device.get(), hwnd);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+#elif defined(__APPLE__)
+    Surface(const Device& device, void* ns_view) {
+        GoldySurface* ptr = goldy_surface_create_appkit(device.get(), ns_view);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+#else
+    Surface(const Device& device, void* wayland_display, void* wayland_surface) {
+        GoldySurface* ptr = goldy_surface_create_wayland(
+            device.get(), wayland_display, wayland_surface);
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+#endif
+
+    Surface(const Surface&) = delete;
+    Surface& operator=(const Surface&) = delete;
+    Surface(Surface&&) = default;
+    Surface& operator=(Surface&&) = default;
+
+    std::pair<uint32_t, uint32_t> size() const {
+        return {goldy_surface_width(ptr_.get()), goldy_surface_height(ptr_.get())};
+    }
+
+    uint32_t width() const { return goldy_surface_width(ptr_.get()); }
+    uint32_t height() const { return goldy_surface_height(ptr_.get()); }
+
+    GoldyTextureFormat format() const { return goldy_surface_format(ptr_.get()); }
+
+    void resize(uint32_t width, uint32_t height) {
+        detail::throw_on_result(goldy_surface_resize(ptr_.get(), width, height));
+    }
+
+    /**
+     * @brief Begin the next frame (acquire swapchain image).
+     */
+    SurfaceFrame begin() {
+        GoldySurfaceFrame* frame = goldy_surface_acquire(ptr_.get());
+        if (!frame) {
+            throw Exception::from_last_error();
+        }
+        return SurfaceFrame(frame);
+    }
+
+    /**
+     * @brief Submit a recorded task graph to an acquired frame.
+     */
+    SurfaceFrame submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame);
+
+    /**
+     * @brief Present a frame to the screen (consumes the frame).
+     */
+    void present(SurfaceFrame frame);
+
+    GoldySurface* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldySurface, detail::SurfaceDeleter> ptr_;
+};
+
+// =============================================================================
+// TaskGraph
+// =============================================================================
+
+/**
+ * @brief Non-owning token from TaskGraph::declare_swapchain_output().
+ *
+ * Points at storage inside the parent graph; do not free. Pass to
+ * copy_render_target_to_swapchain() only.
+ */
+class SwapchainOutput {
+public:
+    explicit SwapchainOutput(GoldySwapchainOutput* ptr) : ptr_(ptr) {}
+
+    SwapchainOutput(const SwapchainOutput&) = default;
+    SwapchainOutput& operator=(const SwapchainOutput&) = default;
+    SwapchainOutput(SwapchainOutput&&) = default;
+    SwapchainOutput& operator=(SwapchainOutput&&) = default;
+
+    GoldySwapchainOutput* get() const { return ptr_; }
+
+private:
+    GoldySwapchainOutput* ptr_ = nullptr;
+};
+
+/**
+ * @brief GPU task graph for render passes, compute nodes, and swapchain blits.
+ */
+class TaskGraph {
+public:
+    class RenderPass;
+
+    TaskGraph() {
+        GoldyTaskGraph* ptr = goldy_task_graph_create();
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    TaskGraph(const TaskGraph&) = delete;
+    TaskGraph& operator=(const TaskGraph&) = delete;
+    TaskGraph(TaskGraph&&) = default;
+    TaskGraph& operator=(TaskGraph&&) = default;
+
+    void clear() {
+        detail::throw_on_result(goldy_task_graph_clear(ptr_.get()));
+    }
+
+    void dispatch(const Device& device) {
+        detail::throw_on_result(goldy_task_graph_dispatch(ptr_.get(), device.get()));
+    }
+
+    [[nodiscard]] SwapchainOutput declare_swapchain_output() {
+        GoldySwapchainOutput* token = goldy_task_graph_declare_swapchain_output(ptr_.get());
+        if (!token) {
+            throw Exception::from_last_error();
+        }
+        return SwapchainOutput(token);
+    }
+
+    void copy_render_target_to_swapchain(const RenderTarget& src, const SwapchainOutput& swapchain) {
+        detail::throw_on_result(goldy_task_graph_copy_render_target_to_swapchain(
+            ptr_.get(), src.get(), swapchain.get()));
+    }
+
+    [[nodiscard]] RenderPass render_pass(const char* label, const RenderTarget& target);
+
+    class ComputeNode;
+    [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);
+
+    void write_buffer(const Buffer& buffer, uint64_t offset, std::span<const uint8_t> data);
+
+    GoldyTaskGraph* get() const { return ptr_.get(); }
+
+private:
+    friend class RenderPass;
+    std::unique_ptr<GoldyTaskGraph, detail::TaskGraphDeleter> ptr_;
+};
+
+/**
+ * @brief RAII scope for recording one offscreen render pass on a task graph.
+ *
+ * Calls render_pass_finish on destruction if finish() was not called explicitly.
+ */
+class TaskGraph::RenderPass {
+public:
+    RenderPass(TaskGraph& graph, const char* label, const RenderTarget& target)
+        : graph_(graph) {
+        detail::throw_on_result(goldy_task_graph_render_pass_begin(
+            graph_.ptr_.get(), label, target.get()));
+        active_ = true;
+    }
+
+    ~RenderPass() noexcept {
+        if (active_) {
+            // Do not throw from a destructor.
+            goldy_task_graph_render_pass_finish(graph_.ptr_.get());
+            active_ = false;
+        }
+    }
+
+    RenderPass(const RenderPass&) = delete;
+    RenderPass& operator=(const RenderPass&) = delete;
+    RenderPass(RenderPass&&) = delete;
+    RenderPass& operator=(RenderPass&&) = delete;
+
+    RenderPass& bind_buffer(const Buffer& buffer, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_buffer(
+            graph_.ptr_.get(), buffer.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    RenderPass& bind_buffer_view(const BufferView& view, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_buffer_view(
+            graph_.ptr_.get(), view.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    RenderPass& bind_resource_index(uint32_t scattered_index) {
+        const uint32_t pair[2] = {0, scattered_index};
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_resources_typed(
+            graph_.ptr_.get(), pair, 1));
+        return *this;
+    }
+
+    RenderPass& bind_resources(std::span<const Buffer* const> buffers) {
+        if (buffers.empty()) {
+            return *this;
+        }
+        std::vector<const GoldyBuffer*> ptrs;
+        ptrs.reserve(buffers.size());
+        for (const Buffer* buf : buffers) {
+            ptrs.push_back(buf->get());
+        }
+        detail::throw_on_result(goldy_task_graph_render_pass_bind_resources(
+            graph_.ptr_.get(), ptrs.data(), static_cast<uint32_t>(ptrs.size())));
+        return *this;
+    }
+
+    RenderPass& clear(const Color& color) {
+        detail::throw_on_result(goldy_task_graph_render_pass_clear(graph_.ptr_.get(), color));
+        return *this;
+    }
+
+    RenderPass& clear_depth(float depth = 1.0f) {
+        detail::throw_on_result(goldy_task_graph_render_pass_clear_depth(graph_.ptr_.get(), depth));
+        return *this;
+    }
+
+    RenderPass& set_pipeline(const RenderPipeline& pipeline) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_pipeline(
+            graph_.ptr_.get(), pipeline.get()));
+        return *this;
+    }
+
+    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_vertex_buffer(
+            graph_.ptr_.get(), slot, buffer.get()));
+        return *this;
+    }
+
+    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint64_t offset) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_vertex_buffer_offset(
+            graph_.ptr_.get(), slot, buffer.get(), offset));
+        return *this;
+    }
+
+    RenderPass& set_index_buffer(const Buffer& buffer, GoldyIndexFormat format) {
+        detail::throw_on_result(goldy_task_graph_render_pass_set_index_buffer(
+            graph_.ptr_.get(), buffer.get(), format));
+        return *this;
+    }
+
+    RenderPass& draw(uint32_t first_vertex, uint32_t vertex_count,
+                     uint32_t first_instance = 0, uint32_t instance_count = 1) {
+        detail::throw_on_result(goldy_task_graph_render_pass_draw(
+            graph_.ptr_.get(), first_vertex, vertex_count, first_instance, instance_count));
+        return *this;
+    }
+
+    RenderPass& draw_indexed(uint32_t first_index, uint32_t index_count, int32_t base_vertex = 0,
+                               uint32_t first_instance = 0, uint32_t instance_count = 1) {
+        detail::throw_on_result(goldy_task_graph_render_pass_draw_indexed(
+            graph_.ptr_.get(), first_index, index_count, base_vertex, first_instance, instance_count));
+        return *this;
+    }
+
+    RenderPass& draw_fullscreen() {
+        detail::throw_on_result(goldy_task_graph_render_pass_draw_fullscreen(graph_.ptr_.get()));
+        return *this;
+    }
+
+    void finish() {
+        if (!active_) {
+            return;
+        }
+        detail::throw_on_result(goldy_task_graph_render_pass_finish(graph_.ptr_.get()));
+        active_ = false;
+    }
+
+private:
+    TaskGraph& graph_;
+    bool active_ = false;
+};
+
+inline TaskGraph::RenderPass TaskGraph::render_pass(const char* label, const RenderTarget& target) {
+    return RenderPass(*this, label, target);
+}
+
+inline void TaskGraph::write_buffer(const Buffer& buffer, uint64_t offset, std::span<const uint8_t> data) {
+    detail::throw_on_result(goldy_task_graph_write_buffer(
+        ptr_.get(), buffer.get(), offset, data.data(), data.size()));
+}
+
+inline SurfaceFrame Surface::submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame) {
+    GoldySurfaceFrame* raw = frame.release();
+    detail::throw_on_result(
+        goldy_surface_submit_graph_to_frame(ptr_.get(), graph.get(), raw));
+    return SurfaceFrame(raw);
+}
+
+inline void Surface::present(SurfaceFrame frame) {
+    detail::throw_on_result(goldy_surface_present(ptr_.get(), frame.release()));
+}
 
 // =============================================================================
 // ComputePipeline
@@ -799,61 +1258,67 @@ private:
     std::unique_ptr<GoldyComputePipeline, detail::ComputePipelineDeleter> ptr_;
 };
 
-// =============================================================================
-// ComputeEncoder
-// =============================================================================
-
 /**
- * @brief Records compute commands.
+ * @brief RAII scope for recording one compute dispatch node on a task graph.
  */
-class ComputeEncoder {
+class TaskGraph::ComputeNode {
 public:
-    /**
-     * @brief Create a new compute encoder.
-     */
-    ComputeEncoder() {
-        ptr_.reset(goldy_compute_encoder_create());
+    ComputeNode(TaskGraph& graph, const char* label, const ComputePipeline& pipeline,
+                uint32_t wg_x = 1, uint32_t wg_y = 1, uint32_t wg_z = 1)
+        : graph_(graph), wg_x_(wg_x), wg_y_(wg_y), wg_z_(wg_z) {
+        detail::throw_on_result(goldy_task_graph_compute_node_begin(
+            graph_.ptr_.get(), label, pipeline.get()));
+        active_ = true;
     }
 
-    ComputeEncoder(const ComputeEncoder&) = delete;
-    ComputeEncoder& operator=(const ComputeEncoder&) = delete;
-    ComputeEncoder(ComputeEncoder&&) = default;
-    ComputeEncoder& operator=(ComputeEncoder&&) = default;
-
-    /**
-     * @brief Set the compute pipeline.
-     */
-    void set_pipeline(const ComputePipeline& pipeline) {
-        goldy_compute_encoder_set_pipeline(ptr_.get(), pipeline.get());
-    }
-
-    /**
-     * @brief Dispatch compute workgroups.
-     */
-    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
-        goldy_compute_encoder_dispatch(ptr_.get(), x, y, z);
-    }
-
-    /**
-     * @brief Execute the compute commands.
-     * @param device The device to execute on.
-     * @throws Exception if execution fails.
-     */
-    void execute(const Device& device) {
-        GoldyResult result = goldy_compute_encoder_execute(ptr_.get(), device.get());
-        if (result != GOLDY_RESULT_OK) {
-            throw Exception::from_last_error();
+    ~ComputeNode() noexcept {
+        if (active_) {
+            goldy_task_graph_compute_node_dispatch(graph_.ptr_.get(), wg_x_, wg_y_, wg_z_);
+            active_ = false;
         }
     }
 
-    /**
-     * @brief Get raw pointer (for advanced use).
-     */
-    GoldyComputeEncoder* get() const { return ptr_.get(); }
+    ComputeNode(const ComputeNode&) = delete;
+    ComputeNode& operator=(const ComputeNode&) = delete;
+    ComputeNode(ComputeNode&&) = delete;
+    ComputeNode& operator=(ComputeNode&&) = delete;
+
+    ComputeNode& bind_buffer(const Buffer& buffer, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_bind_buffer(
+            graph_.ptr_.get(), buffer.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    ComputeNode& bind_buffer_view(const BufferView& view, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_bind_buffer_view(
+            graph_.ptr_.get(), view.get(), static_cast<GoldyNodeAccess>(access)));
+        return *this;
+    }
+
+    ComputeNode& bind_resources_raw(std::span<const uint32_t> indices) {
+        detail::throw_on_result(goldy_task_graph_compute_node_bind_resources_raw(
+            graph_.ptr_.get(), indices.data(), static_cast<uint32_t>(indices.size())));
+        return *this;
+    }
+
+    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
+        if (!active_) return;
+        detail::throw_on_result(goldy_task_graph_compute_node_dispatch(
+            graph_.ptr_.get(), x, y, z));
+        active_ = false;
+    }
 
 private:
-    std::unique_ptr<GoldyComputeEncoder, detail::ComputeEncoderDeleter> ptr_;
+    TaskGraph& graph_;
+    uint32_t wg_x_;
+    uint32_t wg_y_;
+    uint32_t wg_z_;
+    bool active_ = false;
 };
+
+inline TaskGraph::ComputeNode TaskGraph::compute_node(const char* label, const ComputePipeline& pipeline) {
+    return ComputeNode(*this, label, pipeline);
+}
 
 // =============================================================================
 // Texture

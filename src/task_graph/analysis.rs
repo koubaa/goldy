@@ -25,6 +25,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use super::ir::{BarrierSet, BarrierUsage, CompiledSchedule, GraphIR, NodeKind, ResourceBinding, UsageKindFlags, Wave};
 // NodeAccess is used in the test module via `super::*`
 #[cfg(test)]
@@ -32,7 +34,15 @@ use super::ir::NodeAccess;
 use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
-use anyhow::Result;
+
+fn push_compute_resource_bind(commands: &mut Vec<GpuCommand>, slots: &[u32], user_slots: &[u32]) {
+    if !slots.is_empty() || !user_slots.is_empty() {
+        commands.push(GpuCommand::BindResourcesRaw {
+            indices: slots.to_vec(),
+            user: user_slots.to_vec(),
+        });
+    }
+}
 
 /// Returns true if byte range `[o1, o1+l1)` overlaps `[o2, o2+l2)`.
 ///
@@ -85,6 +95,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
             },
         ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
         (ResourceId::Texture(x), ResourceId::Texture(y)) => x == y,
+        (ResourceId::RenderTarget(x), ResourceId::RenderTarget(y)) => x == y,
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
@@ -92,7 +103,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
     }
 }
 
-fn resolve_texture_resource(id: ResourceId, resolver: Option<&SlotResolver>) -> TextureHandle {
+fn resolve_copy_destination(id: ResourceId, resolver: Option<&SlotResolver>) -> TextureHandle {
     let resolved = match resolver {
         Some(r) => r.resolve(id),
         None => id,
@@ -100,10 +111,49 @@ fn resolve_texture_resource(id: ResourceId, resolver: Option<&SlotResolver>) -> 
     match resolved {
         ResourceId::Texture(h) => h,
         ResourceId::SwapchainOutput => {
-            panic!("CopyTexture destination SwapchainOutput emitted before surface acquire")
+            panic!("copy destination SwapchainOutput emitted before surface acquire")
         }
-        other => panic!("CopyTexture destination resolved to non-texture resource: {other:?}"),
+        other => panic!("copy destination resolved to non-texture resource: {other:?}"),
     }
+}
+
+/// Returns true when one node implicitly/explicitly writes a render target and
+/// the other reads the same target (e.g. [`NodeKind::RenderPass`] → copy).
+fn render_target_access_conflict(a: &super::ir::TaskNode, b: &super::ir::TaskNode) -> bool {
+    let rt_from = |node: &super::ir::TaskNode| match &node.kind {
+        NodeKind::RenderPass { target, .. } => Some(*target),
+        _ => None,
+    };
+    let reads_rt = |node: &super::ir::TaskNode, rt: crate::backend::RenderTargetHandle| {
+        node.bindings
+            .iter()
+            .any(|b| matches!(b.resource, ResourceId::RenderTarget(h) if h == rt) && b.access.reads())
+    };
+    if let Some(rt) = rt_from(a) {
+        if reads_rt(b, rt) {
+            return true;
+        }
+    }
+    if let Some(rt) = rt_from(b) {
+        if reads_rt(a, rt) {
+            return true;
+        }
+    }
+    if let (Some(t1), Some(t2)) = (rt_from(a), rt_from(b)) {
+        return t1 == t2;
+    }
+    false
+}
+
+fn nodes_conflict(ir: &GraphIR, i: usize, j: usize) -> bool {
+    if ir.nodes[i]
+        .bindings
+        .iter()
+        .any(|bi| ir.nodes[j].bindings.iter().any(|bj| bindings_conflict(bi, bj)))
+    {
+        return true;
+    }
+    render_target_access_conflict(&ir.nodes[i], &ir.nodes[j])
 }
 
 /// Build directed dependency edges between graph nodes.
@@ -130,6 +180,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     enum GroupKey {
         Buffer(u64),
         Texture(u64),
+        RenderTarget(u64),
         TransientBuffer(u32),
         TransientTexture(u32),
         SwapchainOutput,
@@ -140,6 +191,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::Buffer(h) => GroupKey::Buffer(h),
             ResourceId::BufferRange { parent, .. } => GroupKey::Buffer(parent),
             ResourceId::Texture(h) => GroupKey::Texture(h),
+            ResourceId::RenderTarget(h) => GroupKey::RenderTarget(h),
             ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
             ResourceId::SwapchainOutput => GroupKey::SwapchainOutput,
@@ -149,6 +201,12 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
     // Map each canonical key to the set of node indices that reference it.
     let mut resource_nodes: HashMap<GroupKey, Vec<usize>> = HashMap::new();
     for (idx, node) in ir.nodes.iter().enumerate() {
+        if let NodeKind::RenderPass { target, .. } = &node.kind {
+            resource_nodes
+                .entry(GroupKey::RenderTarget(*target))
+                .or_default()
+                .push(idx);
+        }
         for binding in &node.bindings {
             resource_nodes
                 .entry(group_key(&binding.resource))
@@ -172,11 +230,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
                 if edge_set.contains(&(i, j)) {
                     continue;
                 }
-                let conflict = ir.nodes[i]
-                    .bindings
-                    .iter()
-                    .any(|bi| ir.nodes[j].bindings.iter().any(|bj| bindings_conflict(bi, bj)));
-                if conflict {
+                if nodes_conflict(ir, i, j) {
                     edge_set.insert((i, j));
                 }
             }
@@ -355,7 +409,35 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteBuffer { .. }
         | NodeKind::WriteTexture { .. }
         | NodeKind::WriteTextureRegion { .. }
-        | NodeKind::CopyTexture { .. } => UsageKindFlags::TRANSFER,
+        | NodeKind::CopyTexture { .. }
+        | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
+    }
+}
+
+/// Pipeline category recorded in a wave barrier for a specific binding.
+///
+/// Non-attachment resources bound for read in a render pass are CBV/SRV, not
+/// RTV/DSV — map `RENDER` to `COMPUTE` so backends emit shader-resource
+/// barriers instead of invalid render-target access masks.
+fn barrier_usage_kind_for_binding(
+    resource: ResourceId,
+    access: super::ir::NodeAccess,
+    node: &super::ir::TaskNode,
+) -> UsageKindFlags {
+    let kind = node_usage_kind(node);
+    let shader_read = !access.writes();
+    let non_attachment = matches!(
+        resource,
+        ResourceId::Buffer(_)
+            | ResourceId::BufferRange { .. }
+            | ResourceId::TransientBuffer(_)
+            | ResourceId::Texture(_)
+            | ResourceId::TransientTexture(_)
+    );
+    if kind.contains(UsageKindFlags::RENDER) && shader_read && non_attachment {
+        UsageKindFlags::COMPUTE
+    } else {
+        kind
     }
 }
 
@@ -391,20 +473,38 @@ fn compute_barriers(
                         match bi.resource {
                             ResourceId::TransientBuffer(tid) => {
                                 let entry = transient_usage.entry(tid.0).or_default();
-                                entry.src.merge(bi.access, node_usage_kind(from_node));
-                                entry.dst.merge(bj.access, node_usage_kind(to_node));
+                                entry.src.merge(
+                                    bi.access,
+                                    barrier_usage_kind_for_binding(bi.resource, bi.access, from_node),
+                                );
+                                entry.dst.merge(
+                                    bj.access,
+                                    barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
+                                );
                             }
                             ResourceId::Texture(h) => {
                                 let entry = texture_usage.entry(h).or_default();
-                                entry.src.merge(bi.access, node_usage_kind(from_node));
-                                entry.dst.merge(bj.access, node_usage_kind(to_node));
+                                entry.src.merge(
+                                    bi.access,
+                                    barrier_usage_kind_for_binding(bi.resource, bi.access, from_node),
+                                );
+                                entry.dst.merge(
+                                    bj.access,
+                                    barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
+                                );
                             }
                             _ => {
                                 // Collapse sub-range to parent for backend barrier commands.
                                 if let Some(h) = bi.resource.canonical_buffer_handle() {
                                     let entry = buffer_usage.entry(h).or_default();
-                                    entry.src.merge(bi.access, node_usage_kind(from_node));
-                                    entry.dst.merge(bj.access, node_usage_kind(to_node));
+                                    entry.src.merge(
+                                        bi.access,
+                                        barrier_usage_kind_for_binding(bi.resource, bi.access, from_node),
+                                    );
+                                    entry.dst.merge(
+                                        bj.access,
+                                        barrier_usage_kind_for_binding(bj.resource, bj.access, to_node),
+                                    );
                                 }
                             }
                         }
@@ -518,8 +618,12 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     });
                 }
                 NodeKind::CopyTexture { src, dst } => {
-                    let dst = resolve_texture_resource(*dst, resolver);
+                    let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyTexture { src: *src, dst });
+                }
+                NodeKind::CopyRenderTarget { src, dst } => {
+                    let dst = resolve_copy_destination(*dst, resolver);
+                    commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
             }
@@ -606,12 +710,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                             None => resource_slots.clone(),
                         };
                         commands.push(GpuCommand::SetPipeline(*pipeline));
-                        if !slots.is_empty() || !user_slots.is_empty() {
-                            commands.push(GpuCommand::BindResourcesRaw {
-                                indices: slots,
-                                user: user_slots.clone(),
-                            });
-                        }
+                        push_compute_resource_bind(&mut commands, &slots, user_slots);
                         commands.push(GpuCommand::DispatchIndirect {
                             label: Some(node.label),
                             buffer: *buffer,
@@ -648,12 +747,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let d = &run[0];
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
                     let slots = d.resource_slots.as_slice();
-                    if !slots.is_empty() || !d.user_slots.is_empty() {
-                        commands.push(GpuCommand::BindResourcesRaw {
-                            indices: slots.to_vec(),
-                            user: d.user_slots.clone(),
-                        });
-                    }
+                    push_compute_resource_bind(&mut commands, slots, d.user_slots);
                     commands.push(GpuCommand::Dispatch {
                         label: Some(d.label),
                         workgroups_x: d.x,
@@ -778,15 +872,24 @@ pub fn emit_partitioned_commands(
     vec![early, late]
 }
 
-/// Emit [`GraphCommand`]s (compute + optional offscreen render) from the analyzed graph.
-pub fn emit_graph_commands(
+/// Returns true if any node in `waves` is an offscreen [`NodeKind::RenderPass`].
+pub(crate) fn waves_contain_render_pass(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| {
+        w.node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
+    })
+}
+
+/// Emit [`GraphCommand`]s for a slice of compiled waves (compute + optional render).
+pub(crate) fn emit_graph_commands_for_waves(
     ir: &GraphIR,
-    schedule: &CompiledSchedule,
+    waves: &[Wave],
     resolver: Option<&SlotResolver>,
 ) -> Vec<GraphCommand> {
     let mut commands = Vec::new();
 
-    for wave in &schedule.waves {
+    for wave in waves {
         if !wave.barriers_before.is_empty() {
             let mut barrier_buffers = wave.barriers_before.buffers.clone();
             if !wave.barriers_before.transient_ids.is_empty() {
@@ -855,8 +958,12 @@ pub fn emit_graph_commands(
                     }));
                 }
                 NodeKind::CopyTexture { src, dst } => {
-                    let dst = resolve_texture_resource(*dst, resolver);
+                    let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyTexture { src: *src, dst }));
+                }
+                NodeKind::CopyRenderTarget { src, dst } => {
+                    let dst = resolve_copy_destination(*dst, resolver);
+                    commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
                 NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
             }
@@ -877,11 +984,10 @@ pub fn emit_graph_commands(
                         None => resource_slots.clone(),
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
-                    if !slots.is_empty() || !user_slots.is_empty() {
-                        commands.push(GraphCommand::Compute(GpuCommand::BindResourcesRaw {
-                            indices: slots,
-                            user: user_slots.clone(),
-                        }));
+                    let mut bind_cmds = Vec::new();
+                    push_compute_resource_bind(&mut bind_cmds, &slots, user_slots);
+                    for cmd in bind_cmds {
+                        commands.push(GraphCommand::Compute(cmd));
                     }
                     match dispatch {
                         super::ir::DispatchDim::Direct { x, y, z } => {
@@ -916,6 +1022,15 @@ pub fn emit_graph_commands(
     }
 
     commands
+}
+
+/// Emit [`GraphCommand`]s (compute + optional offscreen render) from the analyzed graph.
+pub fn emit_graph_commands(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    resolver: Option<&SlotResolver>,
+) -> Vec<GraphCommand> {
+    emit_graph_commands_for_waves(ir, &schedule.waves, resolver)
 }
 
 #[cfg(test)]
@@ -996,6 +1111,83 @@ mod tests {
                 height: 1,
             },
         }
+    }
+
+    #[test]
+    fn render_pass_then_copy_render_target_orders_nodes() {
+        let ir = GraphIR {
+            nodes: vec![
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![],
+                    kind: NodeKind::RenderPass {
+                        target: 10,
+                        commands: Vec::new(),
+                    },
+                },
+                TaskNode {
+                    label: "copy_to_swapchain",
+                    bindings: vec![
+                        ResourceBinding {
+                            resource: ResourceId::RenderTarget(10),
+                            access: NodeAccess::Read,
+                        },
+                        ResourceBinding {
+                            resource: ResourceId::SwapchainOutput,
+                            access: NodeAccess::Write,
+                        },
+                    ],
+                    kind: NodeKind::CopyRenderTarget {
+                        src: 10,
+                        dst: ResourceId::SwapchainOutput,
+                    },
+                },
+            ],
+        };
+        let edges = build_edges(&ir);
+        assert_eq!(edges, vec![(0, 1)]);
+
+        let schedule = schedule_waves(&ir, &edges);
+        assert_eq!(schedule.waves.len(), 2);
+        assert_eq!(schedule.waves[0].node_indices, vec![0]);
+        assert_eq!(schedule.waves[1].node_indices, vec![1]);
+    }
+
+    #[test]
+    fn copy_render_target_resolves_swapchain_output_dst() {
+        let ir = GraphIR {
+            nodes: vec![TaskNode {
+                label: "copy_rt_to_swapchain",
+                bindings: vec![
+                    ResourceBinding {
+                        resource: ResourceId::RenderTarget(5),
+                        access: NodeAccess::Read,
+                    },
+                    ResourceBinding {
+                        resource: ResourceId::SwapchainOutput,
+                        access: NodeAccess::Write,
+                    },
+                ],
+                kind: NodeKind::CopyRenderTarget {
+                    src: 5,
+                    dst: ResourceId::SwapchainOutput,
+                },
+            }],
+        };
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let resolver = SlotResolver {
+            swapchain: Some(crate::task_graph::ResolvedSwapchain {
+                handle: 42,
+                uav_index: 3,
+            }),
+            ..Default::default()
+        };
+
+        let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
+        assert!(matches!(
+            commands.as_slice(),
+            [GpuCommand::CopyRenderTarget { src: 5, dst: 42 }]
+        ));
     }
 
     #[test]

@@ -1,203 +1,217 @@
 #!/usr/bin/env python3
-"""Conway's Game of Life - Compute + Graphics Example
+"""Conway's Game of Life — hybrid TaskGraph in a window (compute + render + blit).
 
-This example demonstrates:
-1. Compute shader running cellular automaton rules
-2. Graphics shader rendering the grid
-3. Ping-pong buffer technique for in-place updates
+Requires: pip install glfw
 
 Usage:
     python game_of_life.py
 """
 
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import glfw
 import goldy
 import numpy as np
-import time
-import os
-import glfw
-
 
 GRID_WIDTH = 128
 GRID_HEIGHT = 128
 CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
+WORKGROUPS_X = (GRID_WIDTH + 7) // 8
+WORKGROUPS_Y = (GRID_HEIGHT + 7) // 8
+
+SHADERS_DIR = Path(__file__).resolve().parents[2] / "shaders"
 
 
-def load_shader(name):
-    """Load shader from shared shaders directory."""
-    shader_dir = os.path.join(os.path.dirname(__file__), "..", "..", "shaders")
-    shader_path = os.path.join(shader_dir, name)
-    with open(shader_path, "r") as f:
-        return f.read()
+def demo_frame_limit() -> int | None:
+    raw = os.environ.get("GOLDY_DEMO_FRAMES", "").strip()
+    if not raw:
+        return None
+    return max(1, int(raw))
 
 
-def create_initial_state():
-    """Create initial pattern (glider gun + some random cells)."""
+def create_initial_state() -> np.ndarray:
     cells = np.zeros(CELL_COUNT, dtype=np.uint32)
 
-    # Gosper Glider Gun (creates infinite gliders)
     gun = [
-        (1, 5), (1, 6), (2, 5), (2, 6),
-        (11, 5), (11, 6), (11, 7),
-        (12, 4), (12, 8),
-        (13, 3), (13, 9),
-        (14, 3), (14, 9),
+        (1, 5),
+        (1, 6),
+        (2, 5),
+        (2, 6),
+        (11, 5),
+        (11, 6),
+        (11, 7),
+        (12, 4),
+        (12, 8),
+        (13, 3),
+        (13, 9),
+        (14, 3),
+        (14, 9),
         (15, 6),
-        (16, 4), (16, 8),
-        (17, 5), (17, 6), (17, 7),
+        (16, 4),
+        (16, 8),
+        (17, 5),
+        (17, 6),
+        (17, 7),
         (18, 6),
-        (21, 3), (21, 4), (21, 5),
-        (22, 3), (22, 4), (22, 5),
-        (23, 2), (23, 6),
-        (25, 1), (25, 2), (25, 6), (25, 7),
-        (35, 3), (35, 4),
-        (36, 3), (36, 4),
+        (21, 3),
+        (21, 4),
+        (21, 5),
+        (22, 3),
+        (22, 4),
+        (22, 5),
+        (23, 2),
+        (23, 6),
+        (25, 1),
+        (25, 2),
+        (25, 6),
+        (25, 7),
+        (35, 3),
+        (35, 4),
+        (36, 3),
+        (36, 4),
     ]
-
-    # Place glider gun
     offset_x, offset_y = 10, 10
     for x, y in gun:
         px, py = x + offset_x, y + offset_y
         if px < GRID_WIDTH and py < GRID_HEIGHT:
             cells[py * GRID_WIDTH + px] = 1
 
-    # Add some random cells in the lower right
-    np.random.seed(42)
+    rng = 42
     for y in range(60, 100):
         for x in range(60, 100):
-            if np.random.randint(4) == 0:
+            rng = (rng * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+            if (rng >> 32) % 4 == 0:
                 cells[y * GRID_WIDTH + x] = 1
 
     return cells
 
 
-def main():
-    print("Game of Life - Press Escape to exit")
+def make_scene_rt(device: goldy.Device, surface: goldy.Surface) -> goldy.RenderTarget:
+    width = max(surface.width, 1)
+    height = max(surface.height, 1)
+    return goldy.RenderTarget(device, width, height, surface.format)
 
-    # Initialize GLFW
+
+def main() -> int:
+    print("Goldy Python Game of Life (TaskGraph)")
+    print("=" * 40)
+    print("Press Escape or close the window to exit\n")
+
     if not glfw.init():
-        raise RuntimeError("Failed to initialize GLFW")
+        print("Failed to initialize GLFW", file=sys.stderr)
+        return 1
 
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
-    glfw.window_hint(glfw.RESIZABLE, True)
-
-    window = glfw.create_window(800, 800, "Game of Life", None, None)
+    window = glfw.create_window(800, 800, "Goldy - Game of Life (Python)", None, None)
     if not window:
         glfw.terminate()
-        raise RuntimeError("Failed to create GLFW window")
+        print("Failed to create GLFW window", file=sys.stderr)
+        return 1
 
-    # Create Goldy device and surface
+    compute_src = (SHADERS_DIR / "game_of_life.slang").read_text(encoding="utf-8")
+    render_src = (SHADERS_DIR / "game_of_life_render.slang").read_text(encoding="utf-8")
+
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
     surface = goldy.Surface.from_glfw(device, window)
 
-    # Load shaders
-    compute_shader = goldy.ShaderModule.from_slang(device, load_shader("game_of_life.slang"))
-    render_shader = goldy.ShaderModule.from_slang(device, load_shader("game_of_life_render.slang"))
+    initial = create_initial_state()
+    zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
+    buf_a = goldy.Buffer(device, initial, goldy.BufferKind.SCATTERED)
+    buf_b = goldy.Buffer(device, zeros, goldy.BufferKind.SCATTERED)
 
-    # Create ping-pong buffers
-    initial_state = create_initial_state()
-    alive_count = np.sum(initial_state)
-    print(f"Initial alive cells: {alive_count} / {len(initial_state)}")
-    buffer_a = goldy.Buffer(device, initial_state, goldy.BufferKind.SCATTERED)
-    buffer_b = goldy.Buffer(device, initial_state, goldy.BufferKind.SCATTERED)
-
-    # Create compute pipeline
+    compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
+    render_shader = goldy.ShaderModule.from_slang(device, render_src)
     compute_pipeline = goldy.ComputePipeline(device, compute_shader)
-
-    # Create render pipeline
-    # Use empty vertex layout since the shader generates vertices via SV_VertexID
     render_pipeline = goldy.RenderPipeline(
-        device, render_shader, render_shader,
+        device,
+        render_shader,
+        render_shader,
         goldy.RenderPipelineDesc(
-            vertex_layout=goldy.VertexBufferLayout.empty(),
-            topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
             target_format=surface.format,
-        )
+            topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
+        ),
     )
 
-    print(f"Initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid")
-    print("Features Gosper Glider Gun + random cells")
-
+    scene_rt = make_scene_rt(device, surface)
+    frame_graph = goldy.TaskGraph()
     use_buffer_a = True
-    last_update = time.time()
     frame_count = 0
-    
-    # CI mode: exit after a few frames to avoid hanging
-    ci_mode = os.environ.get('CI') == 'true' or os.environ.get('GITHUB_ACTIONS') == 'true'
-    max_frames = 10 if ci_mode else float('inf')
+    last_update = time.monotonic()
+    frame_limit = demo_frame_limit()
+    start = time.monotonic()
 
-    # Handle window resize
-    def on_resize(win, w, h):
-        if w > 0 and h > 0:
-            surface.resize(w, h)
+    try:
+        while not glfw.window_should_close(window):
+            fb_width, fb_height = glfw.get_framebuffer_size(window)
+            if fb_width > 0 and fb_height > 0:
+                if fb_width != surface.width or fb_height != surface.height:
+                    surface.resize(fb_width, fb_height)
+                    scene_rt = make_scene_rt(device, surface)
 
-    glfw.set_framebuffer_size_callback(window, on_resize)
+            now = time.monotonic()
+            should_update = (now - last_update) > 0.033
 
-    def on_key(win, key, scancode, action, mods):
-        if action == glfw.PRESS and key == glfw.KEY_ESCAPE:
-            glfw.set_window_should_close(window, True)
+            frame_graph.clear()
 
-    glfw.set_key_callback(window, on_key)
+            if should_update:
+                last_update = now
+                read_buf, write_buf = (buf_a, buf_b) if use_buffer_a else (buf_b, buf_a)
+                read_idx = read_buf.resource_index(goldy.ResourceAccess.READ)
+                write_idx = write_buf.resource_index(goldy.ResourceAccess.WRITE)
+                with frame_graph.compute_node(
+                    "game_of_life",
+                    compute_pipeline,
+                    workgroups=(WORKGROUPS_X, WORKGROUPS_Y, 1),
+                ) as node:
+                    (
+                        node.bind_buffer(read_buf, goldy.NodeAccess.READ)
+                        .bind_buffer(write_buf, goldy.NodeAccess.WRITE)
+                        .bind_resources_raw([read_idx, write_idx])
+                    )
+                use_buffer_a = not use_buffer_a
 
-    # Main render loop
-    while not glfw.window_should_close(window) and frame_count < max_frames:
-        glfw.poll_events()
+            current_buf = buf_a if use_buffer_a else buf_b
+            cells_idx = current_buf.resource_index(goldy.ResourceAccess.READ)
 
-        # Update simulation ~30 times per second
-        now = time.time()
-        should_update = (now - last_update) > 0.033
+            with frame_graph.render_pass("game_of_life_render", scene_rt) as rp:
+                (
+                    rp.bind_buffer(current_buf, goldy.NodeAccess.READ)
+                    .clear(goldy.Color.BLACK)
+                    .set_pipeline(render_pipeline)
+                    .bind_resource_index(cells_idx)
+                    .draw_fullscreen()
+                )
 
-        if should_update:
-            last_update = now
+            swapchain = frame_graph.declare_swapchain_output()
+            frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
 
-            # Run compute pass with ping-pong buffers
-            compute_encoder = goldy.ComputeEncoder()
-            with compute_encoder.begin_compute_pass() as cp:
-                cp.set_pipeline(compute_pipeline)
+            frame = surface.acquire()
+            surface.submit_graph_to_frame(frame_graph, frame)
+            surface.present(frame)
 
-                # Bind resource slots
-                # Order matters: [current_state, next_state] matching shader slots
-                if use_buffer_a:
-                    # A -> B: read from A, write to B
-                    cp.bind_resources([buffer_a, buffer_b])
-                else:
-                    # B -> A: read from B, write to A
-                    cp.bind_resources([buffer_b, buffer_a])
+            frame_count += 1
+            glfw.poll_events()
 
-                # Dispatch workgroups (8x8 threads per group)
-                workgroups_x = (GRID_WIDTH + 7) // 8
-                workgroups_y = (GRID_HEIGHT + 7) // 8
-                cp.dispatch(workgroups_x, workgroups_y, 1)
+            if glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS:
+                break
+            if frame_limit is not None and frame_count >= frame_limit:
+                glfw.set_window_should_close(window, True)
+    finally:
+        elapsed = time.monotonic() - start
+        fps = frame_count / elapsed if elapsed > 0 else 0.0
+        print(f"GOLDY_PERF: frames={frame_count} elapsed={elapsed:.2f}s avg_fps={fps:.1f}")
+        glfw.destroy_window(window)
+        glfw.terminate()
 
-            compute_encoder.dispatch(device)
-
-            # Toggle buffer for next frame
-            use_buffer_a = not use_buffer_a
-
-        # Render
-        frame = surface.acquire()
-
-        encoder = goldy.CommandEncoder()
-        with encoder.begin_render_pass() as rp:
-            rp.clear(goldy.Color.BLACK)
-            rp.set_pipeline(render_pipeline)
-
-            # Read from the buffer that is now "current"
-            if use_buffer_a:
-                rp.bind_resources([buffer_a])
-            else:
-                rp.bind_resources([buffer_b])
-
-            # Draw fullscreen triangle
-            rp.draw(range(3))
-
-        frame.render(encoder)
-        surface.present(frame)
-        
-        frame_count += 1
-        
-    glfw.terminate()
+    print("Done!")
+    return 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())

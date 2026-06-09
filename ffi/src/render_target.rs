@@ -1,7 +1,6 @@
 //! FFI bindings for RenderTarget.
 
 use crate::device::GoldyDevice;
-use crate::encoder::GoldyCommandEncoder;
 use crate::error::{set_last_error_from_anyhow, GoldyResult};
 use crate::types::{GoldyDepthFormat, GoldyTextureFormat};
 use std::ptr;
@@ -142,32 +141,6 @@ pub unsafe extern "C" fn goldy_render_target_buffer_size(target: *const GoldyRen
         return 0;
     }
     (*target).inner.buffer_size()
-}
-
-/// Render commands to the target.
-///
-/// This consumes the encoder.
-///
-/// # Safety
-/// Both pointers must be valid.
-/// The encoder is consumed and must not be used after this call.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_render_target_render(
-    target: *const GoldyRenderTarget,
-    encoder: *mut GoldyCommandEncoder,
-) -> GoldyResult {
-    if target.is_null() || encoder.is_null() {
-        return GoldyResult::NullPointer;
-    }
-
-    let encoder = Box::from_raw(encoder);
-    match (*target).inner.render(encoder.inner) {
-        Ok(()) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            GoldyResult::GpuError
-        }
-    }
 }
 
 /// Read the rendered pixels to a CPU buffer.

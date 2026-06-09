@@ -9,15 +9,16 @@ use super::{
 use crate::backend::{
     BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, TextureHandle,
 };
-use crate::buffer::{Buffer, BufferView};
+use crate::buffer::{Buffer, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
-use crate::encoder::CommandEncoder;
 use crate::error::GoldyError;
+use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
+use crate::sampler::Sampler;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::TextureFormat;
+use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFormat};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -417,6 +418,7 @@ impl TaskGraph {
                     | NodeKind::WriteTexture { .. }
                     | NodeKind::WriteTextureRegion { .. }
                     | NodeKind::CopyTexture { .. }
+                    | NodeKind::CopyRenderTarget { .. }
             )
         });
         let fp = Self::binding_fingerprint(ir);
@@ -822,6 +824,29 @@ impl TaskGraph {
         });
     }
 
+    /// Add a CPU→GPU write node for a retained buffer [`crate::Parcel`].
+    ///
+    /// Like [`Self::write_buffer`], but accepts an opaque parcel instead of a
+    /// [`Buffer`] handle. Valid only for non-mosaic buffer parcels (the same
+    /// restriction as a direct buffer write). The analyzer inserts
+    /// barriers between this write and any subsequent reader in the graph.
+    pub fn write_parcel(&mut self, parcel: &crate::Parcel, offset: u64, data: Vec<u8>) -> Result<()> {
+        let (buffer, resource) = parcel.write_buffer_target()?;
+        self.ir.nodes.push(TaskNode {
+            label: "write_parcel",
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer,
+                offset,
+                data: Arc::from(data),
+            },
+        });
+        Ok(())
+    }
+
     /// Add a CPU→GPU texture upload node (full image).
     ///
     /// Data length must match [`Texture::byte_size`]. The upload is batched with
@@ -905,6 +930,32 @@ impl TaskGraph {
         });
     }
 
+    /// Copy an offscreen [`crate::RenderTarget`] color buffer to the late-bound swapchain output.
+    ///
+    /// Record this after a [`Self::render_pass`] that targets the same `src` render target.
+    /// The analyzer orders the copy after the render pass via the shared
+    /// render-target resource binding.
+    pub fn copy_render_target_to_swapchain(&mut self, src: &RenderTarget, _dst: SwapchainOutputHandle) {
+        let src_h = src.backend_handle();
+        self.ir.nodes.push(TaskNode {
+            label: "copy_render_target_to_swapchain",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::SwapchainOutput,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: src_h,
+                dst: ResourceId::SwapchainOutput,
+            },
+        });
+    }
+
     /// Add a CPU→GPU texture upload node for a subrectangle.
     pub fn write_texture_region(
         &mut self,
@@ -955,6 +1006,11 @@ impl TaskGraph {
         Ok(())
     }
 
+    /// Push a fully recorded task node (used by [`super::record::RenderPassRecord`] and tests).
+    pub(crate) fn push_task_node(&mut self, node: super::ir::TaskNode) {
+        self.ir.nodes.push(node);
+    }
+
     /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
     pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         RenderPassBuilder {
@@ -962,6 +1018,8 @@ impl TaskGraph {
             label,
             target: target.backend_handle(),
             bindings: Vec::new(),
+            commands: Vec::new(),
+            push_constant_handles: Vec::new(),
         }
     }
 
@@ -1517,6 +1575,33 @@ impl<'a> NodeBuilder<'a> {
         self.bind_resources_raw(indices.to_vec())
     }
 
+    /// Bind buffer resource slots and declare read/write dependencies.
+    ///
+    /// Slot indices are each buffer's UAV bindless index in shader parameter order.
+    pub fn bind_resources(mut self, buffers: &[&Buffer]) -> Self {
+        use crate::types::ResourceAccess;
+        let mut indices = Vec::with_capacity(buffers.len());
+        for buf in buffers {
+            self.bindings.push(ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::ReadWrite,
+            });
+            let idx = buf
+                .resource_index(ResourceAccess::ReadWrite)
+                .or_else(|| buf.resource_index(ResourceAccess::Read))
+                .expect("bind_resources: buffer has no bindless index");
+            indices.push(idx);
+        }
+        self.resource_slots = indices;
+        self
+    }
+
+    /// Bind resource slots from typed [`ResourceHandle`]s (region A indices only).
+    pub fn bind_resources_typed(mut self, handles: &[ResourceHandle]) -> Self {
+        self.resource_slots = handles.iter().map(|h| h.index()).collect();
+        self
+    }
+
     /// Set user scalar parameters for this node's dispatch (region B).
     /// Accepts an owned `Vec` for indices to avoid re-allocation.
     pub fn bind_resources_raw_with_user(mut self, indices: Vec<u32>, user: &[u32]) -> Self {
@@ -1559,15 +1644,208 @@ impl<'a> NodeBuilder<'a> {
     }
 }
 
+/// One bindless push-constant slot in shader virtual-main parameter order.
+///
+/// Use with [`RenderPassBuilder::bind_shader_resources`]. Mosaic parcels belong in
+/// [`RenderPassBuilder::bind_parcel_mut`] (graph dependency + vertex views), not here.
+pub enum ShaderResourceSlot<'a> {
+    Parcel {
+        parcel: &'a crate::Parcel,
+        access: NodeAccess,
+    },
+    Sampler(&'a Sampler),
+}
+
+fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+    match access {
+        NodeAccess::Read => ResourceAccess::Read,
+        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+    }
+}
+
 /// Builder for a render pass targeting an offscreen [`crate::RenderTarget`].
 pub struct RenderPassBuilder<'a> {
     graph: &'a mut TaskGraph,
     label: &'static str,
     target: RenderTargetHandle,
     bindings: Vec<ResourceBinding>,
+    commands: Vec<RenderCommand>,
+    push_constant_handles: Vec<ResourceHandle>,
 }
 
 impl<'a> RenderPassBuilder<'a> {
+    /// Declare push-constant slots in shader parameter order and register graph bindings.
+    ///
+    /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
+    /// handles before each pipeline bind.
+    pub fn bind_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
+        for slot in slots {
+            match slot {
+                ShaderResourceSlot::Parcel { parcel, access } => {
+                    let resource_access = node_access_to_resource_access(*access);
+                    self.graph.stamp_targets.push(parcel.stamp_handle());
+                    self.bindings.push(ResourceBinding {
+                        resource: parcel.resource_id(),
+                        access: *access,
+                    });
+                    let handle = parcel.handle(resource_access).unwrap_or_else(|| {
+                        panic!(
+                            "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
+                             use bind_parcel_mut for geometry and bind views at draw time"
+                        )
+                    });
+                    self.push_constant_handles.push(handle);
+                }
+                ShaderResourceSlot::Sampler(sampler) => {
+                    let handle = sampler
+                        .handle(ResourceAccess::Read)
+                        .expect("ShaderResourceSlot::Sampler: missing bindless sampler index");
+                    self.push_constant_handles.push(handle);
+                }
+            }
+        }
+        self
+    }
+
+    /// Like [`Self::bind_parcel`] but for use while recording on `&mut self`.
+    pub fn bind_parcel_mut(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    /// Like [`Self::bind_buffer`] but for use while recording on `&mut self`.
+    pub fn bind_buffer_mut(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Buffer(buf.handle),
+            access,
+        });
+        self
+    }
+
+    /// Like [`Self::bind_texture`] but for use while recording on `&mut self`.
+    pub fn bind_texture_mut(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::Texture(tex.handle),
+            access,
+        });
+        self
+    }
+
+    /// Like [`Self::bind_buffer_view`] but for use while recording on `&mut self`.
+    pub fn bind_buffer_view_mut(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::BufferRange {
+                parent: view.parent_handle(),
+                offset: view.offset(),
+                len: view.size(),
+            },
+            access,
+        });
+        self
+    }
+
+    pub fn clear(&mut self, color: Color) -> &mut Self {
+        self.commands.push(RenderCommand::Clear(color));
+        self
+    }
+
+    pub fn clear_depth(&mut self, depth: f32) -> &mut Self {
+        self.commands.push(RenderCommand::ClearDepth(depth));
+        self
+    }
+
+    /// Set the active pipeline and bind [`Self::bind_shader_resources`] slots when declared.
+    ///
+    /// Pipeline is bound before root constants (required on D3D12: root signature first).
+    pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
+        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.push_constant_handles.is_empty() {
+            self.commands.push(RenderCommand::BindResourcesTyped {
+                handles: self.push_constant_handles.clone(),
+            });
+        }
+        self
+    }
+
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) -> &mut Self {
+        self.commands.push(RenderCommand::SetVertexBuffer {
+            slot,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
+        });
+        self
+    }
+
+    pub fn set_index_buffer(&mut self, buffer: &impl BufferSource, format: IndexFormat) -> &mut Self {
+        self.commands.push(RenderCommand::SetIndexBuffer {
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
+            format,
+        });
+        self
+    }
+
+    pub fn draw_indexed(
+        &mut self,
+        indices: std::ops::Range<u32>,
+        base_vertex: i32,
+        instances: std::ops::Range<u32>,
+    ) -> &mut Self {
+        self.commands.push(RenderCommand::DrawIndexed {
+            index_count: indices.end - indices.start,
+            instance_count: instances.end - instances.start,
+            first_index: indices.start,
+            base_vertex,
+            first_instance: instances.start,
+        });
+        self
+    }
+
+    pub fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) -> &mut Self {
+        self.commands.push(RenderCommand::Draw {
+            vertex_count: vertices.end - vertices.start,
+            instance_count: instances.end - instances.start,
+            first_vertex: vertices.start,
+            first_instance: instances.start,
+        });
+        self
+    }
+
+    pub fn draw_fullscreen(&mut self) -> &mut Self {
+        self.draw(0..3, 0..1)
+    }
+
+    pub fn draw_quads(&mut self, count: u32) -> &mut Self {
+        self.draw(0..6, 0..count)
+    }
+
+    pub fn bind_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResources {
+            buffers: buffers.iter().map(|b| b.handle).collect(),
+        });
+        self
+    }
+
+    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResourcesRaw {
+            indices: indices.to_vec(),
+            user: Vec::new(),
+        });
+        self
+    }
+
+    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResourcesTyped {
+            handles: handles.to_vec(),
+        });
+        self
+    }
+
     pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
@@ -1612,21 +1890,55 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Finalize the node with recorded [`RenderCommand`]s (e.g. from [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish)).
-    pub fn finish(self, commands: Vec<RenderCommand>) {
-        self.graph.ir.nodes.push(TaskNode {
-            label: self.label,
-            bindings: self.bindings,
-            kind: NodeKind::RenderPass {
-                target: self.target,
-                commands,
-            },
+    /// Declare that this render pass accesses a retained [`crate::Parcel`].
+    ///
+    /// Like [`NodeBuilder::bind_parcel`], the parcel is stamped at graph submit
+    /// time so [`crate::Parcel::last_referenced`] is updated automatically.
+    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    /// Finalize the node with commands recorded via [`Self::clear`], [`Self::set_pipeline`], etc.
+    pub fn finish_recorded(self) {
+        let RenderPassBuilder {
+            graph,
+            label,
+            target,
+            bindings,
+            commands,
+            push_constant_handles: _,
+        } = self;
+        graph.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::RenderPass { target, commands },
         });
     }
 
-    /// Convenience: [`CommandEncoder::finish`](crate::encoder::CommandEncoder::finish) then [`Self::finish`].
-    pub fn finish_encoder(self, encoder: CommandEncoder) {
-        self.finish(encoder.finish())
+    /// Finalize the node with a pre-built [`RenderCommand`] list.
+    pub fn finish(self, commands: Vec<RenderCommand>) {
+        self.push_node(commands);
+    }
+
+    fn push_node(self, commands: Vec<RenderCommand>) {
+        let RenderPassBuilder {
+            graph,
+            label,
+            target,
+            bindings,
+            push_constant_handles: _,
+            ..
+        } = self;
+        graph.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::RenderPass { target, commands },
+        });
     }
 }
 
@@ -1638,7 +1950,6 @@ mod tests {
     use crate::backend::GraphCommand;
     use crate::buffer::BufferPool;
     use crate::device::Device;
-    use crate::encoder::CommandEncoder;
     use crate::render_target::RenderTarget;
     use crate::shader::ShaderModule;
     use crate::types::{Color, TextureFormat};
@@ -1666,6 +1977,19 @@ mod tests {
         crate::compute::ComputePipeline::new(device, shader).unwrap()
     }
 
+    fn mock_render_pipeline(device: &Device, shader: &ShaderModule) -> RenderPipeline {
+        RenderPipeline::new(
+            device,
+            shader,
+            shader,
+            &crate::RenderPipelineDesc {
+                target_format: TextureFormat::Rgba8Unorm,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn compile_mixed_compute_render_inserts_barrier_and_submits_graph() {
         let device = mock_device();
@@ -1682,15 +2006,10 @@ mod tests {
             .bind_resources_raw_slice(&[1])
             .dispatch(1, 1, 1);
 
-        let mut enc = CommandEncoder::new();
-        {
-            let mut pass = enc.begin_render_pass();
-            pass.clear(Color::RED);
-        }
-        graph
-            .render_pass("draw", &target)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .finish_encoder(enc);
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_buffer_mut(&buf, NodeAccess::Read);
+        pass.clear(Color::RED);
+        pass.finish_recorded();
 
         let gcs = graph.compile_graph_commands();
         assert!(
@@ -1700,6 +2019,128 @@ mod tests {
         );
 
         graph.submit(&ctx).unwrap();
+    }
+
+    #[test]
+    fn render_pass_finish_recorded_auto_binds_shader_resources() {
+        use crate::backend::RenderCommand;
+
+        let device = mock_device();
+        let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
+        let parcel = retained_buffer_parcel(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+        let shader = mock_shader(&device);
+        let pipeline = mock_render_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &parcel,
+            access: NodeAccess::Read,
+        }]);
+        pass.clear(Color::GREEN);
+        pass.set_pipeline(&pipeline);
+        pass.finish_recorded();
+
+        let gcs = graph.compile_graph_commands();
+        let render_cmds = gcs
+            .iter()
+            .find_map(|c| match c {
+                GraphCommand::Render { commands, .. } => Some(commands.as_slice()),
+                _ => None,
+            })
+            .expect("render pass command");
+        assert!(
+            render_cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::BindResourcesTyped { .. })),
+            "set_pipeline should emit BindResourcesTyped from bind_shader_resources"
+        );
+        let set_pipe = render_cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::SetPipeline(_)))
+            .expect("SetPipeline");
+        let bind = render_cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::BindResourcesTyped { .. }))
+            .expect("BindResourcesTyped");
+        assert!(set_pipe < bind, "D3D12 requires SetPipeline before BindResourcesTyped");
+    }
+
+    #[test]
+    fn write_parcel_then_render_pass_inserts_barrier() {
+        let device = mock_device();
+        let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
+        let parcel = retained_buffer_parcel(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut graph = TaskGraph::new();
+        graph.write_parcel(&parcel, 0, vec![1, 2, 3, 4]).unwrap();
+
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.clear(Color::RED);
+        pass.finish_recorded();
+
+        let gcs = graph.compile_graph_commands();
+        assert!(
+            gcs.iter()
+                .any(|c| matches!(c, GraphCommand::Compute(GpuCommand::ResourceBarrier { .. }))),
+            "expected ResourceBarrier between write_parcel and render read"
+        );
+    }
+
+    #[test]
+    fn write_parcel_rejects_mosaic_parcel() {
+        let device = Arc::new(mock_device());
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let mut mosaic = pool.mosaic();
+        let _slot = mosaic.emplace(&[0u32, 1, 2, 3]);
+        let parcel = mosaic.build().unwrap();
+
+        let mut graph = TaskGraph::new();
+        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
+        assert!(
+            err.to_string().contains("non-mosaic buffer parcels"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn render_pass_then_copy_render_target_emits_in_order() {
+        let device = mock_device();
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("draw", &target);
+        pass.clear(Color::RED);
+        pass.finish_recorded();
+        let sc = graph.declare_swapchain_output();
+        graph.copy_render_target_to_swapchain(&target, sc);
+
+        let (schedule, split_wave) = graph.schedule_and_split_wave();
+        assert_eq!(schedule.waves.len(), 2, "render and copy must be in separate waves");
+        assert_eq!(split_wave, 1, "swapchain copy must be in the late partition");
+        assert_eq!(schedule.waves[0].node_indices.len(), 1);
+        assert_eq!(schedule.waves[1].node_indices.len(), 1);
+    }
+
+    #[test]
+    fn render_pass_bind_parcel_submit_stamps_last_referenced() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let parcel = retained_buffer_parcel(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("draw", &target);
+        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.clear(Color::BLUE);
+        pass.finish_recorded();
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]

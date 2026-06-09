@@ -16,22 +16,43 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+use crate::types::ResourceCategory;
+
+fn buffer_stride_for_bindless_index(
+    buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+    device_handle: DeviceHandle,
+    index: u32,
+    cat: ResourceCategory,
+) -> Option<u32> {
+    // DX12 uses a process-wide backend singleton; bindless indices are per-device heap
+    // offsets, so parallel tests must not resolve strides from another device's buffers.
+    for b in buffers.values() {
+        if b.device_handle != device_handle {
+            continue;
+        }
+        match cat {
+            ResourceCategory::Scattered
+                if b.is_storage && (b.bindless_offset == Some(index) || b.bindless_srv_offset == Some(index)) =>
+            {
+                return b.element_stride;
+            }
+            ResourceCategory::Broadcast if !b.is_storage && b.bindless_offset == Some(index) => {
+                return b.element_stride;
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 /// Collect bindless heap indices referenced by a flat GPU command stream.
 fn collect_bindless_slots_from_gpu_commands(
     commands: &[GpuCommand],
-    buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
+    _buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
 ) -> Vec<DeferredSlot> {
     let mut slots = Vec::new();
     for cmd in commands {
         match cmd {
-            GpuCommand::BindResources { buffers: buf_handles } => {
-                for h in buf_handles {
-                    if let Some(offset) = buffers.get(h).and_then(|b| b.bindless_offset) {
-                        slots.push(DeferredSlot::CbvSrvUav(offset));
-                    }
-                }
-            }
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 slots.extend(indices.iter().copied().map(DeferredSlot::CbvSrvUav));
             }
@@ -137,13 +158,21 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
 /// descriptor.  A mismatch (e.g. `AccessAfter = SRV` when the shader reads
 /// via UAV) causes the driver to use the wrong cache coherence protocol,
 /// resulting in implicit full stalls on hardware.
-fn slot_usage_to_dx12_access(usage: &SlotUsageSet) -> D3D12_BARRIER_ACCESS {
+/// Lower Koubaa slot usage to DX12 access flags.
+///
+/// When `for_buffer` is true, read-only shader bindings omit UAV so barriers
+/// stay valid on non-UAV buffer resources.
+fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, for_buffer: bool) -> D3D12_BARRIER_ACCESS {
     if usage.kinds.is_empty() {
         return D3D12_BARRIER_ACCESS_COMMON;
     }
     let mut access = D3D12_BARRIER_ACCESS(0);
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
-        access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+        if for_buffer && usage.access != NodeAccessUnion::Write {
+            access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+        } else {
+            access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+        }
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
         if usage.access == NodeAccessUnion::Write {
@@ -518,11 +547,17 @@ pub(super) fn create(
     let handle = state.next_compute_pipeline_handle;
     state.next_compute_pipeline_handle += 1;
 
-    let (cats, strides) = state
+    let (cats, slot_kinds, strides) = state
         .shaders
         .get(&compute_shader)
         .and_then(|s| s.reflection.as_ref())
-        .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+        .map(|r| {
+            (
+                r.push_constant_categories.clone(),
+                r.push_constant_slot_kinds.clone(),
+                r.binding_element_strides.clone(),
+            )
+        })
         .unwrap_or_default();
 
     state.compute_pipelines.insert(
@@ -533,6 +568,7 @@ pub(super) fn create(
             root_signature,
             parameter_block_layouts: Vec::new(),
             push_constant_categories: cats,
+            push_constant_slot_kinds: slot_kinds,
             binding_element_strides: strides,
             shader_debug_name,
         },
@@ -681,51 +717,28 @@ fn record_gpu_command(
                 }
             }
         }
-        GpuCommand::BindResources { buffers } => {
-            if crate::slang::layout_validation_enabled() {
-                if let Some(pipeline) = ctx
-                    .current_compute_pipeline
-                    .and_then(|h| state.compute_pipelines.get(&h))
-                {
-                    if !pipeline.binding_element_strides.is_empty() {
-                        let actual: Vec<Option<u32>> = buffers
-                            .iter()
-                            .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
-                            .collect();
-                        crate::backend::validate_binding_strides(
-                            &actual,
-                            &pipeline.binding_element_strides,
-                            &pipeline.shader_debug_name,
-                        )?;
-                    }
-                }
-            }
-            let mut layout = types::PushLayout::default();
-            shared::fill_bindless(
-                &mut layout,
-                buffers.iter().map(|h| {
-                    let offset = state.buffers.get(h).and_then(|b| b.bindless_offset).unwrap_or(0);
-                    tracing::trace!("Compute BindResources: buffer {} -> UAV offset {}", h, offset);
-                    offset
-                }),
-            );
-            tracing::trace!(
-                "Setting compute root constants (bindless): {:?}",
-                &layout.bindless[..buffers.len().min(types::MAX_BINDLESS_SLOTS)]
-            );
-            unsafe {
-                cl.SetComputeRoot32BitConstants(
-                    0,
-                    (types::TOTAL_PUSH_BYTES / 4) as u32,
-                    &layout as *const _ as *const std::ffi::c_void,
-                    0,
-                );
-            }
-        }
         GpuCommand::BindResourcesRaw {
             indices: raw_indices,
             user: raw_user,
         } => {
+            if let Some(pipeline) = ctx
+                .current_compute_pipeline
+                .and_then(|h| state.compute_pipelines.get(&h))
+            {
+                crate::backend::validate_raw_binding_strides(
+                    raw_indices,
+                    &pipeline.push_constant_categories,
+                    &pipeline.binding_element_strides,
+                    |idx, cat| buffer_stride_for_bindless_index(&state.buffers, device_handle, idx, cat),
+                    &pipeline.shader_debug_name,
+                )?;
+                crate::backend::validate_bindless_slot_kinds(
+                    raw_indices,
+                    &pipeline.push_constant_slot_kinds,
+                    |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                    &pipeline.shader_debug_name,
+                )?;
+            }
             let mut layout = types::PushLayout::default();
             shared::fill_raw(&mut layout, raw_indices, raw_user);
             unsafe {
@@ -745,6 +758,13 @@ fn record_gpu_command(
                 crate::backend::validate_typed_push_constants(
                     typed_handles,
                     &pipeline.push_constant_categories,
+                    &pipeline.shader_debug_name,
+                )?;
+                let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
+                crate::backend::validate_bindless_slot_kinds(
+                    &indices,
+                    &pipeline.push_constant_slot_kinds,
+                    |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
                     &pipeline.shader_debug_name,
                 )?;
             }
@@ -970,8 +990,8 @@ fn record_gpu_command(
                     let g = D3D12_GLOBAL_BARRIER {
                         SyncBefore: slot_usage_to_dx12_sync(&usage.src),
                         SyncAfter: slot_usage_to_dx12_sync(&usage.dst),
-                        AccessBefore: slot_usage_to_dx12_access(&usage.src),
-                        AccessAfter: slot_usage_to_dx12_access(&usage.dst),
+                        AccessBefore: slot_usage_to_dx12_access_for_buffer(&usage.src, true),
+                        AccessAfter: slot_usage_to_dx12_access_for_buffer(&usage.dst, true),
                     };
                     unsafe { barriers::barrier_globals(cl7, &[g]) };
                 }
@@ -984,8 +1004,8 @@ fn record_gpu_command(
                                 &bs.resource,
                                 slot_usage_to_dx12_sync(&usage.src),
                                 slot_usage_to_dx12_sync(&usage.dst),
-                                slot_usage_to_dx12_access(&usage.src),
-                                slot_usage_to_dx12_access(&usage.dst),
+                                slot_usage_to_dx12_access_for_buffer(&usage.src, true),
+                                slot_usage_to_dx12_access_for_buffer(&usage.dst, true),
                             )
                         })
                     })
@@ -1252,6 +1272,88 @@ fn record_gpu_command(
             if let Some(ts) = state.textures.get_mut(src) {
                 ts.last_layout = src_post_state.1;
             }
+            if let Some(ts) = state.textures.get_mut(dst) {
+                ts.last_layout = dst_post_state.1;
+            }
+        }
+        GpuCommand::CopyRenderTarget { src, dst } => {
+            let _tz = tracy_zone!("dx12.copy_render_target");
+            let src_res = {
+                let rt = state
+                    .render_targets
+                    .get(src)
+                    .context("CopyRenderTarget: src render target not found")?;
+                rt.texture.clone()
+            };
+            let (dst_res, dst_layout, dst_is_storage) = {
+                let ts = state
+                    .textures
+                    .get(dst)
+                    .context("CopyRenderTarget: dst texture not found")?;
+                (ts.resource.clone(), ts.last_layout, ts.is_storage)
+            };
+
+            let (dst_sync_before, dst_access_before, dst_layout_before) = texture_barrier_state_for_layout(dst_layout);
+
+            let mut pre_barriers = vec![
+                barriers::texture_barrier_full(
+                    &src_res,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                ),
+                barriers::texture_barrier_full(
+                    &dst_res,
+                    dst_sync_before,
+                    D3D12_BARRIER_SYNC_COPY,
+                    dst_access_before,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    dst_layout_before,
+                    D3D12_BARRIER_LAYOUT_COPY_DEST,
+                ),
+            ];
+            unsafe { barriers::barrier_textures(cl7, &pre_barriers) };
+            unsafe { barriers::drop_texture_barriers(&mut pre_barriers) };
+
+            unsafe { cl.CopyResource(&dst_res, &src_res) };
+
+            let dst_post_state = if dst_is_storage {
+                (
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                )
+            } else {
+                (
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE,
+                )
+            };
+            let mut post_barriers = vec![
+                barriers::texture_barrier_full(
+                    &src_res,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_RENDER_TARGET,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    D3D12_BARRIER_ACCESS_RENDER_TARGET,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                    D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                ),
+                barriers::texture_barrier_full(
+                    &dst_res,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    dst_post_state.0,
+                    D3D12_BARRIER_LAYOUT_COPY_DEST,
+                    dst_post_state.1,
+                ),
+            ];
+            unsafe { barriers::barrier_textures(cl7, &post_barriers) };
+            unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+
             if let Some(ts) = state.textures.get_mut(dst) {
                 ts.last_layout = dst_post_state.1;
             }
@@ -1879,23 +1981,26 @@ pub(super) fn submit_graph(
                         render_cmds,
                         &command_list7,
                     )?;
+                    // Color is already COPY_SOURCE after record_render_pass_to_list.
+                    // Global render→compute barriers cannot express texture layout
+                    // transitions and trip the debug layer before swapchain copy.
+                    if let Some(rt) = state.render_targets.get(target) {
+                        if let Some(ref depth_res) = rt.depth_texture {
+                            let depth_after = barriers::texture_barrier_full(
+                                depth_res,
+                                D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+                                D3D12_BARRIER_SYNC_ALL,
+                                D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                                D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ,
+                                D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+                                D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
+                            );
+                            unsafe {
+                                barriers::barrier_textures(cmd_ctx.command_list7, &[depth_after]);
+                            }
+                        }
+                    }
                     rendered_targets.push(*target);
-
-                    let render_to_compute = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: D3D12_BARRIER_SYNC(
-                            D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0,
-                        ),
-                        SyncAfter: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
-                        AccessBefore: D3D12_BARRIER_ACCESS(
-                            D3D12_BARRIER_ACCESS_RENDER_TARGET.0 | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE.0,
-                        ),
-                        AccessAfter: D3D12_BARRIER_ACCESS(
-                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0
-                                | D3D12_BARRIER_ACCESS_COPY_SOURCE.0
-                                | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
-                        ),
-                    };
-                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[render_to_compute]) };
                 }
             }
         }

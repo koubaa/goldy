@@ -11,22 +11,20 @@ A modern Rust GPU library that deliberately sheds legacy baggage. Goldy targets 
 ## Quick Example
 
 ```rust
-use goldy::{
-    Color, CommandEncoder, DeviceType, Instance, RenderTarget, TextureFormat,
-};
+use goldy::{Color, DeviceType, Instance, RenderTarget, TaskGraph, TextureFormat};
 
 fn main() -> anyhow::Result<()> {
     let instance = Instance::new()?;
     let device = instance.create_device(DeviceType::DiscreteGpu)?;
+    let ctx = device.create_context()?;
 
     let target = RenderTarget::new(&device, 800, 600, TextureFormat::Rgba8Unorm)?;
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
-        pass.clear(Color::CORNFLOWER_BLUE);
-    }
+    let mut graph = TaskGraph::new();
+    let mut pass = graph.render_pass("clear", &target);
+    pass.clear(Color::CORNFLOWER_BLUE);
+    pass.finish_recorded();
+    graph.dispatch(&ctx)?;
 
-    target.render(encoder)?;
     let _pixels = target.read_to_cpu()?;
     Ok(())
 }
@@ -50,12 +48,18 @@ goldy = "0.1"
 
 ### Slang Compiler
 
-Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The build script automatically downloads Slang 2026.4 during compilation. You can also:
+Goldy uses [Slang](https://github.com/shader-slang/slang) for shader compilation. The
+Rust `build.rs` downloads (if needed) and **embeds** the pinned Slang version at
+compile time; at runtime Goldy extracts and loads it automatically. Application
+developers do not install Slang separately.
 
-- Set `GOLDY_SLANG_PATH` to use a custom Slang installation
-- Run `slang/download.sh` to manually download vendored binaries
+- Set `GOLDY_SLANG_PATH` only to override with a custom Slang build
+- `slang/download.sh` is for **maintainers** bumping the pinned Slang version in
+  `slang/manifest.json`, not for normal project setup
 
-For FFI bindings (Python, .NET, C++), Slang libraries are bundled automatically by the respective build scripts. See [PACKAGING.md](PACKAGING.md) for architecture details and [DEBUGGING.md](DEBUGGING.md) for troubleshooting.
+Release packaging for Python wheels and FFI redistributions is described in
+[PACKAGING.md](PACKAGING.md). See [DEBUGGING.md](DEBUGGING.md) if shader
+compilation fails at runtime.
 
 Optional **Rust vs Slang struct layout checks** at shader compile time: set `GOLDY_VALIDATE_LAYOUTS=1` and pass `LayoutCheck` data from `#[derive(LayoutCheckable)]` into `ShaderModule::from_slang_with_options` (see [DEBUGGING.md](DEBUGGING.md) and the `gradient` / `checkerboard` examples).
 

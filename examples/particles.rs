@@ -1,15 +1,15 @@
 //! Particles example - rain/snow particle system.
 //!
-//! Demonstrates GPU compute + graphics integration using Surface API.
-//! The compute shader updates particle positions, the graphics shader renders them.
+//! Demonstrates GPU compute + graphics in a single task graph:
+//! compute update → offscreen render pass → swapchain blit → present.
 //!
 //! Run with: cargo run --example particles
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, CommandEncoder, ComputePipeline, DeviceDescriptor, Instance, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ShaderModule,
-    Surface, TaskGraph, VertexBufferLayout,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
+    TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -82,22 +82,25 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    context: goldy::Context,
+    device: Arc<goldy::Device>,
     surface: Surface,
-    // Compute resources
+    scene_rt: RenderTarget,
+    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    // Buffers
     particle_buffer: Buffer,
     params_buffer: Buffer,
-    // Graphics resources
     render_pipeline: RenderPipeline,
-    // State
     is_snow: bool,
     frame_count: f32,
     start_time: std::time::Instant,
 }
 
 impl RenderState {
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    }
+
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
         let device = Arc::new(
@@ -107,18 +110,14 @@ impl RenderState {
         );
         let ctx = device.create_context()?;
         let surface = Surface::new(&ctx, window.as_ref())?;
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
-        // Compute shader for particle physics
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
-
-        // Render shader for visualization
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
 
-        // Create particle buffer with initial rain particles
         let particles = Self::create_particles(false);
         let particle_buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
 
-        // Create params buffer
         let initial_params = ParticleParams {
             is_snow: 0.0,
             frame: 0.0,
@@ -127,10 +126,8 @@ impl RenderState {
         };
         let params_buffer = device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
 
-        // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
-        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -147,8 +144,10 @@ impl RenderState {
 
         Ok(Self {
             window,
-            context: ctx,
+            device,
             surface,
+            scene_rt,
+            frame_graph: TaskGraph::new(),
             compute_pipeline,
             particle_buffer,
             params_buffer,
@@ -163,8 +162,7 @@ impl RenderState {
         let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
         for _ in 0..NUM_PARTICLES {
             let x = random() * 2.0 - 1.0;
-            // Start particles distributed across screen so some are immediately visible
-            let y = random() * 2.2 - 1.0; // y from -1.0 to 1.2
+            let y = random() * 2.2 - 1.0;
 
             let (vx, vy, size) = if is_snow {
                 (
@@ -195,7 +193,6 @@ impl RenderState {
     fn toggle_mode(&mut self) -> Result<()> {
         self.is_snow = !self.is_snow;
 
-        // Reinitialize particles for the new mode
         let particles = Self::create_particles(self.is_snow);
         self.particle_buffer.write_data(0, &particles)?;
 
@@ -210,7 +207,6 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1.0;
 
-        // Update params buffer
         let params = ParticleParams {
             is_snow: if self.is_snow { 1.0 } else { 0.0 },
             frame: self.frame_count,
@@ -218,22 +214,6 @@ impl RenderState {
             _pad2: 0.0,
         };
         self.params_buffer.write_data(0, &[params])?;
-
-        // Run compute pass to update particles
-        let mut graph = TaskGraph::new();
-        graph
-            .node("update_particles", &self.compute_pipeline)
-            .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
-            .bind_buffer(&self.params_buffer, NodeAccess::Read)
-            .bind_resources_raw_slice(&[
-                self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
-                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
-            ])
-            .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
-        graph.dispatch(&self.context)?;
-
-        // Render particles
-        let frame = self.surface.begin()?;
 
         let bg_color = if self.is_snow {
             Color {
@@ -251,18 +231,32 @@ impl RenderState {
             }
         };
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(bg_color);
-            pass.set_pipeline(&self.render_pipeline);
-            // Pass buffer indices via push constants
-            pass.bind_resources(&[&self.particle_buffer, &self.params_buffer]);
-            // Draw quads for each particle instance
-            pass.draw_quads(NUM_PARTICLES);
-        }
+        self.frame_graph.clear();
+        self.frame_graph
+            .node("update_particles", &self.compute_pipeline)
+            .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
+            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_resources_raw_slice(&[
+                self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
+                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
+            ])
+            .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
 
-        frame.render(encoder)?;
+        let mut pass = self.frame_graph.render_pass("particles", &self.scene_rt);
+        pass.bind_buffer_mut(&self.particle_buffer, NodeAccess::Read);
+        pass.bind_buffer_mut(&self.params_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(&self.render_pipeline);
+        pass.bind_resources(&[&self.particle_buffer, &self.params_buffer]);
+        pass.draw_quads(NUM_PARTICLES);
+        pass.finish_recorded();
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
+
+        let frame = self.surface.begin()?;
+        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
         self.window.request_redraw();
@@ -333,6 +327,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                            state.scene_rt = rt;
+                        }
                     }
                 }
             }

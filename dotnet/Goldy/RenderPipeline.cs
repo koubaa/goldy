@@ -21,10 +21,18 @@ public sealed class RenderPipeline : IDisposable
         RenderPipelineDesc desc)
     {
         device.ThrowIfDisposed();
-        
-        var nativeDesc = desc.ToNative();
-        Handle = NativeMethods.RenderPipelineCreate(device.Handle, vertexShader.Handle, fragmentShader.Handle, in nativeDesc);
-        
+
+        var nativeAttrs = desc.ToNativeAttributes();
+        unsafe
+        {
+            fixed (VertexAttributeNative* pAttrs = nativeAttrs)
+            {
+                var nativeDesc = desc.ToNative(pAttrs, (uint)nativeAttrs.Length);
+                Handle = NativeMethods.RenderPipelineCreate(
+                    device.Handle, vertexShader.Handle, fragmentShader.Handle, in nativeDesc);
+            }
+        }
+
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("RenderPipeline creation");
     }
@@ -69,12 +77,12 @@ public class RenderPipelineDesc
     /// </summary>
     public DepthStencilState? DepthStencil { get; set; }
 
-    internal RenderPipelineDescNative ToNative()
+    internal unsafe RenderPipelineDescNative ToNative(VertexAttributeNative* attributes, uint attributeCount)
     {
         return new RenderPipelineDescNative
         {
-            VertexAttributes = nint.Zero,
-            VertexAttributeCount = 0,
+            VertexAttributes = attributeCount > 0 ? (nint)attributes : nint.Zero,
+            VertexAttributeCount = attributeCount,
             VertexStride = VertexStride,
             Topology = Topology,
             TargetFormat = TargetFormat,
@@ -84,6 +92,27 @@ public class RenderPipelineDesc
             DepthCompare = DepthStencil?.DepthCompare ?? CompareFunction.Less,
         };
     }
+
+    internal VertexAttributeNative[] ToNativeAttributes() =>
+        VertexAttributes.Select(a => new VertexAttributeNative
+        {
+            Location = a.Location,
+            Format = a.Format,
+            Offset = a.Offset,
+        }).ToArray();
+}
+
+/// <summary>
+/// Common vertex buffer layouts.
+/// </summary>
+public static class VertexLayouts
+{
+    /// <summary>Position (float2) + color (float4), 24-byte stride.</summary>
+    public static VertexAttribute[] Vertex2D { get; } =
+    [
+        new(0, VertexFormat.Float32x2, 0),
+        new(1, VertexFormat.Float32x4, 8),
+    ];
 }
 
 /// <summary>

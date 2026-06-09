@@ -11,17 +11,18 @@ using Goldy;
 using var instance = new Instance();
 using var device = instance.RequestAdapter().RequestDevice();
 
-// Create a render target
-using var target = new RenderTarget(device, 800, 600, TextureFormat.Rgba8Unorm);
-
-// Create and record commands
-var encoder = new CommandEncoder();
-encoder.Clear(new Color(0.2f, 0.3f, 0.8f, 1.0f));
-
-// Render
-target.Render(encoder);
-
-// Read pixels back to CPU
+// Headless triangle via TaskGraph
+using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
+using var pipeline = new RenderPipeline(device, shader, shader, new RenderPipelineDesc
+{
+    VertexAttributes = VertexLayouts.Vertex2D,
+    TargetFormat = TextureFormat.Rgba8Unorm,
+});
+using var target = new RenderTarget(device, 100, 100, TextureFormat.Rgba8Unorm);
+using var graph = new TaskGraph();
+using (var pass = graph.RenderPass("clear", target))
+    pass.Clear(Color.CornflowerBlue);
+graph.Dispatch(device);
 byte[] pixels = target.ReadToCpu();
 ```
 

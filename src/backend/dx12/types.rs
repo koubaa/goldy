@@ -47,7 +47,7 @@ pub const MAX_BINDLESS_SAMPLERS: u32 = 2048;
 // PushLayout and its constants live in the shared module so all three backends
 // use one definition. Re-export them here so internal code keeps using the
 // same unqualified names as before.
-pub use super::super::shared::{PushLayout, MAX_BINDLESS_SLOTS, TOTAL_PUSH_BYTES};
+pub use super::super::shared::{PushLayout, TOTAL_PUSH_BYTES};
 
 /// Registry for tracking bindless resource descriptor heap offsets.
 ///
@@ -952,6 +952,8 @@ pub(crate) struct PipelineState {
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    /// Per push-constant slot SRV/UAV expectations from shader analysis (DX12).
+    pub push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.
@@ -968,6 +970,8 @@ pub(crate) struct ComputePipelineState {
     pub parameter_block_layouts: Vec<crate::slang::ParameterBlockLayout>,
     /// Per push-constant slot category expectations from shader analysis.
     pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    /// Per push-constant slot SRV/UAV expectations from shader analysis (DX12).
+    pub push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier used in category-mismatch error messages.

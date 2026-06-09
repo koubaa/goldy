@@ -1,173 +1,243 @@
 /**
- * Goldy C++ Example: Triangle
+ * Triangle example - animated colored triangle in a window (cross-platform).
  *
- * Demonstrates basic usage of the Goldy C++ API:
- * - Creating an instance and device
- * - Compiling a shader
- * - Creating buffers and pipelines
- * - Rendering to a target
- * - Reading back pixel data
+ * Uses GLFW for windowing and Goldy TaskGraph:
+ * offscreen RenderTarget -> render_pass -> copy_render_target_to_swapchain -> present.
  *
- * This is the C++ equivalent of goldy/examples/triangle.rs
+ * Build: cmake --build build --target triangle
  */
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <goldy.hpp>
-#include <iostream>
+
+#include <GLFW/glfw3.h>
+
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#elif defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
+#include <objc/message.h>
+#include <objc/objc.h>
+#include <objc/runtime.h>
+#else
+#define GLFW_EXPOSE_NATIVE_WAYLAND
+#include <GLFW/glfw3native.h>
+#endif
+
+#include <chrono>
+#include <cmath>
 #include <cstdint>
-#include <array>
-#include <fstream>
+#include <iostream>
+#include <stdexcept>
+#include <utility>
 
-// Vertex data: position (x, y) + color (r, g, b, a)
+namespace {
+
 struct Vertex {
-    float x, y;
-    float r, g, b, a;
+    float position[2];
+    float color[4];
 };
 
-// Triangle shader in Slang
-constexpr const char* TRIANGLE_SHADER = R"(
-struct VertexInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
+struct GpuState {
+    goldy::Device device;
+    goldy::Buffer vertex_buffer;
+    goldy::ShaderModule shader;
+    goldy::RenderPipeline pipeline;
+    goldy::RenderTarget scene_rt;
+    goldy::Surface surface;
+    goldy::TaskGraph frame_graph;
+    uint64_t frame_count = 0;
+    std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
 
-struct VertexOutput {
-    float4 position : SV_Position;
-    float4 color : COLOR;
-};
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.color = input.color;
-    return output;
+goldy::RenderTarget make_scene_rt(const goldy::Device& device, const goldy::Surface& surface) {
+    auto [width, height] = surface.size();
+    width = std::max(width, 1u);
+    height = std::max(height, 1u);
+    return goldy::RenderTarget(device, width, height, surface.format());
 }
 
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return input.color;
+goldy::Surface create_surface(const goldy::Device& device, GLFWwindow* window) {
+#if defined(_WIN32)
+    void* hwnd = glfwGetWin32Window(window);
+    if (!hwnd) {
+        throw std::runtime_error("glfwGetWin32Window failed");
+    }
+    return goldy::Surface(device, hwnd);
+#elif defined(__APPLE__)
+    void* ns_window = glfwGetCocoaWindow(window);
+    if (!ns_window) {
+        throw std::runtime_error("glfwGetCocoaWindow failed");
+    }
+    using MsgSendFn = id (*)(id, SEL);
+    void* ns_view = reinterpret_cast<void*>(
+        ((MsgSendFn)objc_msgSend)(reinterpret_cast<id>(ns_window), sel_registerName("contentView")));
+    if (!ns_view) {
+        throw std::runtime_error("NSWindow contentView is null");
+    }
+    return goldy::Surface(device, ns_view);
+#else
+    void* display = glfwGetWaylandDisplay();
+    void* surface = glfwGetWaylandWindow(window);
+    if (!display || !surface) {
+        throw std::runtime_error(
+            "Wayland handles unavailable — run under a Wayland session (Vulkan backend requires Wayland on Linux)");
+    }
+    return goldy::Surface(device, display, surface);
+#endif
 }
-)";
 
-// Simple PPM image writer (no external dependencies)
-void write_ppm(const char* filename, uint32_t width, uint32_t height,
-               const std::vector<uint8_t>& pixels) {
-    std::ofstream file(filename, std::ios::binary);
-    file << "P6\n" << width << " " << height << "\n255\n";
-    
-    // RGBA to RGB conversion
-    for (size_t i = 0; i < pixels.size(); i += 4) {
-        file.put(static_cast<char>(pixels[i]));     // R
-        file.put(static_cast<char>(pixels[i + 1])); // G
-        file.put(static_cast<char>(pixels[i + 2])); // B
+GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
+    const Vertex vertices[] = {
+        {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+    };
+
+    goldy::Buffer vertex_buffer(
+        device,
+        std::span<const Vertex>(vertices),
+        goldy::BufferKind::Scattered);
+
+    goldy::Surface surface = create_surface(device, window);
+
+    goldy::ShaderModule shader(device, goldy::ShaderModule::builtin_vertex_color_2d());
+
+    GoldyVertexAttribute attributes[] = {
+        {0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0},
+        {1, GOLDY_VERTEX_FORMAT_FLOAT32X4, static_cast<uint32_t>(sizeof(float) * 2)},
+    };
+
+    GoldyRenderPipelineDesc pipeline_desc{};
+    pipeline_desc.vertex_attributes = attributes;
+    pipeline_desc.vertex_attribute_count = static_cast<uint32_t>(std::size(attributes));
+    pipeline_desc.vertex_stride = sizeof(Vertex);
+    pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pipeline_desc.target_format = surface.format();
+    pipeline_desc.depth_enabled = false;
+
+    goldy::RenderPipeline pipeline(device, shader, shader, pipeline_desc);
+    goldy::RenderTarget scene_rt = make_scene_rt(device, surface);
+
+    return GpuState{
+        std::move(device),
+        std::move(vertex_buffer),
+        std::move(shader),
+        std::move(pipeline),
+        std::move(scene_rt),
+        std::move(surface),
+        goldy::TaskGraph{},
+        0,
+        std::chrono::steady_clock::now(),
+    };
+}
+
+void render_frame(GpuState& gpu) {
+    const float t = std::sin(static_cast<float>(gpu.frame_count) * 0.02f) * 0.5f + 0.5f;
+    const goldy::Color bg_color{
+        0.1f + t * 0.1f,
+        0.1f + t * 0.05f,
+        0.2f + t * 0.1f,
+        1.0f,
+    };
+
+    gpu.frame_graph.clear();
+
+    {
+        auto pass = gpu.frame_graph.render_pass("triangle", gpu.scene_rt);
+        pass.bind_buffer(gpu.vertex_buffer, goldy::NodeAccess::Read)
+            .clear(bg_color)
+            .set_pipeline(gpu.pipeline)
+            .set_vertex_buffer(0, gpu.vertex_buffer)
+            .draw(0, 3);
+    }
+
+    const auto swapchain = gpu.frame_graph.declare_swapchain_output();
+    gpu.frame_graph.copy_render_target_to_swapchain(gpu.scene_rt, swapchain);
+
+    auto frame = gpu.surface.begin();
+    frame = gpu.surface.submit_graph_to_frame(gpu.frame_graph, std::move(frame));
+    gpu.surface.present(std::move(frame));
+
+    ++gpu.frame_count;
+}
+
+void handle_resize(GpuState& gpu, GLFWwindow* window) {
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    const auto w = static_cast<uint32_t>(width);
+    const auto h = static_cast<uint32_t>(height);
+    if (w == gpu.surface.width() && h == gpu.surface.height()) {
+        return;
+    }
+    gpu.surface.resize(w, h);
+    gpu.scene_rt = make_scene_rt(gpu.device, gpu.surface);
+}
+
+void print_perf(const GpuState& gpu) {
+    const auto elapsed = std::chrono::steady_clock::now() - gpu.start_time;
+    const auto sec = std::chrono::duration<double>(elapsed).count();
+    if (sec > 0.0 && gpu.frame_count > 0) {
+        const auto fps = static_cast<double>(gpu.frame_count) / sec;
+        std::cout << "\nRendered " << gpu.frame_count << " frames in " << sec << "s ("
+                  << fps << " FPS)\n";
     }
 }
+
+} // namespace
 
 int main() {
     try {
-        std::cout << "Goldy C++ Triangle Example\n";
-        std::cout << "==========================\n\n";
+        std::cout << "Goldy Triangle Window (C++ / GLFW)\n";
+        std::cout << "==================================\n";
+        std::cout << "TaskGraph: offscreen RT -> swapchain blit -> present\n";
+        std::cout << "Press Escape or close the window to exit\n\n";
 
-        // Create instance and enumerate adapters
+        if (!glfwInit()) {
+            throw std::runtime_error("glfwInit failed");
+        }
+
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        GLFWwindow* window = glfwCreateWindow(800, 600, "Goldy - Animated Triangle (C++)", nullptr, nullptr);
+        if (!window) {
+            glfwTerminate();
+            throw std::runtime_error("glfwCreateWindow failed");
+        }
+
         goldy::Instance instance;
-        std::cout << "Backend: ";
-        switch (instance.backend_type()) {
-            case GOLDY_BACKEND_TYPE_VULKAN: std::cout << "Vulkan\n"; break;
-            case GOLDY_BACKEND_TYPE_DX12: std::cout << "DirectX 12\n"; break;
-            case GOLDY_BACKEND_TYPE_METAL: std::cout << "Metal\n"; break;
-            default: std::cout << "Unknown\n"; break;
-        }
+        goldy::Device device = instance.request_adapter().request_device();
+        GpuState gpu = init_gpu(std::move(device), window);
 
-        auto adapters = instance.enumerate_adapters();
-        std::cout << "\nAvailable adapters:\n";
-        for (const auto& adapter : adapters) {
-            std::cout << "  [" << adapter.id << "] " << adapter.name << "\n";
-        }
-        std::cout << "\n";
+        while (!glfwWindowShouldClose(window)) {
+            handle_resize(gpu, window);
+            render_frame(gpu);
 
-        // Create device (prefer discrete GPU)
-        uint32_t adapter_id = adapters.empty() ? 0 : adapters[0].id;
-        for (const auto& adapter : adapters) {
-            if (adapter.device_type == GOLDY_DEVICE_TYPE_DISCRETE_GPU) {
-                adapter_id = adapter.id;
-                break;
+            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
-        }
-        goldy::Device device = instance.create_device_for_adapter(adapter_id);
-        std::cout << "Created device on adapter " << device.adapter_id() << "\n";
-        std::cout << "Has goldy_exp library: " << (device.has_library("goldy_exp") ? "yes" : "no") << "\n\n";
-
-        // Triangle vertices (clockwise)
-        std::array<Vertex, 3> vertices = {{
-            { 0.0f,  0.5f,  1.0f, 0.0f, 0.0f, 1.0f },  // Top - Red
-            { 0.5f, -0.5f,  0.0f, 1.0f, 0.0f, 1.0f },  // Bottom right - Green
-            {-0.5f, -0.5f,  0.0f, 0.0f, 1.0f, 1.0f },  // Bottom left - Blue
-        }};
-
-        // Create vertex buffer (Scattered = any thread can access any address)
-        goldy::Buffer vertex_buffer(device,
-            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(vertices.data()),
-                                     vertices.size() * sizeof(Vertex)),
-            goldy::BufferKind::Scattered);
-        std::cout << "Created vertex buffer: " << vertex_buffer.size() << " bytes\n";
-
-        // Compile shader
-        goldy::ShaderModule shader(device, TRIANGLE_SHADER);
-        std::cout << "Compiled shader\n";
-
-        // Create pipeline
-        std::array<GoldyVertexAttribute, 2> attributes = {{
-            { 0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0 },                    // position
-            { 1, GOLDY_VERTEX_FORMAT_FLOAT32X4, sizeof(float) * 2 },    // color
-        }};
-
-        GoldyRenderPipelineDesc pipeline_desc{};
-        pipeline_desc.vertex_attributes = attributes.data();
-        pipeline_desc.vertex_attribute_count = static_cast<uint32_t>(attributes.size());
-        pipeline_desc.vertex_stride = sizeof(Vertex);
-        pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        pipeline_desc.target_format = GOLDY_TEXTURE_FORMAT_RGBA8_UNORM;
-        pipeline_desc.depth_enabled = false;
-
-        goldy::RenderPipeline pipeline(device, shader, shader, pipeline_desc);
-        std::cout << "Created render pipeline\n";
-
-        // Create render target
-        constexpr uint32_t WIDTH = 800;
-        constexpr uint32_t HEIGHT = 600;
-        goldy::RenderTarget target(device, WIDTH, HEIGHT, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
-        std::cout << "Created render target: " << target.width() << "x" << target.height() << "\n\n";
-
-        // Record and execute rendering commands
-        std::cout << "Rendering...\n";
-        {
-            goldy::CommandEncoder encoder;
-            encoder.clear(goldy::Color::cornflower_blue());
-            encoder.set_pipeline(pipeline);
-            encoder.set_vertex_buffer(0, vertex_buffer);
-            encoder.draw(3);  // 3 vertices
-            target.render(std::move(encoder));
+            glfwPollEvents();
         }
 
-        // Read back and save
-        std::cout << "Reading pixels...\n";
-        auto pixels = target.read_to_cpu();
-        std::cout << "Read " << pixels.size() << " bytes\n";
-
-        // Save as PPM
-        const char* output_file = "triangle.ppm";
-        write_ppm(output_file, WIDTH, HEIGHT, pixels);
-        std::cout << "Saved to " << output_file << "\n";
-
-        std::cout << "\nDone!\n";
+        print_perf(gpu);
+        glfwDestroyWindow(window);
+        glfwTerminate();
         return 0;
-
     } catch (const goldy::Exception& e) {
-        std::cerr << "Goldy error: " << e.what() << "\n";
+        std::cerr << "Goldy error: " << e.what() << '\n';
+        glfwTerminate();
         return 1;
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        std::cerr << "Error: " << e.what() << '\n';
+        glfwTerminate();
         return 1;
     }
 }
-

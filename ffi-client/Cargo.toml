@@ -1,0 +1,50 @@
+[package]
+name = "goldy-ffi-client"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-or-later"
+description = "Rust RAII client for the Goldy C ABI (libgoldy_ffi)"
+repository = "https://github.com/koubaa/goldy"
+keywords = ["gpu", "graphics", "ffi"]
+build = "build.rs"
+
+[dependencies]
+bytemuck = { version = "1.21", features = ["derive"] }
+libc = "0.2"
+libloading = "0.9"
+
+[build-dependencies]
+goldy-ffi = { path = "../ffi", default-features = false, features = ["vulkan", "dx12", "metal"] }
+
+[dev-dependencies]
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+winit = "0.30"
+raw-window-handle = "0.6"
+
+[features]
+default = ["vulkan", "dx12", "metal"]
+vulkan = []
+dx12 = []
+metal = []
+
+[[example]]
+name = "triangle"
+path = "examples/triangle.rs"
+
+[[example]]
+name = "compute_simple"
+path = "examples/compute_simple.rs"
+
+[[example]]
+name = "triangle_headless"
+path = "examples/triangle_headless.rs"
+
+[[example]]
+name = "game_of_life"
+path = "examples/game_of_life.rs"
+
+[[example]]
+name = "game_of_life_headless"
+path = "examples/game_of_life_headless.rs"

@@ -16,6 +16,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Lavapipe CI image (ghcr.io/koubaa/goldy/lavapipe-ci:latest) is inlined in
+  # build-dotnet.container.image below — workflow env cannot be referenced there.
 
 jobs:
   build-native:
@@ -88,6 +90,8 @@ jobs:
     name: Build and Test .NET
     needs: build-native
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/koubaa/goldy/lavapipe-ci:latest
 
     steps:
     - uses: actions/checkout@v6
@@ -96,6 +100,9 @@ jobs:
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 8.0.x
+
+    - name: Verify lavapipe
+      run: DISPLAY= vulkaninfo --summary | head -30
 
     - name: Download all native artifacts
       uses: actions/download-artifact@v8
@@ -120,7 +127,12 @@ jobs:
       run: dotnet build dotnet/Goldy.sln --no-restore --configuration Release
 
     - name: Test
-      run: dotnet test dotnet/Goldy.sln --no-build --configuration Release --verbosity normal
+      env:
+        GOLDY_BACKEND: vulkan
+      run: |
+        NATIVE_DIR="$(pwd)/dotnet/Goldy.Tests/bin/Release/net8.0"
+        export LD_LIBRARY_PATH="${NATIVE_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        dotnet test dotnet/Goldy.sln --no-build --configuration Release --verbosity normal
 
     - name: Pack NuGet
       run: dotnet pack dotnet/Goldy/Goldy.csproj --configuration Release --output ./nupkg

@@ -18,7 +18,6 @@ pub mod common_types;
 pub mod compute;
 pub mod context;
 pub mod device;
-pub mod encoder;
 pub mod error;
 pub mod examples;
 pub mod frame_orchestrator;
@@ -66,7 +65,7 @@ pub use vram_allocator::{DeferredPayload, ParcelType};
 // Re-export main types
 pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
-pub use compute::{ComputeEncoder, ComputePass, ComputePipeline};
+pub use compute::ComputePipeline;
 pub use signal::{OversubscribedReason, Signal};
 pub use timeline::{Epoch, ReferenceTable, TimelineValue};
 
@@ -76,7 +75,6 @@ pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,
 };
-pub use encoder::{CommandEncoder, RenderPass};
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
 pub use pipeline::{RenderPipeline, RenderPipelineDesc};
@@ -86,7 +84,9 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use slang::{layout_validation_enabled, LayoutCheck, StructFieldLayout, StructLayout};
 pub use surface::{Frame, Surface};
-pub use task_graph::{GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, TaskGraph, TransientId, TransientTextureId};
+pub use task_graph::{
+    GraphIR, NodeAccess, NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph, TransientId, TransientTextureId,
+};
 pub use task_graph::{SwapchainOutputHandle, SWAPCHAIN_SLOT_PLACEHOLDER};
 
 pub use texture::Texture;

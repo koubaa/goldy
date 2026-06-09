@@ -26,6 +26,30 @@ fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Op
     }
 }
 
+fn buffer_stride_for_bindless_index(
+    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    device_handle: DeviceHandle,
+    index: u32,
+    cat: crate::types::ResourceCategory,
+) -> Option<u32> {
+    // Uniform and storage buffers use separate bindless array indices; both may be 0.
+    for b in buffers.values() {
+        if b.device_handle != device_handle {
+            continue;
+        }
+        match cat {
+            crate::types::ResourceCategory::Scattered if b.is_storage && b.bindless_index == Some(index) => {
+                return b.element_stride;
+            }
+            crate::types::ResourceCategory::Broadcast if !b.is_storage && b.bindless_index == Some(index) => {
+                return b.element_stride;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn collect_slots_from_raw_bind(indices: &[u32], categories: &[Option<crate::types::ResourceCategory>]) -> Vec<SlotKey> {
     let mut slots = Vec::new();
     for (i, &idx) in indices.iter().enumerate() {
@@ -41,20 +65,13 @@ fn collect_slots_from_raw_bind(indices: &[u32], categories: &[Option<crate::type
 fn collect_slot_keys_from_gpu_commands(
     commands: &[GpuCommand],
     compute_pipelines: &HashMap<ComputePipelineHandle, ComputePipelineState>,
-    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    _buffers: &HashMap<BufferHandle, super::types::BufferState>,
 ) -> Vec<SlotKey> {
     let mut current_pipeline = None;
     let mut slots = Vec::new();
     for cmd in commands {
         match cmd {
             GpuCommand::SetPipeline(p) => current_pipeline = Some(*p),
-            GpuCommand::BindResources { buffers: buf_handles } => {
-                for h in buf_handles {
-                    if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
-                        slots.push(SlotKey::StorageBuffer(idx));
-                    }
-                }
-            }
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
                     slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
@@ -104,13 +121,6 @@ fn collect_slot_keys_from_graph_commands(
         match gc {
             GraphCommand::Compute(cmd) => match cmd {
                 GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
-                GpuCommand::BindResources { buffers: buf_handles } => {
-                    for h in buf_handles {
-                        if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
-                            slots.push(SlotKey::StorageBuffer(idx));
-                        }
-                    }
-                }
                 GpuCommand::BindResourcesRaw { indices, .. } => {
                     if let Some(p) = current_compute_pipeline.and_then(|h| compute_pipelines.get(&h)) {
                         slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
@@ -832,44 +842,18 @@ pub(super) fn submit(
                         current_pipeline = Some(*handle);
                     }
                 }
-                GpuCommand::BindResources {
-                    buffers: buffer_handles,
-                } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                        if crate::slang::layout_validation_enabled() && !pipeline.binding_element_strides.is_empty() {
-                            let actual_strides: Vec<Option<u32>> = buffer_handles
-                                .iter()
-                                .map(|h| buffers.get(h).and_then(|b| b.element_stride))
-                                .collect();
-                            crate::backend::validate_binding_strides(
-                                &actual_strides,
-                                &pipeline.binding_element_strides,
-                                &pipeline.shader_debug_name,
-                            )?;
-                        }
-                        let mut layout = PushLayout::default();
-                        shared::fill_bindless(
-                            &mut layout,
-                            buffer_handles
-                                .iter()
-                                .map(|h| buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)),
-                        );
-                        unsafe {
-                            logical_device.device.cmd_push_constants(
-                                cmd,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::ALL,
-                                0,
-                                layout.as_bytes(),
-                            );
-                        }
-                    }
-                }
                 GpuCommand::BindResourcesRaw {
                     indices: raw_indices,
                     user: raw_user,
                 } => {
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                        crate::backend::validate_raw_binding_strides(
+                            raw_indices,
+                            &pipeline.push_constant_categories,
+                            &pipeline.binding_element_strides,
+                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                            &pipeline.shader_debug_name,
+                        )?;
                         let mut layout = PushLayout::default();
                         shared::fill_raw(&mut layout, raw_indices, raw_user);
                         unsafe {
@@ -1185,6 +1169,72 @@ pub(super) fn submit(
                         );
 
                         // Barrier: make copy writes visible to subsequent compute/transfer.
+                        let mem_barrier2 = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(
+                                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_COMMANDS,
+                            )
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep_info2 =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier2));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2);
+                    }
+                }
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    let _tz = tracy_zone!("vk.copy_render_target");
+                    let (src_image, width, height) = {
+                        let rt = state
+                            .render_targets
+                            .get(src)
+                            .context("CopyRenderTarget: src render target not found")?;
+                        (rt.image, rt.width, rt.height)
+                    };
+                    let dst_image = state
+                        .textures
+                        .get(dst)
+                        .context("CopyRenderTarget: dst texture not found")?
+                        .image;
+
+                    unsafe {
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+
+                        let region = vk::ImageCopy {
+                            src_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            dst_offset: vk::Offset3D::default(),
+                            extent: vk::Extent3D {
+                                width,
+                                height,
+                                depth: 1,
+                            },
+                        };
+                        logical_device.device.cmd_copy_image(
+                            cmd,
+                            src_image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            dst_image,
+                            vk::ImageLayout::GENERAL,
+                            std::slice::from_ref(&region),
+                        );
+
                         let mem_barrier2 = vk::MemoryBarrier2::default()
                             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -1650,33 +1700,18 @@ fn submit_graph_impl(
                         current_compute_pipeline = Some(*handle);
                     }
                 }
-                GpuCommand::BindResources {
-                    buffers: buffer_handles,
-                } => {
-                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                        let mut layout = PushLayout::default();
-                        shared::fill_bindless(
-                            &mut layout,
-                            buffer_handles
-                                .iter()
-                                .map(|h| buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)),
-                        );
-                        unsafe {
-                            logical_device.device.cmd_push_constants(
-                                cmd,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::ALL,
-                                0,
-                                layout.as_bytes(),
-                            );
-                        }
-                    }
-                }
                 GpuCommand::BindResourcesRaw {
                     indices: raw_indices,
                     user: raw_user,
                 } => {
                     if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                        crate::backend::validate_raw_binding_strides(
+                            raw_indices,
+                            &pipeline.push_constant_categories,
+                            &pipeline.binding_element_strides,
+                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                            &pipeline.shader_debug_name,
+                        )?;
                         let mut layout = PushLayout::default();
                         shared::fill_raw(&mut layout, raw_indices, raw_user);
                         unsafe {
@@ -1977,6 +2012,71 @@ fn submit_graph_impl(
                             cmd,
                             src_image,
                             vk::ImageLayout::GENERAL,
+                            dst_image,
+                            vk::ImageLayout::GENERAL,
+                            std::slice::from_ref(&region),
+                        );
+
+                        let mem_barrier2 = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(
+                                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_COMMANDS,
+                            )
+                            .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
+                        let dep2 = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier2));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep2);
+                    }
+                }
+                GpuCommand::CopyRenderTarget { src, dst } => {
+                    let _tz = tracy_zone!("vk.copy_render_target");
+                    let (src_image, width, height) = {
+                        let rt = state
+                            .render_targets
+                            .get(src)
+                            .context("CopyRenderTarget: src render target not found")?;
+                        (rt.image, rt.width, rt.height)
+                    };
+                    let dst_image = state
+                        .textures
+                        .get(dst)
+                        .context("CopyRenderTarget: dst texture not found")?
+                        .image;
+
+                    unsafe {
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+
+                        let region = vk::ImageCopy {
+                            src_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            dst_offset: vk::Offset3D::default(),
+                            extent: vk::Extent3D {
+                                width,
+                                height,
+                                depth: 1,
+                            },
+                        };
+                        logical_device.device.cmd_copy_image(
+                            cmd,
+                            src_image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             dst_image,
                             vk::ImageLayout::GENERAL,
                             std::slice::from_ref(&region),

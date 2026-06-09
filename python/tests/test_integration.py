@@ -156,89 +156,109 @@ def test_render_target_with_depth(device):
     assert target.has_depth()
 
 
-def test_full_render_pipeline(device):
-    """Test complete render pipeline: shader -> pipeline -> render -> readback."""
+def test_render_clear_via_graph(device):
+    """Clear a render target through TaskGraph and verify readback."""
     import goldy
-    
-    # 1. Create shader
-    shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
-    
-    # 2. Create pipeline
-    desc = goldy.RenderPipelineDesc(
-        vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
-        target_format=goldy.TextureFormat.RGBA8_UNORM,
-    )
-    pipeline = goldy.RenderPipeline(device, shader, shader, desc)
-    
-    # 3. Create vertex buffer (a triangle)
-    vertices = np.array([
-        # x, y, r, g, b, a
-        0.0, -0.5, 1.0, 0.0, 0.0, 1.0,  # red
-        -0.5, 0.5, 0.0, 1.0, 0.0, 1.0,  # green
-        0.5, 0.5, 0.0, 0.0, 1.0, 1.0,   # blue
-    ], dtype=np.float32)
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
-    
-    # 4. Create render target
-    target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
-    
-    # 5. Build render commands
-    encoder = goldy.CommandEncoder()
-    with encoder.begin_render_pass() as rp:
-        rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
-        rp.set_pipeline(pipeline)
-        rp.set_vertex_buffer(0, vertex_buffer)
-        rp.draw(range(3))
-    
-    # 6. Render
-    target.render(encoder)
-    
-    # 7. Read back pixels
-    pixels = target.read_to_cpu()
-    
-    # Verify output
-    assert pixels.shape == (100, 100, 4)
-    assert pixels.dtype == np.uint8
-    
-    # Check that some pixels were written (not all black)
-    assert np.any(pixels > 0)
 
-
-def test_render_clear_only(device):
-    """Test render with just a clear."""
-    import goldy
-    
     target = goldy.RenderTarget(device, 2, 2, goldy.TextureFormat.RGBA8_UNORM)
-    
-    encoder = goldy.CommandEncoder()
-    with encoder.begin_render_pass() as rp:
+    graph = goldy.TaskGraph()
+    with graph.render_pass("clear", target) as rp:
         rp.clear(goldy.Color.RED)
-    
-    target.render(encoder)
+    graph.dispatch(device)
+
     pixels = target.read_to_cpu()
-    
-    # All pixels should be red (255, 0, 0, 255)
     assert pixels.shape == (2, 2, 4)
-    assert np.all(pixels[:, :, 0] == 255)  # R
-    assert np.all(pixels[:, :, 1] == 0)    # G
-    assert np.all(pixels[:, :, 2] == 0)    # B
-    assert np.all(pixels[:, :, 3] == 255)  # A
+    assert np.all(pixels[:, :, 0] == 255)
+    assert np.all(pixels[:, :, 1] == 0)
+    assert np.all(pixels[:, :, 2] == 0)
+    assert np.all(pixels[:, :, 3] == 255)
 
 
-def test_read_to_bytes(device):
-    """Test raw bytes readback."""
+def test_compute_node_fills_buffer_with_42(device):
+    """Fill a buffer via TaskGraph compute_node and verify readback."""
     import goldy
-    
-    target = goldy.RenderTarget(device, 10, 10, goldy.TextureFormat.RGBA8_UNORM)
-    
-    encoder = goldy.CommandEncoder()
-    with encoder.begin_render_pass() as rp:
-        rp.clear(goldy.Color.GREEN)
-    
-    target.render(encoder)
-    pixels = target.read_to_bytes()
-    
-    assert len(pixels) == 10 * 10 * 4
+
+    fill_shader = """
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = 42;
+}
+"""
+
+    buffer = goldy.Buffer.empty(device, 64 * 4, goldy.BufferKind.SCATTERED)
+    shader = goldy.ShaderModule.from_slang(device, fill_shader)
+    pipeline = goldy.ComputePipeline(device, shader)
+    idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+
+    graph = goldy.TaskGraph()
+    with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
+        node.bind_buffer(buffer, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
+
+    graph.dispatch(device)
+
+    values = np.frombuffer(buffer.read_to_cpu(device), dtype=np.uint32)
+    assert values.shape == (64,)
+    assert np.all(values == 42)
+
+
+def test_triangle_via_graph(device):
+    """Render a triangle through TaskGraph and verify non-empty readback."""
+    import goldy
+
+    shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
+    pipeline = goldy.RenderPipeline(
+        device,
+        shader,
+        shader,
+        goldy.RenderPipelineDesc(
+            vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
+            target_format=goldy.TextureFormat.RGBA8_UNORM,
+        ),
+    )
+
+    vertices = np.array(
+        [
+            0.0,
+            -0.5,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -0.5,
+            0.5,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.5,
+            0.5,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+        ],
+        dtype=np.float32,
+    )
+    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+    target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
+
+    graph = goldy.TaskGraph()
+    with graph.render_pass("triangle", target) as rp:
+        (
+            rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+            .clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
+            .set_pipeline(pipeline)
+            .set_vertex_buffer(0, vertex_buffer)
+            .draw(range(3))
+        )
+
+    graph.dispatch(device)
+    pixels = target.read_to_cpu()
+    assert pixels.shape == (100, 100, 4)
+    assert np.any(pixels[:, :, :3] > 0)
 
 
 def test_custom_shader_library(device):

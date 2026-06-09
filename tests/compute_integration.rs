@@ -10,8 +10,8 @@ mod submission;
 
 use goldy::{
     types::{BackendType, BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferKind, BufferPool, ComputeEncoder, ComputePipeline, Device, DeviceDescriptor, DeviceType, Instance,
-    RequestAdapterOptions, ShaderModule,
+    Buffer, BufferKind, BufferPool, ComputePipeline, Device, DeviceDescriptor, DeviceType, Instance, NodeAccess,
+    RequestAdapterOptions, ShaderModule, TaskGraph,
 };
 use submission::submission_context;
 
@@ -116,14 +116,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.dispatch(1, 1, 1);
-    }
-
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
 }
 
@@ -143,17 +138,12 @@ fn test_compute_with_uav_buffer() {
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
-    // Dispatch compute
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        // Bind buffer resource slots
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1); // 64 threads total
-    }
-
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph
+        .node("double", &pipeline)
+        .bind_resources(&[&buffer])
+        .dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
 
     // Note: We can't easily read back the buffer without mapping support
@@ -182,18 +172,12 @@ fn test_compute_with_srv_and_uav() {
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
-    // Dispatch compute
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        // Bind buffer resource slots
-        // Order matches shader slots: [input (slot 0), output (slot 1)]
-        pass.bind_resources(&[&input_buffer, &output_buffer]);
-        pass.dispatch(1, 1, 1); // 64 threads
-    }
-
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph
+        .node("copy", &pipeline)
+        .bind_resources(&[&input_buffer, &output_buffer])
+        .dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch with SRV+UAV: {:?}", result.err());
 }
 
@@ -295,13 +279,9 @@ fn vk_api_validation_timeline_semaphore() {
     let shader = ShaderModule::from_slang(&device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.dispatch(1, 1, 1);
-    }
-    let tv = encoder.submit(&ctx).expect("submit");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).dispatch(1, 1, 1);
+    let tv = graph.submit(&ctx).expect("submit");
 
     let buf = device
         .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
@@ -327,13 +307,9 @@ fn vk_api_validation_two_device_teardown() {
         let ctx = submission_context(device);
         let shader = ShaderModule::from_slang(device, MINIMAL_COMPUTE_FOR_VK_VALIDATION).expect("shader");
         let pipeline = ComputePipeline::new(device, &shader).expect("pipeline");
-        let mut encoder = ComputeEncoder::new();
-        {
-            let mut pass = encoder.begin_compute_pass();
-            pass.set_pipeline(&pipeline);
-            pass.dispatch(1, 1, 1);
-        }
-        encoder.dispatch(&ctx).expect("dispatch");
+        let mut graph = TaskGraph::new();
+        graph.node("minimal", &pipeline).dispatch(1, 1, 1);
+        graph.dispatch(&ctx).expect("dispatch");
     };
 
     let i1 = Instance::new().expect("i1");
@@ -598,14 +574,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
         .expect("read2");
@@ -622,14 +593,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     let initial2: Vec<u32> = (0..16).collect();
     buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch2");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch2");
 
     buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
         .expect("read3");
@@ -664,14 +630,12 @@ fn test_compute_write_and_readback() {
         .alloc_buffer_with_data(&initial, BufferKind::Scattered)
         .expect("create buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1); // 64 threads, each doubles one element
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("double", &pipeline)
+        .bind_resources(&[&buffer])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
     buffer.read_to_cpu(&device, &mut output).expect("read_to_cpu");
@@ -751,9 +715,9 @@ fn test_buffer_clear_to_end() {
     }
 }
 
-// ─── Batched ClearBuffer in compute encoder ───────────────────────────────────
+// ─── Batched ClearBuffer in task graph ────────────────────────────────────────
 
-/// `ComputePass::clear_buffer` batches the clear into the command stream.
+/// `TaskGraph::clear_buffer` records a clear node in the graph.
 /// Clears input before the copy dispatch; output should be all zeros.
 #[test]
 fn test_compute_batched_clear_before_dispatch() {
@@ -771,16 +735,13 @@ fn test_compute_batched_clear_before_dispatch() {
         .alloc_buffer_with_data(&vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered)
         .expect("output buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        // Clear input before the copy — output should receive zeros.
-        pass.clear_buffer(&input_buf, 0, 0);
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&input_buf, &output_buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.clear_buffer(&input_buf, 0, 0);
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&input_buf, &output_buf])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; 64 * 4];
     output_buf.read_to_cpu(&device, &mut out).expect("readback");
@@ -816,21 +777,17 @@ fn test_compute_clear_between_dispatches() {
         .alloc_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
         .expect("output");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        // Pass 1: copy 42s into output.
-        pass.set_pipeline(&copy_pipeline);
-        pass.bind_resources(&[&input_buf, &output_buf]);
-        pass.dispatch(1, 1, 1);
-        // Clear output — must happen AFTER the copy dispatch.
-        pass.clear_buffer(&output_buf, 0, 0);
-        // Pass 2: increment output (zeros → 1s).
-        pass.set_pipeline(&inc_pipeline);
-        pass.bind_resources(&[&output_buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &copy_pipeline)
+        .bind_resources(&[&input_buf, &output_buf])
+        .dispatch(1, 1, 1);
+    graph.clear_buffer(&output_buf, 0, 0);
+    graph
+        .node("n1", &inc_pipeline)
+        .bind_resources(&[&output_buf])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; 64 * 4];
     output_buf.read_to_cpu(&device, &mut out).expect("readback");
@@ -869,14 +826,12 @@ fn test_compute_dispatch_indirect() {
         .alloc_buffer_with_data(&data, BufferKind::Scattered)
         .expect("data buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&data_buf]);
-        pass.dispatch_indirect(&args_buf, 0);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&data_buf])
+        .dispatch_indirect(&args_buf, 0);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
     data_buf.read_to_cpu(&device, &mut output).expect("readback");
@@ -900,23 +855,17 @@ fn test_dispatch_indirect_invalid_buffer() {
         .alloc_buffer_with_data(&vec![1u32; 64], BufferKind::Scattered)
         .expect("data");
 
-    let mut encoder = ComputeEncoder::new();
+    let mut graph = TaskGraph::new();
     {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&data_buf]);
-
-        // Record indirect dispatch with a temp buffer, then drop the buffer.
-        // The encoder stores the raw handle; after drop it's stale.
-        {
-            let temp = device
-                .alloc_buffer_with_data(&[1u32, 1, 1], BufferKind::Scattered)
-                .expect("temp buffer");
-            pass.dispatch_indirect(&temp, 0);
-        } // temp dropped — backend destroys the buffer here
+        let temp = device
+            .alloc_buffer_with_data(&[1u32, 1, 1], BufferKind::Scattered)
+            .expect("temp buffer");
+        graph
+            .node("indirect", &pipeline)
+            .bind_resources(&[&data_buf])
+            .dispatch_indirect(&temp, 0);
     }
-
-    let result = encoder.dispatch(&ctx);
+    let result = graph.dispatch(&ctx);
     assert!(
         result.is_err(),
         "Expected error dispatching with a destroyed indirect args buffer"
@@ -956,14 +905,12 @@ fn test_compute_many_resource_slots() {
         .alloc_buffer_with_data(&[0u32; N], BufferKind::Scattered)
         .expect("out");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&a, &b, &c, &d, &e, &out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&a, &b, &c, &d, &e, &out])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 4];
     out.read_to_cpu(&device, &mut output).expect("readback");
@@ -1028,15 +975,9 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1);
-    }
-
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
     assert!(
         result.is_ok(),
         "Failed to dispatch with struct buffer: {:?}",
@@ -1084,14 +1025,12 @@ fn test_buffer_view_copy_between_sub_regions() {
         .resource_index(ResourceAccess::Write)
         .expect("view B bindless index");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[idx_a, idx_b]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources_raw_slice(&[idx_a, idx_b])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     // Read back the entire pool buffer and check the second half
     let mut output = vec![0u8; N * 2 * 4];
@@ -1137,14 +1076,12 @@ fn test_buffer_view_isolation() {
 
     let idx = view.resource_index(ResourceAccess::Write).expect("view bindless index");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[idx]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources_raw_slice(&[idx])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; N * 2 * 4];
     pool_buf.read_to_cpu(&device, &mut output).expect("read_to_cpu");
@@ -1197,14 +1134,12 @@ fn test_buffer_pool_alloc_and_dispatch() {
         .resource_index(ResourceAccess::Write)
         .expect("dst bindless index");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[src_idx, dst_idx]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     // Read back entire pool and verify the destination region
     let mut output = vec![0u8; pool_size];
@@ -1292,14 +1227,9 @@ void cs_main(Scattered<float> out, ThreadId id) {
         .alloc_buffer_with_data(&[0.0f32; 7], BufferKind::Scattered)
         .expect("create output buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 7 * 4];
     buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
@@ -1381,14 +1311,9 @@ void cs_main(Scattered<float> out, ThreadId id) {
         .alloc_buffer_with_data(&[0.0f32; 9], BufferKind::Scattered)
         .expect("create output buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 9 * 4];
     buf.read_to_cpu(&device, &mut raw).expect("read_to_cpu");
@@ -1461,17 +1386,16 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
         .alloc_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
         .expect("output buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[
-            input_buf.resource_index(ResourceAccess::Read).expect("srv"),
-            output_buf.resource_index(ResourceAccess::Write).expect("uav"),
-        ]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let srv = input_buf.resource_index(ResourceAccess::Read).expect("srv");
+    let uav = output_buf.resource_index(ResourceAccess::Write).expect("uav");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("typed_copy", &pipeline)
+        .bind_buffer(&input_buf, NodeAccess::Read)
+        .bind_buffer(&output_buf, NodeAccess::Write)
+        .bind_resources_raw_slice(&[srv, uav])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
     output_buf.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1536,14 +1460,12 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     }
 
     let workgroups = (ELEM_COUNT as u32).div_ceil(64);
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]]);
-        pass.dispatch(workgroups, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]])
+        .dispatch(workgroups, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; BUF_SIZE as usize];
     buffers[NUM_BUFFERS - 1]
@@ -1597,16 +1519,16 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources_raw(&[texture
-            .resource_index(ResourceAccess::Write)
-            .expect("tex resource index")]);
-        pass.dispatch(wg_x, wg_y, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let tex_idx = texture
+        .resource_index(ResourceAccess::Write)
+        .expect("tex resource index");
+    let mut graph = TaskGraph::new();
+    graph
+        .node("write_tex", &pipeline)
+        .bind_texture(&texture, NodeAccess::Write)
+        .bind_resources_raw_slice(&[tex_idx])
+        .dispatch(wg_x, wg_y, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; (width * height * 4) as usize];
     texture.read_to_cpu(&mut output).expect("readback");
@@ -1659,14 +1581,9 @@ fn test_cpu_readable_compute_write_and_read() {
         )
         .expect("create CPU_READABLE buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; N * size_of::<u32>()];
     buffer.read_to_cpu(&device, &mut out).expect("read_to_cpu");
@@ -1824,15 +1741,14 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         .expect("out");
 
     const EXPECTED: u32 = 42;
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        pass.bind_resources_raw_with_user(&[heap_idx], &[EXPECTED]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let mut graph = TaskGraph::new();
+    graph
+        .node("uniform_uint", &pipeline)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_with_user(vec![heap_idx], &[EXPECTED])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1860,15 +1776,14 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         .alloc_buffer_with_data(&[0xDEAD_BEEFu32; 1], BufferKind::Scattered)
         .expect("out");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        pass.bind_resources_raw_with_user(&[heap_idx], &[0u32]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let mut graph = TaskGraph::new();
+    graph
+        .node("uniform_zero", &pipeline)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_with_user(vec![heap_idx], &[0u32])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1896,15 +1811,14 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
         .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("out");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        pass.bind_resources_raw_with_user(&[heap_idx], &[u32::MAX]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let mut graph = TaskGraph::new();
+    graph
+        .node("uniform_max", &pipeline)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_with_user(vec![heap_idx], &[u32::MAX])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1942,15 +1856,14 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let value: f32 = 3.14159;
     let bits = value.to_bits();
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        pass.bind_resources_raw_with_user(&[heap_idx], &[bits]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let mut graph = TaskGraph::new();
+    graph
+        .node("uniform_float", &pipeline)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_with_user(vec![heap_idx], &[bits])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -1986,15 +1899,14 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     const A: u32 = 0xABCD;
     const B: u32 = 0x1234;
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        pass.bind_resources_raw_with_user(&[heap_idx], &[A, B]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let mut graph = TaskGraph::new();
+    graph
+        .node("uniform_two", &pipeline)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_with_user(vec![heap_idx], &[A, B])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 8];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2032,16 +1944,16 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
 
     const OFFSET: u32 = 100;
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        let inp_idx = inp.resource_index(ResourceAccess::Write).unwrap();
-        let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
-        pass.bind_resources_raw_with_user(&[inp_idx, out_idx], &[OFFSET]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let inp_idx = inp.resource_index(ResourceAccess::ReadWrite).unwrap();
+    let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
+    let mut graph = TaskGraph::new();
+    graph
+        .node("uniform_offset", &pipeline)
+        .bind_buffer(&inp, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_with_user(vec![inp_idx, out_idx], &[OFFSET])
+        .dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; N * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2072,13 +1984,9 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.dispatch(1, 1, 1);
-    }
-    let tv = encoder.submit(&ctx).expect("submit");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).dispatch(1, 1, 1);
+    let tv = graph.submit(&ctx).expect("submit");
 
     let buf = device
         .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
@@ -2117,8 +2025,8 @@ fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
         .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("buffer");
     let tv = {
-        let encoder = ComputeEncoder::new();
-        encoder.submit(&ctx).expect("submit empty work")
+        let mut graph = TaskGraph::new();
+        graph.submit(&ctx).expect("submit empty work")
     };
     ctx.wait_until(tv).expect("wait");
 
@@ -2144,8 +2052,8 @@ fn flush_deferred_deletions_respects_gpu_progress() {
 
     // Submit work so the timeline advances past zero.
     let tv = {
-        let encoder = ComputeEncoder::new();
-        encoder.submit(&ctx).expect("submit")
+        let mut graph = TaskGraph::new();
+        graph.submit(&ctx).expect("submit")
     };
 
     // Drop a buffer while GPU may still be in flight.
@@ -2241,14 +2149,9 @@ fn stride_validation_matching_uint_passes() {
         .alloc_buffer_with_data(&initial, BufferKind::Scattered)
         .expect("create buffer");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1);
-    }
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     result.expect("dispatch with matching stride must succeed");
@@ -2272,14 +2175,9 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
         .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
         .expect("create buffer with stride 16");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1);
-    }
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     let err = result.expect_err("dispatch with wrong stride must fail");
@@ -2306,14 +2204,9 @@ fn stride_validation_disabled_allows_mismatch() {
         .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
         .expect("create buffer with stride 16");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    graph
         .dispatch(&ctx)
         .expect("dispatch must succeed when validation is off");
 }
@@ -2341,14 +2234,12 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
         .alloc_buffer_with_bytes_stride(&wrong_data, BufferKind::Scattered, 4)
         .expect("create data buf with stride 4");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&params, &data_buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&params, &data_buf])
+        .dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     let err = result.expect_err("dispatch with wrong stride on slot 1 must fail");
@@ -2382,14 +2273,12 @@ fn stride_validation_multi_binding_all_correct_passes() {
         .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
         .expect("create data buf with stride 16");
 
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&params, &data_buf]);
-        pass.dispatch(1, 1, 1);
-    }
-    let result = encoder.dispatch(&ctx);
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&params, &data_buf])
+        .dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
 
     std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
     result.expect("dispatch with all-correct strides must succeed");
@@ -2423,7 +2312,10 @@ fn transient_allocator_smoke_all_strategies() {
         a.begin_frame(&device, 0).expect("begin");
         let view = a.alloc(&device, 256, Some(4)).expect("alloc");
         // Submit empty work to advance the timeline.
-        let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
+        let tv = {
+            let mut graph = TaskGraph::new();
+            graph.submit(&ctx).expect("submit")
+        };
         drop(view);
         a.end_frame(&device, tv);
         // Next frame: should not panic, and BumpReset should wait for tv internally.
@@ -2460,7 +2352,10 @@ fn bump_reset_blocks_on_prev_epoch() {
 
     a.begin_frame(&device, 0).expect("begin");
     let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-    let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
+    let tv = {
+        let mut graph = TaskGraph::new();
+        graph.submit(&ctx).expect("submit")
+    };
     a.end_frame(&device, tv);
 
     // begin_frame should wait for `tv` if it hasn't completed. After it returns,
@@ -2482,7 +2377,10 @@ fn transient_allocator_clear_resets_state() {
         let mut a = strategy.create(&device, small_config()).expect("create allocator");
         a.begin_frame(&device, 0).expect("begin");
         let _v = a.alloc(&device, 1024, Some(4)).expect("alloc");
-        let tv = ComputeEncoder::new().submit(&ctx).expect("submit");
+        let tv = {
+            let mut graph = TaskGraph::new();
+            graph.submit(&ctx).expect("submit")
+        };
         a.end_frame(&device, tv);
         ctx.wait_until(tv).expect("wait");
         a.clear();
@@ -2935,14 +2833,9 @@ fn test_wave_inclusive_scan_uniform_64() {
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2968,14 +2861,9 @@ fn test_wave_inclusive_scan_ramp_64() {
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -2999,14 +2887,9 @@ fn test_wave_inclusive_scan_uniform_256() {
     let out = device
         .alloc_buffer(256 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 256 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3032,14 +2915,9 @@ fn test_workgroup_reduce_uint_correct() {
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3064,14 +2942,9 @@ fn test_workgroup_inclusive_scan_uint_correct() {
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3097,14 +2970,9 @@ fn test_workgroup_broadcast_correct() {
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3125,14 +2993,9 @@ fn test_workgroup_upper_bound_linear() {
     let out = device
         .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("output buffer");
-    let mut encoder = ComputeEncoder::new();
-    {
-        let mut pass = encoder.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&out]);
-        pass.dispatch(1, 1, 1);
-    }
-    encoder.dispatch(&ctx).expect("dispatch");
+    let mut graph = TaskGraph::new();
+    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3219,14 +3082,12 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     // Write pass (UAV).
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("compile write");
     let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
-    let mut enc = ComputeEncoder::new();
-    {
-        let mut pass = enc.begin_compute_pass();
-        pass.set_pipeline(&write_pipeline);
-        pass.bind_resources_raw(&[storage_idx]);
-        pass.dispatch(1, 1, 1);
-    }
-    enc.dispatch(&ctx).expect("write dispatch");
+    let mut graph_enc = TaskGraph::new();
+    graph_enc
+        .node("n0", &write_pipeline)
+        .bind_resources_raw_slice(&[storage_idx])
+        .dispatch(1, 1, 1);
+    graph_enc.dispatch(&ctx).expect("write dispatch");
 
     // Read pass (SRV + sampler).
     let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
@@ -3235,19 +3096,18 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
         .expect("out buffer");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
-    let mut enc2 = ComputeEncoder::new();
-    {
-        let mut pass = enc2.begin_compute_pass();
-        pass.set_pipeline(&read_pipeline);
-        // Bind: Interpolated<float4> src, Filter smp, Scattered<uint> out
-        pass.bind_resources_raw(&[
-            sampled_idx,                                           // Texture2D<float4> SRV
-            sampler.resource_index(ResourceAccess::Read).unwrap(), // Filter sampler
-            out.resource_index(ResourceAccess::Write).unwrap(),    // Scattered<uint> output
-        ]);
-        pass.dispatch(1, 1, 1);
-    }
-    enc2.dispatch(&ctx).expect("read dispatch");
+    let mut graph_enc2 = TaskGraph::new();
+    graph_enc2
+        .node("read", &read_pipeline)
+        .bind_texture(&tex, NodeAccess::Read)
+        .bind_buffer(&out, NodeAccess::Write)
+        .bind_resources_raw_slice(&[
+            sampled_idx,
+            sampler.resource_index(ResourceAccess::Read).unwrap(),
+            out.resource_index(ResourceAccess::Write).unwrap(),
+        ])
+        .dispatch(1, 1, 1);
+    graph_enc2.dispatch(&ctx).expect("read dispatch");
 
     let mut raw = vec![0u8; N * 4];
     out.read_to_cpu(&device, &mut raw).expect("readback");
@@ -3290,7 +3150,10 @@ fn two_contexts_reclaim_independently() {
     let buf = device
         .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
         .expect("buffer");
-    let tv_a = ComputeEncoder::new().submit(&ctx_a).expect("ctx_a submit");
+    let tv_a = {
+        let mut graph = TaskGraph::new();
+        graph.submit(&ctx_a).expect("ctx_a submit")
+    };
 
     // Drop the buffer — its descriptor slot enters ctx_a's deferred queue.
     drop(buf);
@@ -3330,23 +3193,19 @@ fn two_contexts_both_submit_and_complete() {
         .expect("buf_b");
 
     // Submit from both contexts.
-    let mut enc_a = ComputeEncoder::new();
-    {
-        let mut pass = enc_a.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buf_a]);
-        pass.dispatch(1, 1, 1);
-    }
-    let tv_a = enc_a.submit(&ctx_a).expect("ctx_a submit");
+    let mut graph_enc_a = TaskGraph::new();
+    graph_enc_a
+        .node("n0", &pipeline)
+        .bind_resources(&[&buf_a])
+        .dispatch(1, 1, 1);
+    let tv_a = graph_enc_a.submit(&ctx_a).expect("ctx_a submit");
 
-    let mut enc_b = ComputeEncoder::new();
-    {
-        let mut pass = enc_b.begin_compute_pass();
-        pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buf_b]);
-        pass.dispatch(1, 1, 1);
-    }
-    let tv_b = enc_b.submit(&ctx_b).expect("ctx_b submit");
+    let mut graph_enc_b = TaskGraph::new();
+    graph_enc_b
+        .node("n0", &pipeline)
+        .bind_resources(&[&buf_b])
+        .dispatch(1, 1, 1);
+    let tv_b = graph_enc_b.submit(&ctx_b).expect("ctx_b submit");
 
     ctx_a.wait_until(tv_a).expect("ctx_a wait");
     ctx_b.wait_until(tv_b).expect("ctx_b wait");

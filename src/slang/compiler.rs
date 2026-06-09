@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::ffi::*;
 use super::loader::SlangLibrary;
 use super::virtual_main::effective_slang_source_for_compile;
-use crate::types::OptimizationLevel;
+use crate::types::{OptimizationLevel, ResourceCategory};
 use crate::{goldy_event, goldy_span};
 
 /// Returns `true` when layout validation is enabled.
@@ -91,11 +91,17 @@ pub struct ParameterBlockLayout {
 pub struct ShaderReflection {
     /// All parameter blocks found in the shader
     pub parameter_blocks: Vec<ParameterBlockLayout>,
-    /// Per push-constant slot, the [`ResourceCategory`](crate::types::ResourceCategory)
+    /// Per push-constant slot, the [`ResourceCategory`]
     /// the shader expects. Populated from `[goldy_*]` entry-point analysis at compile time.
     /// Used by backend validation when `BindResourcesTyped` is used to catch category
     /// mismatches against the shader's reflected expectations.
     pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
+    /// Per push-constant slot, the DX12 bindless view kind the shader expects
+    /// (`Scattered<T>` → UAV, `BufRO<T>` → SRV). Empty when source has no
+    /// `[goldy_*]` annotations. Re-derived from source at compile time (not serialized).
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    #[serde(skip)]
+    pub(crate) push_constant_slot_kinds: Vec<Option<crate::types::BindlessSlotKind>>,
     /// Per push-constant slot, the expected element stride (bytes) of the bound
     /// buffer. Populated from `[goldy_*]` source analysis + Slang reflection at
     /// compile time.  At dispatch time, backends compare each bound buffer's
@@ -631,6 +637,7 @@ impl SlangCompiler {
         }
 
         let binding_type_names = super::virtual_main::extract_binding_element_type_names(source);
+        let binding_categories = super::virtual_main::extract_push_constant_categories(source);
 
         let out = self.with_compiled_request(
             effective.as_ref(),
@@ -659,9 +666,11 @@ impl SlangCompiler {
 
                 let strides: Vec<Option<u32>> = binding_type_names
                     .iter()
-                    .map(|opt_name| {
+                    .enumerate()
+                    .map(|(i, opt_name)| {
+                        let cat = binding_categories.get(i).copied().unwrap_or(None);
                         opt_name.as_deref().and_then(|name| {
-                            builtin_type_stride(name).or_else(|| slf.reflect_type_size_from_request(request, name))
+                            builtin_type_stride(name).or_else(|| slf.reflect_binding_element_stride(request, name, cat))
                         })
                     })
                     .collect();
@@ -747,33 +756,127 @@ impl SlangCompiler {
         self.extract_struct_layout_uniform(layout_ptr, type_name)
     }
 
-    /// Query the byte size of a named type from a live compile request.
+    /// Query the per-element byte stride for a bindless slot's element type.
     ///
-    /// Uses the `Uniform` parameter category (std140-style), which matches
-    /// std430 for most scalar/vector/simple-struct types.  Returns `None`
-    /// when the type is not found in the compiled program.
-    fn reflect_type_size_from_request(&self, request: *mut SlangCompileRequest, type_name: &str) -> Option<u32> {
-        let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
-        if reflection_ptr.is_null() {
-            return None;
-        }
-        let name_cstr = CString::new(type_name).ok()?;
-        let ty = unsafe { (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr()) };
-        if ty.is_null() {
-            return None;
-        }
-        let layout_ptr =
-            unsafe { (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default) };
-        if layout_ptr.is_null() {
-            return None;
-        }
-        let cat = SlangParameterCategory::Uniform as i32;
-        let size = unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, cat) } as u32;
+    /// Broadcast uniforms use std140-style `Uniform` layout. Storage-buffer element
+    /// types (`Scattered<T>`, `BufRO<T>`, etc.) use `ShaderResource` layout so
+    /// simple structs like `{ uint a; uint b; }` report 8 bytes, not the 16-byte
+    /// uniform round-up that would mismatch GPU structured-buffer indexing.
+    fn reflect_binding_element_stride(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+        category: Option<ResourceCategory>,
+    ) -> Option<u32> {
+        let layout_cat = match category {
+            Some(ResourceCategory::Broadcast) => SlangParameterCategory::Uniform,
+            Some(ResourceCategory::StorageImage) => SlangParameterCategory::UnorderedAccess,
+            Some(ResourceCategory::Scattered)
+            | Some(ResourceCategory::Texture)
+            | Some(ResourceCategory::Sampler)
+            | None => SlangParameterCategory::ShaderResource,
+        };
+        self.reflect_type_size_with_category(request, type_name, layout_cat)
+            .or_else(|| {
+                if matches!(
+                    category,
+                    Some(ResourceCategory::Scattered)
+                        | Some(ResourceCategory::StorageImage)
+                        | Some(ResourceCategory::Texture)
+                        | None
+                ) {
+                    self.reflect_struct_storage_stride(request, type_name, layout_cat)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn reflect_type_size_with_category(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+        layout_cat: SlangParameterCategory,
+    ) -> Option<u32> {
+        let layout_ptr = self.reflect_type_layout_ptr(request, type_name)?;
+        let size = unsafe { (self.library.reflection_type_layout_get_size)(layout_ptr, layout_cat as i32) } as u32;
         if size > 0 {
             Some(size)
         } else {
             None
         }
+    }
+
+    /// Structured-buffer element size from per-field offsets (natural struct extent).
+    ///
+    /// Whole-type `Uniform` layout includes std140 tail padding (e.g. 8-byte struct → 16),
+    /// which does not match GPU structured-buffer indexing. Field extents under `Uniform`
+    /// omit that padding and match storage-buffer element sizes.
+    fn reflect_struct_storage_stride(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+        _layout_cat: SlangParameterCategory,
+    ) -> Option<u32> {
+        let layout_ptr = self.reflect_type_layout_ptr(request, type_name)?;
+        let field_count = unsafe { (self.library.reflection_type_layout_get_field_count)(layout_ptr) };
+        if field_count == 0 {
+            return None;
+        }
+
+        let field_cat = SlangParameterCategory::Uniform as i32;
+        let mut extent = 0u32;
+        for i in 0..field_count {
+            let field_var = unsafe { (self.library.reflection_type_layout_get_field_by_index)(layout_ptr, i) };
+            if field_var.is_null() {
+                continue;
+            }
+            let field_type_layout = unsafe { (self.library.reflection_variable_layout_get_type_layout)(field_var) };
+            if field_type_layout.is_null() {
+                continue;
+            }
+            let offset = unsafe { (self.library.reflection_variable_layout_get_offset)(field_var, field_cat) } as u32;
+            let field_size =
+                unsafe { (self.library.reflection_type_layout_get_size)(field_type_layout, field_cat) } as u32;
+            let field_extent = offset.saturating_add(field_size.max(1));
+            extent = extent.max(field_extent);
+        }
+
+        if extent > 0 {
+            Some(extent)
+        } else {
+            None
+        }
+    }
+
+    fn reflect_type_layout_ptr(
+        &self,
+        request: *mut SlangCompileRequest,
+        type_name: &str,
+    ) -> Option<*mut SlangReflectionTypeLayout> {
+        let reflection_ptr = unsafe { (self.library.get_reflection)(request) };
+        if reflection_ptr.is_null() {
+            return None;
+        }
+
+        let mut candidates = vec![type_name.to_string()];
+        if !type_name.contains('.') {
+            candidates.push(format!("shader.{type_name}"));
+        }
+
+        for candidate in &candidates {
+            let name_cstr = CString::new(candidate.as_str()).ok()?;
+            let ty = unsafe { (self.library.reflection_find_type_by_name)(reflection_ptr, name_cstr.as_ptr()) };
+            if ty.is_null() {
+                continue;
+            }
+            let layout_ptr =
+                unsafe { (self.library.reflection_get_type_layout)(reflection_ptr, ty, SlangLayoutRules::Default) };
+            if !layout_ptr.is_null() {
+                return Some(layout_ptr);
+            }
+        }
+        None
     }
 
     fn extract_struct_layout_uniform(
@@ -905,6 +1008,8 @@ impl SlangCompiler {
         Ok(ShaderReflection {
             parameter_blocks,
             push_constant_categories: Vec::new(),
+            #[cfg(all(feature = "dx12", target_os = "windows"))]
+            push_constant_slot_kinds: Vec::new(),
             binding_element_strides: Vec::new(),
         })
     }
@@ -1550,6 +1655,54 @@ mod struct_layout_validate_tests {
             strides[1],
             Some(4),
             "Scattered<uint> element stride should be 4: {strides:?}"
+        );
+    }
+
+    #[test]
+    fn stride_extraction_structured_buffer_element_uses_storage_layout() {
+        use super::{ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable; skipping");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("shaders").to_string_lossy().into_owned();
+
+        let source = r#"
+            import goldy_exp;
+
+            struct Pair { uint a; uint b; };
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
+                output[id.x] = input[id.x];
+            }
+        "#;
+
+        let result = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("__SPIRV__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("compilation failed");
+
+        let strides = &result.reflection.binding_element_strides;
+        assert_eq!(strides.len(), 2, "expected 2 binding slots: {strides:?}");
+        assert_eq!(
+            strides[0],
+            Some(8),
+            "BufRO<Pair> element stride should be 8 (not uniform 16): {strides:?}"
+        );
+        assert_eq!(
+            strides[1],
+            Some(8),
+            "Scattered<Pair> element stride should be 8: {strides:?}"
         );
     }
 }

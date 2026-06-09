@@ -1,125 +1,130 @@
 #!/usr/bin/env python3
-"""Triangle example - render a colored triangle in an interactive window.
+"""Triangle example — animated colored triangle in a window via TaskGraph.
 
-This example demonstrates the Surface API for zero-copy GPU presentation.
+Offscreen RenderTarget -> render_pass -> copy_render_target_to_swapchain -> present.
+
+Requires: pip install glfw
 
 Usage:
-    python windowed.py
+    python triangle.py
 """
 
-import goldy
-import numpy as np
+from __future__ import annotations
+
 import math
+import sys
 
 import glfw
+import goldy
+import numpy as np
 
 
-def main():
-    print("Goldy Surface API Example")
+def make_scene_rt(device: goldy.Device, surface: goldy.Surface) -> goldy.RenderTarget:
+    width = max(surface.width, 1)
+    height = max(surface.height, 1)
+    return goldy.RenderTarget(device, width, height, surface.format)
+
+
+def main() -> int:
+    print("Goldy Python Triangle Window (TaskGraph)")
     print("=" * 40)
-    print("Rendering triangle with zero-copy GPU presentation")
-    print("Press Escape or close window to exit")
-    print()
+    print("Press Escape or close the window to exit\n")
 
-    # Initialize GLFW
     if not glfw.init():
-        raise RuntimeError("Failed to initialize GLFW")
+        print("Failed to initialize GLFW", file=sys.stderr)
+        return 1
 
-    # Configure window - NO_API means no OpenGL context (we use DX12/Vulkan/Metal)
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
-    glfw.window_hint(glfw.RESIZABLE, True)
-
-    # Create window
-    width, height = 800, 600
-    window = glfw.create_window(width, height, "Goldy - Animated Triangle (Surface API)", None, None)
+    window = glfw.create_window(800, 600, "Goldy - Animated Triangle (Python)", None, None)
     if not window:
         glfw.terminate()
-        raise RuntimeError("Failed to create GLFW window")
+        print("Failed to create GLFW window", file=sys.stderr)
+        return 1
 
-    # Create Goldy device and surface
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
-    print(f"Backend: {instance.backend_type}")
-
     surface = goldy.Surface.from_glfw(device, window)
-    print(f"Surface: {surface.width}x{surface.height}")
 
-    # Create vertex buffer with a triangle
-    vertices = np.array([
-        # Position      Color (RGBA)
-         0.0, -0.5,    1.0, 0.0, 0.0, 1.0,  # Top (red)
-        -0.5,  0.5,    0.0, 1.0, 0.0, 1.0,  # Bottom-left (green)
-         0.5,  0.5,    0.0, 0.0, 1.0, 1.0,  # Bottom-right (blue)
-    ], dtype=np.float32)
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
-
-    # Create shader and pipeline using surface's actual format
     shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
     pipeline = goldy.RenderPipeline(
-        device, shader, shader,
+        device,
+        shader,
+        shader,
         goldy.RenderPipelineDesc(
             vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
             target_format=surface.format,
-        )
+        ),
     )
 
-    # Animation state
+    vertices = np.array(
+        [
+            0.0,
+            -0.5,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            -0.5,
+            0.5,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.5,
+            0.5,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+        ],
+        dtype=np.float32,
+    )
+    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+
+    scene_rt = make_scene_rt(device, surface)
+    frame_graph = goldy.TaskGraph()
     frame_count = 0
 
-    # Handle window resize
-    def on_resize(win, w, h):
-        nonlocal width, height
-        if w > 0 and h > 0:
-            width, height = w, h
-            surface.resize(w, h)
+    try:
+        while not glfw.window_should_close(window):
+            fb_width, fb_height = glfw.get_framebuffer_size(window)
+            if fb_width > 0 and fb_height > 0:
+                if fb_width != surface.width or fb_height != surface.height:
+                    surface.resize(fb_width, fb_height)
+                    scene_rt = make_scene_rt(device, surface)
 
-    glfw.set_framebuffer_size_callback(window, on_resize)
+            t = math.sin(frame_count * 0.02) * 0.5 + 0.5
+            bg = goldy.Color(0.1 + t * 0.1, 0.1 + t * 0.05, 0.2 + t * 0.1, 1.0)
 
-    # Handle key input
-    def on_key(win, key, scancode, action, mods):
-        if action == glfw.PRESS and key == glfw.KEY_ESCAPE:
-            glfw.set_window_should_close(window, True)
+            frame_graph.clear()
+            with frame_graph.render_pass("triangle", scene_rt) as rp:
+                (
+                    rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+                    .clear(bg)
+                    .set_pipeline(pipeline)
+                    .set_vertex_buffer(0, vertex_buffer)
+                    .draw(range(3))
+                )
 
-    glfw.set_key_callback(window, on_key)
+            swapchain = frame_graph.declare_swapchain_output()
+            frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
 
-    print("\nRendering...")
+            frame = surface.acquire()
+            surface.submit_graph_to_frame(frame_graph, frame)
+            surface.present(frame)
 
-    # Main render loop
-    while not glfw.window_should_close(window):
-        # Poll events
-        glfw.poll_events()
+            frame_count += 1
+            glfw.poll_events()
 
-        # Animate background color
-        t = math.sin(frame_count * 0.02) * 0.5 + 0.5
-        bg_color = goldy.Color(
-            0.1 + t * 0.1,
-            0.1 + t * 0.05,
-            0.2 + t * 0.1,
-            1.0
-        )
+            if glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS:
+                break
+    finally:
+        glfw.destroy_window(window)
+        glfw.terminate()
 
-        # Acquire next frame from swapchain
-        frame = surface.acquire()
-
-        # Build render commands
-        encoder = goldy.CommandEncoder()
-        with encoder.begin_render_pass() as rp:
-            rp.clear(bg_color)
-            rp.set_pipeline(pipeline)
-            rp.set_vertex_buffer(0, vertex_buffer)
-            rp.draw(range(3))
-
-        # Render to swapchain image (zero-copy - no CPU readback!)
-        frame.render(encoder)
-
-        # Present to screen
-        surface.present(frame)
-
-        frame_count += 1
-
-    glfw.terminate()
     print("Done!")
+    return 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())

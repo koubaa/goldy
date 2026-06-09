@@ -185,6 +185,13 @@ pub enum NodeKind {
     /// `src` must have [`crate::types::TextureFlags::COPY_SRC`] and
     /// `dst` must have [`crate::types::TextureFlags::COPY_DST`].
     CopyTexture { src: TextureHandle, dst: ResourceId },
+    /// Copy an offscreen [`crate::RenderTarget`] color buffer to a texture or swapchain output.
+    ///
+    /// The source render target must have been written by an earlier
+    /// [`NodeKind::RenderPass`] node in the same graph. Declare a `Read` binding
+    /// on the same [`super::ResourceId::RenderTarget`] so the analyzer orders the
+    /// copy after the render pass.
+    CopyRenderTarget { src: RenderTargetHandle, dst: ResourceId },
     /// Offscreen render pass targeting a [`crate::RenderTarget`].
     ///
     /// Declare all buffers and textures read by draw commands via

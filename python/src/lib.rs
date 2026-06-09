@@ -10,15 +10,16 @@
 #![allow(clippy::wrong_self_convention)]
 
 mod buffer;
+mod buffer_pool;
 mod compute;
 mod device;
-mod encoder;
 mod error;
 mod instance;
 mod pipeline;
 mod render_target;
 mod shader;
 mod surface;
+mod task_graph;
 mod types;
 
 use pyo3::prelude::*;
@@ -42,6 +43,8 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyIndexFormat>()?;
     m.add_class::<types::PyDepthFormat>()?;
     m.add_class::<types::PyCompareFunction>()?;
+    m.add_class::<types::PyNodeAccess>()?;
+    m.add_class::<types::PyResourceAccess>()?;
     m.add_class::<types::PyColor>()?;
     m.add_class::<types::PyVertexAttribute>()?;
     m.add_class::<types::PyVertexBufferLayout>()?;
@@ -52,20 +55,22 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<instance::PyAdapter>()?;
     m.add_class::<device::PyDevice>()?;
     m.add_class::<buffer::PyBuffer>()?;
+    m.add_class::<buffer_pool::PyBufferPool>()?;
+    m.add_class::<buffer_pool::PyBufferView>()?;
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
     m.add_class::<render_target::PyRenderTarget>()?;
-    m.add_class::<encoder::PyCommandEncoder>()?;
-    m.add_class::<encoder::PyRenderPass>()?;
+    m.add_class::<task_graph::PyTaskGraph>()?;
+    m.add_class::<task_graph::PyRenderPass>()?;
+    m.add_class::<task_graph::PySwapchainOutput>()?;
+    m.add_class::<task_graph::PyComputeNode>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
-    m.add_class::<compute::PyComputeEncoder>()?;
-    m.add_class::<compute::PyComputePass>()?;
 
     // Surface (windowed rendering)
     m.add_class::<surface::PySurface>()?;

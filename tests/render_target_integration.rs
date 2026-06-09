@@ -4,10 +4,24 @@
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
-    BufferKind, Color, CommandEncoder, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat,
-    Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule,
-    TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat, Instance,
+    NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+
+fn graph_render(
+    device: &goldy::Device,
+    target: &RenderTarget,
+    label: &'static str,
+    record: impl FnOnce(&mut goldy::RenderPassBuilder<'_>),
+) {
+    let ctx = device.create_context().expect("context");
+    let mut graph = TaskGraph::new();
+    let mut pass = graph.render_pass(label, target);
+    record(&mut pass);
+    pass.finish_recorded();
+    graph.dispatch(&ctx).expect("graph dispatch");
+}
 
 fn create_device() -> Option<goldy::Device> {
     let instance = Instance::new().ok()?;
@@ -94,17 +108,13 @@ fn test_vulkan_render_and_readback() {
         .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("Failed to create vertex buffer");
 
-    // Render
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "triangle", |pass| {
+        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
         pass.draw(0..3, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
 
     // Read back
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
@@ -126,15 +136,10 @@ fn test_render_target_clear_only() {
 
     let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
-    // Just clear to a solid color
     let clear_color = Color::from_rgb(128, 64, 32);
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "clear", |pass| {
         pass.clear(clear_color);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
 
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
 
@@ -158,20 +163,12 @@ fn test_multiple_render_targets() {
     let target1 = RenderTarget::new(&device, 10, 10, TextureFormat::Rgba8Unorm).expect("Failed to create target 1");
     let target2 = RenderTarget::new(&device, 20, 20, TextureFormat::Rgba8Unorm).expect("Failed to create target 2");
 
-    // Render to both with different colors
-    let mut encoder1 = CommandEncoder::new();
-    {
-        let mut pass = encoder1.begin_render_pass();
+    graph_render(&device, &target1, "clear_red", |pass| {
         pass.clear(Color::RED);
-    }
-    target1.render(encoder1).expect("Failed to render to target 1");
-
-    let mut encoder2 = CommandEncoder::new();
-    {
-        let mut pass = encoder2.begin_render_pass();
+    });
+    graph_render(&device, &target2, "clear_blue", |pass| {
         pass.clear(Color::BLUE);
-    }
-    target2.render(encoder2).expect("Failed to render to target 2");
+    });
 
     // Read back and verify
     let pixels1 = target1.read_to_cpu().expect("Failed to read target 1");
@@ -258,18 +255,15 @@ fn test_indexed_drawing() {
         .alloc_buffer_with_data(&indices, BufferKind::Scattered)
         .expect("Failed to create index buffer");
 
-    // Render using indexed drawing
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "indexed_u16", |pass| {
+        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
         pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
         pass.draw_indexed(0..6, 0, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
 
     // Read back and verify we got something rendered
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
@@ -350,17 +344,15 @@ fn test_indexed_drawing_uint32() {
         .alloc_buffer_with_data(&indices, BufferKind::Scattered)
         .expect("Failed to create index buffer");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "indexed_u32", |pass| {
+        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
         pass.set_index_buffer(&index_buffer, IndexFormat::Uint32);
         pass.draw_indexed(0..3, 0, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
 
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
 
@@ -486,9 +478,9 @@ fn test_depth_occlusion_red_beats_green() {
         .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("Failed to create green VB");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "depth_red_wins", |pass| {
+        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
+        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -496,9 +488,7 @@ fn test_depth_occlusion_red_beats_green() {
         pass.draw(0..3, 0..1);
         pass.set_vertex_buffer(0, &green_vb);
         pass.draw(0..3, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
 
     let total = pixels.len() / 4;
@@ -593,9 +583,9 @@ fn test_depth_occlusion_green_beats_red() {
         .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("Failed to create green VB");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "depth_green_wins", |pass| {
+        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
+        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -603,9 +593,7 @@ fn test_depth_occlusion_green_beats_red() {
         pass.draw(0..3, 0..1);
         pass.set_vertex_buffer(0, &green_vb);
         pass.draw(0..3, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
     let pixels = target.read_to_cpu().expect("Failed to read pixels");
 
     let total = pixels.len() / 4;
@@ -712,15 +700,13 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     )
     .expect("create pipeline");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(&device, &target, "bindless_read", |pass| {
+        pass.bind_buffer_mut(&buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.bind_resources(&[&buffer]);
         pass.draw(0..3, 0..1);
-    }
-    target.render(encoder).expect("render");
+    });
 
     let pixels = target.read_to_cpu().expect("readback");
     assert_eq!(pixels.len(), 4 * 4 * 4);

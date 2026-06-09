@@ -10,45 +10,75 @@ C and C++ bindings for the Goldy GPU library.
 
 ## Quick Start
 
+Headless offscreen render (all platforms with a GPU):
+
 ```cpp
 #include <goldy.hpp>
 
+#include <cstdint>
+#include <iostream>
+
+struct Vertex {
+    float position[2];
+    float color[4];
+};
+
 int main() {
-    // Create instance and device
-    goldy::Instance instance;
-    goldy::Device device = instance.create_device_for_adapter(adapters[0].id);
-    
-    // Create render target
-    goldy::RenderTarget target(device, 800, 600);
-    
-    // Compile shader and create pipeline
-    goldy::ShaderModule shader(device, R"(
-        [shader("vertex")]
-        float4 vs_main(float2 pos : POSITION) : SV_Position {
-            return float4(pos, 0.0, 1.0);
+    try {
+        goldy::Instance instance;
+        goldy::Device device = instance.request_adapter().request_device();
+        goldy::RenderTarget target(device, 800, 600, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
+
+        const Vertex vertices[] = {
+            {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+            {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        };
+
+        goldy::Buffer vertex_buffer(
+            device,
+            std::span<const Vertex>(vertices),
+            goldy::BufferKind::Scattered);
+
+        goldy::ShaderModule shader(device, goldy::ShaderModule::builtin_vertex_color_2d());
+
+        GoldyVertexAttribute attributes[] = {
+            {0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0},
+            {1, GOLDY_VERTEX_FORMAT_FLOAT32X4, static_cast<uint32_t>(sizeof(float) * 2)},
+        };
+
+        GoldyRenderPipelineDesc desc{};
+        desc.vertex_attributes = attributes;
+        desc.vertex_attribute_count = static_cast<uint32_t>(std::size(attributes));
+        desc.vertex_stride = sizeof(Vertex);
+        desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        desc.target_format = GOLDY_TEXTURE_FORMAT_RGBA8_UNORM;
+
+        goldy::RenderPipeline pipeline(device, shader, shader, desc);
+
+        goldy::TaskGraph graph;
+        {
+            auto pass = graph.render_pass("triangle", target);
+            pass.bind_buffer(vertex_buffer, goldy::NodeAccess::Read)
+                .clear(goldy::Color::cornflower_blue())
+                .set_pipeline(pipeline)
+                .set_vertex_buffer(0, vertex_buffer)
+                .draw(0, 3);
         }
-        
-        [shader("fragment")]
-        float4 fs_main() : SV_Target {
-            return float4(1.0, 0.0, 0.0, 1.0);
-        }
-    )");
-    
-    GoldyRenderPipelineDesc desc{};
-    desc.target_format = GoldyTextureFormat::Rgba8Unorm;
-    goldy::RenderPipeline pipeline(device, shader, shader, desc);
-    
-    // Render
-    goldy::CommandEncoder encoder;
-    encoder.clear(goldy::Color::cornflower_blue());
-    encoder.set_pipeline(pipeline);
-    encoder.draw(3);
-    target.render(std::move(encoder));
-    
-    // Read back pixels
-    auto pixels = target.read_to_cpu();
+        graph.dispatch(device);
+
+        auto pixels = target.read_to_cpu();
+        std::cout << "Rendered " << pixels.size() << " bytes\n";
+        return 0;
+    } catch (const goldy::Exception& e) {
+        std::cerr << "Goldy error: " << e.what() << '\n';
+        return 1;
+    }
 }
 ```
+
+Windowed rendering: see `examples/triangle.cpp` (Win32 / macOS). Check
+`goldy::Surface::is_supported()` before using `Surface`.
 
 ## Installation
 
@@ -88,8 +118,14 @@ cargo build --package goldy-ffi --release
 # Configure with CMake
 cd cpp
 cmake -B build -DGOLDY_BUILD_FROM_SOURCE=ON
-cmake --build build
+cmake --build build --target triangle
 ```
+
+On Windows, if MSVC cannot find `stdarg.h`, either:
+
+- Re-configure from any shell (CMake auto-detects MSVC/SDK paths for Ninja), or
+- Use **x64 Native Tools Command Prompt for VS 2022**, or
+- Run `cpp/build.bat` which calls `vcvars64.bat` first.
 
 ## Requirements
 
@@ -99,12 +135,11 @@ cmake --build build
 
 ## Platform Support
 
-| Platform | Status |
-|----------|--------|
-| Windows x64 | ✅ Supported |
-| Linux x64 | ✅ Supported |
-| macOS x64 | ✅ Supported |
-| macOS ARM64 | ✅ Supported |
+| Platform | Headless TaskGraph | Windowed Surface |
+|----------|-------------------|------------------|
+| Windows x64 | ✅ | ✅ |
+| Linux x64 | ✅ | ❌ (use headless or custom window + C API) |
+| macOS x64 / ARM64 | ✅ | ✅ |
 
 ## API Reference
 
@@ -117,10 +152,10 @@ cmake --build build
 | `goldy::Buffer` | GPU buffer (vertex, uniform, etc.) |
 | `goldy::ShaderModule` | Compiled Slang shader |
 | `goldy::RenderPipeline` | Graphics pipeline |
-| `goldy::RenderTarget` | Offscreen render target |
-| `goldy::CommandEncoder` | Records render commands |
+| `goldy::RenderTarget` | Offscreen render target (readback) |
+| `goldy::TaskGraph` | Task graph (render passes, swapchain blit, dispatch) |
+| `goldy::Surface` | Window swapchain (Win32 / macOS only) |
 | `goldy::ComputePipeline` | Compute shader pipeline |
-| `goldy::ComputeEncoder` | Records compute commands |
 | `goldy::Texture` | GPU texture |
 | `goldy::Sampler` | Texture sampler |
 
@@ -162,4 +197,3 @@ goldy_instance_destroy(instance);
 ## License
 
 LGPL-2.1-or-later. A commercial license is also available; contact [koubaa on github](permament email tbd) for terms.
-

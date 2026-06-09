@@ -5,10 +5,8 @@
 
 #[cfg(windows)]
 use crate::device::GoldyDevice;
-use crate::encoder::GoldyCommandEncoder;
-#[cfg(windows)]
-use crate::error::set_last_error;
-use crate::error::{set_last_error_from_anyhow, GoldyResult};
+use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
+use crate::task_graph::GoldyTaskGraph;
 use crate::types::GoldyTextureFormat;
 use std::ptr;
 
@@ -22,7 +20,7 @@ pub struct GoldySurface {
 
 /// Opaque handle to a Goldy SurfaceFrame.
 pub struct GoldySurfaceFrame {
-    pub(crate) inner: goldy::Frame,
+    pub(crate) inner: Option<goldy::Frame>,
 }
 
 // Note: Surface creation is complex due to platform-specific window handles.
@@ -109,10 +107,53 @@ pub unsafe extern "C" fn goldy_surface_acquire(surface: *const GoldySurface) -> 
     }
 
     match (*surface).inner.acquire() {
-        Ok(frame) => Box::into_raw(Box::new(GoldySurfaceFrame { inner: frame })),
+        Ok(frame) => Box::into_raw(Box::new(GoldySurfaceFrame { inner: Some(frame) })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
             ptr::null_mut()
+        }
+    }
+}
+
+/// Submit a task graph that writes to an already-acquired swapchain frame.
+///
+/// The graph must include [`goldy_task_graph_declare_swapchain_output`] and
+/// [`goldy_task_graph_copy_render_target_to_swapchain`] (or another swapchain
+/// binding). Updates `frame` in place with any parcel stamp targets from the graph.
+///
+/// # Safety
+/// All pointers must be valid. No render pass may be open on `graph`.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_surface_submit_graph_to_frame(
+    surface: *const GoldySurface,
+    graph: *mut GoldyTaskGraph,
+    frame: *mut GoldySurfaceFrame,
+) -> GoldyResult {
+    if surface.is_null() || graph.is_null() || frame.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    if (*graph).has_active_render_pass() {
+        set_last_error("Cannot submit graph while a render pass is being recorded; call render_pass_finish first");
+        return GoldyResult::InvalidArgument;
+    }
+
+    let mut frame_box = Box::from_raw(frame);
+    let Some(goldy_frame) = frame_box.inner.take() else {
+        set_last_error("Surface frame already consumed");
+        let _ = Box::into_raw(frame_box);
+        return GoldyResult::InvalidArgument;
+    };
+    match (*surface).inner.submit_graph_to_frame(&mut (*graph).inner, goldy_frame) {
+        Ok(updated) => {
+            frame_box.inner = Some(updated);
+            let _ = Box::into_raw(frame_box);
+            GoldyResult::Ok
+        }
+        Err(e) => {
+            set_last_error_from_anyhow(&e);
+            frame_box.inner = None;
+            let _ = Box::into_raw(frame_box);
+            GoldyResult::GpuError
         }
     }
 }
@@ -133,35 +174,14 @@ pub unsafe extern "C" fn goldy_surface_present(
         return GoldyResult::NullPointer;
     }
 
-    let frame = Box::from_raw(frame);
-    match (*surface).inner.present(frame.inner) {
+    let mut frame = Box::from_raw(frame);
+    let Some(goldy_frame) = frame.inner.take() else {
+        set_last_error("Surface frame already consumed");
+        let _ = Box::into_raw(frame);
+        return GoldyResult::InvalidArgument;
+    };
+    match (*surface).inner.present(goldy_frame) {
         Ok(_) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            GoldyResult::GpuError
-        }
-    }
-}
-
-/// Render commands to a frame.
-///
-/// This consumes the encoder.
-///
-/// # Safety
-/// Both pointers must be valid.
-/// The encoder is consumed and must not be used after this call.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_surface_frame_render(
-    frame: *const GoldySurfaceFrame,
-    encoder: *mut GoldyCommandEncoder,
-) -> GoldyResult {
-    if frame.is_null() || encoder.is_null() {
-        return GoldyResult::NullPointer;
-    }
-
-    let encoder = Box::from_raw(encoder);
-    match (*frame).inner.render(encoder.inner) {
-        Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error_from_anyhow(&e);
             GoldyResult::GpuError
@@ -178,7 +198,7 @@ pub unsafe extern "C" fn goldy_surface_frame_width(frame: *const GoldySurfaceFra
     if frame.is_null() {
         return 0;
     }
-    (*frame).inner.width()
+    (*frame).inner.as_ref().map(|f| f.width()).unwrap_or(0)
 }
 
 /// Get the frame height.
@@ -190,10 +210,85 @@ pub unsafe extern "C" fn goldy_surface_frame_height(frame: *const GoldySurfaceFr
     if frame.is_null() {
         return 0;
     }
-    (*frame).inner.height()
+    (*frame).inner.as_ref().map(|f| f.height()).unwrap_or(0)
 }
 
 // Platform-specific surface creation
+
+#[cfg(target_os = "macos")]
+mod appkit_surface {
+    use super::*;
+    use crate::device::GoldyDevice;
+    use raw_window_handle::{
+        AppKitDisplayHandle, AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    };
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    struct AppKitWindow {
+        ns_view: NonNull<c_void>,
+    }
+
+    impl HasWindowHandle for AppKitWindow {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let handle = AppKitWindowHandle::new(self.ns_view);
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for AppKitWindow {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            let handle = AppKitDisplayHandle::new();
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::AppKit(handle)) })
+        }
+    }
+
+    /// Create a surface from an AppKit `NSView` pointer.
+    ///
+    /// # Safety
+    /// - `device` must be valid.
+    /// - `ns_view` must be a valid `NSView*` for the window's content view.
+    /// - The view must outlive the surface.
+    #[no_mangle]
+    pub unsafe extern "C" fn goldy_surface_create_appkit(
+        device: *const GoldyDevice,
+        ns_view: *mut c_void,
+    ) -> *mut GoldySurface {
+        if device.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Device pointer is null"));
+            return ptr::null_mut();
+        }
+        if ns_view.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("NSView pointer is null"));
+            return ptr::null_mut();
+        }
+
+        let ns_view = match NonNull::new(ns_view) {
+            Some(v) => v,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("NSView pointer is null"));
+                return ptr::null_mut();
+            }
+        };
+
+        let window = AppKitWindow { ns_view };
+        let device = &(*device).inner;
+        let ctx = match device.create_context() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                return ptr::null_mut();
+            }
+        };
+        match goldy::Surface::new(&ctx, &window) {
+            Ok(surface) => Box::into_raw(Box::new(GoldySurface { inner: surface })),
+            Err(e) => {
+                set_last_error_from_anyhow(&e);
+                ptr::null_mut()
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 mod windows_surface {
@@ -275,6 +370,90 @@ mod windows_surface {
         };
         match goldy::Surface::new(&ctx, &window) {
             Ok(surface) => Box::into_raw(Box::new(GoldySurface { inner: surface })),
+            Err(e) => {
+                set_last_error_from_anyhow(&e);
+                ptr::null_mut()
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod wayland_surface {
+    use super::*;
+    use crate::device::GoldyDevice;
+    use raw_window_handle::{
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
+    };
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    struct WaylandWindow {
+        display: NonNull<c_void>,
+        surface: NonNull<c_void>,
+    }
+
+    impl HasWindowHandle for WaylandWindow {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let handle = WaylandWindowHandle::new(self.surface);
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::Wayland(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for WaylandWindow {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            let handle = WaylandDisplayHandle::new(self.display);
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(handle)) })
+        }
+    }
+
+    /// Create a surface from Wayland `wl_display` and `wl_surface` pointers.
+    ///
+    /// # Safety
+    /// - `device` must be valid.
+    /// - `display` and `surface` must be valid Wayland handles for the window.
+    /// - They must outlive the surface.
+    #[no_mangle]
+    pub unsafe extern "C" fn goldy_surface_create_wayland(
+        device: *const GoldyDevice,
+        display: *mut c_void,
+        surface: *mut c_void,
+    ) -> *mut GoldySurface {
+        if device.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Device pointer is null"));
+            return ptr::null_mut();
+        }
+        if display.is_null() || surface.is_null() {
+            set_last_error_from_anyhow(&anyhow::anyhow!("Wayland display or surface pointer is null"));
+            return ptr::null_mut();
+        }
+
+        let display = match NonNull::new(display) {
+            Some(d) => d,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("Wayland display pointer is null"));
+                return ptr::null_mut();
+            }
+        };
+        let surface = match NonNull::new(surface) {
+            Some(s) => s,
+            None => {
+                set_last_error_from_anyhow(&anyhow::anyhow!("Wayland surface pointer is null"));
+                return ptr::null_mut();
+            }
+        };
+
+        let window = WaylandWindow { display, surface };
+        let device = &(*device).inner;
+        let ctx = match device.create_context() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                return ptr::null_mut();
+            }
+        };
+        match goldy::Surface::new(&ctx, &window) {
+            Ok(s) => Box::into_raw(Box::new(GoldySurface { inner: s })),
             Err(e) => {
                 set_last_error_from_anyhow(&e);
                 ptr::null_mut()

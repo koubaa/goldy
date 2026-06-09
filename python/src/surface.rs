@@ -1,8 +1,8 @@
 //! Python wrapper for Surface (windowed rendering).
 
 use crate::device::PyDevice;
-use crate::encoder::PyCommandEncoder;
 use crate::error::IntoPyResult;
+use crate::task_graph::PyTaskGraph;
 use crate::types::PyTextureFormat;
 use pyo3::prelude::*;
 
@@ -24,12 +24,15 @@ use pyo3::prelude::*;
 ///     >>> device = instance.request_adapter().request_device()
 ///     >>> surface = goldy.Surface.from_glfw(device, window)
 ///     >>>
+///     >>> frame_graph = goldy.TaskGraph()
 ///     >>> while not glfw.window_should_close(window):
-///     ...     frame = surface.acquire()
-///     ...     encoder = goldy.CommandEncoder()
-///     ...     with encoder.begin_render_pass() as rp:
+///     ...     frame_graph.clear()
+///     ...     with frame_graph.render_pass("main", scene_rt) as rp:
 ///     ...         rp.clear(goldy.Color.CORNFLOWER_BLUE)
-///     ...     frame.render(encoder)
+///     ...     swapchain = frame_graph.declare_swapchain_output()
+///     ...     frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
+///     ...     frame = surface.acquire()
+///     ...     surface.submit_graph_to_frame(frame_graph, frame)
 ///     ...     surface.present(frame)
 ///     ...     glfw.poll_events()
 #[pyclass(name = "Surface", module = "goldy")]
@@ -74,16 +77,22 @@ impl PySurface {
 
         #[cfg(target_os = "linux")]
         let surface = {
-            // On Linux/X11, get the X11 window and display
-            let get_x11_window = glfw.getattr("get_x11_window")?;
-            let get_x11_display = glfw.getattr("get_x11_display")?;
+            // Vulkan on Linux requires Wayland handles (see goldy Vulkan surface backend).
+            let get_wayland_window = glfw.getattr("get_wayland_window")?;
+            let get_wayland_display = glfw.getattr("get_wayland_display")?;
 
-            let x11_window: u64 = get_x11_window.call1((glfw_window,))?.extract()?;
-            let x11_display: isize = get_x11_display.call1(())?.extract()?;
+            let wl_surface: isize = get_wayland_window.call1((glfw_window,))?.extract()?;
+            let wl_display: isize = get_wayland_display.call1(())?.extract()?;
 
-            let window_wrapper = X11WindowWrapper {
-                window: x11_window as u32,
-                display: x11_display as *mut std::ffi::c_void,
+            if wl_surface == 0 || wl_display == 0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "Wayland handles unavailable — run under a Wayland session (X11 is not supported by the Vulkan backend)",
+                ));
+            }
+
+            let window_wrapper = WaylandWindowWrapper {
+                display: wl_display as *mut std::ffi::c_void,
+                surface: wl_surface as *mut std::ffi::c_void,
             };
             goldy::Surface::new(&context, &window_wrapper).into_py_result()?
         };
@@ -143,6 +152,21 @@ impl PySurface {
         Ok(PySurfaceFrame { inner: Some(frame) })
     }
 
+    /// Submit a task graph to an acquired frame, then present with [`Self::present`].
+    fn submit_graph_to_frame(&mut self, graph: &PyTaskGraph, frame: &mut PySurfaceFrame) -> PyResult<()> {
+        graph.ensure_no_active_recorder()?;
+        let frame_val = frame
+            .inner
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Frame already consumed"))?;
+        let updated = self
+            .inner
+            .submit_graph_to_frame(&mut graph.inner.borrow_mut(), frame_val)
+            .into_py_result()?;
+        frame.inner = Some(updated);
+        Ok(())
+    }
+
     /// Present a rendered frame to the display.
     fn present(&mut self, frame: &mut PySurfaceFrame) -> PyResult<()> {
         let frame = frame
@@ -170,17 +194,6 @@ pub struct PySurfaceFrame {
 
 #[pymethods]
 impl PySurfaceFrame {
-    /// Render commands to this frame.
-    fn render(&mut self, encoder: &PyCommandEncoder) -> PyResult<()> {
-        let frame = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Frame already consumed"))?;
-
-        let commands = encoder.take_inner();
-        frame.render(commands).into_py_result()
-    }
-
     fn __repr__(&self) -> String {
         if self.inner.is_some() {
             "SurfaceFrame(pending)".to_string()
@@ -222,30 +235,33 @@ impl raw_window_handle::HasDisplayHandle for Win32WindowWrapper {
 }
 
 #[cfg(target_os = "linux")]
-struct X11WindowWrapper {
-    window: u32,
+struct WaylandWindowWrapper {
     display: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
 }
 
 #[cfg(target_os = "linux")]
-unsafe impl Send for X11WindowWrapper {}
+unsafe impl Send for WaylandWindowWrapper {}
 #[cfg(target_os = "linux")]
-unsafe impl Sync for X11WindowWrapper {}
+unsafe impl Sync for WaylandWindowWrapper {}
 
 #[cfg(target_os = "linux")]
-impl raw_window_handle::HasWindowHandle for X11WindowWrapper {
+impl raw_window_handle::HasWindowHandle for WaylandWindowWrapper {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let mut handle = raw_window_handle::XlibWindowHandle::new(self.window as _);
-        let raw = raw_window_handle::RawWindowHandle::Xlib(handle);
+        let handle =
+            raw_window_handle::WaylandWindowHandle::new(std::ptr::NonNull::new(self.surface).expect("wayland surface"));
+        let raw = raw_window_handle::RawWindowHandle::Wayland(handle);
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
     }
 }
 
 #[cfg(target_os = "linux")]
-impl raw_window_handle::HasDisplayHandle for X11WindowWrapper {
+impl raw_window_handle::HasDisplayHandle for WaylandWindowWrapper {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let handle = raw_window_handle::XlibDisplayHandle::new(std::ptr::NonNull::new(self.display), 0);
-        let raw = raw_window_handle::RawDisplayHandle::Xlib(handle);
+        let handle = raw_window_handle::WaylandDisplayHandle::new(
+            std::ptr::NonNull::new(self.display).expect("wayland display"),
+        );
+        let raw = raw_window_handle::RawDisplayHandle::Wayland(handle);
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw) })
     }
 }

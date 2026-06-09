@@ -63,13 +63,55 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
 }
 
-#[cfg(any(
-    test,
-    feature = "vulkan",
-    all(feature = "dx12", target_os = "windows"),
-    all(feature = "metal", target_os = "macos"),
-))]
+#[cfg(any(test, feature = "vulkan", all(feature = "metal", target_os = "macos"),))]
 use crate::types::ResourceCategory;
+
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+use crate::types::BindlessSlotKind;
+
+/// Validate raw bindless indices against per-slot SRV/UAV expectations (DX12).
+///
+/// Only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
+/// `GOLDY_VALIDATION=layout`). Skips slots where reflection or index resolution
+/// is ambiguous.
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+pub(crate) fn validate_bindless_slot_kinds(
+    indices: &[u32],
+    expectations: &[Option<BindlessSlotKind>],
+    mut resolve: impl FnMut(u32) -> Option<BindlessSlotKind>,
+    shader_name: &str,
+) -> Result<()> {
+    if !crate::slang::layout_validation_enabled() || expectations.is_empty() {
+        return Ok(());
+    }
+    let mut mismatches: Vec<String> = Vec::new();
+    for (slot, &index) in indices.iter().enumerate() {
+        let Some(expected) = expectations.get(slot).copied().flatten() else {
+            continue;
+        };
+        let Some(actual) = resolve(index) else {
+            continue;
+        };
+        if actual != expected {
+            mismatches.push(format!(
+                "slot {slot}: shader expects {expected} bindless slot but index {index} resolves to {actual}",
+                expected = expected.name(),
+                actual = actual.name(),
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "bindless SRV/UAV mismatch in shader `{shader_name}`:\n  {}\n\
+             Hint: `Scattered<T>` / `StorageBuffer<T>` need `ResourceAccess::ReadWrite` or `Write` \
+             (UAV index); `BufRO<T>` needs `ResourceAccess::Read` (SRV index). \
+             Prefer `bind_resources(&[&buf])` or `Buffer::handle(access)` over raw indices.",
+            mismatches.join("\n  ")
+        );
+    }
+}
 
 /// Validate a typed push-constant array against per-slot category expectations
 /// reported by shader reflection.
@@ -164,6 +206,49 @@ pub(crate) fn validate_binding_strides(
             mismatches.join("\n  ")
         );
     }
+}
+
+/// Validate buffer element strides for a compute dispatch bound via raw bindless indices.
+///
+/// For each push-constant slot with a reflected stride expectation, resolves the bound
+/// buffer's `element_stride` through `resolve_stride(index, category)` and delegates
+/// to [`validate_binding_strides`].
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_raw_binding_strides(
+    indices: &[u32],
+    categories: &[Option<crate::types::ResourceCategory>],
+    expected: &[Option<u32>],
+    mut resolve_stride: impl FnMut(u32, crate::types::ResourceCategory) -> Option<u32>,
+    shader_name: &str,
+) -> Result<()> {
+    if !crate::slang::layout_validation_enabled() || expected.is_empty() {
+        return Ok(());
+    }
+    let mut actual: Vec<Option<u32>> = vec![None; expected.len()];
+    for (slot, exp) in expected.iter().enumerate() {
+        if exp.is_none() {
+            continue;
+        }
+        let Some(cat) = categories.get(slot).and_then(|c| *c) else {
+            continue;
+        };
+        if !matches!(
+            cat,
+            crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::Broadcast
+        ) {
+            continue;
+        }
+        let Some(&idx) = indices.get(slot) else {
+            continue;
+        };
+        actual[slot] = resolve_stride(idx, cat);
+    }
+    validate_binding_strides(&actual, expected, shader_name)
 }
 
 // Re-export raw_window_handle for Surface API users
@@ -269,8 +354,6 @@ pub enum RenderCommand {
 pub enum GpuCommand {
     /// Set the active compute pipeline.
     SetPipeline(ComputePipelineHandle),
-    /// Bind resource slots (fully bindless mode - buffer indices passed directly).
-    BindResources { buffers: Vec<BufferHandle> },
     /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
     /// `indices` go to region A (bindless, packed as u16).
@@ -336,6 +419,15 @@ pub enum GpuCommand {
     /// Both textures must have compatible formats and identical dimensions.
     /// The backend inserts appropriate layout transitions and memory barriers.
     CopyTexture { src: TextureHandle, dst: TextureHandle },
+    /// Copy the color attachment of an offscreen render target into a texture.
+    ///
+    /// The source must have been rendered to earlier in the same submission (or
+    /// a prior submission whose timeline has completed). The backend transitions
+    /// the source from its post-render layout and copies into `dst`.
+    CopyRenderTarget {
+        src: RenderTargetHandle,
+        dst: TextureHandle,
+    },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
     /// Each entry packs `[PushLayout bytes | wg_x u32 | wg_y u32 | wg_z u32]` into
@@ -351,10 +443,8 @@ pub enum GpuCommand {
         arg_data: Arc<[u8]>,
         count: u32,
     },
-    /// Manual memory barrier inserted via [`crate::ComputePass::barrier`].
+    /// Conservative global memory barrier (legacy command-list path).
     ///
-    /// This is the non-graph path: it carries no Koubaa-level access semantics,
-    /// so backends emit a conservative global sync covering all prior work.
     /// Within a [`crate::task_graph::TaskGraph`] submission, prefer
     /// `ResourceBarrier` which is produced by the scheduler with precise
     /// `src_usage` / `dst_usage` derived from the dependency graph.
@@ -848,13 +938,6 @@ pub trait GpuBackend: Send + Sync {
     /// Destroy a compute pipeline.
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
 
-    /// Execute compute commands.
-    /// This submits compute work to the GPU and waits for completion.
-    fn dispatch_compute(&mut self, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<()> {
-        let v = self.submit_standalone(ctx, commands)?;
-        self.wait_until(ctx, v)
-    }
-
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap
     /// allocations. No-op by default.
@@ -1147,6 +1230,49 @@ mod push_constant_validation_tests {
             .to_string();
         assert!(err.contains("slot 0"), "should report slot 0: {err}");
         assert!(err.contains("slot 1"), "should report slot 1: {err}");
+    }
+}
+
+#[cfg(all(test, feature = "dx12", target_os = "windows"))]
+mod bindless_slot_validation_tests {
+    use super::validate_bindless_slot_kinds;
+    use crate::types::BindlessSlotKind;
+
+    #[test]
+    fn matching_srv_uav_passes() {
+        let expectations = vec![Some(BindlessSlotKind::StorageUav), Some(BindlessSlotKind::ReadOnlySrv)];
+        validate_bindless_slot_kinds(
+            &[10, 20],
+            &expectations,
+            |idx| {
+                Some(match idx {
+                    10 => BindlessSlotKind::StorageUav,
+                    20 => BindlessSlotKind::ReadOnlySrv,
+                    _ => return None,
+                })
+            },
+            "test_shader",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn srv_where_uav_expected_fails() {
+        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+        let expectations = vec![Some(BindlessSlotKind::StorageUav)];
+        let err = validate_bindless_slot_kinds(
+            &[5],
+            &expectations,
+            |_| Some(BindlessSlotKind::ReadOnlySrv),
+            "game_of_life_render",
+        )
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+        assert!(err.contains("SRV/UAV mismatch"), "{err}");
+        assert!(err.contains("slot 0"), "{err}");
+        assert!(err.contains("storage UAV"), "{err}");
+        assert!(err.contains("read-only SRV"), "{err}");
     }
 }
 

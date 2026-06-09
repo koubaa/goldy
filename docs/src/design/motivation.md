@@ -61,7 +61,7 @@ Goldy synthesizes ideas from several sources:
 
 - **Sebastian Aaltonen, "No Graphics API"** — The primary philosophical foundation. Modern GPUs have converged enough that a dramatically simpler API is possible if you drop legacy support.
 - **Ralph Levien, ["Requiem for piet-gpu-hal"](https://raphlinus.github.io/rust/gpu/2023/01/07/requiem-piet-gpu-hal.html)** — The insight that good abstractions expose *cost and reality* while abstracting *meaning and rules*. Classic HALs failed by hiding both.
-- **wgpu** — Excellent API ergonomics (Instance/Device architecture, CommandEncoder pattern, explicit pass structure). Goldy borrows patterns but is free to diverge from the WebGPU spec.
+- **wgpu** — Excellent API ergonomics (Instance/Device architecture, explicit command recording, pass structure). Goldy borrows patterns but is free to diverge from the WebGPU spec.
 - **Wayland compositor architecture** — Frames, not commands. Explicit synchronization, not implicit state machines.
 - **TU Darmstadt, ["Recursive Hardware Abstraction Layers"](https://www.kom.tu-darmstadt.de/papers/KCGS17.pdf)** — Rigorous analysis of what a minimal HAL actually needs when targeting converged modern hardware.
 - **CUDA** — A composable language that exposes memory directly, with a broad library ecosystem built on that simplicity.

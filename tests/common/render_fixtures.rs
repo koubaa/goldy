@@ -1,11 +1,24 @@
 //! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
 
 use goldy::{
-    BufferKind, Color, CommandEncoder, CompareFunction, ComputeEncoder, ComputePipeline, DepthFormat,
-    DepthStencilState, Device, DeviceDescriptor, Instance, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, DeviceDescriptor,
+    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+
+fn graph_render(
+    device: &Device,
+    target: &RenderTarget,
+    label: &'static str,
+    record: impl FnOnce(&mut goldy::RenderPassBuilder<'_>),
+) {
+    let ctx = device.create_context().expect("context");
+    let mut graph = TaskGraph::new();
+    let mut pass = graph.render_pass(label, target);
+    record(&mut pass);
+    pass.finish_recorded();
+    graph.dispatch(&ctx).expect("graph dispatch");
+}
 
 pub fn create_device() -> Option<Device> {
     let instance = Instance::new().ok()?;
@@ -20,13 +33,9 @@ pub fn render_clear(device: &Device, width: u32, height: u32, color: Color) -> V
     let target =
         RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(device, &target, "clear", |pass| {
         pass.clear(color);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
     target.read_to_cpu().expect("Failed to read pixels")
 }
 
@@ -83,16 +92,13 @@ pub fn render_triangle(
         .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("Failed to create VB");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(device, &target, "triangle", |pass| {
+        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
         pass.clear(clear_color);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
         pass.draw(0..3, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
     target.read_to_cpu().expect("Failed to read pixels")
 }
 
@@ -209,38 +215,39 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     let workgroups_y = GOL_GRID_HEIGHT.div_ceil(8);
 
     for _ in 0..updates {
-        let mut compute_encoder = ComputeEncoder::new();
-        {
-            let mut pass = compute_encoder.begin_compute_pass();
-            pass.set_pipeline(&compute_pipeline);
-            if use_buffer_a {
-                pass.bind_resources(&[&buffer_a, &buffer_b]);
-            } else {
-                pass.bind_resources(&[&buffer_b, &buffer_a]);
-            }
-            pass.dispatch(workgroups_x, workgroups_y, 1);
+        let mut graph = TaskGraph::new();
+        if use_buffer_a {
+            graph
+                .node("gol_update", &compute_pipeline)
+                .bind_resources(&[&buffer_a, &buffer_b])
+                .dispatch(workgroups_x, workgroups_y, 1);
+        } else {
+            graph
+                .node("gol_update", &compute_pipeline)
+                .bind_resources(&[&buffer_b, &buffer_a])
+                .dispatch(workgroups_x, workgroups_y, 1);
         }
-        compute_encoder.dispatch(&ctx).expect("Compute dispatch failed");
+        graph.dispatch(&ctx).expect("Compute dispatch failed");
         use_buffer_a = !use_buffer_a;
     }
 
     let target = RenderTarget::new(device, render_width, render_height, TextureFormat::Rgba8Unorm)
         .expect("Failed to create render target");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&render_pipeline);
+    graph_render(device, &target, "gol_render", |pass| {
         if use_buffer_a {
+            pass.bind_buffer_mut(&buffer_a, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.set_pipeline(&render_pipeline);
             pass.bind_resources(&[&buffer_a]);
         } else {
+            pass.bind_buffer_mut(&buffer_b, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.set_pipeline(&render_pipeline);
             pass.bind_resources(&[&buffer_b]);
         }
         pass.draw(0..3, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
     target.read_to_cpu().expect("Failed to read pixels")
 }
 
@@ -331,9 +338,9 @@ pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u
         .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
         .expect("Failed to create VB");
 
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
+    graph_render(device, &target, "depth_occlusion", |pass| {
+        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
+        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -341,8 +348,6 @@ pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u
         pass.draw(0..3, 0..1);
         pass.set_vertex_buffer(0, &green_vb);
         pass.draw(0..3, 0..1);
-    }
-
-    target.render(encoder).expect("Failed to render");
+    });
     target.read_to_cpu().expect("Failed to read pixels")
 }

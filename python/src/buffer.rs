@@ -1,8 +1,8 @@
 //! Python wrapper for Buffer with NumPy support.
 
 use crate::device::PyDevice;
-use crate::error::IntoPyResult;
-use crate::types::PyBufferKind;
+use crate::error::{GoldyError, IntoPyResult};
+use crate::types::{PyBufferKind, PyResourceAccess};
 use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -81,6 +81,20 @@ impl PyBuffer {
     #[getter]
     fn size(&self) -> u64 {
         self.inner.size()
+    }
+
+    /// Bindless resource slot index for shader binding.
+    fn resource_index(&self, access: PyResourceAccess) -> PyResult<u32> {
+        self.inner
+            .resource_index(access.into())
+            .ok_or_else(|| GoldyError::new_err("bindless resource index unavailable"))
+    }
+
+    /// Read buffer contents back to CPU memory as a uint8 numpy array.
+    fn read_to_cpu<'py>(&self, py: Python<'py>, device: &PyDevice) -> PyResult<Bound<'py, PyArray1<u8>>> {
+        let mut output = vec![0u8; self.inner.size() as usize];
+        self.inner.read_to_cpu(&device.inner, &mut output).into_py_result()?;
+        Ok(PyArray1::from_vec(py, output))
     }
 
     fn __repr__(&self) -> String {

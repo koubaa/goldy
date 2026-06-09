@@ -1,0 +1,54 @@
+//! Headless compute example using goldy-ffi-client.
+//!
+//! Run from `goldy/ffi-client`: `cargo run --example compute_simple`
+
+use goldy_ffi_client::{
+    BufferKind, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions, ResourceAccess,
+    ShaderModule, TaskGraph,
+};
+
+const COMPUTE_SRC: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<float> data, ThreadId id) {
+    uint idx = id.x;
+    if (idx < 64u) {
+        data[idx] = float(idx) * 2.0;
+    }
+}
+"#;
+
+fn main() -> goldy_ffi_client::Result<()> {
+    println!("Goldy compute_simple (ffi-client)\n");
+
+    let instance = Instance::new()?;
+    let device = instance
+        .request_adapter(&RequestAdapterOptions::default())?
+        .request_device(&DeviceDescriptor::default())?;
+
+    let data = [0f32; 64];
+    let buffer = device.alloc_buffer_with_data(&data, BufferKind::Scattered)?;
+
+    let shader = ShaderModule::from_slang(&device, COMPUTE_SRC)?;
+    let pipeline = ComputePipeline::new(&device, &shader)?;
+
+    let idx = buffer.resource_index(ResourceAccess::Write)?;
+    let mut graph = TaskGraph::new();
+    let mut node = graph.compute_node("double", &pipeline);
+    node.bind_buffer(&buffer, NodeAccess::ReadWrite);
+    node.bind_resources_raw(&[idx]);
+    node.dispatch(1, 1, 1);
+    graph.dispatch(&device)?;
+
+    let bytes = buffer.read_to_cpu(&device)?;
+    let values: &[f32] = bytemuck::cast_slice(&bytes);
+    for (i, &v) in values.iter().enumerate().take(64) {
+        let expected = i as f32 * 2.0;
+        assert!((v - expected).abs() < 1e-4, "index {i}: expected {expected}, got {v}");
+    }
+
+    println!("Compute dispatch verified: data[i] == i * 2 for 64 elements.");
+    Ok(())
+}

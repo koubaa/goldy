@@ -15,9 +15,13 @@ pip install goldy
 ```bash
 git clone https://github.com/koubaa/goldy.git
 cd goldy/python
-pip install maturin
-maturin develop --release
+python -m venv .venv
+source .venv/Scripts/activate   # platform-specific
+pip install -e ".[dev]"
 ```
+
+Slang is embedded when the extension is compiled; you do not run `build-slang.py` for
+local development. Rebuild after editing `python/src/*.rs` with `maturin develop`.
 
 ### Requirements
 
@@ -44,15 +48,12 @@ instance = goldy.Instance()
 device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
 
-# Render
-encoder = goldy.CommandEncoder()
-with encoder.begin_render_pass() as rp:
+# Graphics via TaskGraph (headless)
+graph = goldy.TaskGraph()
+with graph.render_pass("clear", target) as rp:
     rp.clear(goldy.Color.CORNFLOWER_BLUE)
-target.render(encoder)
-
-# Read back as NumPy array and save
-pixels = target.read_to_cpu()              # shape (600, 800, 4), dtype uint8
-Image.fromarray(pixels, mode='RGBA').save('hello_goldy.png')
+graph.dispatch(device)
+pixels = target.read_to_cpu()
 ```
 
 ## NumPy Integration
@@ -138,12 +139,12 @@ void cs_main(Scattered<float> data, ThreadId id) {
 shader = goldy.ShaderModule.from_slang(device, SHADER)
 pipeline = goldy.ComputePipeline(device, shader)
 
-encoder = goldy.ComputeEncoder()
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(pipeline)
-    cp.bind_resources([buffer])
-    cp.dispatch(4, 1, 1)      # 4 workgroups × 64 threads = 256 threads
-encoder.dispatch(device)
+graph = goldy.TaskGraph()
+idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
+    node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+    node.bind_resources_raw([idx])   # 4 workgroups × 64 threads = 256 threads
+graph.dispatch(device)
 ```
 
 ### Ping-Pong Buffers
@@ -156,36 +157,21 @@ buf_b = goldy.Buffer(device, initial_data, goldy.BufferKind.SCATTERED)
 
 use_a = True
 for _ in range(100):
-    encoder = goldy.ComputeEncoder()
-    with encoder.begin_compute_pass() as cp:
-        cp.set_pipeline(pipeline)
-        cp.bind_resources([buf_a, buf_b] if use_a else [buf_b, buf_a])
-        cp.dispatch(workgroups_x, workgroups_y, 1)
-    encoder.dispatch(device)
+    read_buf, write_buf = (buf_a, buf_b) if use_a else (buf_b, buf_a)
+    read_idx = read_buf.resource_index(goldy.ResourceAccess.READ)
+    write_idx = write_buf.resource_index(goldy.ResourceAccess.WRITE)
+    graph = goldy.TaskGraph()
+    with graph.compute_node("step", pipeline, workgroups=(workgroups_x, workgroups_y, 1)) as node:
+        node.bind_buffer(read_buf, goldy.NodeAccess.READ)
+        node.bind_buffer(write_buf, goldy.NodeAccess.WRITE)
+        node.bind_resources_raw([read_idx, write_idx])
+    graph.dispatch(device)
     use_a = not use_a
 ```
 
 ### Combining Compute and Graphics
 
-Use compute results directly in a subsequent render pass through shared storage buffers:
-
-```python
-# Compute pass
-compute_encoder = goldy.ComputeEncoder()
-with compute_encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(compute_pipeline)
-    cp.bind_resources([buffer])
-    cp.dispatch(workgroups, 1, 1)
-compute_encoder.dispatch(device)
-
-# Render pass — reads the same buffer
-render_encoder = goldy.CommandEncoder()
-with render_encoder.begin_render_pass() as rp:
-    rp.set_pipeline(render_pipeline)
-    rp.bind_resources([buffer])
-    rp.draw(range(3))
-target.render(render_encoder)
-```
+Standalone and hybrid compute workflows both use `TaskGraph` (see `python/examples/compute_demo.py`, `python/examples/game_of_life.py`, and `goldy/examples/game_of_life.rs`). Python exposes `render_pass` and `compute_node` on the same graph.
 
 ## Key Differences from Rust
 
@@ -194,7 +180,8 @@ target.render(render_encoder)
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
 | Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
-| Render pass | `encoder.begin_render_pass()` returns struct | Context manager (`with ... as rp`) |
+| Render pass | `RenderPassBuilder` on `TaskGraph` | `with graph.render_pass(...) as rp:` |
+| Compute node | `graph.node(...).dispatch(...)` | `with graph.compute_node(...) as node:` |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |
 | Resource lifetime | Explicit `Arc<Device>` ownership | Managed by Python GC via PyO3 |
 
@@ -246,8 +233,7 @@ target = goldy.RenderTarget(device, width, height, format, depth_format=None)
 target.width, target.height
 target.format
 target.has_depth
-target.render(encoder)
-target.read_to_cpu()       # numpy array (H, W, 4)
+target.read_to_cpu()       # numpy array (H, W, 4) — render via TaskGraph first
 ```
 
 #### `ShaderModule`
@@ -273,18 +259,36 @@ desc = goldy.RenderPipelineDesc(
 )
 ```
 
-#### `CommandEncoder` / `RenderPass`
+#### `TaskGraph` / `RenderPass`
 
 ```python
-encoder = goldy.CommandEncoder()
-with encoder.begin_render_pass() as rp:
+graph = goldy.TaskGraph()
+graph.clear()
+
+with graph.render_pass("main", scene_rt) as rp:
+    rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
     rp.clear(goldy.Color.BLACK)
     rp.set_pipeline(pipeline)
-    rp.set_vertex_buffer(slot, buffer)
-    rp.set_index_buffer(buffer, format)
-    rp.bind_resources([buf1, buf2])
-    rp.draw(vertices, instances=range(1))
-    rp.draw_indexed(indices, base_vertex, instances)
+    rp.set_vertex_buffer(0, vertex_buffer)
+    rp.draw(vertex_count=3)
+
+# Headless
+graph.dispatch(device)
+
+# Windowed
+swapchain = graph.declare_swapchain_output()
+graph.copy_render_target_to_swapchain(scene_rt, swapchain)
+frame = surface.acquire()
+surface.submit_graph_to_frame(graph, frame)
+surface.present(frame)
+```
+
+#### `ComputeNode` (on `TaskGraph`)
+
+```python
+with graph.compute_node("update", compute_pipeline, workgroups=(8, 8, 1)) as node:
+    node.bind_buffer(state_buf, goldy.NodeAccess.READ_WRITE)
+    node.bind_resources_raw([state_idx])
 ```
 
 ### Compute Classes
@@ -293,17 +297,6 @@ with encoder.begin_render_pass() as rp:
 
 ```python
 pipeline = goldy.ComputePipeline(device, shader)
-```
-
-#### `ComputeEncoder`
-
-```python
-encoder = goldy.ComputeEncoder()
-with encoder.begin_compute_pass() as cp:
-    cp.set_pipeline(pipeline)
-    cp.bind_resources([buffer])
-    cp.dispatch(wg_x, wg_y, wg_z)
-encoder.dispatch(device)
 ```
 
 ### Enums

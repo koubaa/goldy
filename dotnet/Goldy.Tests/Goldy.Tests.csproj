@@ -25,5 +25,7 @@
     <ProjectReference Include="..\Goldy\Goldy.csproj" />
   </ItemGroup>
 
+  <Import Project="..\Goldy\Goldy.Native.targets" />
+
 </Project>
 

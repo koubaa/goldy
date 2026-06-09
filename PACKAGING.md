@@ -96,12 +96,19 @@ The `.csproj` includes `slang*.dll` / `libslang*` in the NuGet package via the `
 
 ### Python / PyPI
 
+**Local development** (idiomatic): `pip install -e ".[dev]"` in `python/`. Maturin
+compiles `_goldy` against the `goldy` crate; Slang is embedded via `goldy/build.rs`
+and extracted at runtime. **Do not** run `build-slang.py` for day-to-day dev.
+
+**Release wheels** (CI / maintainers):
+
 **Build script**: [`python/build-slang.py`](python/build-slang.py)
 
 **Package config**: [`python/pyproject.toml`](python/pyproject.toml)
 
-Before running `maturin build`:
-1. Run `python build-slang.py` to copy Slang libraries to `python/goldy/`
+Before `maturin build --release` for PyPI:
+1. Run `python build-slang.py` to copy Slang libraries into `python/goldy/` (so the
+   wheel ships DLLs next to the package in addition to the embedded copy)
 2. The `pyproject.toml` `include` section picks up `*.dll`, `*.so`, `*.dylib`
 
 ### C++ / vcpkg
@@ -159,8 +166,10 @@ To update to a new Slang version:
    # .NET
    cd dotnet && ./build-native.ps1 && dotnet test
    
-   # Python
-   cd python && python build-slang.py && maturin develop && pytest
+   # Python (dev)
+   cd python && pip install -e ".[dev]" && pytest
+   # Python (release wheel smoke test)
+   cd python && python build-slang.py && maturin build --release
    ```
 
 5. **Update CHANGELOG.md** to note the Slang version bump

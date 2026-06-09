@@ -32,9 +32,6 @@ SURFACE_NEW = re.compile(r"Surface::new(_with_(?:depth|config))?\(&device\b")
 FRAME_ORCH = re.compile(r"FrameOrchestrator::new\(&device\b")
 GRAPH_SUBMIT = re.compile(r"\.submit\(&device\b")
 GRAPH_DISPATCH = re.compile(r"\.dispatch\(&device\b")
-ENCODER_DISPATCH = re.compile(r"\.dispatch\(&device\b")
-ENCODER_SUBMIT = re.compile(r"encoder\.submit\(&device\b|ComputeEncoder.*\.submit\(&device\b")
-
 def should_process(path: Path) -> bool:
     if path.name == "placement_heap.rs":
         return False

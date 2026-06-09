@@ -13,6 +13,20 @@ use crate::tracy_zone;
 /// cannot be parsed. Matches the Metal/Slang default used elsewhere in the codebase.
 const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
+use crate::types::{BufferKind, ResourceCategory};
+
+fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCategory) -> Option<u32> {
+    let expected_kind = match cat {
+        ResourceCategory::Scattered => BufferKind::Scattered,
+        ResourceCategory::Broadcast => BufferKind::Broadcast,
+        _ => return None,
+    };
+    state
+        .buffers
+        .values()
+        .find(|b| b.arg_buffer_index == index && b.access == expected_kind)
+        .and_then(|b| b.element_stride)
+}
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
@@ -547,45 +561,20 @@ pub(super) fn record_commands_to_buffer(
                     current_pipeline = Some(pipeline);
                 }
             }
-            GpuCommand::BindResources { buffers } => {
-                ensure_compute!();
-                if crate::slang::layout_validation_enabled() {
-                    if let Some(pipeline) = current_pipeline {
-                        if !pipeline.binding_element_strides.is_empty() {
-                            let actual: Vec<Option<u32>> = buffers
-                                .iter()
-                                .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
-                                .collect();
-                            crate::backend::validate_binding_strides(
-                                &actual,
-                                &pipeline.binding_element_strides,
-                                &pipeline.shader_debug_name,
-                            )?;
-                        }
-                    }
-                }
-                let mut layout = PushLayout::default();
-                shared::fill_bindless(
-                    &mut layout,
-                    buffers
-                        .iter()
-                        .map(|h| state.buffers.get(h).map(|b| b.arg_buffer_index).unwrap_or(0)),
-                );
-                let layout_bytes = layout.as_bytes();
-                guard
-                    .compute
-                    .expect("encoder must be set after ensure_compute!()")
-                    .set_bytes(
-                        RESOURCE_SLOT_BUFFER,
-                        layout_bytes.len() as u64,
-                        layout_bytes.as_ptr() as *const _,
-                    );
-            }
             GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
             } => {
                 ensure_compute!();
+                if let Some(pipeline) = current_pipeline {
+                    crate::backend::validate_raw_binding_strides(
+                        raw_indices,
+                        &pipeline.push_constant_categories,
+                        &pipeline.binding_element_strides,
+                        |idx, cat| buffer_stride_for_arg_index(state, idx, cat),
+                        &pipeline.shader_debug_name,
+                    )?;
+                }
                 let mut layout = PushLayout::default();
                 shared::fill_raw(&mut layout, raw_indices, raw_user);
                 let layout_bytes = layout.as_bytes();
@@ -716,6 +705,34 @@ pub(super) fn record_commands_to_buffer(
                 ensure_blit_tex!(*dst);
                 let src_state = state.textures.get(src).context("CopyTexture: src texture not found")?;
                 let dst_state = state.textures.get(dst).context("CopyTexture: dst texture not found")?;
+                let w = src_state.width as u64;
+                let h = src_state.height as u64;
+                guard.blit.unwrap().copy_from_texture(
+                    &src_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    MTLSize {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    },
+                    &dst_state.texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                );
+            }
+            GpuCommand::CopyRenderTarget { src, dst } => {
+                ensure_blit_tex!(*dst);
+                let src_state = state
+                    .render_targets
+                    .get(src)
+                    .context("CopyRenderTarget: src render target not found")?;
+                let dst_state = state
+                    .textures
+                    .get(dst)
+                    .context("CopyRenderTarget: dst texture not found")?;
                 let w = src_state.width as u64;
                 let h = src_state.height as u64;
                 guard.blit.unwrap().copy_from_texture(
@@ -911,8 +928,8 @@ fn stage_uploads(
             // Commands that open an encoder set would_have_gpu_work.
             GpuCommand::ClearBuffer { .. }
             | GpuCommand::CopyTexture { .. }
+            | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)
-            | GpuCommand::BindResources { .. }
             | GpuCommand::BindResourcesRaw { .. }
             | GpuCommand::BindResourcesTyped { .. }
             | GpuCommand::Dispatch { .. }

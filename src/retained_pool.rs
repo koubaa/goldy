@@ -83,7 +83,7 @@ impl RetainedPool {
 
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// For in-place per-frame CPU rewrites, use [`Parcel::copy_into`] on the returned parcel.
+    /// For in-place per-frame CPU rewrites, use [`crate::TaskGraph::write_parcel`] on the returned parcel.
     pub fn acquire_buffer(
         &mut self,
         size: u64,
@@ -403,8 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn copy_into_on_buffer_parcel_succeeds() {
-        let mut pool = RetainedPool::new(test_device());
+    fn write_parcel_on_buffer_parcel_succeeds() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(device);
         let parcel = pool
             .acquire_buffer(
                 16,
@@ -414,25 +416,31 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(parcel.copy_into(&[1u32, 2, 3, 4]).is_ok());
+        let mut graph = crate::TaskGraph::new();
+        assert!(graph
+            .write_parcel(&parcel, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
+            .is_ok());
+        graph.dispatch(&ctx).unwrap();
     }
 
     #[test]
-    fn copy_into_on_texture_parcel_errors() {
+    fn write_parcel_on_texture_parcel_errors() {
         let mut pool = RetainedPool::new(test_device());
         let (fmt, acc, flags) = rgba_interpolated();
         let parcel = pool.acquire_texture(4, 4, fmt, acc, flags, None).unwrap();
-        let err = parcel.copy_into(&[0u32]).unwrap_err();
+        let mut graph = crate::TaskGraph::new();
+        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
         assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
     }
 
     #[test]
-    fn copy_into_on_mosaic_parcel_errors() {
+    fn write_parcel_on_mosaic_parcel_errors() {
         let mut pool = RetainedPool::new(test_device());
         let mut m = pool.mosaic();
         m.emplace(&[1u32]);
         let parcel = m.build().unwrap();
-        let err = parcel.copy_into(&[0u32]).unwrap_err();
+        let mut graph = crate::TaskGraph::new();
+        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
         assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
     }
 

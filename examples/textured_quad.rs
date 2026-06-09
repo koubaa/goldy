@@ -6,8 +6,9 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    Buffer, Color, CommandEncoder, BufferKind, DeviceDescriptor, Instance, RenderPipeline,
-    RequestAdapterOptions, RenderPipelineDesc, Sampler, ShaderModule, Surface, Texture, Vertex2DUv,
+    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, Sampler, ShaderModule, Surface, TaskGraph, Texture,
+    Vertex2DUv,
 };
 use std::sync::Arc;
 use winit::{
@@ -127,6 +128,8 @@ struct App {
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
     vertex_buffer: Option<Buffer>,
     texture: Option<Texture>,
     sampler: Option<Sampler>,
@@ -141,10 +144,17 @@ impl App {
             shader: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             vertex_buffer: None,
             texture: None,
             sampler: None,
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -202,10 +212,13 @@ impl App {
         // Create vertex buffer
         let vertex_buffer = device.alloc_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
 
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
         self.vertex_buffer = Some(vertex_buffer);
         self.texture = Some(texture);
         self.sampler = Some(sampler);
@@ -222,6 +235,7 @@ impl App {
 
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
         let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
         let texture = self.texture.as_ref().unwrap();
         let sampler = self.sampler.as_ref().unwrap();
@@ -229,25 +243,29 @@ impl App {
         let tex_handle = texture.handle(ResourceAccess::Read).unwrap();
         let samp_handle = sampler.handle(ResourceAccess::Read).unwrap();
 
+        self.frame_graph.clear();
+
+        let mut pass = self.frame_graph.render_pass("textured_quad", scene_rt);
+        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.bind_texture_mut(texture, NodeAccess::Read);
+        pass.clear(Color {
+            r: 0.1,
+            g: 0.1,
+            b: 0.15,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        pass.bind_resources_typed(&[tex_handle, samp_handle]);
+        pass.set_vertex_buffer(0, vertex_buffer);
+        pass.draw(0..6, 0..1);
+        pass.finish_recorded();
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph
+            .copy_render_target_to_swapchain(scene_rt, swapchain);
+
         let frame = surface.begin()?;
-
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(Color {
-                r: 0.1,
-                g: 0.1,
-                b: 0.15,
-                a: 1.0,
-            });
-            pass.set_pipeline(pipeline);
-            // Pass texture and sampler indices via push constants
-            pass.bind_resources_typed(&[tex_handle, samp_handle]);
-            pass.set_vertex_buffer(0, vertex_buffer);
-            pass.draw(0..6, 0..1);
-        }
-
-        frame.render(encoder)?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
         Ok(())
     }
@@ -256,6 +274,11 @@ impl App {
         if new_size.width > 0 && new_size.height > 0 {
             if let Some(surface) = &mut self.surface {
                 let _ = surface.resize(new_size.width, new_size.height);
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+                    self.scene_rt = Some(rt);
+                }
             }
         }
     }

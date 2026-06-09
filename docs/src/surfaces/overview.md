@@ -18,9 +18,9 @@ let surface = Surface::new_with_config(&device, &window, SurfaceConfig {
     depth_format: Some(DepthFormat::Depth32Float),
 })?;
 
-// Shorthand for depth-only configuration
-let surface = Surface::new_with_depth(&device, &window, Some(DepthFormat::Depth24Plus))?;
 ```
+
+Depth testing uses an offscreen `RenderTarget::new_with_depth` in the task graph, not the swapchain surface.
 
 ## SurfaceConfig
 
@@ -54,25 +54,25 @@ let current = surface.present_mode();
 
 ## Frame Acquisition Cycle
 
-Each frame follows a begin → record → present sequence:
+Each frame builds a task graph, blits an offscreen render target to the swapchain, then presents:
 
 ```rust
 loop {
-    // 1. Begin the frame (acquire a swapchain image)
+    frame_graph.clear();
+
+    let mut pass = frame_graph.render_pass("main", &scene_rt);
+    pass.bind_buffer_mut(&vertices, NodeAccess::Read);
+    pass.clear(Color::CORNFLOWER_BLUE);
+    pass.set_pipeline(&pipeline);
+    pass.set_vertex_buffer(0, &vertices);
+    pass.draw(0..3, 0..1);
+    pass.finish_recorded();
+
+    let swapchain = frame_graph.declare_swapchain_output();
+    frame_graph.copy_render_target_to_swapchain(&scene_rt, swapchain);
+
     let frame = surface.begin()?;
-
-    // 2. Record rendering commands
-    let mut encoder = CommandEncoder::new();
-    {
-        let mut pass = encoder.begin_render_pass();
-        pass.clear(Color::CORNFLOWER_BLUE);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertices);
-        pass.draw(0..3, 0..1);
-    }
-
-    // 3. Submit and present
-    frame.render(encoder)?;
+    let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
     frame.present()?;
 }
 ```
@@ -92,12 +92,12 @@ frame.width();   // frame dimensions (may differ from surface after resize)
 frame.height();
 ```
 
-### Graphics Path — Frame::render
+### Graphics Path — submit_graph_to_frame
 
-Record draw commands into a `CommandEncoder` and submit with `render()`:
+Record draw commands in `RenderPassBuilder` nodes, then submit the graph with the acquired frame:
 
 ```rust
-frame.render(encoder)?;
+let frame = surface.submit_graph_to_frame(&mut frame_graph, frame)?;
 frame.present()?;
 ```
 

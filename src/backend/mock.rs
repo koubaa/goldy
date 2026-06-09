@@ -1832,9 +1832,12 @@ mod tests {
             .create_buffer(device, 128, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
+        let idx1 = backend.buffer_bindless_index(buffer1).unwrap();
+        let idx2 = backend.buffer_bindless_index(buffer2).unwrap();
         let commands = vec![
-            GpuCommand::BindResources {
-                buffers: vec![buffer1, buffer2],
+            GpuCommand::BindResourcesRaw {
+                indices: vec![idx1, idx2],
+                user: Vec::new(),
             },
             GpuCommand::Dispatch {
                 label: None,
@@ -1845,18 +1848,17 @@ mod tests {
         ];
 
         let ctx = backend.create_context(device).unwrap();
-        backend.dispatch_compute(ctx, &commands).unwrap();
+        let tv = backend.submit_standalone(ctx, &commands).unwrap();
+        backend.wait_until(ctx, tv).unwrap();
 
         assert_eq!(backend.recorded_compute_commands.len(), 1);
         assert_eq!(backend.recorded_compute_commands[0].len(), 2);
 
         match &backend.recorded_compute_commands[0][0] {
-            GpuCommand::BindResources { buffers } => {
-                assert_eq!(buffers.len(), 2);
-                assert_eq!(buffers[0], buffer1);
-                assert_eq!(buffers[1], buffer2);
+            GpuCommand::BindResourcesRaw { indices, .. } => {
+                assert_eq!(indices.as_slice(), &[idx1, idx2]);
             }
-            _ => panic!("Expected BindResources command"),
+            _ => panic!("Expected BindResourcesRaw command"),
         }
     }
 

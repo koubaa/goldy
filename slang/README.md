@@ -21,22 +21,27 @@ slang/
 └── README.md
 ```
 
-## Downloading Binaries
+## Who runs `download.sh`?
 
-Run the download script to fetch pre-built binaries for all platforms:
+**Application developers do not.** `cargo build` / `pip install -e` runs `goldy/build.rs`,
+which downloads the pinned Slang version into `bin/{platform}/` when missing, then
+embeds those bytes into the Goldy library.
+
+Run `download.sh` when **bumping the pinned Slang version** or preparing **release
+artifacts** (CI, wheels, FFI packages) that copy DLLs next to shipped binaries:
 
 ```bash
-./download.sh           # Latest pinned version
-./download.sh 2026.4 # Specific version
+./download.sh              # version from manifest.json
+./download.sh 2026.4       # explicit version
 ```
 
-## Development Fallback
+## Runtime loading
 
-For development, Goldy will automatically fall back to using Slang from:
+At runtime Goldy loads Slang dynamically (search order in `goldy/src/slang/loader.rs`):
 
-1. `RAG_SLANG_PATH` environment variable
-2. Vendored binaries in this directory
-3. Vulkan SDK (Windows: `C:\VulkanSDK\*\Bin\slang.dll`)
+1. `GOLDY_SLANG_PATH` if set
+2. Slang DLLs next to the running executable (wheel / FFI layout)
+3. Cache directory — extracted from bytes embedded at compile time
 
 ## Version
 

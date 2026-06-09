@@ -9,24 +9,21 @@ Example:
     >>> instance = goldy.Instance()
     >>> device = instance.request_adapter().request_device()
     >>> 
-    >>> # Create a render target
+    >>> # Graphics via TaskGraph (headless)
     >>> target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
-    >>> 
-    >>> # Render
-    >>> encoder = goldy.CommandEncoder()
-    >>> with encoder.begin_render_pass() as rp:
-    ...     rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
-    >>> target.render(encoder)
-    >>> 
-    >>> # Read pixels as numpy array
+    >>> graph = goldy.TaskGraph()
+    >>> with graph.render_pass("clear", target) as rp:
+    ...     rp.clear(goldy.Color.CORNFLOWER_BLUE)
+    >>> graph.dispatch(device)
     >>> pixels = target.read_to_cpu()
 """
 
 import os as _os
 from pathlib import Path as _Path
 
-# Set up GOLDY_SLANG_PATH to point to bundled Slang libraries
-# This must happen BEFORE importing the native module
+# PyPI wheels may ship slang-compiler next to this package; prefer that over cache.
+# Editable dev installs embed Slang at compile time — this block is a no-op unless
+# build-slang.py was run for a release wheel layout.
 if "GOLDY_SLANG_PATH" not in _os.environ:
     _package_dir = _Path(__file__).parent
     # Determine library name based on platform
@@ -70,14 +67,18 @@ from goldy._goldy import (
     RenderPipeline,
     RenderPipelineDesc,
     RenderTarget,
-    CommandEncoder,
+    TaskGraph,
     RenderPass,
+    ComputeNode,
+    SwapchainOutput,
+    NodeAccess,
+    ResourceAccess,
+    BufferPool,
+    BufferView,
     # Shader builtins
     Builtins,
     # Compute
     ComputePipeline,
-    ComputeEncoder,
-    ComputePass,
     # Surface (windowed rendering)
     Surface,
     SurfaceFrame,
@@ -111,14 +112,18 @@ __all__ = [
     "RenderPipeline",
     "RenderPipelineDesc",
     "RenderTarget",
-    "CommandEncoder",
+    "TaskGraph",
     "RenderPass",
+    "ComputeNode",
+    "SwapchainOutput",
+    "NodeAccess",
+    "ResourceAccess",
+    "BufferPool",
+    "BufferView",
     # Shader builtins
     "Builtins",
     # Compute
     "ComputePipeline",
-    "ComputeEncoder",
-    "ComputePass",
     # Surface (windowed rendering)
     "Surface",
     "SurfaceFrame",

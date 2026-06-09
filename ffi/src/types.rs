@@ -267,6 +267,34 @@ impl From<GoldyIndexFormat> for goldy::IndexFormat {
     }
 }
 
+/// Per-node resource access for task graph bindings.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyNodeAccess {
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
+/// Shader resource binding access (SRV vs UAV).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoldyResourceAccess {
+    Read = 0,
+    Write = 1,
+    ReadWrite = 2,
+}
+
+impl From<GoldyResourceAccess> for goldy::ResourceAccess {
+    fn from(a: GoldyResourceAccess) -> Self {
+        match a {
+            GoldyResourceAccess::Read => goldy::ResourceAccess::Read,
+            GoldyResourceAccess::Write => goldy::ResourceAccess::Write,
+            GoldyResourceAccess::ReadWrite => goldy::ResourceAccess::ReadWrite,
+        }
+    }
+}
+
 /// Depth format.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

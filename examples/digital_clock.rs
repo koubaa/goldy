@@ -8,8 +8,8 @@
 
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    Buffer, BufferKind, CommandEncoder, DeviceDescriptor, Instance, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, ShaderModule, Surface,
+    Buffer, BufferKind, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc, RenderTarget,
+    RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +32,8 @@ struct App {
 
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
+    scene_rt: Option<RenderTarget>,
+    frame_graph: TaskGraph,
 
     start_time: Instant,
     perf_start: Instant,
@@ -51,12 +53,19 @@ impl App {
             shader: None,
             window: None,
             surface: None,
+            scene_rt: None,
+            frame_graph: TaskGraph::new(),
             start_time: Instant::now(),
             perf_start: Instant::now(),
             frame_count: 0,
             clock_state: ClockState::default(),
             vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
         })
+    }
+
+    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
+        let (width, height) = surface.size();
+        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -79,10 +88,13 @@ impl App {
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
 
+        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
+        self.scene_rt = Some(scene_rt);
 
         Ok(())
     }
@@ -119,6 +131,7 @@ impl App {
         let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
+        let scene_rt = self.scene_rt.as_ref().unwrap();
 
         let elapsed = self.elapsed_secs();
         let time = TimeData::from_elapsed_secs(elapsed);
@@ -134,22 +147,25 @@ impl App {
             .as_ref()
             .alloc_buffer_with_bytes(vertex_data, BufferKind::Scattered)?;
 
-        // Render directly to surface
-        let frame = surface.begin()?;
         if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
             self.vertex_buffers.remove(0);
         }
 
-        let mut encoder = CommandEncoder::new();
-        {
-            let mut pass = encoder.begin_render_pass();
-            pass.clear(bg_color);
-            pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, &vertex_buffer);
-            pass.draw(0..vertices.len() as u32, 0..1);
-        }
+        self.frame_graph.clear();
 
-        frame.render(encoder)?;
+        let mut pass = self.frame_graph.render_pass("digital_clock", scene_rt);
+        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.draw(0..vertices.len() as u32, 0..1);
+        pass.finish_recorded();
+
+        let swapchain = self.frame_graph.declare_swapchain_output();
+        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
+
+        let frame = surface.begin()?;
+        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
         self.vertex_buffers.push(vertex_buffer);
 
@@ -160,6 +176,11 @@ impl App {
         if new_size.width > 0 && new_size.height > 0 {
             if let Some(surface) = &mut self.surface {
                 let _ = surface.resize(new_size.width, new_size.height);
+            }
+            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
+                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+                    self.scene_rt = Some(rt);
+                }
             }
         }
     }

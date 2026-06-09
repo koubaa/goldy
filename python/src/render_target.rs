@@ -1,7 +1,6 @@
 //! Python wrapper for RenderTarget.
 
 use crate::device::PyDevice;
-use crate::encoder::PyCommandEncoder;
 use crate::error::IntoPyResult;
 use crate::types::{PyDepthFormat, PyTextureFormat};
 use numpy::{PyArray3, PyArrayMethods};
@@ -16,7 +15,7 @@ use std::sync::Arc;
 /// multi-consumer scenarios.
 #[pyclass(name = "RenderTarget", module = "goldy")]
 pub struct PyRenderTarget {
-    inner: Arc<goldy::RenderTarget>,
+    pub(crate) inner: Arc<goldy::RenderTarget>,
 }
 
 #[pymethods]
@@ -93,22 +92,6 @@ impl PyRenderTarget {
     #[getter]
     fn buffer_size(&self) -> usize {
         self.inner.buffer_size()
-    }
-
-    /// Render commands to this target.
-    ///
-    /// This executes the render commands and stores the result in the GPU texture.
-    /// The data stays on the GPU - no CPU copy occurs.
-    ///
-    /// Args:
-    ///     encoder: The command encoder containing render commands.
-    ///
-    /// Raises:
-    ///     GoldyError: If rendering fails.
-    fn render(&self, encoder: &PyCommandEncoder) -> PyResult<()> {
-        // Take the encoder's commands
-        let rust_encoder = encoder.take_inner();
-        self.inner.render(rust_encoder).into_py_result()
     }
 
     /// Read the rendered pixels to a numpy array.
