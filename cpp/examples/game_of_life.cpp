@@ -244,7 +244,7 @@ void render_frame(GpuState& gpu) {
         pass.bind_buffer(current_buf, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(gpu.render_pipeline)
-            .bind_resources(std::span<const goldy::Buffer* const>{&current_buf, 1})
+            .bind_resource_index(current_buf.resource_index(goldy::ResourceAccess::ReadWrite))
             .draw_fullscreen();
     }
 
