@@ -2107,6 +2107,43 @@ void cs_main(
     }
 
     #[test]
+    fn categories_bufro_and_scattered_struct() {
+        use crate::types::ResourceCategory;
+        let source = r#"
+            import goldy_exp;
+            struct Pair { uint a; uint b; };
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
+                output[id.x] = input[id.x];
+            }
+        "#;
+        let cats = extract_push_constant_categories(source);
+        assert_eq!(cats.len(), 2);
+        assert_eq!(cats[0], Some(ResourceCategory::Scattered));
+        assert_eq!(cats[1], Some(ResourceCategory::Scattered));
+    }
+
+    #[test]
+    fn binding_type_names_bufro_and_scattered_struct() {
+        let source = r#"
+            import goldy_exp;
+
+            struct Pair { uint a; uint b; };
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
+                output[id.x] = input[id.x];
+            }
+        "#;
+        let names = extract_binding_element_type_names(source);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], Some("Pair".into()));
+        assert_eq!(names[1], Some("Pair".into()));
+    }
+
+    #[test]
     fn binding_type_names_empty_for_non_goldy() {
         let source = r#"
 [shader("compute")]

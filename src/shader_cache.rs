@@ -14,6 +14,9 @@ use crate::types::OptimizationLevel;
 /// Leading bytes of the decompressed shader cache payload.
 pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 
+/// Bump when [`ShaderReflection::binding_element_strides`] extraction rules change.
+const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v2";
+
 /// Build-time fingerprint: package version + git short hash + bundled Slang version.
 pub const GOLDY_CACHE_VERSION: &str = env!("GOLDY_CACHE_VERSION");
 
@@ -95,6 +98,7 @@ pub(crate) fn compile_cache_key(
             h = fnv_mix(h, &sz.to_le_bytes());
         }
     }
+    h = hash_string(h, REFLECTION_STRIDE_SCHEMA);
     h = fnv_mix(h, &[optimization_level as u8]);
     h
 }
