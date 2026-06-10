@@ -3,6 +3,7 @@
 use std::ffi::c_char;
 
 pub enum GoldyBuffer {}
+pub enum GoldyMosaicBuilder {}
 pub enum GoldyParcel {}
 pub enum GoldyRetainedPool {}
 pub enum GoldyComputePipeline {}

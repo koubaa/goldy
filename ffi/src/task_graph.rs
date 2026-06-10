@@ -11,6 +11,7 @@ use crate::retained_pool::GoldyParcel;
 use crate::types::{GoldyColor, GoldyIndexFormat, GoldyNodeAccess};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
 use goldy::types::{ResourceCategory, ResourceHandle};
+use goldy::MosaicSlot;
 use std::ffi::CStr;
 use std::ptr;
 
@@ -202,6 +203,28 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_buffer_view(
         Err(e) => return e,
     };
     pass.bind_buffer_view(&(*view).inner, node_access(access));
+    GoldyResult::Ok
+}
+
+/// Declare a mosaic sub-view dependency for the active render pass.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel_view(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    slot: u32,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || parcel.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let pass = match active_pass_mut(&mut *graph) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    pass.bind_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
     GoldyResult::Ok
 }
 
@@ -593,6 +616,28 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_buffer_view(
         Err(e) => return e,
     };
     node.bind_buffer_view(&(*view).inner, node_access(access));
+    GoldyResult::Ok
+}
+
+/// Declare a mosaic sub-view dependency for the active compute node.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel_view(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    slot: u32,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || parcel.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *graph) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    node.bind_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
     GoldyResult::Ok
 }
 

@@ -187,6 +187,9 @@ typedef struct GoldyDevice GoldyDevice;
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
+// Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
+typedef struct GoldyMosaicBuilder GoldyMosaicBuilder;
+
 // Opaque handle to a retained [`goldy::Parcel`].
 typedef struct GoldyParcel GoldyParcel;
 
@@ -542,6 +545,36 @@ enum GoldyResult goldy_instance_get_adapter(const struct GoldyInstance *instance
                                             uint32_t index,
                                             struct GoldyAdapterInfo *info);
 
+// Build a mosaic parcel from a builder and destroy the builder.
+//
+// Returns a heap-allocated parcel handle, or null on failure.
+//
+// # Safety
+// `builder` and `pool` must be valid. `builder` is consumed regardless of outcome.
+struct GoldyParcel *goldy_mosaic_builder_build(struct GoldyMosaicBuilder *builder,
+                                               struct GoldyRetainedPool *pool);
+
+// Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
+struct GoldyMosaicBuilder *goldy_mosaic_builder_create(void);
+
+// Destroy a mosaic builder without building.
+//
+// # Safety
+// The pointer must be valid and not used after this call.
+void goldy_mosaic_builder_destroy(struct GoldyMosaicBuilder *builder);
+
+// Reserve a mosaic sub-view and upload `data` (`data_size` must equal `element_count * element_stride`).
+//
+// Returns the slot index, or `u32::MAX` on failure.
+//
+// # Safety
+// `builder` must be valid. `data` must point to at least `data_size` bytes when non-null.
+uint32_t goldy_mosaic_builder_emplace(struct GoldyMosaicBuilder *builder,
+                                      const uint8_t *data,
+                                      size_t data_size,
+                                      uint64_t element_count,
+                                      uint32_t element_stride);
+
 // Approximate committed byte size of a parcel.
 //
 // # Safety
@@ -553,6 +586,36 @@ uint64_t goldy_parcel_byte_size(const struct GoldyParcel *parcel);
 // # Safety
 // The pointer must be valid and not used after this call.
 void goldy_parcel_destroy(struct GoldyParcel *parcel);
+
+// Read one mosaic sub-view back to CPU memory.
+//
+// `output_size` must equal the sub-view byte size.
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_parcel_mosaic_view_read_to_cpu(const struct GoldyParcel *parcel,
+                                                      uint32_t slot,
+                                                      const struct GoldyDevice *device,
+                                                      uint8_t *output,
+                                                      size_t output_size);
+
+// Bindless resource index for one mosaic sub-view.
+//
+// Returns `u32::MAX` if unavailable.
+//
+// # Safety
+// The parcel pointer must be valid.
+uint32_t goldy_parcel_mosaic_view_resource_index(const struct GoldyParcel *parcel,
+                                                 uint32_t slot,
+                                                 enum GoldyResourceAccess access);
+
+// Byte size of one mosaic sub-view.
+//
+// Returns `0` if the parcel or slot is invalid.
+//
+// # Safety
+// The parcel pointer must be valid.
+uint64_t goldy_parcel_mosaic_view_size(const struct GoldyParcel *parcel, uint32_t slot);
 
 // Read buffer parcel contents back to CPU memory.
 //
@@ -893,6 +956,15 @@ enum GoldyResult goldy_task_graph_compute_node_bind_parcel(struct GoldyTaskGraph
                                                            const struct GoldyParcel *parcel,
                                                            enum GoldyNodeAccess access);
 
+// Declare a mosaic sub-view dependency for the active compute node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_compute_node_bind_parcel_view(struct GoldyTaskGraph *graph,
+                                                                const struct GoldyParcel *parcel,
+                                                                uint32_t slot,
+                                                                enum GoldyNodeAccess access);
+
 // Set bindless resource slot indices for the active compute node.
 //
 // # Safety
@@ -983,6 +1055,15 @@ enum GoldyResult goldy_task_graph_render_pass_bind_buffer_view(struct GoldyTaskG
 enum GoldyResult goldy_task_graph_render_pass_bind_parcel(struct GoldyTaskGraph *graph,
                                                           const struct GoldyParcel *parcel,
                                                           enum GoldyNodeAccess access);
+
+// Declare a mosaic sub-view dependency for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_bind_parcel_view(struct GoldyTaskGraph *graph,
+                                                               const struct GoldyParcel *parcel,
+                                                               uint32_t slot,
+                                                               enum GoldyNodeAccess access);
 
 // Bind shader resource slots from buffers for the active render pass.
 //

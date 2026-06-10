@@ -105,10 +105,19 @@ pub(crate) struct GoldyFfi {
     pub goldy_retained_pool_acquire_buffer: FnGoldyRetainedPoolAcquireBuffer,
     pub goldy_retained_pool_create: FnGoldyRetainedPoolCreate,
     pub goldy_retained_pool_destroy: FnGoldyRetainedPoolDestroy,
+    pub goldy_mosaic_builder_create: FnGoldyMosaicBuilderCreate,
+    pub goldy_mosaic_builder_destroy: FnGoldyMosaicBuilderDestroy,
+    pub goldy_mosaic_builder_emplace: FnGoldyMosaicBuilderEmplace,
+    pub goldy_mosaic_builder_build: FnGoldyMosaicBuilderBuild,
     pub goldy_parcel_byte_size: FnGoldyParcelByteSize,
     pub goldy_parcel_destroy: FnGoldyParcelDestroy,
     pub goldy_parcel_resource_index: FnGoldyParcelResourceIndex,
+    pub goldy_parcel_mosaic_view_resource_index: FnGoldyParcelMosaicViewResourceIndex,
+    pub goldy_parcel_mosaic_view_read_to_cpu: FnGoldyParcelMosaicViewReadToCpu,
+    pub goldy_parcel_mosaic_view_size: FnGoldyParcelMosaicViewSize,
     pub goldy_parcel_read_to_cpu: FnGoldyParcelReadToCpu,
+    pub goldy_task_graph_compute_node_bind_parcel_view: FnGoldyTaskGraphComputeNodeBindParcelView,
+    pub goldy_task_graph_render_pass_bind_parcel_view: FnGoldyTaskGraphRenderPassBindParcelView,
     pub goldy_task_graph_render_pass_set_vertex_buffer_offset: FnGoldyTaskGraphRenderPassSetVertexBufferOffset,
     pub goldy_texture_create: FnGoldyTextureCreate,
     pub goldy_texture_destroy: FnGoldyTextureDestroy,
@@ -310,10 +319,31 @@ impl GoldyFfi {
             ),
             goldy_retained_pool_create: sym!("goldy_retained_pool_create", FnGoldyRetainedPoolCreate),
             goldy_retained_pool_destroy: sym!("goldy_retained_pool_destroy", FnGoldyRetainedPoolDestroy),
+            goldy_mosaic_builder_create: sym!("goldy_mosaic_builder_create", FnGoldyMosaicBuilderCreate),
+            goldy_mosaic_builder_destroy: sym!("goldy_mosaic_builder_destroy", FnGoldyMosaicBuilderDestroy),
+            goldy_mosaic_builder_emplace: sym!("goldy_mosaic_builder_emplace", FnGoldyMosaicBuilderEmplace),
+            goldy_mosaic_builder_build: sym!("goldy_mosaic_builder_build", FnGoldyMosaicBuilderBuild),
             goldy_parcel_byte_size: sym!("goldy_parcel_byte_size", FnGoldyParcelByteSize),
             goldy_parcel_destroy: sym!("goldy_parcel_destroy", FnGoldyParcelDestroy),
             goldy_parcel_resource_index: sym!("goldy_parcel_resource_index", FnGoldyParcelResourceIndex),
+            goldy_parcel_mosaic_view_resource_index: sym!(
+                "goldy_parcel_mosaic_view_resource_index",
+                FnGoldyParcelMosaicViewResourceIndex
+            ),
+            goldy_parcel_mosaic_view_read_to_cpu: sym!(
+                "goldy_parcel_mosaic_view_read_to_cpu",
+                FnGoldyParcelMosaicViewReadToCpu
+            ),
+            goldy_parcel_mosaic_view_size: sym!("goldy_parcel_mosaic_view_size", FnGoldyParcelMosaicViewSize),
             goldy_parcel_read_to_cpu: sym!("goldy_parcel_read_to_cpu", FnGoldyParcelReadToCpu),
+            goldy_task_graph_compute_node_bind_parcel_view: sym!(
+                "goldy_task_graph_compute_node_bind_parcel_view",
+                FnGoldyTaskGraphComputeNodeBindParcelView
+            ),
+            goldy_task_graph_render_pass_bind_parcel_view: sym!(
+                "goldy_task_graph_render_pass_bind_parcel_view",
+                FnGoldyTaskGraphRenderPassBindParcelView
+            ),
             goldy_task_graph_render_pass_set_vertex_buffer_offset: sym!(
                 "goldy_task_graph_render_pass_set_vertex_buffer_offset",
                 FnGoldyTaskGraphRenderPassSetVertexBufferOffset

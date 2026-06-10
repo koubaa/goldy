@@ -5,13 +5,17 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
 use goldy_ffi_client::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, TaskGraph, TextureFormat,
+    Color, ComputePipeline, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle, RetainedPool,
+    ShaderModule, TaskGraph, TextureFormat,
 };
 
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: usize = (GRID_WIDTH * GRID_HEIGHT) as usize;
+
+const SLOT_A: MosaicSlot = MosaicSlot(0);
+const SLOT_B: MosaicSlot = MosaicSlot(1);
 
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
@@ -39,9 +43,11 @@ fn main() -> goldy_ffi_client::Result<()> {
         .request_device(&DeviceDescriptor::default())?;
 
     let initial = initial_cells();
-    let zeros = vec![0u32; CELL_COUNT];
-    let buf_a = Buffer::from_slice(&device, &initial, BufferKind::Scattered)?;
-    let buf_b = Buffer::from_slice(&device, &zeros, BufferKind::Scattered)?;
+    let mut retained_pool = RetainedPool::new(&device)?;
+    let mut mosaic = retained_pool.mosaic()?;
+    mosaic.emplace_pod::<u32>(&initial)?;
+    mosaic.emplace_pod::<u32>(&initial)?;
+    let cells = mosaic.build(&mut retained_pool)?;
 
     let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
     let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -58,30 +64,34 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     let target = RenderTarget::new(&device, GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm)?;
 
-    let read_idx = buf_a.resource_index(ResourceAccess::ReadWrite)?;
-    let write_idx = buf_b.resource_index(ResourceAccess::Write)?;
+    let read_idx = cells.mosaic_view_resource_index(SLOT_A, ResourceAccess::ReadWrite)?;
+    let write_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::Write)?;
 
     let mut graph = TaskGraph::new();
 
     {
         let mut node = graph.compute_node("game_of_life", &compute_pipeline);
-        node.bind_buffer(&buf_a, NodeAccess::Read);
-        node.bind_buffer(&buf_b, NodeAccess::Write);
+        node.bind_parcel_view(&cells, SLOT_A, NodeAccess::Read);
+        node.bind_parcel_view(&cells, SLOT_B, NodeAccess::Write);
         node.bind_resources_raw(&[read_idx, write_idx]);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
+    let render_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::ReadWrite)?;
     let mut pass = graph.render_pass("game_of_life_render", &target);
-    pass.bind_buffer_mut(&buf_b, NodeAccess::Read);
+    pass.bind_parcel_view_mut(&cells, SLOT_B, NodeAccess::Read);
     pass.clear(Color::BLACK);
     pass.set_pipeline(&render_pipeline);
-    pass.bind_resources(&[&buf_b]);
+    pass.bind_resources_typed(&[ResourceHandle {
+        category: ResourceCategory::Scattered,
+        index: render_idx,
+    }]);
     pass.draw_fullscreen();
     pass.finish_recorded();
 
     graph.dispatch(&device)?;
 
-    let bytes = buf_b.read_to_cpu(&device)?;
+    let bytes = cells.mosaic_view_read_to_cpu(SLOT_B, &device)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&bytes);
     assert_eq!(count_live(cells_out), 4, "still-life block should remain 4 live cells");
 

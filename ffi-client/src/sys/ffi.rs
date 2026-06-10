@@ -132,11 +132,36 @@ pub type FnGoldyRetainedPoolAcquireBuffer =
     unsafe extern "C" fn(*mut GoldyRetainedPool, u64, GoldyBufferKind, u32, *const u8, usize) -> *mut GoldyParcel;
 pub type FnGoldyRetainedPoolCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyRetainedPool;
 pub type FnGoldyRetainedPoolDestroy = unsafe extern "C" fn(*mut GoldyRetainedPool);
+pub type FnGoldyMosaicBuilderCreate = unsafe extern "C" fn() -> *mut GoldyMosaicBuilder;
+pub type FnGoldyMosaicBuilderDestroy = unsafe extern "C" fn(*mut GoldyMosaicBuilder);
+pub type FnGoldyMosaicBuilderEmplace = unsafe extern "C" fn(
+    *mut GoldyMosaicBuilder,
+    *const u8,
+    usize,
+    u64,
+    u32,
+) -> u32;
+pub type FnGoldyMosaicBuilderBuild =
+    unsafe extern "C" fn(*mut GoldyMosaicBuilder, *mut GoldyRetainedPool) -> *mut GoldyParcel;
 pub type FnGoldyParcelByteSize = unsafe extern "C" fn(*const GoldyParcel) -> u64;
 pub type FnGoldyParcelDestroy = unsafe extern "C" fn(*mut GoldyParcel);
 pub type FnGoldyParcelResourceIndex = unsafe extern "C" fn(*const GoldyParcel, GoldyResourceAccess) -> u32;
+pub type FnGoldyParcelMosaicViewResourceIndex =
+    unsafe extern "C" fn(*const GoldyParcel, u32, GoldyResourceAccess) -> u32;
+pub type FnGoldyParcelMosaicViewReadToCpu = unsafe extern "C" fn(
+    *const GoldyParcel,
+    u32,
+    *const GoldyDevice,
+    *mut u8,
+    usize,
+) -> GoldyResult;
+pub type FnGoldyParcelMosaicViewSize = unsafe extern "C" fn(*const GoldyParcel, u32) -> u64;
 pub type FnGoldyParcelReadToCpu =
     unsafe extern "C" fn(*const GoldyParcel, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
+pub type FnGoldyTaskGraphComputeNodeBindParcelView =
+    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, u32, GoldyNodeAccess) -> GoldyResult;
+pub type FnGoldyTaskGraphRenderPassBindParcelView =
+    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, u32, GoldyNodeAccess) -> GoldyResult;
 pub type FnGoldyTaskGraphRenderPassSetVertexBufferOffset =
     unsafe extern "C" fn(*mut GoldyTaskGraph, u32, *const GoldyBuffer, u64) -> GoldyResult;
 

@@ -164,7 +164,11 @@ impl RetainedPool {
 impl<'a> MosaicBuilder<'a> {
     /// Reserve space for `count` elements of type `T` (no initial upload).
     pub fn reserve<T: StructuredBufferElement>(&mut self, count: u64) -> MosaicSlot {
-        let stride = std::mem::size_of::<T>() as u32;
+        self.reserve_bytes(count, std::mem::size_of::<T>() as u32)
+    }
+
+    /// Reserve raw bytes (`count * stride`, no initial upload).
+    pub fn reserve_bytes(&mut self, count: u64, stride: u32) -> MosaicSlot {
         let slot = MosaicSlot(self.specs.len() as u32);
         self.specs.push(MosaicSpec {
             data: None,
@@ -181,6 +185,24 @@ impl<'a> MosaicBuilder<'a> {
         self.specs.push(MosaicSpec {
             data: Some(bytemuck::cast_slice(data).to_vec()),
             count: data.len() as u64,
+            stride,
+        });
+        slot
+    }
+
+    /// Reserve space and upload raw bytes (`data.len()` must equal `count * stride`).
+    pub fn emplace_bytes(&mut self, data: &[u8], count: u64, stride: u32) -> MosaicSlot {
+        let expected = count.saturating_mul(stride as u64) as usize;
+        assert_eq!(
+            data.len(),
+            expected,
+            "emplace_bytes: data len {} != count * stride ({expected})",
+            data.len()
+        );
+        let slot = MosaicSlot(self.specs.len() as u32);
+        self.specs.push(MosaicSpec {
+            data: Some(data.to_vec()),
+            count,
             stride,
         });
         slot

@@ -33,6 +33,31 @@ impl Parcel {
         Ok(output)
     }
 
+    pub fn mosaic_view_resource_index(&self, slot: crate::retained_pool::MosaicSlot, access: ResourceAccess) -> Result<u32> {
+        let idx = unsafe { sys::goldy_parcel_mosaic_view_resource_index(self.ptr, slot.0, access.into()) };
+        if idx == u32::MAX {
+            return Err(crate::error::GoldyError::from_message(
+                "mosaic view resource index unavailable for requested access",
+            ));
+        }
+        Ok(idx)
+    }
+
+    pub fn mosaic_view_read_to_cpu(&self, slot: crate::retained_pool::MosaicSlot, device: &Device) -> Result<Vec<u8>> {
+        let size = unsafe { sys::goldy_parcel_mosaic_view_size(self.ptr, slot.0) };
+        let mut output = vec![0u8; size as usize];
+        check(unsafe {
+            sys::goldy_parcel_mosaic_view_read_to_cpu(
+                self.ptr,
+                slot.0,
+                device.as_ptr(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        })?;
+        Ok(output)
+    }
+
     pub(crate) fn as_ptr(&self) -> *const GoldyParcel {
         self.ptr
     }

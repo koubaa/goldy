@@ -30,7 +30,7 @@ pub use instance::{AdapterInfo, Instance};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use render_target::RenderTarget;
-pub use retained_pool::RetainedPool;
+pub use retained_pool::{MosaicBuilder, MosaicSlot, RetainedPool};
 pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
 pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};

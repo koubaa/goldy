@@ -6,6 +6,7 @@ use crate::parcel::Parcel;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::sys::{self, GoldySwapchainOutput, GoldyTaskGraph};
+use crate::retained_pool::MosaicSlot;
 use crate::types::{Color, NodeAccess, ResourceHandle};
 use std::ffi::CString;
 use std::ops::Range;
@@ -122,6 +123,13 @@ impl RenderPassBuilder<'_> {
         self
     }
 
+    pub fn bind_parcel_view_mut(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_render_pass_bind_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
+        });
+        self
+    }
+
     pub fn clear(&mut self, color: Color) -> &mut Self {
         expect_ok(unsafe { sys::goldy_task_graph_render_pass_clear(self.graph.ptr, color.into()) });
         self
@@ -210,6 +218,13 @@ impl ComputeNodeBuilder<'_> {
     pub fn bind_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
             sys::goldy_task_graph_compute_node_bind_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
+        });
+        self
+    }
+
+    pub fn bind_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_compute_node_bind_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
         });
         self
     }
