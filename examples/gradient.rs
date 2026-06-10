@@ -99,13 +99,8 @@ impl App {
         )?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let uniform = retained_pool.acquire_buffer(
-            std::mem::size_of::<TimeUniforms>() as u64,
-            BufferKind::Broadcast,
-            None,
-            BufferFlags::empty(),
-            None,
-        )?;
+        let uniform =
+            retained_pool.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 

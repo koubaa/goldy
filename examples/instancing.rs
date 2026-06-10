@@ -110,22 +110,9 @@ impl RenderState {
         }
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let instance_stride = std::mem::size_of::<Instance2D>() as u32;
-        let instance_buffer = retained_pool.acquire_buffer(
-            (instances.len() * instance_stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(instance_stride),
-            BufferFlags::empty(),
-            Some(bytemuck::cast_slice(&instances)),
-        )?;
-
-        let params_buffer = retained_pool.acquire_buffer(
-            std::mem::size_of::<AnimParams>() as u64,
-            BufferKind::Broadcast,
-            None,
-            BufferFlags::empty(),
-            None,
-        )?;
+        let instance_buffer = retained_pool.acquire_buffer_with_data(&instances, BufferKind::Scattered)?;
+        let params_buffer =
+            retained_pool.acquire_buffer_sized::<AnimParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 

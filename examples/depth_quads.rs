@@ -155,22 +155,10 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let stride = std::mem::size_of::<DepthVertex>() as u32;
-        let quad_bytes = 6 * stride as usize;
-        let warm_parcel = retained_pool.acquire_buffer(
-            quad_bytes as u64,
-            BufferKind::Scattered,
-            Some(stride),
-            BufferFlags::empty(),
-            None,
-        )?;
-        let cool_parcel = retained_pool.acquire_buffer(
-            quad_bytes as u64,
-            BufferKind::Scattered,
-            Some(stride),
-            BufferFlags::empty(),
-            None,
-        )?;
+        let warm_parcel =
+            retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
+        let cool_parcel =
+            retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         self.device = Some(device);
         self.pipeline = Some(pipeline);

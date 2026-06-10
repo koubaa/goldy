@@ -142,22 +142,9 @@ impl RenderState {
         }
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let star_stride = std::mem::size_of::<Star>() as u32;
-        let star_buffer = retained_pool.acquire_buffer(
-            (stars.len() * star_stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(star_stride),
-            BufferFlags::empty(),
-            Some(bytemuck::cast_slice(&stars)),
-        )?;
-
-        let params_buffer = retained_pool.acquire_buffer(
-            std::mem::size_of::<StarfieldParams>() as u64,
-            BufferKind::Broadcast,
-            None,
-            BufferFlags::empty(),
-            None,
-        )?;
+        let star_buffer = retained_pool.acquire_buffer_with_data(&stars, BufferKind::Scattered)?;
+        let params_buffer =
+            retained_pool.acquire_buffer_sized::<StarfieldParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 

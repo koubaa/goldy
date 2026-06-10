@@ -6,7 +6,7 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
     RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Sampler, ShaderModule, Surface, TaskGraph,
     Vertex2DUv,
 };
@@ -211,15 +211,7 @@ impl App {
             },
         )?;
 
-        // Create vertex buffer
-        let stride = std::mem::size_of::<Vertex2DUv>() as u32;
-        let vertex_buffer = retained_pool.acquire_buffer(
-            (QUAD_VERTICES.len() * stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(stride),
-            BufferFlags::empty(),
-            Some(bytemuck::cast_slice(&QUAD_VERTICES)),
-        )?;
+        let vertex_buffer = retained_pool.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 

@@ -31,7 +31,7 @@ Examples that use `ComputePipeline` and `TaskGraph` for GPU-side data processing
 | Example | What it demonstrates | Source |
 |---------|---------------------|--------|
 | **`compute_particles`** | Full compute + graphics loop. A compute shader updates 1024 particle positions and velocities each frame; a graphics shader renders them as instanced colored quads. Uses `TaskGraph` for dependency scheduling. | [`compute_particles.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_particles.rs) |
-| **`game_of_life`** | Conway's Game of Life on the GPU. A compute shader applies cellular-automaton rules on a 128×128 grid using **ping-pong `BufferView`s** from a shared `BufferPool`. A separate graphics pass renders the result. | [`game_of_life.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/game_of_life.rs) |
+| **`game_of_life`** | Conway's Game of Life on the GPU. A compute shader applies cellular-automaton rules on a 128×128 grid using **ping-pong sub-views** in one retained mosaic `Parcel`. A separate graphics pass renders the result. | [`game_of_life.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/game_of_life.rs) |
 | **`compute_to_surface`** | Pure compute rendering — no `RenderPipeline`, no raster pass, no vertex buffers. A compute shader writes directly to the swapchain texture via `frame.texture()` and `TaskGraph`. Demonstrates the compute-to-surface workflow. | [`compute_to_surface.rs`](https://github.com/koubaa/goldy/blob/main/goldy/examples/compute_to_surface.rs) |
 
 ## Graphics Pipelines

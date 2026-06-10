@@ -208,21 +208,15 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let vertex_stride = std::mem::size_of::<Vertex2D>() as u32;
-        let index_stride = std::mem::size_of::<u16>() as u32;
-        let vertex_parcel = retained_pool.acquire_buffer(
-            (MAX_CUBE_VERTICES * vertex_stride as usize) as u64,
+        let vertex_parcel = retained_pool.acquire_buffer_sized::<Vertex2D>(
+            MAX_CUBE_VERTICES as u64,
             BufferKind::Scattered,
-            Some(vertex_stride),
             BufferFlags::empty(),
-            None,
         )?;
-        let index_parcel = retained_pool.acquire_buffer(
-            (MAX_CUBE_INDICES * index_stride as usize) as u64,
+        let index_parcel = retained_pool.acquire_buffer_sized::<u16>(
+            MAX_CUBE_INDICES as u64,
             BufferKind::Scattered,
-            Some(index_stride),
             BufferFlags::empty(),
-            None,
         )?;
 
         self.device = Some(device);

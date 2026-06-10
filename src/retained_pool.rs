@@ -96,6 +96,44 @@ impl RetainedPool {
         self.wrap_buffer(buf)
     }
 
+    /// Allocate a retained buffer from a typed slice. Element stride is inferred from `T`.
+    pub fn acquire_buffer_with_data<T: StructuredBufferElement>(
+        &mut self,
+        data: &[T],
+        access: BufferKind,
+    ) -> Result<Parcel> {
+        self.acquire_buffer_with_data_and_flags(data, access, crate::types::BufferFlags::empty())
+    }
+
+    /// Allocate a retained buffer from a typed slice with explicit flags.
+    pub fn acquire_buffer_with_data_and_flags<T: StructuredBufferElement>(
+        &mut self,
+        data: &[T],
+        access: BufferKind,
+        flags: crate::types::BufferFlags,
+    ) -> Result<Parcel> {
+        let stride = std::mem::size_of::<T>() as u32;
+        let bytes = bytemuck::cast_slice(data);
+        self.acquire_buffer(bytes.len() as u64, access, Some(stride), flags, Some(bytes))
+    }
+
+    /// Allocate an uninitialized retained buffer sized for `element_count` elements of type `T`.
+    pub fn acquire_buffer_sized<T: StructuredBufferElement>(
+        &mut self,
+        element_count: u64,
+        access: BufferKind,
+        flags: crate::types::BufferFlags,
+    ) -> Result<Parcel> {
+        let stride = std::mem::size_of::<T>() as u32;
+        self.acquire_buffer(
+            element_count * stride as u64,
+            access,
+            Some(stride),
+            flags,
+            None,
+        )
+    }
+
     fn alloc_raw_buffer(
         &self,
         size: u64,

@@ -179,7 +179,7 @@ Standalone and hybrid compute workflows both use `TaskGraph` (see `python/exampl
 |--------|------|--------|
 | Instance creation | `Instance::new()?` | `goldy.Instance()` |
 | Error handling | `Result<T, GoldyError>` | Raises `goldy.GoldyError` |
-| Buffer data | `device.alloc_buffer_with_data( &[T], access)` | `goldy.Buffer(device, numpy_array, access)` |
+| Retained buffer | `retained_pool.acquire_buffer_with_data(&data, access)` | `retained_pool.acquire_buffer(numpy_array, access)` → `Parcel` |
 | Render pass | `RenderPassBuilder` on `TaskGraph` | `with graph.render_pass(...) as rp:` |
 | Compute node | `graph.node(...).dispatch(...)` | `with graph.compute_node(...) as node:` |
 | Pixel readback | `target.read_to_cpu()` → `Vec<u8>` | `target.read_to_cpu()` → NumPy array `(H, W, 4)` |

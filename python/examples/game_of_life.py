@@ -122,8 +122,9 @@ def main() -> int:
 
     initial = create_initial_state()
     zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
-    buf_a = goldy.Buffer(device, initial, goldy.BufferKind.SCATTERED)
-    buf_b = goldy.Buffer(device, zeros, goldy.BufferKind.SCATTERED)
+    retained_pool = goldy.RetainedPool(device)
+    buf_a = retained_pool.acquire_buffer(initial, goldy.BufferKind.SCATTERED)
+    buf_b = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
     render_shader = goldy.ShaderModule.from_slang(device, render_src)
@@ -170,8 +171,8 @@ def main() -> int:
                     workgroups=(WORKGROUPS_X, WORKGROUPS_Y, 1),
                 ) as node:
                     (
-                        node.bind_buffer(read_buf, goldy.NodeAccess.READ)
-                        .bind_buffer(write_buf, goldy.NodeAccess.WRITE)
+                        node.bind_parcel(read_buf, goldy.NodeAccess.READ)
+                        .bind_parcel(write_buf, goldy.NodeAccess.WRITE)
                         .bind_resources_raw([read_idx, write_idx])
                     )
                 use_buffer_a = not use_buffer_a
@@ -181,7 +182,7 @@ def main() -> int:
 
             with frame_graph.render_pass("game_of_life_render", scene_rt) as rp:
                 (
-                    rp.bind_buffer(current_buf, goldy.NodeAccess.READ)
+                    rp.bind_parcel(current_buf, goldy.NodeAccess.READ)
                     .clear(goldy.Color.BLACK)
                     .set_pipeline(render_pipeline)
                     .bind_resource_index(cells_idx)

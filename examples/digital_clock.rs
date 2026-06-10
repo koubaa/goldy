@@ -93,13 +93,10 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let stride = std::mem::size_of::<ClockVertex>() as u32;
-        let vertex_parcel = retained_pool.acquire_buffer(
-            (MAX_CLOCK_VERTICES * stride as usize) as u64,
+        let vertex_parcel = retained_pool.acquire_buffer_sized::<ClockVertex>(
+            MAX_CLOCK_VERTICES as u64,
             BufferKind::Scattered,
-            Some(stride),
             BufferFlags::empty(),
-            None,
         )?;
 
         self.device = Some(device);

@@ -49,8 +49,9 @@ static class GameOfLifeWindow
 
             var initial = CreateInitialState();
             var zeros = new uint[CellCount];
-            using var bufA = Goldy.Buffer.WithData<uint>(device, initial, BufferKind.Scattered);
-            using var bufB = Goldy.Buffer.WithData<uint>(device, zeros, BufferKind.Scattered);
+            using var retainedPool = new RetainedPool(device);
+            using var bufA = retainedPool.AcquireBuffer(initial, BufferKind.Scattered);
+            using var bufB = retainedPool.AcquireBuffer(zeros, BufferKind.Scattered);
 
             using var computeShader = new ShaderModule(device, computeSrc);
             using var renderShader = new ShaderModule(device, renderSrc);
@@ -100,8 +101,8 @@ static class GameOfLifeWindow
                     using (var node = frameGraph.ComputeNode("game_of_life", computePipeline))
                     {
                         node
-                            .BindBuffer(readBuf, NodeAccess.Read)
-                            .BindBuffer(writeBuf, NodeAccess.Write)
+                            .BindParcel(readBuf, NodeAccess.Read)
+                            .BindParcel(writeBuf, NodeAccess.Write)
                             .BindResourcesRaw(new uint[] { readIdx, writeIdx });
                         node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
                     }
@@ -114,10 +115,10 @@ static class GameOfLifeWindow
                 using (var pass = frameGraph.RenderPass("game_of_life_render", sceneRt))
                 {
                     pass
-                        .BindBuffer(currentBuf, NodeAccess.Read)
+                        .BindParcel(currentBuf, NodeAccess.Read)
                         .Clear(Color.Black)
                         .SetPipeline(renderPipeline)
-                        .BindResources(stackalloc Buffer[] { currentBuf })
+                        .BindResourceIndex(currentBuf.ResourceIndex(ResourceAccess.Read))
                         .DrawFullscreen();
                 }
 

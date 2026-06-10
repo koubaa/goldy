@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, BufferFlags, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel,
+    task_graph::NodeAccess, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel,
     PresentMode, RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface, SurfaceConfig,
     TaskGraph, SWAPCHAIN_SLOT_PLACEHOLDER,
 };
@@ -133,18 +133,14 @@ impl App {
         // NOTE: pass a typed `&[Uniforms]`, NOT `bytemuck::bytes_of(&u)`.
         // Structured-buffer stride must match `size_of::<Uniforms>()` on DX12.
         let mut retained_pool = RetainedPool::new(device);
-        let uniform_stride = std::mem::size_of::<Uniforms>() as u32;
-        let uniform_buffer = retained_pool.acquire_buffer(
-            uniform_stride as u64,
-            BufferKind::Scattered,
-            Some(uniform_stride),
-            BufferFlags::empty(),
-            Some(bytemuck::bytes_of(&Uniforms {
+        let uniform_buffer = retained_pool.acquire_buffer_with_data(
+            &[Uniforms {
                 width: surface.width(),
                 height: surface.height(),
                 time: 0.0,
                 _padding: 0.0,
-            })),
+            }],
+            BufferKind::Scattered,
         )?;
 
         self.state = Some(RenderState {

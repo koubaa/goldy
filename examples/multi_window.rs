@@ -292,14 +292,8 @@ impl WindowState {
         )?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let stride = std::mem::size_of::<QuadVertex>() as u32;
-        let vertex_parcel = retained_pool.acquire_buffer(
-            (6 * stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(stride),
-            BufferFlags::empty(),
-            None,
-        )?;
+        let vertex_parcel =
+            retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         Ok(Self {
             window,

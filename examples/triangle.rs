@@ -6,7 +6,7 @@
 //! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
     RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
@@ -78,14 +78,7 @@ impl App {
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
         let mut retained_pool = RetainedPool::new(device.clone());
-        let stride = std::mem::size_of::<Vertex2D>() as u32;
-        let vertex_buffer = retained_pool.acquire_buffer(
-            (vertices.len() * stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(stride),
-            BufferFlags::empty(),
-            Some(bytemuck::cast_slice(&vertices)),
-        )?;
+        let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
         // Create Surface for presentation
         let surface = Surface::new(&ctx, window.as_ref())?;

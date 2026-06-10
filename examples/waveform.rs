@@ -121,17 +121,9 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let stride = std::mem::size_of::<Vertex2D>() as u32;
-        let channel_bytes = (NUM_SAMPLES * stride as usize) as u64;
         let channel_parcels = std::array::from_fn(|_| {
             retained_pool
-                .acquire_buffer(
-                    channel_bytes,
-                    BufferKind::Scattered,
-                    Some(stride),
-                    BufferFlags::empty(),
-                    None,
-                )
+                .acquire_buffer_sized::<Vertex2D>(NUM_SAMPLES as u64, BufferKind::Scattered, BufferFlags::empty())
                 .expect("waveform channel parcel")
         });
 

@@ -2,11 +2,30 @@
 
 `Buffer` is a GPU memory allocation for storing typed data — uniforms, vertex data, index data, compute storage, or anything a shader needs to read or write.
 
-## Creating Buffers
+## Creating buffers (recommended)
+
+For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in the task graph (`bind_parcel`, `set_vertex_buffer`, `write_parcel`). All Rust, Python, FFI, and .NET examples use this path.
+
+```rust
+use goldy::{BufferFlags, BufferKind, RetainedPool};
+
+let mut pool = RetainedPool::new(device.clone());
+let vertices = [/* Vertex2D ... */];
+let vertex_parcel = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+
+// Uninitialized storage (e.g. a uniform updated each frame via write_parcel):
+let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+```
+
+See [`retained-pool.md`](retained-pool.md) for textures, mosaics, and release.
+
+## Low-level `Device::alloc_*` (internal / advanced)
+
+The methods below route through the installed [`VramAllocator`](vram-allocator.md). Prefer `RetainedPool` in application code; these remain for runtime internals, custom allocators, and tests.
 
 ### With Typed Data
 
-`Device::alloc_buffer_with_data` allocates through the installed [`VramAllocator`](vram-allocator.md) and uploads an initial slice. The element stride is inferred from `T`, which is critical for correct `StructuredBuffer` views on DX12.
+`Device::alloc_buffer_with_data` uploads an initial slice. The element stride is inferred from `T`, which is critical for correct `StructuredBuffer` views on DX12.
 
 ```rust
 use goldy::BufferKind;

@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
+    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -112,14 +112,7 @@ impl RenderState {
         }
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let stride = std::mem::size_of::<Line>() as u32;
-        let line_buffer = retained_pool.acquire_buffer(
-            (lines.len() * stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(stride),
-            BufferFlags::empty(),
-            Some(bytemuck::cast_slice(&lines)),
-        )?;
+        let line_buffer = retained_pool.acquire_buffer_with_data(&lines, BufferKind::Scattered)?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 

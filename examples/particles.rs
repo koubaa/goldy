@@ -121,22 +121,9 @@ impl RenderState {
 
         let particles = Self::create_particles(false);
         let mut retained_pool = RetainedPool::new(device.clone());
-        let particle_stride = std::mem::size_of::<Particle>() as u32;
-        let particle_buffer = retained_pool.acquire_buffer(
-            (particles.len() * particle_stride as usize) as u64,
-            BufferKind::Scattered,
-            Some(particle_stride),
-            BufferFlags::empty(),
-            Some(bytemuck::cast_slice(&particles)),
-        )?;
-
-        let params_buffer = retained_pool.acquire_buffer(
-            std::mem::size_of::<ParticleParams>() as u64,
-            BufferKind::Broadcast,
-            None,
-            BufferFlags::empty(),
-            None,
-        )?;
+        let particle_buffer = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
+        let params_buffer =
+            retained_pool.acquire_buffer_sized::<ParticleParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
