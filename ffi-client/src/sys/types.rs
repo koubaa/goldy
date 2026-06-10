@@ -2,7 +2,6 @@
 
 use std::ffi::c_char;
 
-pub enum GoldyBuffer {}
 pub enum GoldyMosaicBuilder {}
 pub enum GoldyParcel {}
 pub enum GoldyRetainedPool {}
@@ -16,7 +15,6 @@ pub enum GoldyShaderModule {}
 pub enum GoldySurface {}
 pub enum GoldySurfaceFrame {}
 pub enum GoldyTaskGraph {}
-pub enum GoldyTexture {}
 
 #[repr(C)]
 pub struct GoldySwapchainOutput {

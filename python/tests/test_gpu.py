@@ -27,18 +27,18 @@ def device():
 
 class TestInstance:
     """Test Instance class."""
-    
+
     def test_create(self):
         import goldy
         instance = goldy.Instance()
         assert instance is not None
-    
+
     def test_backend_type(self):
         import goldy
         instance = goldy.Instance()
         bt = instance.backend_type
         assert bt in [goldy.BackendType.VULKAN, goldy.BackendType.METAL, goldy.BackendType.DX12]
-    
+
     def test_enumerate_adapters(self):
         import goldy
         instance = goldy.Instance()
@@ -48,190 +48,128 @@ class TestInstance:
 
 class TestDevice:
     """Test Device class."""
-    
+
     def test_create(self, device):
         assert device.is_valid()
         assert device.adapter_id >= 0
-    
+
     def test_has_default_library(self, device):
         assert device.has_library('goldy_exp')
-    
+
     def test_list_libraries(self, device):
         libs = device.list_libraries()
         assert 'goldy_exp' in libs
-    
+
     def test_register_library(self, device):
         device.register_library('test_lib', '''
             module test_lib;
             public float test_fn() { return 1.0; }
         ''')
         assert device.has_library('test_lib')
-        
-        # Clean up
         device.unregister_library('test_lib')
         assert not device.has_library('test_lib')
 
 
-class TestBuffer:
-    """Test Buffer class."""
-    
-    def test_create_from_float32(self, device):
+class TestRetainedPool:
+    """Test RetainedPool and Parcel."""
+
+    def test_acquire_from_float32(self, device):
         import goldy
-        
+
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
-        assert buffer.size == 16  # 4 floats * 4 bytes
-    
-    def test_create_from_int32(self, device):
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert parcel.byte_size == 16
+
+    def test_acquire_from_int32(self, device):
         import goldy
-        
+
         data = np.array([1, 2, 3], dtype=np.int32)
-        buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
-        assert buffer.size == 12  # 3 ints * 4 bytes
-    
-    def test_create_from_uint16(self, device):
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert parcel.byte_size == 12
+
+    def test_acquire_from_uint16(self, device):
         import goldy
-        
+
         data = np.array([0, 1, 2, 3, 4, 5], dtype=np.uint16)
-        buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
-        assert buffer.size == 12  # 6 shorts * 2 bytes
-    
-    def test_create_empty(self, device):
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert parcel.byte_size == 12
+
+    def test_write_parcel_via_graph(self, device):
         import goldy
-        
-        buffer = goldy.Buffer.empty(device, 1024, goldy.BufferKind.BROADCAST)
-        assert buffer.size == 1024
-    
-    def test_write(self, device):
-        import goldy
-        
-        buffer = goldy.Buffer.empty(device, 64, goldy.BufferKind.BROADCAST)
-        data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        buffer.write(0, data)  # Should not raise
-    
-    def test_write_with_offset(self, device):
-        import goldy
-        
-        buffer = goldy.Buffer.empty(device, 64, goldy.BufferKind.BROADCAST)
-        data = np.array([1.0, 2.0], dtype=np.float32)
-        buffer.write(16, data)  # Write at offset 16
+
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(
+            np.zeros(64, dtype=np.uint32),
+            goldy.BufferKind.SCATTERED,
+        )
+        graph = goldy.TaskGraph()
+        graph.write_parcel(parcel, 0, np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
 
 
 class TestShaderModule:
     """Test ShaderModule class."""
-    
+
     def test_compile_builtin(self, device):
         import goldy
-        
+
         shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
         assert shader is not None
-    
+
     def test_compile_custom(self, device):
         import goldy
-        
+
         source = '''
-struct VS_IN { float2 pos : POSITION; };
-struct VS_OUT { float4 pos : SV_Position; };
-
-[shader("vertex")]
-VS_OUT vs_main(VS_IN input) {
-    VS_OUT output;
-    output.pos = float4(input.pos, 0.0, 1.0);
-    return output;
-}
-
-[shader("fragment")]
-float4 fs_main() : SV_Target {
-    return float4(1.0, 0.0, 0.0, 1.0);
-}
-'''
-        shader = goldy.ShaderModule.from_slang(device, source)
-        assert shader is not None
-    
-    def test_compile_with_library(self, device):
-        import goldy
-        
-        source = '''
-import goldy_exp;
-
-[shader("vertex")]
-FullscreenVarying vs_main(FullscreenVertex input) {
-    return vs_fullscreen(input);
-}
-
-[shader("fragment")]
-float4 fs_main(FullscreenVarying input) : SV_Target {
-    return float4(rainbow(input.uv.x), 1.0);
-}
-'''
+        [shader("vertex")]
+        float4 vs_main() : SV_Position { return float4(0, 0, 0, 1); }
+        [shader("fragment")]
+        float4 fs_main() : SV_Target { return float4(1, 0, 0, 1); }
+        '''
         shader = goldy.ShaderModule.from_slang(device, source)
         assert shader is not None
 
 
-class TestRenderTarget:
-    """Test RenderTarget class."""
-    
+class TestComputePipeline:
+    """Test ComputePipeline class."""
+
     def test_create(self, device):
         import goldy
-        
-        target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
-        assert target.width == 100
-        assert target.height == 100
-        assert target.buffer_size == 100 * 100 * 4
-        assert not target.has_depth()
-    
-    def test_create_with_depth(self, device):
-        import goldy
-        
-        target = goldy.RenderTarget.with_depth(
-            device, 256, 256,
-            goldy.TextureFormat.RGBA8_UNORM,
-            goldy.DepthFormat.DEPTH24_PLUS,
-        )
-        assert target.has_depth()
-    
-class TestComputePipeline:
-    """Test compute shader pipeline (covers game_of_life.py functionality)."""
-    
-    def test_compute_double_values(self, device):
-        """Test basic compute shader that doubles buffer values."""
-        import goldy
-        
-        # Simple compute shader that doubles each value (cross-platform)
-        compute_shader_src = '''
-import goldy_exp;
 
-[goldy_compute]
-[numthreads(64, 1, 1)]
-void cs_main(Scattered<float> data, ThreadId id) {
-    data[id.x] = data[id.x] * 2.0;
-}
-'''
-        
-        # Create input data
-        input_data = np.arange(256, dtype=np.float32)
-        
-        # Create GPU storage buffer
-        buffer = goldy.Buffer(device, input_data, goldy.BufferKind.SCATTERED)
-        
-        # Compile compute shader
-        shader = goldy.ShaderModule.from_slang(device, compute_shader_src)
-        
-        # Create compute pipeline
+        source = '''
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(64, 1, 1)]
+        void cs_main(Scattered<uint> data, ThreadId id) {
+            data[id.x] = data[id.x] * 2;
+        }
+        '''
+        shader = goldy.ShaderModule.from_slang(device, source)
         pipeline = goldy.ComputePipeline(device, shader)
-        
+        assert pipeline is not None
+
+    def test_dispatch_via_graph(self, device):
+        import goldy
+
+        source = '''
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(64, 1, 1)]
+        void cs_main(Scattered<uint> data, ThreadId id) {
+            data[id.x] = 42;
+        }
+        '''
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
+        shader = goldy.ShaderModule.from_slang(device, source)
+        pipeline = goldy.ComputePipeline(device, shader)
+        idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
+
         graph = goldy.TaskGraph()
-        idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
-        with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
-            node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
-            node.bind_resources_raw([idx])
-
+        with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
+            node.bind_parcel(parcel, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
         graph.dispatch(device)
-        
-        # Compute shader executed without error
-        # (Full readback verification would require COPY_SRC staging buffer)
 
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
-
+        values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
+        assert np.all(values == 42)

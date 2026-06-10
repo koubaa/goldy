@@ -38,7 +38,7 @@ impl PyRetainedPool {
 
     /// Acquire a retained buffer parcel from numpy array or bytes.
     fn acquire_buffer(&self, data: &Bound<'_, PyAny>, access: PyBufferKind) -> PyResult<PyParcel> {
-        let (bytes, element_stride) = crate::buffer::extract_bytes_with_stride(data)?;
+        let (bytes, element_stride) = crate::bytes_util::extract_bytes_with_stride(data)?;
         let parcel = self
             .inner
             .borrow_mut()
@@ -71,7 +71,7 @@ impl PyRetainedPool {
 impl PyMosaicBuilder {
     /// Reserve a mosaic sub-view and upload numpy array or bytes.
     fn emplace(&self, data: &Bound<'_, PyAny>) -> PyResult<u32> {
-        let (bytes, element_stride) = crate::buffer::extract_bytes_with_stride(data)?;
+        let (bytes, element_stride) = crate::bytes_util::extract_bytes_with_stride(data)?;
         let count = bytes.len() as u64 / element_stride as u64;
         let slot = self.specs.borrow().len() as u32;
         self.specs.borrow_mut().push(MosaicSpec {

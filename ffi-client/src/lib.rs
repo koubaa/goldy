@@ -6,7 +6,6 @@
 //! task-graph recording.
 
 mod adapter;
-mod buffer;
 mod compute;
 mod device;
 mod error;
@@ -22,7 +21,6 @@ mod task_graph;
 mod types;
 
 pub use adapter::Adapter;
-pub use buffer::Buffer;
 pub use compute::ComputePipeline;
 pub use device::Device;
 pub use error::{GoldyError, Result};
@@ -35,7 +33,8 @@ pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
 pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};
 pub use types::{
-    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, NodeAccess,
+    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
+    NodeAccess,
     PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory,
     ResourceHandle, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };

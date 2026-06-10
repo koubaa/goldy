@@ -9,58 +9,6 @@ pub use types::*;
 
 use loader::lib;
 
-pub unsafe fn goldy_buffer_access(buffer: *const GoldyBuffer) -> GoldyBufferKind {
-    (lib().goldy_buffer_access)(buffer)
-}
-
-pub unsafe fn goldy_buffer_create(device: *const GoldyDevice, size: u64, access: GoldyBufferKind) -> *mut GoldyBuffer {
-    (lib().goldy_buffer_create)(device, size, access)
-}
-
-pub unsafe fn goldy_buffer_create_with_data(
-    device: *const GoldyDevice,
-    data: *const u8,
-    size: usize,
-    access: GoldyBufferKind,
-) -> *mut GoldyBuffer {
-    (lib().goldy_buffer_create_with_data)(device, data, size, access)
-}
-
-pub unsafe fn goldy_buffer_create_with_data_stride(
-    device: *const GoldyDevice,
-    data: *const u8,
-    size: usize,
-    access: GoldyBufferKind,
-    element_stride: u32,
-) -> *mut GoldyBuffer {
-    (lib().goldy_buffer_create_with_data_stride)(device, data, size, access, element_stride)
-}
-
-pub unsafe fn goldy_buffer_destroy(buffer: *mut GoldyBuffer) {
-    (lib().goldy_buffer_destroy)(buffer)
-}
-
-pub unsafe fn goldy_buffer_size(buffer: *const GoldyBuffer) -> u64 {
-    (lib().goldy_buffer_size)(buffer)
-}
-
-pub unsafe fn goldy_buffer_read_to_cpu(
-    buffer: *const GoldyBuffer,
-    device: *const GoldyDevice,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    (lib().goldy_buffer_read_to_cpu)(buffer, device, output, output_size)
-}
-
-pub unsafe fn goldy_buffer_resource_index(buffer: *const GoldyBuffer, access: GoldyResourceAccess) -> u32 {
-    (lib().goldy_buffer_resource_index)(buffer, access)
-}
-
-pub unsafe fn goldy_buffer_write(buffer: *const GoldyBuffer, offset: u64, data: *const u8, size: usize) -> GoldyResult {
-    (lib().goldy_buffer_write)(buffer, offset, data, size)
-}
-
 pub unsafe fn goldy_clear_error() {
     (lib().goldy_clear_error)()
 }
@@ -398,14 +346,6 @@ pub unsafe fn goldy_task_graph_compute_node_begin(
     (lib().goldy_task_graph_compute_node_begin)(graph, label, pipeline)
 }
 
-pub unsafe fn goldy_task_graph_compute_node_bind_buffer(
-    graph: *mut GoldyTaskGraph,
-    buffer: *const GoldyBuffer,
-    access: GoldyNodeAccess,
-) -> GoldyResult {
-    (lib().goldy_task_graph_compute_node_bind_buffer)(graph, buffer, access)
-}
-
 pub unsafe fn goldy_task_graph_compute_node_bind_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
@@ -440,16 +380,6 @@ pub unsafe fn goldy_task_graph_compute_node_dispatch(
     (lib().goldy_task_graph_compute_node_dispatch)(graph, workgroups_x, workgroups_y, workgroups_z)
 }
 
-pub unsafe fn goldy_task_graph_write_buffer(
-    graph: *mut GoldyTaskGraph,
-    buffer: *const GoldyBuffer,
-    offset: u64,
-    data: *const u8,
-    size: usize,
-) -> GoldyResult {
-    (lib().goldy_task_graph_write_buffer)(graph, buffer, offset, data, size)
-}
-
 pub unsafe fn goldy_task_graph_write_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
@@ -468,14 +398,6 @@ pub unsafe fn goldy_task_graph_render_pass_begin(
     (lib().goldy_task_graph_render_pass_begin)(graph, label, target)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_bind_buffer(
-    graph: *mut GoldyTaskGraph,
-    buffer: *const GoldyBuffer,
-    access: GoldyNodeAccess,
-) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_bind_buffer)(graph, buffer, access)
-}
-
 pub unsafe fn goldy_task_graph_render_pass_bind_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
@@ -491,14 +413,6 @@ pub unsafe fn goldy_task_graph_render_pass_bind_parcel_view(
     access: GoldyNodeAccess,
 ) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_bind_parcel_view)(graph, parcel, slot, access)
-}
-
-pub unsafe fn goldy_task_graph_render_pass_bind_resources(
-    graph: *mut GoldyTaskGraph,
-    buffers: *const *const GoldyBuffer,
-    buffer_count: u32,
-) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_bind_resources)(graph, buffers, buffer_count)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_bind_resources_typed(
@@ -555,10 +469,10 @@ pub unsafe fn goldy_task_graph_render_pass_finish(graph: *mut GoldyTaskGraph) ->
 
 pub unsafe fn goldy_task_graph_render_pass_set_index_buffer(
     graph: *mut GoldyTaskGraph,
-    buffer: *const GoldyBuffer,
+    parcel: *const GoldyParcel,
     format: GoldyIndexFormat,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_set_index_buffer)(graph, buffer, format)
+    (lib().goldy_task_graph_render_pass_set_index_buffer)(graph, parcel, format)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_set_pipeline(
@@ -566,14 +480,6 @@ pub unsafe fn goldy_task_graph_render_pass_set_pipeline(
     pipeline: *const GoldyRenderPipeline,
 ) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_set_pipeline)(graph, pipeline)
-}
-
-pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer(
-    graph: *mut GoldyTaskGraph,
-    slot: u32,
-    buffer: *const GoldyBuffer,
-) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_set_vertex_buffer)(graph, slot, buffer)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
@@ -584,38 +490,3 @@ pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
     (lib().goldy_task_graph_render_pass_set_vertex_buffer_parcel)(graph, slot, parcel)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_offset(
-    graph: *mut GoldyTaskGraph,
-    slot: u32,
-    buffer: *const GoldyBuffer,
-    offset: u64,
-) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_set_vertex_buffer_offset)(graph, slot, buffer, offset)
-}
-
-pub unsafe fn goldy_texture_create(
-    device: *const GoldyDevice,
-    width: u32,
-    height: u32,
-    format: GoldyTextureFormat,
-    access: GoldyTextureKind,
-    flags: GoldyTextureFlags,
-) -> *mut GoldyTexture {
-    (lib().goldy_texture_create)(device, width, height, format, access, flags)
-}
-
-pub unsafe fn goldy_texture_destroy(texture: *mut GoldyTexture) {
-    (lib().goldy_texture_destroy)(texture)
-}
-
-pub unsafe fn goldy_texture_format(texture: *const GoldyTexture) -> GoldyTextureFormat {
-    (lib().goldy_texture_format)(texture)
-}
-
-pub unsafe fn goldy_texture_height(texture: *const GoldyTexture) -> u32 {
-    (lib().goldy_texture_height)(texture)
-}
-
-pub unsafe fn goldy_texture_width(texture: *const GoldyTexture) -> u32 {
-    (lib().goldy_texture_width)(texture)
-}

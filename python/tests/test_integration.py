@@ -59,43 +59,40 @@ def test_device_creation(device):
     assert 'goldy_exp' in libs
 
 
-def test_buffer_creation_numpy(device):
-    """Test Buffer creation from numpy arrays."""
+def test_parcel_creation_numpy(device):
+    """Test Parcel creation from numpy arrays via RetainedPool."""
     import goldy
-    
-    # Float32 array (vertices)
+
     vertices = np.array([
-        0.0, -0.5, 1.0, 0.0, 0.0, 1.0,  # pos + color
+        0.0, -0.5, 1.0, 0.0, 0.0, 1.0,
         -0.5, 0.5, 0.0, 1.0, 0.0, 1.0,
         0.5, 0.5, 0.0, 0.0, 1.0, 1.0,
     ], dtype=np.float32)
-    
-    buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
-    assert buffer.size == vertices.nbytes
-    
-    # Uint16 array (indices)
+
+    pool = goldy.RetainedPool(device)
+    parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    assert parcel.byte_size == vertices.nbytes
+
     indices = np.array([0, 1, 2], dtype=np.uint16)
-    index_buffer = goldy.Buffer(device, indices, goldy.BufferKind.SCATTERED)
-    assert index_buffer.size == indices.nbytes
+    index_parcel = pool.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
+    assert index_parcel.byte_size == indices.nbytes
 
 
-def test_buffer_empty(device):
-    """Test empty Buffer creation."""
+def test_parcel_write_via_graph(device):
+    """Upload bytes into a parcel through TaskGraph.write_parcel."""
     import goldy
-    
-    buffer = goldy.Buffer.empty(device, 1024, goldy.BufferKind.BROADCAST)
-    assert buffer.size == 1024
 
-
-def test_buffer_write(device):
-    """Test Buffer write."""
-    import goldy
-    
-    buffer = goldy.Buffer.empty(device, 1024, goldy.BufferKind.BROADCAST)
-    
-    # Write some data
-    data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-    buffer.write(0, data)
+    pool = goldy.RetainedPool(device)
+    parcel = pool.acquire_buffer(
+        np.zeros(16, dtype=np.uint32),
+        goldy.BufferKind.SCATTERED,
+    )
+    graph = goldy.TaskGraph()
+    graph.write_parcel(
+        parcel,
+        0,
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes(),
+    )
 
 
 def test_shader_compilation(device):

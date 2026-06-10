@@ -54,8 +54,8 @@ int main() {
             {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
         };
 
-        goldy::Buffer vertex_buffer(
-            device,
+        goldy::RetainedPool pool(device);
+        goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -83,10 +83,10 @@ int main() {
         goldy::TaskGraph graph;
         {
             auto pass = graph.render_pass("triangle", target);
-            pass.bind_buffer(vertex_buffer, goldy::NodeAccess::Read)
+            pass.bind_parcel(vertex_buffer, goldy::NodeAccess::Read)
                 .clear(goldy::Color::black())
                 .set_pipeline(pipeline)
-                .set_vertex_buffer(0, vertex_buffer)
+                .set_vertex_buffer_parcel(0, vertex_buffer)
                 .draw(0, 3);
         }
 

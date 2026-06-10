@@ -6,12 +6,12 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_resource_index, goldy_buffer_size,
     goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_shader_create, goldy_shader_destroy, goldy_task_graph_compute_node_begin,
-    goldy_task_graph_compute_node_bind_buffer, goldy_task_graph_compute_node_bind_resources_raw,
-    goldy_task_graph_compute_node_dispatch, goldy_task_graph_create, goldy_task_graph_destroy,
-    goldy_task_graph_dispatch, GoldyBufferKind, GoldyResourceAccess, GoldyResult,
+    goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu, goldy_parcel_resource_index,
+    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create,
+    goldy_shader_destroy, goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_parcel,
+    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
+    goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyBufferKind, GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -35,12 +35,16 @@ fn task_graph_compute_node_fills_buffer_with_42() {
             initial.as_ptr() as *const u8,
             initial.len() * std::mem::size_of::<u32>(),
         );
-        let buffer = goldy_buffer_create_with_data_stride(
-            device,
-            bytes.as_ptr(),
-            bytes.len(),
+
+        let pool = goldy_retained_pool_create(device);
+        assert!(!pool.is_null(), "{}", last_ffi_message());
+        let buffer = goldy_retained_pool_acquire_buffer(
+            pool,
+            bytes.len() as u64,
             GoldyBufferKind::Scattered,
             std::mem::size_of::<u32>() as u32,
+            bytes.as_ptr(),
+            bytes.len(),
         );
         assert!(!buffer.is_null(), "{}", last_ffi_message());
 
@@ -62,13 +66,13 @@ fn task_graph_compute_node_fills_buffer_with_42() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_bind_buffer(graph, buffer, goldy_ffi::GoldyNodeAccess::Write),
+            goldy_task_graph_compute_node_bind_parcel(graph, buffer, goldy_ffi::GoldyNodeAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
 
-        let idx = goldy_buffer_resource_index(buffer, GoldyResourceAccess::Write);
+        let idx = goldy_parcel_resource_index(buffer, GoldyResourceAccess::Write);
         assert_ne!(idx, u32::MAX);
         assert_eq!(
             goldy_task_graph_compute_node_bind_resources_raw(graph, &idx as *const u32, 1),
@@ -94,9 +98,9 @@ fn task_graph_compute_node_fills_buffer_with_42() {
             last_ffi_message()
         );
 
-        let mut readback = vec![0u8; goldy_buffer_size(buffer) as usize];
+        let mut readback = vec![0u8; goldy_parcel_byte_size(buffer) as usize];
         assert_eq!(
-            goldy_ffi::goldy_buffer_read_to_cpu(buffer, device, readback.as_mut_ptr(), readback.len()),
+            goldy_parcel_read_to_cpu(buffer, device, readback.as_mut_ptr(), readback.len()),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -113,7 +117,8 @@ fn task_graph_compute_node_fills_buffer_with_42() {
         goldy_task_graph_destroy(graph);
         goldy_compute_pipeline_destroy(pipeline);
         goldy_shader_destroy(shader);
-        goldy_buffer_destroy(buffer);
+        goldy_parcel_destroy(buffer);
+        goldy_retained_pool_destroy(pool);
         goldy_device_destroy(device);
         goldy_instance_destroy(instance);
     }

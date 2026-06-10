@@ -88,24 +88,6 @@ public sealed class TaskGraph : IDisposable
     }
 
     /// <summary>
-    /// Add a CPU→GPU buffer upload node.
-    /// </summary>
-    public void WriteBuffer(Buffer buffer, ulong offset, ReadOnlySpan<byte> data)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        unsafe
-        {
-            fixed (byte* p = data)
-            {
-                var result = NativeMethods.TaskGraphWriteBuffer(
-                    Handle, buffer.Handle, offset, (nint)p, (nuint)data.Length);
-                if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("TaskGraph write_buffer");
-            }
-        }
-    }
-
-    /// <summary>
     /// Add a CPU→GPU upload node targeting a retained buffer parcel.
     /// </summary>
     public void WriteParcel(Parcel parcel, ulong offset, ReadOnlySpan<byte> data)
@@ -158,24 +140,6 @@ public sealed class RenderPassScope : IDisposable
 
     internal RenderPassScope(TaskGraph graph) => _graph = graph;
 
-    public RenderPassScope BindBuffer(Buffer buffer, NodeAccess access)
-    {
-        EnsureOpen();
-        var result = NativeMethods.TaskGraphRenderPassBindBuffer(_graph.Handle, buffer.Handle, access);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph render_pass_bind_buffer");
-        return this;
-    }
-
-    public RenderPassScope BindBufferView(BufferView view, NodeAccess access)
-    {
-        EnsureOpen();
-        var result = NativeMethods.TaskGraphRenderPassBindBufferView(_graph.Handle, view.Handle, access);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph render_pass_bind_buffer_view");
-        return this;
-    }
-
     public RenderPassScope BindParcel(Parcel parcel, NodeAccess access)
     {
         EnsureOpen();
@@ -197,29 +161,6 @@ public sealed class RenderPassScope : IDisposable
                 var result = NativeMethods.TaskGraphRenderPassBindResourcesTyped(_graph.Handle, (nint)p, 1);
                 if (result != GoldyResult.Ok)
                     throw GoldyException.FromLastError("TaskGraph render_pass_bind_resources_typed");
-            }
-        }
-        return this;
-    }
-
-    public RenderPassScope BindResources(ReadOnlySpan<Buffer> buffers)
-    {
-        EnsureOpen();
-        unsafe
-        {
-            if (buffers.IsEmpty)
-                return this;
-
-            Span<nint> ptrs = stackalloc nint[buffers.Length];
-            for (var i = 0; i < buffers.Length; i++)
-                ptrs[i] = buffers[i].Handle;
-
-            fixed (nint* p = ptrs)
-            {
-                var result = NativeMethods.TaskGraphRenderPassBindResources(
-                    _graph.Handle, (nint)p, (uint)buffers.Length);
-                if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("TaskGraph render_pass_bind_resources");
             }
         }
         return this;
@@ -252,15 +193,6 @@ public sealed class RenderPassScope : IDisposable
         return this;
     }
 
-    public RenderPassScope SetVertexBuffer(uint slot, Buffer buffer)
-    {
-        EnsureOpen();
-        var result = NativeMethods.TaskGraphRenderPassSetVertexBuffer(_graph.Handle, slot, buffer.Handle);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph render_pass_set_vertex_buffer");
-        return this;
-    }
-
     public RenderPassScope SetVertexBuffer(uint slot, Parcel parcel)
     {
         EnsureOpen();
@@ -270,20 +202,10 @@ public sealed class RenderPassScope : IDisposable
         return this;
     }
 
-    public RenderPassScope SetVertexBuffer(uint slot, Buffer buffer, ulong offset)
+    public RenderPassScope SetIndexBuffer(Parcel parcel, IndexFormat format)
     {
         EnsureOpen();
-        var result = NativeMethods.TaskGraphRenderPassSetVertexBufferOffset(
-            _graph.Handle, slot, buffer.Handle, offset);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph render_pass_set_vertex_buffer_offset");
-        return this;
-    }
-
-    public RenderPassScope SetIndexBuffer(Buffer buffer, IndexFormat format)
-    {
-        EnsureOpen();
-        var result = NativeMethods.TaskGraphRenderPassSetIndexBuffer(_graph.Handle, buffer.Handle, format);
+        var result = NativeMethods.TaskGraphRenderPassSetIndexBuffer(_graph.Handle, parcel.Handle, format);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("TaskGraph render_pass_set_index_buffer");
         return this;
@@ -359,30 +281,12 @@ public sealed class ComputeNodeScope : IDisposable
         _wgZ = wgZ;
     }
 
-    public ComputeNodeScope BindBuffer(Buffer buffer, NodeAccess access)
-    {
-        EnsureOpen();
-        var result = NativeMethods.TaskGraphComputeNodeBindBuffer(_graph.Handle, buffer.Handle, access);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph compute_node_bind_buffer");
-        return this;
-    }
-
     public ComputeNodeScope BindParcel(Parcel parcel, NodeAccess access)
     {
         EnsureOpen();
         var result = NativeMethods.TaskGraphComputeNodeBindParcel(_graph.Handle, parcel.Handle, access);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("TaskGraph compute_node_bind_parcel");
-        return this;
-    }
-
-    public ComputeNodeScope BindBufferView(BufferView view, NodeAccess access)
-    {
-        EnsureOpen();
-        var result = NativeMethods.TaskGraphComputeNodeBindBufferView(_graph.Handle, view.Handle, access);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph compute_node_bind_buffer_view");
         return this;
     }
 

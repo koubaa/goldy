@@ -301,7 +301,7 @@ impl Parcel {
     /// Extract the backing buffer from a non-mosaic buffer parcel.
     ///
     /// Consumes the parcel and releases retained-pool bookkeeping. The returned
-    /// [`Buffer`] is independently owned (legacy bindings and scratch pools).
+    /// [`Buffer`] is independently owned (ekrano scratch pools and similar escape hatches).
     pub fn detach_buffer(mut self) -> anyhow::Result<Buffer> {
         self.release_bookkeeping();
         match self.storage {

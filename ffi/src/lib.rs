@@ -3,8 +3,6 @@
 //! This crate provides a stable C ABI for interoperating with Goldy from
 //! other languages (C#, Python via ctypes, etc.).
 
-mod buffer;
-mod buffer_pool;
 mod compute;
 mod device;
 mod error;
@@ -16,11 +14,8 @@ mod sampler;
 mod shader;
 mod surface;
 mod task_graph;
-mod texture;
 mod types;
 
-pub use buffer::*;
-pub use buffer_pool::*;
 pub use compute::*;
 pub use device::*;
 pub use error::*;
@@ -32,5 +27,4 @@ pub use sampler::*;
 pub use shader::*;
 pub use surface::*;
 pub use task_graph::*;
-pub use texture::*;
 pub use types::*;

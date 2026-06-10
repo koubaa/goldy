@@ -10,7 +10,7 @@ mod submission;
 
 use goldy::{
     types::{BackendType, BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferKind, BufferPool, ComputePipeline, Device, DeviceDescriptor, DeviceType, Instance, NodeAccess,
+    Buffer, BufferKind, BufferPool, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
     RequestAdapterOptions, ShaderModule, TaskGraph,
 };
 use submission::submission_context;
@@ -19,18 +19,6 @@ fn request_default_device(instance: &Instance) -> Device {
     instance
         .request_adapter(&RequestAdapterOptions::default())
         .expect("Failed to request adapter")
-        .request_device(&DeviceDescriptor::default())
-        .expect("Failed to create device")
-}
-
-fn request_device_preferring(instance: &Instance, preferred: DeviceType) -> Device {
-    let adapters = instance.enumerate_adapters();
-    let adapter = adapters
-        .iter()
-        .find(|a| a.device_type() == preferred)
-        .or(adapters.first())
-        .expect("No GPU adapters available");
-    adapter
         .request_device(&DeviceDescriptor::default())
         .expect("Failed to create device")
 }
@@ -132,9 +120,7 @@ fn test_compute_with_uav_buffer() {
 
     // Create buffer with initial data
     let initial_data: Vec<u32> = (0..64).collect();
-    let buffer = device
-        .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
-        .expect("Failed to create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &initial_data, BufferKind::Scattered);
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
@@ -160,15 +146,11 @@ fn test_compute_with_srv_and_uav() {
 
     // Create input buffer (read-only)
     let input_data: Vec<u32> = (0..64).collect();
-    let input_buffer = device
-        .alloc_buffer_with_data(&input_data, BufferKind::Scattered)
-        .expect("Failed to create input buffer");
+    let input_buffer = test_alloc_buffer_with_data(&device, &input_data, BufferKind::Scattered);
 
     // Create output buffer (read-write)
     let output_data: Vec<u32> = vec![0; 64];
-    let output_buffer = device
-        .alloc_buffer_with_data(&output_data, BufferKind::Scattered)
-        .expect("Failed to create output buffer");
+    let output_buffer = test_alloc_buffer_with_data(&device, &output_data, BufferKind::Scattered);
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
@@ -283,9 +265,7 @@ fn vk_api_validation_timeline_semaphore() {
     graph.node("n0", &pipeline).dispatch(1, 1, 1);
     let tv = graph.submit(&ctx).expect("submit");
 
-    let buf = device
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buffer");
+    let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
     drop(buf);
 
     ctx.wait_until(tv).expect("wait_until");
@@ -318,9 +298,7 @@ fn vk_api_validation_two_device_teardown() {
         .expect("adapter d1")
         .request_device(&DeviceDescriptor::default())
         .expect("d1");
-    let _b1 = d1
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("b1");
+    let _b1 = test_alloc_buffer(&d1, 256, BufferKind::Scattered, None, BufferFlags::empty());
     submit_minimal(&d1);
 
     let i2 = Instance::new().expect("i2");
@@ -329,288 +307,13 @@ fn vk_api_validation_two_device_teardown() {
         .expect("adapter d2")
         .request_device(&DeviceDescriptor::default())
         .expect("d2");
-    let _b2 = d2
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("b2");
+    let _b2 = test_alloc_buffer(&d2, 256, BufferKind::Scattered, None, BufferFlags::empty());
     submit_minimal(&d2);
 
     drop(d1);
     drop(i1);
     drop(d2);
     drop(i2);
-}
-
-// ─── Buffer resize (Phase 1: stable handles, realloc-copy fallback) ───────────
-
-#[test]
-fn resize_preserves_contents() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)
-        .expect("buf");
-    buf.resize_to(32).expect("resize");
-    let mut out = vec![0u8; 32];
-    buf.read_to_cpu(&device, &mut out).expect("read");
-    let words: &[u32] = bytemuck::cast_slice(&out);
-    assert_eq!(&words[..4], &[1u32, 2, 3, 4]);
-    for w in &words[4..8] {
-        assert_eq!(*w, 0, "new region should be zero");
-    }
-}
-
-#[test]
-fn resize_preserves_bindless_index() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer(16, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buf");
-    let idx = buf.resource_index(ResourceAccess::Write).expect("bindless");
-    buf.resize_to(256).expect("resize");
-    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(idx));
-}
-
-#[test]
-fn resize_down_truncates() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)
-        .expect("buf");
-    buf.resize_to(8).expect("resize down");
-    let mut out = vec![0u8; 8];
-    buf.read_to_cpu(&device, &mut out).expect("read");
-    let words: &[u32] = bytemuck::cast_slice(&out);
-    assert_eq!(words, &[10u32, 20]);
-}
-
-#[test]
-fn resize_uninitialized_skips_copy() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer_with_data(&[0xABCD_BEEFu32], BufferKind::Scattered)
-        .expect("buf");
-    buf.resize_to_uninitialized(8).expect("resize uni");
-    let mut out = vec![0u8; 8];
-    buf.read_to_cpu(&device, &mut out).expect("read");
-}
-
-#[test]
-fn buffer_pool_resize() {
-    let device = make_device();
-    let mut pool = BufferPool::new(&device, 1024).expect("pool");
-    let v1 = pool.alloc::<u32>(4).expect("v1");
-    let v2 = pool.alloc::<u32>(4).expect("v2");
-    let i1 = v1.resource_index(ResourceAccess::Write).unwrap();
-    let i2 = v2.resource_index(ResourceAccess::Write).unwrap();
-    pool.resize(2048).expect("resize pool");
-    let _v3 = pool.alloc::<u32>(8).expect("v3");
-    assert_eq!(v1.resource_index(ResourceAccess::Write), Some(i1));
-    assert_eq!(v2.resource_index(ResourceAccess::Write), Some(i2));
-}
-
-#[test]
-fn new_with_capacity_hint_smoke() {
-    let device = make_device();
-    let b = device
-        .alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
-        .expect("b");
-    assert_eq!(b.size(), 16);
-    assert!(b.allocated_size() >= 4096, "expected oversize allocation");
-}
-
-#[test]
-fn oversize_resize_within_capacity_preserves_and_zeros_tail() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
-        .expect("buf");
-    let idx = buf.resource_index(ResourceAccess::Write).expect("bindless");
-    buf.write(0, &[0xabu8; 16]).expect("seed");
-    buf.resize_to(256).expect("grow within cap");
-    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(idx));
-    assert!(buf.size() >= 256);
-    let mut got = vec![0u8; 256];
-    buf.read_to_cpu(&device, &mut got).expect("read");
-    assert_eq!(&got[..16], &[0xabu8; 16]);
-    assert!(got[16..].iter().all(|&x| x == 0));
-}
-
-#[test]
-fn oversize_resize_beyond_capacity_falls_back_and_preserves() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer_with_capacity(16, 256, BufferKind::Scattered, BufferFlags::empty())
-        .expect("buf");
-    buf.write(0, &[7u8; 16]).expect("w");
-    buf.resize_to(512).expect("grow past cap");
-    assert!(buf.allocated_size() >= 512);
-    let mut got = vec![0u8; 512];
-    buf.read_to_cpu(&device, &mut got).expect("r");
-    assert_eq!(&got[..16], &[7u8; 16]);
-}
-
-#[test]
-fn hint_unused_above_does_not_corrupt_prefix() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
-        .expect("buf");
-    buf.write(0, &[0x11u8; 64]).expect("w");
-    buf.hint_unused_above(32);
-    let mut got = vec![0u8; 32];
-    buf.read_to_cpu(&device, &mut got).expect("r");
-    assert_eq!(&got[..], &[0x11u8; 32]);
-}
-
-#[cfg(all(target_os = "macos", feature = "metal"))]
-#[test]
-fn device_capabilities_metal_reports_constant_resize() {
-    use goldy::{types::BufferResizeCost, BackendType, Instance};
-    let inst = Instance::new().expect("i");
-    let device = request_device_preferring(&inst, goldy::DeviceType::IntegratedGpu);
-    let _ctx = device.create_context().expect("context");
-    assert_eq!(device.backend_type(), BackendType::Metal);
-    let caps = device.capabilities();
-    assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
-    assert!(caps.buffer_decommit_supported);
-}
-
-#[cfg(feature = "vulkan")]
-#[test]
-fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
-    use goldy::{types::BufferResizeCost, BackendType, Instance};
-    let inst = Instance::new().expect("i");
-    let device = request_device_preferring(&inst, goldy::DeviceType::DiscreteGpu);
-    if device.backend_type() != BackendType::Vulkan {
-        return;
-    }
-    let caps = device.capabilities();
-    if caps.buffer_resize_cost == BufferResizeCost::PageBind {
-        assert_eq!(caps.buffer_page_size, 64 * 1024);
-        assert!(caps.buffer_decommit_supported);
-    }
-}
-
-#[cfg(feature = "dx12")]
-#[test]
-fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
-    use goldy::{types::BufferResizeCost, BackendType, Instance};
-    // With multiple backends enabled, `GOLDY_BACKEND` may select a non-DX12 API; skip in that case.
-    let inst = Instance::new().expect("i");
-    let device = request_device_preferring(&inst, goldy::DeviceType::DiscreteGpu);
-    if device.backend_type() != BackendType::Dx12 {
-        return;
-    }
-    let caps = device.capabilities();
-    if caps.buffer_resize_cost == BufferResizeCost::PageBind {
-        assert_eq!(caps.buffer_page_size, 64 * 1024);
-        assert!(caps.buffer_decommit_supported);
-    }
-}
-
-#[cfg(any(feature = "vulkan", feature = "dx12"))]
-#[test]
-fn sparse_backend_oversize_resize_and_hint_within_capacity() {
-    use goldy::{types::BufferResizeCost, Instance};
-    let inst = Instance::new().expect("i");
-    let device = request_device_preferring(&inst, goldy::DeviceType::DiscreteGpu);
-    if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
-        return;
-    }
-    let mut buf = device
-        .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
-        .expect("buf");
-    buf.write(0, &[0x11u8; 64]).expect("w");
-    buf.resize_to(256).expect("grow within cap");
-    let mut got = vec![0u8; 256];
-    buf.read_to_cpu(&device, &mut got).expect("r");
-    assert_eq!(&got[..64], &[0x11u8; 64]);
-    assert!(got[64..].iter().all(|&x| x == 0));
-
-    buf.hint_unused_above(32);
-    let mut prefix = vec![0u8; 32];
-    buf.read_to_cpu(&device, &mut prefix).expect("r2");
-    assert_eq!(&prefix[..], &[0x11u8; 32]);
-}
-
-/// DX12 reserved-buffer path: cross tile boundaries, `hint_unused_above`, regrowth, stable bindless, compute.
-#[cfg(all(feature = "dx12", target_os = "windows"))]
-#[test]
-fn dx12_reserved_buffer_resize_compute_smoke() {
-    use goldy::types::BufferResizeCost;
-    const SMOKY_SHADER: &str = r#"
-import goldy_exp;
-
-[goldy_compute]
-[numthreads(16, 1, 1)]
-void cs_main(Scattered<uint> data, ThreadId id) {
-    data[id.x] = data[id.x] * 2;
-}
-"#;
-    let inst = Instance::new().expect("i");
-    let device = request_device_preferring(&inst, DeviceType::DiscreteGpu);
-    let ctx = device.create_context().expect("context");
-    if device.backend_type() != BackendType::Dx12 {
-        return;
-    }
-    if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
-        return;
-    }
-
-    let mut buf = device
-        .alloc_buffer_with_capacity(256, 4 * 64 * 1024, BufferKind::Scattered, BufferFlags::empty())
-        .expect("buf");
-    let bindless = buf.resource_index(ResourceAccess::Write).expect("bindless");
-
-    let initial: Vec<u32> = (1..=16).collect();
-    buf.write(0, bytemuck::cast_slice(&initial)).expect("w");
-
-    buf.resize_to(200 * 1024).expect("grow across tiles");
-    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
-
-    let mut read = vec![0u32; 16];
-    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
-        .expect("read");
-    assert_eq!(read, initial);
-
-    let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
-    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
-    graph.dispatch(&ctx).expect("dispatch");
-
-    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
-        .expect("read2");
-    for (i, &v) in read.iter().enumerate() {
-        assert_eq!(v, (i as u32 + 1) * 2, "after first dispatch[{i}]");
-    }
-
-    // Shrink to one tile, decommit reserved tail with `hint_unused_above`, then grow again.
-    buf.resize_to(64 * 1024).expect("shrink to one tile");
-    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
-    buf.hint_unused_above(64 * 1024);
-    buf.resize_to(200 * 1024).expect("grow after decommit hint");
-    assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
-
-    let initial2: Vec<u32> = (0..16).collect();
-    buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
-    let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
-    graph.dispatch(&ctx).expect("dispatch2");
-
-    buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
-        .expect("read3");
-    for (i, &v) in read.iter().enumerate() {
-        assert_eq!(v, (i as u32) * 2, "after second dispatch[{i}]");
-    }
-}
-
-#[test]
-fn hint_unused_above_smoke() {
-    let device = make_device();
-    let mut buf = device
-        .alloc_buffer(64, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buf");
-    buf.hint_unused_above(32);
 }
 
 // ─── Buffer read_to_cpu / clear tests ────────────────────────────────────────
@@ -626,9 +329,7 @@ fn test_compute_write_and_readback() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let initial: Vec<u32> = (0..64).collect();
-    let buffer = device
-        .alloc_buffer_with_data(&initial, BufferKind::Scattered)
-        .expect("create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &initial, BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph
@@ -652,9 +353,7 @@ fn test_buffer_clear_standalone() {
     let device = make_device();
 
     let data: Vec<u32> = vec![0xDEAD_BEEF; 64];
-    let buffer = device
-        .alloc_buffer_with_data(&data, BufferKind::Scattered)
-        .expect("create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
     buffer.clear(&device, 0, 0).expect("clear (full)");
 
@@ -675,9 +374,7 @@ fn test_buffer_clear_partial() {
     // 64 u32s = 256 bytes. Clear bytes 64–128 (elements 16–31).
     let sentinel = 0xDEAD_BEEFu32;
     let data: Vec<u32> = vec![sentinel; 64];
-    let buffer = device
-        .alloc_buffer_with_data(&data, BufferKind::Scattered)
-        .expect("create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
     buffer.clear(&device, 64, 64).expect("partial clear");
 
@@ -699,9 +396,7 @@ fn test_buffer_clear_to_end() {
     // Fill with sentinel, then clear from element 32 to end (offset 128, size 0).
     let sentinel = 0xCAFE_BABEu32;
     let data: Vec<u32> = vec![sentinel; 64];
-    let buffer = device
-        .alloc_buffer_with_data(&data, BufferKind::Scattered)
-        .expect("create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
     buffer.clear(&device, 128, 0).expect("clear to end");
 
@@ -728,12 +423,8 @@ fn test_compute_batched_clear_before_dispatch() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let input: Vec<u32> = vec![0xDEAD_BEEF; 64];
-    let input_buf = device
-        .alloc_buffer_with_data(&input, BufferKind::Scattered)
-        .expect("input buffer");
-    let output_buf = device
-        .alloc_buffer_with_data(&vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered)
-        .expect("output buffer");
+    let input_buf = test_alloc_buffer_with_data(&device, &input, BufferKind::Scattered);
+    let output_buf = test_alloc_buffer_with_data(&device, &vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph.clear_buffer(&input_buf, 0, 0);
@@ -770,12 +461,8 @@ fn test_compute_clear_between_dispatches() {
     let inc_pipeline = ComputePipeline::new(&device, &inc_shader).expect("inc pipeline");
 
     // Input with 42s; output starts empty.
-    let input_buf = device
-        .alloc_buffer_with_data(&vec![42u32; 64], BufferKind::Scattered)
-        .expect("input");
-    let output_buf = device
-        .alloc_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
-        .expect("output");
+    let input_buf = test_alloc_buffer_with_data(&device, &vec![42u32; 64], BufferKind::Scattered);
+    let output_buf = test_alloc_buffer_with_data(&device, &vec![0u32; 64], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph
@@ -817,14 +504,10 @@ fn test_compute_dispatch_indirect() {
 
     // Dispatch args: 1 workgroup in each dimension (3 × u32 = 12 bytes).
     let args: [u32; 3] = [1, 1, 1];
-    let args_buf = device
-        .alloc_buffer_with_data(&args, BufferKind::Scattered)
-        .expect("args buffer");
+    let args_buf = test_alloc_buffer_with_data(&device, &args, BufferKind::Scattered);
 
     let data: Vec<u32> = (0..64).collect();
-    let data_buf = device
-        .alloc_buffer_with_data(&data, BufferKind::Scattered)
-        .expect("data buffer");
+    let data_buf = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph
@@ -851,15 +534,11 @@ fn test_dispatch_indirect_invalid_buffer() {
     let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let data_buf = device
-        .alloc_buffer_with_data(&vec![1u32; 64], BufferKind::Scattered)
-        .expect("data");
+    let data_buf = test_alloc_buffer_with_data(&device, &vec![1u32; 64], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     {
-        let temp = device
-            .alloc_buffer_with_data(&[1u32, 1, 1], BufferKind::Scattered)
-            .expect("temp buffer");
+        let temp = test_alloc_buffer_with_data(&device, &[1u32, 1, 1], BufferKind::Scattered);
         graph
             .node("indirect", &pipeline)
             .bind_resources(&[&data_buf])
@@ -886,24 +565,12 @@ fn test_compute_many_resource_slots() {
 
     // Each input buffer contains a constant value; OUT[i] = sum = 1+2+3+4+5 = 15.
     const N: usize = 16;
-    let a = device
-        .alloc_buffer_with_data(&[1u32; N], BufferKind::Scattered)
-        .expect("a");
-    let b = device
-        .alloc_buffer_with_data(&[2u32; N], BufferKind::Scattered)
-        .expect("b");
-    let c = device
-        .alloc_buffer_with_data(&[3u32; N], BufferKind::Scattered)
-        .expect("c");
-    let d = device
-        .alloc_buffer_with_data(&[4u32; N], BufferKind::Scattered)
-        .expect("d");
-    let e = device
-        .alloc_buffer_with_data(&[5u32; N], BufferKind::Scattered)
-        .expect("e");
-    let out = device
-        .alloc_buffer_with_data(&[0u32; N], BufferKind::Scattered)
-        .expect("out");
+    let a = test_alloc_buffer_with_data(&device, &[1u32; N], BufferKind::Scattered);
+    let b = test_alloc_buffer_with_data(&device, &[2u32; N], BufferKind::Scattered);
+    let c = test_alloc_buffer_with_data(&device, &[3u32; N], BufferKind::Scattered);
+    let d = test_alloc_buffer_with_data(&device, &[4u32; N], BufferKind::Scattered);
+    let e = test_alloc_buffer_with_data(&device, &[5u32; N], BufferKind::Scattered);
+    let out = test_alloc_buffer_with_data(&device, &[0u32; N], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph
@@ -969,9 +636,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
         4
     ];
 
-    let buffer = device
-        .alloc_buffer_with_data(&particles, BufferKind::Scattered)
-        .expect("Failed to create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &particles, BufferKind::Scattered);
 
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
@@ -1005,9 +670,7 @@ fn test_buffer_view_copy_between_sub_regions() {
     }
     // Second half: zeros (destination)
 
-    let pool_buf = device
-        .alloc_buffer_with_data(&data, BufferKind::Scattered)
-        .expect("create pool buffer");
+    let pool_buf = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
     let view_a = pool_buf.create_view(0, (N * 4) as u64, Some(4)).expect("create view A");
     let view_b = pool_buf
@@ -1065,9 +728,7 @@ fn test_buffer_view_isolation() {
         *slot = (i + 1) as u32; // second half: values to double
     }
 
-    let pool_buf = device
-        .alloc_buffer_with_data(&data, BufferKind::Scattered)
-        .expect("create pool buffer");
+    let pool_buf = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
     // View only the second half
     let view = pool_buf
@@ -1223,9 +884,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile positive_mod shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let buf = device
-        .alloc_buffer_with_data(&[0.0f32; 7], BufferKind::Scattered)
-        .expect("create output buffer");
+    let buf = test_alloc_buffer_with_data(&device, &[0.0f32; 7], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
@@ -1307,9 +966,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile billboard shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let buf = device
-        .alloc_buffer_with_data(&[0.0f32; 9], BufferKind::Scattered)
-        .expect("create output buffer");
+    let buf = test_alloc_buffer_with_data(&device, &[0.0f32; 9], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
@@ -1379,12 +1036,8 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     impl goldy::StructuredBufferElement for Pair {}
 
     let input_data: Vec<Pair> = (0..8).map(|i| Pair { a: i + 1, b: i + 10 }).collect();
-    let input_buf = device
-        .alloc_buffer_with_data(&input_data, BufferKind::Scattered)
-        .expect("input buffer");
-    let output_buf = device
-        .alloc_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
-        .expect("output buffer");
+    let input_buf = test_alloc_buffer_with_data(&device, &input_data, BufferKind::Scattered);
+    let output_buf = test_alloc_buffer_with_data(&device, &[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered);
 
     let srv = input_buf.resource_index(ResourceAccess::Read).expect("srv");
     let uav = output_buf.resource_index(ResourceAccess::Write).expect("uav");
@@ -1452,11 +1105,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
         } else {
             vec![0u32; ELEM_COUNT]
         };
-        buffers.push(
-            device
-                .alloc_buffer_with_data(&data, BufferKind::Scattered)
-                .unwrap_or_else(|e| panic!("Failed to create buffer {}: {}", i, e)),
-        );
+        buffers.push(test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered));
     }
 
     let workgroups = (ELEM_COUNT as u32).div_ceil(64);
@@ -1470,7 +1119,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     let mut output = vec![0u8; BUF_SIZE as usize];
     buffers[NUM_BUFFERS - 1]
         .read_to_cpu(&device, &mut output)
-        .expect("read_to_cpu");
+        .expect("readback");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
     for i in (0..ELEM_COUNT).step_by(1024) {
@@ -1507,15 +1156,11 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 
     let width = 16u32;
     let height = 16u32;
-    let texture = device
-        .alloc_texture(
-            width,
+    let texture = test_alloc_texture(&device, width,
             height,
             TextureFormat::Rgba8Unorm,
             TextureKind::Direct,
-            TextureFlags::COPY_SRC,
-        )
-        .expect("texture");
+            TextureFlags::COPY_SRC,);
 
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
@@ -1572,14 +1217,10 @@ fn test_cpu_readable_compute_write_and_read() {
     const N: usize = 64;
     let initial: Vec<u32> = (0..N as u32).collect();
 
-    let buffer = device
-        .alloc_buffer_with_bytes_stride_and_flags(
-            bytemuck::cast_slice(&initial),
+    let buffer = test_alloc_buffer_with_bytes_stride_and_flags(&device, bytemuck::cast_slice(&initial),
             BufferKind::Scattered,
             size_of::<u32>() as u32,
-            BufferFlags::CPU_READABLE,
-        )
-        .expect("create CPU_READABLE buffer");
+            BufferFlags::CPU_READABLE,);
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
@@ -1607,30 +1248,18 @@ fn test_write_buffer_reuse_across_submissions() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     const N: usize = 16;
-    let mid = device
-        .alloc_buffer(
-            (N * core::mem::size_of::<u32>()) as u64,
+    let mid = test_alloc_buffer(&device, (N * core::mem::size_of::<u32>()) as u64,
             BufferKind::Scattered,
             None,
-            BufferFlags::empty(),
-        )
-        .expect("mid buffer");
-    let out_a = device
-        .alloc_buffer(
-            (N * core::mem::size_of::<u32>()) as u64,
+            BufferFlags::empty(),);
+    let out_a = test_alloc_buffer(&device, (N * core::mem::size_of::<u32>()) as u64,
             BufferKind::Scattered,
             None,
-            BufferFlags::empty(),
-        )
-        .expect("out_a");
-    let out_b = device
-        .alloc_buffer(
-            (N * core::mem::size_of::<u32>()) as u64,
+            BufferFlags::empty(),);
+    let out_b = test_alloc_buffer(&device, (N * core::mem::size_of::<u32>()) as u64,
             BufferKind::Scattered,
             None,
-            BufferFlags::empty(),
-        )
-        .expect("out_b");
+            BufferFlags::empty(),);
 
     let idx_in = mid.resource_index(ResourceAccess::Write).expect("mid bindless");
     let idx_out_a = out_a.resource_index(ResourceAccess::Write).expect("out_a bindless");
@@ -1687,14 +1316,10 @@ fn test_cpu_readable_cpu_write_read_roundtrip() {
     const N: usize = 16;
     let initial: Vec<u32> = vec![0xABCD_1234u32; N];
 
-    let buffer = device
-        .alloc_buffer_with_bytes_stride_and_flags(
-            bytemuck::cast_slice(&initial),
+    let buffer = test_alloc_buffer_with_bytes_stride_and_flags(&device, bytemuck::cast_slice(&initial),
             BufferKind::Scattered,
             size_of::<u32>() as u32,
-            BufferFlags::CPU_READABLE,
-        )
-        .expect("create CPU_READABLE buffer");
+            BufferFlags::CPU_READABLE,);
 
     let new_values: Vec<u32> = (100..100 + N as u32).collect();
     buffer.write(0, bytemuck::cast_slice(&new_values)).expect("write");
@@ -1736,9 +1361,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = device
-        .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
-        .expect("out");
+    let out = test_alloc_buffer_with_data(&device, &[0u32; 1], BufferKind::Scattered);
 
     const EXPECTED: u32 = 42;
     let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
@@ -1772,9 +1395,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = device
-        .alloc_buffer_with_data(&[0xDEAD_BEEFu32; 1], BufferKind::Scattered)
-        .expect("out");
+    let out = test_alloc_buffer_with_data(&device, &[0xDEAD_BEEFu32; 1], BufferKind::Scattered);
 
     let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
     let mut graph = TaskGraph::new();
@@ -1807,9 +1428,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = device
-        .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
-        .expect("out");
+    let out = test_alloc_buffer_with_data(&device, &[0u32; 1], BufferKind::Scattered);
 
     let heap_idx = out.resource_index(ResourceAccess::Write).unwrap();
     let mut graph = TaskGraph::new();
@@ -1848,9 +1467,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = device
-        .alloc_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
-        .expect("out");
+    let out = test_alloc_buffer_with_data(&device, &[0u32; 1], BufferKind::Scattered);
 
     #[allow(clippy::approx_constant)]
     let value: f32 = 3.14159;
@@ -1892,9 +1509,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let out = device
-        .alloc_buffer_with_data(&[0u32; 2], BufferKind::Scattered)
-        .expect("out");
+    let out = test_alloc_buffer_with_data(&device, &[0u32; 2], BufferKind::Scattered);
 
     const A: u32 = 0xABCD;
     const B: u32 = 0x1234;
@@ -1935,12 +1550,8 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
 
     const N: usize = 64;
     let input: Vec<u32> = (0..N as u32).collect();
-    let inp = device
-        .alloc_buffer_with_data(&input, BufferKind::Scattered)
-        .expect("inp");
-    let out = device
-        .alloc_buffer_with_data(&[0u32; N], BufferKind::Scattered)
-        .expect("out");
+    let inp = test_alloc_buffer_with_data(&device, &input, BufferKind::Scattered);
+    let out = test_alloc_buffer_with_data(&device, &[0u32; N], BufferKind::Scattered);
 
     const OFFSET: u32 = 100;
 
@@ -1988,9 +1599,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     graph.node("n0", &pipeline).dispatch(1, 1, 1);
     let tv = graph.submit(&ctx).expect("submit");
 
-    let buf = device
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buffer");
+    let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
 
     let pending_after_drop = {
         drop(buf);
@@ -2021,9 +1630,7 @@ fn flush_deferred_deletions_reclaims_slots_after_gpu_idle() {
 
     // Allocate, submit some work, then drop the buffer so its slot enters
     // the pending-free list.
-    let buf = device
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buffer");
+    let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
     let tv = {
         let mut graph = TaskGraph::new();
         graph.submit(&ctx).expect("submit empty work")
@@ -2057,9 +1664,7 @@ fn flush_deferred_deletions_respects_gpu_progress() {
     };
 
     // Drop a buffer while GPU may still be in flight.
-    let buf = device
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buffer");
+    let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
     drop(buf);
 
     // Without waiting for the GPU, calling flush is safe (no panic/crash).
@@ -2145,9 +1750,7 @@ fn stride_validation_matching_uint_passes() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let initial: Vec<u32> = (0..64).collect();
-    let buffer = device
-        .alloc_buffer_with_data(&initial, BufferKind::Scattered)
-        .expect("create buffer");
+    let buffer = test_alloc_buffer_with_data(&device, &initial, BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
@@ -2171,9 +1774,7 @@ fn stride_validation_mismatched_uint_vs_stride16_fails() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let data = vec![0u8; 64 * 16];
-    let buffer = device
-        .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
-        .expect("create buffer with stride 16");
+    let buffer = test_alloc_buffer_with_bytes_stride(&device, &data, BufferKind::Scattered, 16);
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
@@ -2200,9 +1801,7 @@ fn stride_validation_disabled_allows_mismatch() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let data = vec![0u8; 64 * 16];
-    let buffer = device
-        .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
-        .expect("create buffer with stride 16");
+    let buffer = test_alloc_buffer_with_bytes_stride(&device, &data, BufferKind::Scattered, 16);
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
@@ -2225,14 +1824,10 @@ fn stride_validation_multi_binding_detects_second_slot_mismatch() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let params_data = vec![0u8; 16];
-    let params = device
-        .alloc_buffer_with_bytes_stride(&params_data, BufferKind::Broadcast, 16)
-        .expect("create broadcast buffer with stride 16");
+    let params = test_alloc_buffer_with_bytes_stride(&device, &params_data, BufferKind::Broadcast, 16);
 
     let wrong_data = vec![0u8; 64 * 4];
-    let data_buf = device
-        .alloc_buffer_with_bytes_stride(&wrong_data, BufferKind::Scattered, 4)
-        .expect("create data buf with stride 4");
+    let data_buf = test_alloc_buffer_with_bytes_stride(&device, &wrong_data, BufferKind::Scattered, 4);
 
     let mut graph = TaskGraph::new();
     graph
@@ -2264,14 +1859,10 @@ fn stride_validation_multi_binding_all_correct_passes() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     let params_data = vec![0u8; 16];
-    let params = device
-        .alloc_buffer_with_bytes_stride(&params_data, BufferKind::Broadcast, 16)
-        .expect("create broadcast buffer with stride 16");
+    let params = test_alloc_buffer_with_bytes_stride(&device, &params_data, BufferKind::Broadcast, 16);
 
     let data = vec![0u8; 64 * 16];
-    let data_buf = device
-        .alloc_buffer_with_bytes_stride(&data, BufferKind::Scattered, 16)
-        .expect("create data buf with stride 16");
+    let data_buf = test_alloc_buffer_with_bytes_stride(&device, &data, BufferKind::Scattered, 16);
 
     let mut graph = TaskGraph::new();
     graph
@@ -2292,6 +1883,80 @@ fn stride_validation_multi_binding_all_correct_passes() {
 // ============================================================================
 
 use goldy::{BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy};
+
+fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
+    device: &goldy::Device,
+    data: &[T],
+    kind: goldy::BufferKind,
+) -> goldy::Buffer {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_buffer_with_data(data, kind)
+        .expect("acquire_buffer_with_data")
+        .detach_buffer()
+        .expect("detach_buffer")
+}
+
+fn test_alloc_buffer(
+    device: &goldy::Device,
+    size: u64,
+    kind: goldy::BufferKind,
+    stride: Option<u32>,
+    flags: goldy::types::BufferFlags,
+) -> goldy::Buffer {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_buffer(size, kind, stride, flags, None)
+        .expect("acquire_buffer")
+        .detach_buffer()
+        .expect("detach_buffer")
+}
+
+fn test_alloc_texture(
+    device: &goldy::Device,
+    width: u32,
+    height: u32,
+    format: goldy::types::TextureFormat,
+    kind: goldy::types::TextureKind,
+    flags: goldy::types::TextureFlags,
+) -> goldy::Texture {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_texture(width, height, format, kind, flags, None)
+        .expect("acquire_texture")
+        .detach_texture()
+        .expect("detach_texture")
+}
+
+fn test_alloc_buffer_with_bytes_stride(
+    device: &goldy::Device,
+    data: &[u8],
+    kind: goldy::BufferKind,
+    stride: u32,
+) -> goldy::Buffer {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_buffer_with_bytes_stride(data, kind, stride)
+        .expect("acquire_buffer_with_bytes_stride")
+        .detach_buffer()
+        .expect("detach_buffer")
+}
+
+fn test_alloc_buffer_with_bytes_stride_and_flags(
+    device: &goldy::Device,
+    data: &[u8],
+    kind: goldy::BufferKind,
+    stride: u32,
+    flags: goldy::types::BufferFlags,
+) -> goldy::Buffer {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_buffer_with_bytes_stride_and_flags(data, kind, stride, flags)
+        .expect("acquire_buffer_with_bytes_stride_and_flags")
+        .detach_buffer()
+        .expect("detach_buffer")
+}
+
 
 fn small_config() -> TransientAllocatorConfig {
     TransientAllocatorConfig {
@@ -2448,9 +2113,7 @@ fn test_transient_buffer_write_then_copy() {
     const N: usize = 64;
     let byte_size = (N * core::mem::size_of::<u32>()) as u64;
 
-    let output = device
-        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let output = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
     let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
 
     let mut graph = TaskGraph::new();
@@ -2502,14 +2165,10 @@ fn test_regular_buffer_write_then_copy() {
     const N: usize = 64;
     let byte_size = (N * core::mem::size_of::<u32>()) as u64;
 
-    let scratch = device
-        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("scratch buffer");
+    let scratch = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
     let scratch_uav = scratch.resource_index(ResourceAccess::Write).expect("scratch UAV");
 
-    let output = device
-        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let output = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
     let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
 
     let mut graph = TaskGraph::new();
@@ -2572,12 +2231,8 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     const N: usize = 64;
     let byte_size = (N * core::mem::size_of::<u32>()) as u64;
 
-    let bridge = device
-        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("bridge buffer");
-    let output = device
-        .alloc_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let bridge = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
+    let output = test_alloc_buffer(&device, byte_size, BufferKind::Scattered, None, BufferFlags::empty());
     let output_uav = output.resource_index(ResourceAccess::Write).expect("output UAV");
 
     let mut graph = TaskGraph::new();
@@ -2830,9 +2485,7 @@ fn test_wave_inclusive_scan_uniform_64() {
     let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_UNIFORM).expect("compile WAVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -2858,9 +2511,7 @@ fn test_wave_inclusive_scan_ramp_64() {
     let shader = ShaderModule::from_slang(&device, WAVE_SCAN_64_RAMP).expect("compile WAVE_SCAN_64_RAMP");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -2884,9 +2535,7 @@ fn test_wave_inclusive_scan_uniform_256() {
     let shader = ShaderModule::from_slang(&device, WAVE_SCAN_256_UNIFORM).expect("compile WAVE_SCAN_256_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(256 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 256 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -2912,9 +2561,7 @@ fn test_workgroup_reduce_uint_correct() {
     let shader = ShaderModule::from_slang(&device, REDUCE_64_UNIFORM).expect("compile REDUCE_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -2939,9 +2586,7 @@ fn test_workgroup_inclusive_scan_uint_correct() {
         ShaderModule::from_slang(&device, INCLUSIVE_SCAN_64_UNIFORM).expect("compile INCLUSIVE_SCAN_64_UNIFORM");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -2967,9 +2612,7 @@ fn test_workgroup_broadcast_correct() {
     let shader = ShaderModule::from_slang(&device, BROADCAST_64).expect("compile BROADCAST_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -2990,9 +2633,7 @@ fn test_workgroup_upper_bound_linear() {
     let shader = ShaderModule::from_slang(&device, UPPER_BOUND_64).expect("compile UPPER_BOUND_64");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let out = device
-        .alloc_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("output buffer");
+    let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -3059,15 +2700,11 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let ctx = submission_context(&device);
 
     // Check that the device supports DirectInterpolated (all backends should).
-    let tex = device
-        .alloc_texture(
-            W,
+    let tex = test_alloc_texture(&device, W,
             H,
             TextureFormat::Rgba8Unorm,
             TextureKind::DirectInterpolated,
-            TextureFlags::empty(),
-        )
-        .expect("create DirectInterpolated texture");
+            TextureFlags::empty(),);
 
     let storage_idx = tex
         .resource_index(ResourceAccess::Write)
@@ -3091,9 +2728,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 
     // Read pass (SRV + sampler).
     let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
-    let out = device
-        .alloc_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("out buffer");
+    let out = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
     let mut graph_enc2 = TaskGraph::new();
@@ -3147,9 +2782,7 @@ fn two_contexts_reclaim_independently() {
     let _ctx_b = submission_context(&device);
 
     // Allocate a buffer and do some work on ctx_a.
-    let buf = device
-        .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
-        .expect("buffer");
+    let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
     let tv_a = {
         let mut graph = TaskGraph::new();
         graph.submit(&ctx_a).expect("ctx_a submit")
@@ -3184,13 +2817,9 @@ fn two_contexts_both_submit_and_complete() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("compute pipeline");
 
     let data_a: Vec<u32> = (0..64).collect();
-    let buf_a = device
-        .alloc_buffer_with_data(&data_a, BufferKind::Scattered)
-        .expect("buf_a");
+    let buf_a = test_alloc_buffer_with_data(&device, &data_a, BufferKind::Scattered);
     let data_b: Vec<u32> = (100..164).collect();
-    let buf_b = device
-        .alloc_buffer_with_data(&data_b, BufferKind::Scattered)
-        .expect("buf_b");
+    let buf_b = test_alloc_buffer_with_data(&device, &data_b, BufferKind::Scattered);
 
     // Submit from both contexts.
     let mut graph_enc_a = TaskGraph::new();

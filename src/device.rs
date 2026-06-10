@@ -649,6 +649,7 @@ impl Device {
     }
 
     /// Allocate a buffer initialized with typed data (element stride from `T`).
+    #[cfg(test)]
     pub(crate) fn alloc_buffer_with_data<T: crate::buffer::StructuredBufferElement>(
         &self,
         data: &[T],
@@ -659,12 +660,8 @@ impl Device {
         self.alloc_buffer_with_bytes_stride(bytes, access, stride)
     }
 
-    /// Allocate a buffer initialized with raw bytes (element stride 1).
-    pub(crate) fn alloc_buffer_with_bytes(&self, data: &[u8], access: BufferKind) -> anyhow::Result<crate::buffer::Buffer> {
-        self.alloc_buffer_with_bytes_stride(data, access, 1)
-    }
-
     /// Allocate a buffer initialized with raw bytes and a custom element stride.
+    #[cfg(test)]
     pub(crate) fn alloc_buffer_with_bytes_stride(
         &self,
         data: &[u8],

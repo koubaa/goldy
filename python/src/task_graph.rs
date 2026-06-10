@@ -1,7 +1,5 @@
 //! Python wrappers for TaskGraph and render-pass recording.
 
-use crate::buffer::PyBuffer;
-use crate::buffer_pool::PyBufferView;
 use crate::compute::PyComputePipeline;
 use crate::device::PyDevice;
 use crate::error::{GoldyError, IntoPyResult};
@@ -141,15 +139,6 @@ impl PyTaskGraph {
         Ok(())
     }
 
-    /// Upload CPU bytes into a buffer via the task graph.
-    fn write_buffer(&self, buffer: &PyBuffer, offset: u64, data: &[u8]) -> PyResult<()> {
-        self.ensure_no_active_recorder()?;
-        self.inner
-            .borrow_mut()
-            .write_buffer(buffer.inner.as_ref(), offset, data.to_vec());
-        Ok(())
-    }
-
     /// Upload CPU bytes into a retained buffer parcel via the task graph.
     fn write_parcel(&self, parcel: &PyParcel, offset: u64, data: &[u8]) -> PyResult<()> {
         self.ensure_no_active_recorder()?;
@@ -239,30 +228,6 @@ pub struct PyRenderPass {
 
 #[pymethods]
 impl PyRenderPass {
-    fn bind_buffer<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        buffer: &PyBuffer,
-        access: PyNodeAccess,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.bind_buffer(buffer.inner.as_ref(), access.into());
-        })?;
-        Ok(slf)
-    }
-
-    fn bind_buffer_view<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        view: &PyBufferView,
-        access: PyNodeAccess,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.bind_buffer_view(&view.inner, access.into());
-        })?;
-        Ok(slf)
-    }
-
     fn bind_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
@@ -312,7 +277,7 @@ impl PyRenderPass {
         Ok(slf)
     }
 
-    /// Bind a scattered buffer resource by bindless index (from `BufferView.resource_index`).
+    /// Bind a scattered buffer resource by bindless index (from `Parcel.resource_index`).
     fn bind_resource_index<'py>(slf: PyRef<'py, Self>, py: Python<'py>, index: u32) -> PyResult<PyRef<'py, Self>> {
         let handle = ResourceHandle::new(ResourceCategory::Scattered, index);
         slf.graph.borrow(py).with_active_pass(|pass| {
@@ -346,18 +311,6 @@ impl PyRenderPass {
         Ok(slf)
     }
 
-    fn set_vertex_buffer<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        slot: u32,
-        buffer: &PyBuffer,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.set_vertex_buffer(slot, buffer.inner.as_ref());
-        })?;
-        Ok(slf)
-    }
-
     fn set_vertex_buffer_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
@@ -370,28 +323,14 @@ impl PyRenderPass {
         Ok(slf)
     }
 
-    #[pyo3(signature = (slot, buffer, offset))]
-    fn set_vertex_buffer_offset<'py>(
+    fn set_index_buffer_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        slot: u32,
-        buffer: &PyBuffer,
-        offset: u64,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.set_vertex_buffer_offset(slot, buffer.inner.as_ref(), offset);
-        })?;
-        Ok(slf)
-    }
-
-    fn set_index_buffer<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        buffer: &PyBuffer,
+        parcel: &PyParcel,
         format: PyIndexFormat,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.set_index_buffer(buffer.inner.as_ref(), format.into());
+            pass.set_index_buffer(parcel.inner.as_ref(), format.into());
         })?;
         Ok(slf)
     }
@@ -478,18 +417,6 @@ impl PyRenderPass {
         Ok(slf)
     }
 
-    fn bind_resources<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        buffers: Vec<PyRef<'py, PyBuffer>>,
-    ) -> PyResult<PyRef<'py, Self>> {
-        let refs: Vec<&goldy::Buffer> = buffers.iter().map(|b| b.inner.as_ref()).collect();
-        slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.bind_resources(&refs);
-        })?;
-        Ok(slf)
-    }
-
     fn __enter__(slf: Py<Self>) -> Py<Self> {
         slf
     }
@@ -543,30 +470,6 @@ impl PyComputeNode {
         slf.graph.borrow(py).with_active_compute(|node| {
             let view = parcel.inner.view(goldy::MosaicSlot(slot));
             node.bind_buffer_view(view, access.into());
-        })?;
-        Ok(slf)
-    }
-
-    fn bind_buffer<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        buffer: &PyBuffer,
-        access: PyNodeAccess,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.graph.borrow(py).with_active_compute(|node| {
-            node.bind_buffer(buffer.inner.as_ref(), access.into());
-        })?;
-        Ok(slf)
-    }
-
-    fn bind_buffer_view<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        view: &PyBufferView,
-        access: PyNodeAccess,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.graph.borrow(py).with_active_compute(|node| {
-            node.bind_buffer_view(&view.inner, access.into());
         })?;
         Ok(slf)
     }

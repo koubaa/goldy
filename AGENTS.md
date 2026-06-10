@@ -1,13 +1,11 @@
+## Compatibility
+Legacy compatibility is not relevant before the 0.2 release. Make
+breaking changes as required for clean code and update all clients
+locally in the workspace.
+
 ## Development
 
-After completing any task, run the CI checks locally:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --no-default-features -- -D warnings
-cargo clippy -- -D warnings
-cargo test
-```
+After completing any task, run the /precommit command
 
 ## Running examples
 
@@ -17,7 +15,7 @@ To run all examples in a row interactively, use
 
 To run a specific example (for instance metaballs), use
 
-`cargo run --example metaballs`
+`cargo run --features examples --example metaballs`
 
 ## Debugging
 

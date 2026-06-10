@@ -54,6 +54,10 @@ pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
+#[cfg(test)]
+mod heap_tests;
+#[cfg(test)]
+mod buffer_alloc_tests;
 pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
