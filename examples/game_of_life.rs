@@ -5,13 +5,16 @@
 //! 2. Graphics shader rendering the grid to an offscreen target
 //! 3. Swapchain blit and present
 //!
+//! Ping-pong cell grids live in one retained mosaic parcel (two sub-views, one backing
+//! allocation). When the transient pool lands, this example is a candidate to re-migrate.
+//!
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
 use goldy::{
-    BufferPool, BufferView, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
-    TaskGraph, VertexBufferLayout,
+    Color, ComputePipeline, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, Parcel, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -21,10 +24,14 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: u32 = GRID_WIDTH * GRID_HEIGHT;
+
+const SLOT_A: MosaicSlot = MosaicSlot(0);
+const SLOT_B: MosaicSlot = MosaicSlot(1);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -56,11 +63,9 @@ struct RenderState {
     frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
-    // Single pool holding both ping-pong buffers as views.
-    // One GPU allocation instead of two.
-    _pool: BufferPool,
-    view_a: BufferView,
-    view_b: BufferView,
+    _retained_pool: RetainedPool,
+    /// Mosaic parcel: slot A and slot B are ping-pong cell grids in one backing buffer.
+    cells: Parcel,
     // State: true = A is current (read from A, write to B)
     use_buffer_a: bool,
     frame_count: u32,
@@ -162,18 +167,13 @@ impl RenderState {
 
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
 
-        // Allocate both ping-pong buffers from a single pool (one GPU allocation).
+        // One retained mosaic: two ping-pong views in a single backing allocation.
         let initial_state = create_initial_state();
-        let cell_bytes = (CELL_COUNT as usize) * std::mem::size_of::<u32>();
-        let mut pool = BufferPool::new(&device, (cell_bytes * 2 + 512) as u64)?;
-
-        let view_a = pool.alloc::<u32>(CELL_COUNT as u64)?;
-        let view_b = pool.alloc::<u32>(CELL_COUNT as u64)?;
-
-        // Write initial state into both views via the backing buffer.
-        pool.backing_buffer().write_data(0, &initial_state)?;
-        pool.backing_buffer()
-            .write_data((cell_bytes as u64 + 255) & !255, &initial_state)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let mut mosaic = retained_pool.mosaic();
+        mosaic.emplace::<u32>(&initial_state);
+        mosaic.emplace::<u32>(&initial_state);
+        let cells = mosaic.build()?;
 
         // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
@@ -203,9 +203,8 @@ impl RenderState {
             frame_graph: TaskGraph::new(),
             compute_pipeline,
             render_pipeline,
-            _pool: pool,
-            view_a,
-            view_b,
+            _retained_pool: retained_pool,
+            cells,
             use_buffer_a: true,
             frame_count: 0,
             last_update: std::time::Instant::now(),
@@ -225,11 +224,14 @@ impl RenderState {
         if should_update {
             self.last_update = now;
 
-            let (read_view, write_view) = if self.use_buffer_a {
-                (&self.view_a, &self.view_b)
+            let (read_slot, write_slot) = if self.use_buffer_a {
+                (SLOT_A, SLOT_B)
             } else {
-                (&self.view_b, &self.view_a)
+                (SLOT_B, SLOT_A)
             };
+            let read_view = self.cells.view(read_slot);
+            let write_view = self.cells.view(write_slot);
+
             self.frame_graph
                 .node("game_of_life", &self.compute_pipeline)
                 .bind_buffer_view(read_view, NodeAccess::Read)
@@ -243,7 +245,8 @@ impl RenderState {
             self.use_buffer_a = !self.use_buffer_a;
         }
 
-        let current_view = if self.use_buffer_a { &self.view_a } else { &self.view_b };
+        let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+        let current_view = self.cells.view(current_slot);
 
         let mut pass = self.frame_graph.render_pass("game_of_life_render", &self.scene_rt);
         pass.bind_buffer_view_mut(current_view, NodeAccess::Read);
@@ -305,6 +308,12 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            common::exit_if_timed_out(event_loop, state.start_time);
         }
     }
 

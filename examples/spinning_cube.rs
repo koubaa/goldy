@@ -5,8 +5,8 @@
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, Vertex2D,
+    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,6 +17,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 // Cube vertices in 3D
 const CUBE_VERTICES: [[f32; 3]; 8] = [
@@ -62,19 +63,20 @@ fn project(p: [f32; 3], fov: f32) -> [f32; 2] {
     [p[0] * scale, p[1] * scale]
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
+const MAX_LINE_VERTICES: usize = CUBE_EDGES.len() * 2;
 
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
+    _retained_pool: Option<RetainedPool>,
+    vertex_parcel: Option<Parcel>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
     frame_graph: TaskGraph,
     start_time: Instant,
-    vertex_buffers: Vec<Buffer>,
     frame_count: u32,
 }
 
@@ -90,7 +92,8 @@ impl App {
             scene_rt: None,
             frame_graph: TaskGraph::new(),
             start_time: Instant::now(),
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+            _retained_pool: None,
+            vertex_parcel: None,
             frame_count: 0,
         })
     }
@@ -122,9 +125,18 @@ impl App {
         )?;
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let vertex_parcel = retained_pool.acquire_buffer_sized::<Vertex2D>(
+            MAX_LINE_VERTICES as u64,
+            BufferKind::Scattered,
+            BufferFlags::empty(),
+        )?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
+        self._retained_pool = Some(retained_pool);
+        self.vertex_parcel = Some(vertex_parcel);
         self.surface = Some(surface);
         self.scene_rt = Some(scene_rt);
         Ok(())
@@ -169,22 +181,17 @@ impl App {
             vertices.push(Vertex2D::new(p2[0], p2[1], color));
         }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
-        let vertex_buffer = device
-            .as_ref()
-            .alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
-
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
+        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
 
         self.frame_graph.clear();
+        self.frame_graph
+            .write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
 
         let mut pass = self.frame_graph.render_pass("spinning_cube", scene_rt);
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
         pass.clear(Color {
             r: 0.02,
             g: 0.02,
@@ -192,7 +199,7 @@ impl App {
             a: 1.0,
         });
         pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..vertices.len() as u32, 0..1);
         pass.finish_recorded();
 
@@ -202,7 +209,6 @@ impl App {
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
-        self.vertex_buffers.push(vertex_buffer);
         Ok(())
     }
 
@@ -251,6 +257,10 @@ impl ApplicationHandler for App {
             self.init_gpu(&window).unwrap();
             window.request_redraw();
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        common::exit_if_timed_out(event_loop, self.start_time);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {

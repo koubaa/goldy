@@ -7,14 +7,16 @@ use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-/// Types allowed as elements in [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data) and [`BufferPool::alloc_with_data`].
+/// Types allowed as elements in [`RetainedPool::acquire_buffer_with_data`](crate::RetainedPool::acquire_buffer_with_data)
+/// and [`BufferPool::alloc_with_data`].
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
 /// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 ///
 /// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
 /// set element stride to 1 while shaders usually expect a larger struct stride. Use
-/// [`Device::alloc_buffer_with_bytes_stride`](crate::Device::alloc_buffer_with_bytes_stride) or a typed slice instead.
+/// [`RetainedPool::acquire_buffer`](crate::RetainedPool::acquire_buffer) with an explicit
+/// element stride or a typed slice instead.
 ///
 /// Unit type `()` is included so empty slices type-check.
 pub trait StructuredBufferElement: bytemuck::Pod {}
@@ -488,9 +490,10 @@ impl Drop for Buffer {
 
 /// Trait for types that can be bound as vertex or index buffers.
 ///
-/// Both [`Buffer`] and [`BufferView`] implement this trait, allowing either to be passed
-/// to `set_vertex_buffer` and `set_index_buffer`. For `BufferView`, the encoder binds
-/// the parent buffer at the view's offset internally.
+/// [`Buffer`], [`BufferView`], and non-mosaic [`crate::Parcel`] buffers implement this trait,
+/// allowing any of them to be passed to `set_vertex_buffer` and `set_index_buffer`.
+/// For `BufferView`, the encoder binds the parent buffer at the view's offset internally.
+/// For mosaic parcels, use [`crate::Parcel::view`] instead.
 pub trait BufferSource {
     #[doc(hidden)]
     fn source_handle(&self) -> BufferHandle;
@@ -789,7 +792,7 @@ impl BufferPool {
     /// Allocate and fill a typed region in one call.
     ///
     /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
-    /// Same element-stride rules as [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data).
+    /// Same element-stride rules as `Device::alloc_buffer_with_data`.
     pub fn alloc_with_data<T: StructuredBufferElement>(&mut self, data: &[T]) -> Result<BufferView> {
         let view = self.alloc::<T>(data.len() as u64)?;
         view.write_data(data)?;

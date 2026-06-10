@@ -45,7 +45,8 @@ struct Vertex {
 
 struct GpuState {
     goldy::Device device;
-    goldy::Buffer vertex_buffer;
+    goldy::RetainedPool pool;
+    goldy::Parcel vertex_buffer;
     goldy::ShaderModule shader;
     goldy::RenderPipeline pipeline;
     goldy::RenderTarget scene_rt;
@@ -99,8 +100,8 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
         {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
     };
 
-    goldy::Buffer vertex_buffer(
-        device,
+    goldy::RetainedPool pool(device);
+    goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
         std::span<const Vertex>(vertices),
         goldy::BufferKind::Scattered);
 
@@ -126,6 +127,7 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
 
     return GpuState{
         std::move(device),
+        std::move(pool),
         std::move(vertex_buffer),
         std::move(shader),
         std::move(pipeline),
@@ -150,10 +152,10 @@ void render_frame(GpuState& gpu) {
 
     {
         auto pass = gpu.frame_graph.render_pass("triangle", gpu.scene_rt);
-        pass.bind_buffer(gpu.vertex_buffer, goldy::NodeAccess::Read)
+        pass.bind_parcel(gpu.vertex_buffer, goldy::NodeAccess::Read)
             .clear(bg_color)
             .set_pipeline(gpu.pipeline)
-            .set_vertex_buffer(0, gpu.vertex_buffer)
+            .set_vertex_buffer_parcel(0, gpu.vertex_buffer)
             .draw(0, 3);
     }
 

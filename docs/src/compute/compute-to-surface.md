@@ -124,8 +124,8 @@ let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
 let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
 // Create uniform buffer
-let uniform_buffer = device.alloc_buffer_with_data(
-    &device,
+let mut retained_pool = RetainedPool::new(device.clone());
+let uniform_buffer = retained_pool.acquire_buffer_with_data(
     &[Uniforms {
         width: surface.width(),
         height: surface.height(),

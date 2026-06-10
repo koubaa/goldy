@@ -2,12 +2,12 @@
 //!
 //! [`VramAllocator`] is the single customization point for *where* GPU memory comes from.
 //! It sits below Goldy's pooling layers; every allocation that goes through a
-//! [`Device::alloc_buffer`] / [`Device::alloc_buffer_with_capacity`] / [`Device::alloc_texture`]
+//! `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity` / `Device::alloc_texture`
 //! method passes through the installed allocator:
 //!
-//! - **Transient backing** — [`TransientAllocator`] → [`BufferPool`] → [`Device::alloc_buffer`] ✓
-//! - **Standalone named buffers** — [`Device::alloc_buffer`] / [`Device::alloc_buffer_with_capacity`] ✓
-//! - **Textures** — [`TexturePool`] → [`Device::alloc_texture`] ✓
+//! - **Transient backing** — [`TransientAllocator`] → [`BufferPool`] → `Device::alloc_buffer`
+//! - **Standalone named buffers** — `Device::alloc_buffer` / `Device::alloc_buffer_with_capacity`
+//! - **Textures** — [`TexturePool`] → `Device::alloc_texture`
 //!
 //! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
 //! a `Weak` back-reference to the allocator. When the [`Buffer`] or [`Texture`] is dropped,
@@ -15,7 +15,7 @@
 //! byte counters. Sub-parcels ([`crate::buffer::BufferView`]) carry no deed and are never
 //! accounted.
 //!
-//! External callers use [`Device::alloc_buffer`] / [`Device::alloc_texture`] (and the
+//! External callers use `Device::alloc_buffer` / `Device::alloc_texture` (and the
 //! `alloc_buffer_with_*` helpers). Raw `Buffer::new_with_stride_and_flags` is
 //! `pub(crate)` for allocator backends and in-crate tests only.
 //!
@@ -61,9 +61,6 @@
 //! [`Texture`]: crate::texture::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
-//! [`Device::alloc_buffer`]: crate::device::Device::alloc_buffer
-//! [`Device::alloc_buffer_with_capacity`]: crate::device::Device::alloc_buffer_with_capacity
-//! [`Device::alloc_texture`]: crate::device::Device::alloc_texture
 //! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator

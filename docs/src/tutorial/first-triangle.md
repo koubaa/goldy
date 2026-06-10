@@ -6,8 +6,9 @@ This tutorial draws a colored triangle in a window using Goldy's render pipeline
 
 ```rust
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceType, Instance, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, ShaderModule, Surface, TaskGraph, Vertex2D,
+    shader::builtins, BufferKind, Color, DeviceType, Instance, NodeAccess, Parcel,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool,
+    ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -20,7 +21,8 @@ use winit::{
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
-    vertex_buffer: Option<Buffer>,
+    _retained_pool: Option<RetainedPool>,
+    vertex_buffer: Option<Parcel>,
     pipeline: Option<RenderPipeline>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
@@ -33,6 +35,7 @@ impl App {
         Ok(Self {
             instance: Instance::new()?,
             device: None,
+            _retained_pool: None,
             vertex_buffer: None,
             pipeline: None,
             window: None,
@@ -50,7 +53,8 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = device.alloc_buffer_with_data( &vertices, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
         let surface = Surface::new(&device, window.as_ref())?;
 
@@ -69,6 +73,7 @@ impl App {
         let scene_rt = RenderTarget::new(&device, surface.width(), surface.height(), surface.format())?;
 
         self.device = Some(device);
+        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
@@ -90,7 +95,7 @@ impl App {
 
         self.frame_graph.clear();
         let mut pass = self.frame_graph.render_pass("triangle", scene_rt);
-        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
         pass.clear(Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 });
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer);
@@ -170,10 +175,11 @@ let vertices = [
     Vertex2D::new(-0.5, 0.5, Color::GREEN),
     Vertex2D::new(0.5, 0.5, Color::BLUE),
 ];
-let vertex_buffer = device.alloc_buffer_with_data( &vertices, BufferKind::Scattered)?;
+let mut pool = RetainedPool::new(device.clone());
+let vertex_buffer = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 ```
 
-`Vertex2D` is a built-in vertex type with position and color. `device.alloc_buffer_with_data` allocates a GPU buffer and uploads the data. `BufferKind::Scattered` marks it as a bindless storage buffer.
+`Vertex2D` is a built-in vertex type with position and color. `RetainedPool::acquire_buffer_with_data` allocates a retained parcel and uploads the data. `BufferKind::Scattered` marks it as a bindless storage buffer. Keep the pool alive for the parcel's lifetime (see `examples/triangle.rs`).
 
 ### Shader and Pipeline
 

@@ -10,6 +10,19 @@ use goldy::{
     RenderTarget, RequestAdapterOptions, ShaderModule, TaskGraph, TextureFormat, Vertex2D,
 };
 
+fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
+    device: &goldy::Device,
+    data: &[T],
+    kind: goldy::BufferKind,
+) -> goldy::Buffer {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_buffer_with_data(data, kind)
+        .expect("acquire_buffer_with_data")
+        .detach_buffer()
+        .expect("detach_buffer")
+}
+
 fn make_device() -> Option<goldy::Device> {
     let instance = Instance::new().ok()?;
     instance
@@ -43,9 +56,7 @@ fn render_pass_task_graph_triangle_readback() {
     ];
 
     let target = RenderTarget::new(&device, W, H, TextureFormat::Rgba8Unorm).expect("render target");
-    let vertex_buffer = device
-        .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
-        .expect("vertex buffer");
+    let vertex_buffer = test_alloc_buffer_with_data(&device, &vertices, BufferKind::Scattered);
     let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D).expect("shader");
     let pipeline = RenderPipeline::new(
         &device,

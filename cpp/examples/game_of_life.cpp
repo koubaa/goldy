@@ -45,10 +45,13 @@ constexpr size_t CELL_COUNT = static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT;
 constexpr uint32_t WORKGROUPS_X = (GRID_WIDTH + 7) / 8;
 constexpr uint32_t WORKGROUPS_Y = (GRID_HEIGHT + 7) / 8;
 
+constexpr uint32_t SLOT_A = 0;
+constexpr uint32_t SLOT_B = 1;
+
 struct GpuState {
     goldy::Device device;
-    goldy::Buffer buf_a;
-    goldy::Buffer buf_b;
+    goldy::RetainedPool pool;
+    goldy::Parcel cells;
     goldy::ShaderModule compute_shader;
     goldy::ShaderModule render_shader;
     goldy::ComputePipeline compute_pipeline;
@@ -174,8 +177,11 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     const auto initial = create_initial_state();
     const std::vector<uint32_t> zeros(CELL_COUNT, 0);
 
-    goldy::Buffer buf_a(device, std::span<const uint32_t>(initial), goldy::BufferKind::Scattered);
-    goldy::Buffer buf_b(device, std::span<const uint32_t>(zeros), goldy::BufferKind::Scattered);
+    goldy::RetainedPool pool(device);
+    auto mosaic = pool.mosaic();
+    mosaic.emplace(initial);
+    mosaic.emplace(zeros);
+    goldy::Parcel cells = mosaic.build(pool);
 
     goldy::ShaderModule compute_shader(device, find_shader("game_of_life.slang"));
     goldy::ShaderModule render_shader(device, find_shader("game_of_life_render.slang"));
@@ -193,8 +199,8 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
 
     return GpuState{
         std::move(device),
-        std::move(buf_a),
-        std::move(buf_b),
+        std::move(pool),
+        std::move(cells),
         std::move(compute_shader),
         std::move(render_shader),
         std::move(compute_pipeline),
@@ -219,17 +225,19 @@ void render_frame(GpuState& gpu) {
     if (should_update) {
         gpu.last_update = now;
 
-        goldy::Buffer& read_buf = gpu.use_buffer_a ? gpu.buf_a : gpu.buf_b;
-        goldy::Buffer& write_buf = gpu.use_buffer_a ? gpu.buf_b : gpu.buf_a;
+        const uint32_t read_slot = gpu.use_buffer_a ? SLOT_A : SLOT_B;
+        const uint32_t write_slot = gpu.use_buffer_a ? SLOT_B : SLOT_A;
 
-        const uint32_t read_idx = read_buf.resource_index(goldy::ResourceAccess::ReadWrite);
-        const uint32_t write_idx = write_buf.resource_index(goldy::ResourceAccess::Write);
+        const uint32_t read_idx =
+            gpu.cells.mosaic_view_resource_index(read_slot, goldy::ResourceAccess::ReadWrite);
+        const uint32_t write_idx =
+            gpu.cells.mosaic_view_resource_index(write_slot, goldy::ResourceAccess::Write);
         const uint32_t slots[] = {read_idx, write_idx};
 
         {
             auto node = gpu.frame_graph.compute_node("game_of_life", gpu.compute_pipeline);
-            node.bind_buffer(read_buf, goldy::NodeAccess::Read)
-                .bind_buffer(write_buf, goldy::NodeAccess::Write)
+            node.bind_parcel_view(gpu.cells, read_slot, goldy::NodeAccess::Read)
+                .bind_parcel_view(gpu.cells, write_slot, goldy::NodeAccess::Write)
                 .bind_resources_raw(std::span<const uint32_t>(slots));
             node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
         }
@@ -237,14 +245,16 @@ void render_frame(GpuState& gpu) {
         gpu.use_buffer_a = !gpu.use_buffer_a;
     }
 
-    goldy::Buffer& current_buf = gpu.use_buffer_a ? gpu.buf_a : gpu.buf_b;
+    const uint32_t current_slot = gpu.use_buffer_a ? SLOT_A : SLOT_B;
+    const uint32_t cells_idx =
+        gpu.cells.mosaic_view_resource_index(current_slot, goldy::ResourceAccess::ReadWrite);
 
     {
         auto pass = gpu.frame_graph.render_pass("game_of_life_render", gpu.scene_rt);
-        pass.bind_buffer(current_buf, goldy::NodeAccess::Read)
+        pass.bind_parcel_view(gpu.cells, current_slot, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(gpu.render_pipeline)
-            .bind_resource_index(current_buf.resource_index(goldy::ResourceAccess::ReadWrite))
+            .bind_resource_index(cells_idx)
             .draw_fullscreen();
     }
 

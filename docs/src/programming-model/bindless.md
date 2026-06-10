@@ -15,7 +15,7 @@ Traditional GPU APIs require you to declare descriptor set layouts, allocate des
 ```
 CPU side:                         GPU side:
                                   
-device.alloc_buffer_with_data(...) goldy_scattered<T>(slot)
+retained_pool.acquire_buffer_with_data(...) goldy_scattered<T>(slot)
   → ResourceHandle {                → descriptor_heap[slot]
       category: Scattered,            → RWStructuredBuffer<T>
       index: 3,
@@ -43,13 +43,13 @@ Goldy's descriptor heaps are organized into five pools, one per access pattern. 
 `ResourceHandle` carries both the raw index and the resource category:
 
 ```rust
-use goldy::{BufferKind, ResourceAccess, ResourceHandle};
+use goldy::{BufferKind, ResourceAccess, ResourceCategory, ResourceHandle};
 
-let buf = device.alloc_buffer_with_data(BufferKind::Scattered, &particles)?;
-let handle: ResourceHandle = buf.handle(ResourceAccess::Write).unwrap();
+let parcel = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
+let index = parcel.resource_index(ResourceAccess::Write).unwrap();
+let handle = ResourceHandle::new(ResourceCategory::Scattered, index);
 
 assert_eq!(handle.category(), ResourceCategory::Scattered);
-assert_eq!(handle.index(), 3); // assigned by the device
 ```
 
 When you bind handles at dispatch time, Goldy can validate that the handle's category matches what the shader expects in that slot — a `Broadcast` handle bound to a slot the shader reads through `goldy_scattered` is caught as a type error rather than silently producing garbage.
@@ -125,8 +125,8 @@ void cs_main(SimParams params, Scattered<Particle> particles, ThreadId id) {
 **Rust dispatch**:
 
 ```rust
-let params_buf = device.alloc_buffer_with_data(BufferKind::Broadcast, &[sim_params])?;
-let particle_buf = device.alloc_buffer_with_data(BufferKind::Scattered, &particles)?;
+let params_buf = retained_pool.acquire_buffer_with_data(&[sim_params], BufferKind::Broadcast)?;
+let particle_buf = retained_pool.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
 
 let shader = ShaderModule::from_slang(&device, PARTICLE_UPDATE_SOURCE)?;
 let pipeline = ComputePipeline::new(&device, &shader)?;
@@ -134,11 +134,11 @@ let pipeline = ComputePipeline::new(&device, &shader)?;
 let mut graph = TaskGraph::new();
 graph
     .node("update", &pipeline)
-    .bind_buffer(&params_buf, NodeAccess::Read)
-    .bind_buffer(&particle_buf, NodeAccess::ReadWrite)
+    .bind_parcel(&params_buf, NodeAccess::Read)
+    .bind_parcel(&particle_buf, NodeAccess::ReadWrite)
     .bind_resources_typed(&[
-        params_buf.handle(ResourceAccess::Read).unwrap(),    // slot 0 → Broadcast → SimParams
-        particle_buf.handle(ResourceAccess::Write).unwrap(), // slot 1 → Scattered → Particle
+        ResourceHandle::new(ResourceCategory::Broadcast, params_buf.resource_index(ResourceAccess::Read).unwrap()),
+        ResourceHandle::new(ResourceCategory::Scattered, particle_buf.resource_index(ResourceAccess::Write).unwrap()),
     ])
     .dispatch((particle_count + 63) / 64, 1, 1);
 graph.dispatch(&device)?;

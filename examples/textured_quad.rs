@@ -6,8 +6,8 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, Sampler, ShaderModule, Surface, TaskGraph, Texture,
+    BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Sampler, ShaderModule, Surface, TaskGraph,
     Vertex2DUv,
 };
 use std::sync::Arc;
@@ -130,8 +130,9 @@ struct App {
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
     frame_graph: TaskGraph,
-    vertex_buffer: Option<Buffer>,
-    texture: Option<Texture>,
+    _retained_pool: Option<RetainedPool>,
+    vertex_buffer: Option<Parcel>,
+    texture: Option<Parcel>,
     sampler: Option<Sampler>,
 }
 
@@ -146,6 +147,7 @@ impl App {
             surface: None,
             scene_rt: None,
             frame_graph: TaskGraph::new(),
+            _retained_pool: None,
             vertex_buffer: None,
             texture: None,
             sampler: None,
@@ -170,14 +172,14 @@ impl App {
         let tex_height = 256u32;
         let checker_data = generate_checkerboard(tex_width, tex_height, 32);
 
-        let texture = Texture::with_data(
-            &device,
-            &checker_data,
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let texture = retained_pool.acquire_texture(
             tex_width,
             tex_height,
             TextureFormat::Rgba8Unorm,
             TextureKind::Interpolated,
             TextureFlags::COPY_DST,
+            Some(&checker_data),
         )?;
 
         // Create sampler with linear filtering and repeat addressing
@@ -209,8 +211,7 @@ impl App {
             },
         )?;
 
-        // Create vertex buffer
-        let vertex_buffer = device.alloc_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
+        let vertex_buffer = retained_pool.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
@@ -219,6 +220,7 @@ impl App {
         self.pipeline = Some(pipeline);
         self.surface = Some(surface);
         self.scene_rt = Some(scene_rt);
+        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.texture = Some(texture);
         self.sampler = Some(sampler);
@@ -246,8 +248,8 @@ impl App {
         self.frame_graph.clear();
 
         let mut pass = self.frame_graph.render_pass("textured_quad", scene_rt);
-        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
-        pass.bind_texture_mut(texture, NodeAccess::Read);
+        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(texture, NodeAccess::Read);
         pass.clear(Color {
             r: 0.1,
             g: 0.1,

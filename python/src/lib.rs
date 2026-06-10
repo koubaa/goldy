@@ -9,14 +9,15 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::wrong_self_convention)]
 
-mod buffer;
-mod buffer_pool;
+mod bytes_util;
 mod compute;
 mod device;
 mod error;
 mod instance;
+mod parcel;
 mod pipeline;
 mod render_target;
+mod retained_pool;
 mod shader;
 mod surface;
 mod task_graph;
@@ -54,9 +55,9 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<instance::PyInstance>()?;
     m.add_class::<instance::PyAdapter>()?;
     m.add_class::<device::PyDevice>()?;
-    m.add_class::<buffer::PyBuffer>()?;
-    m.add_class::<buffer_pool::PyBufferPool>()?;
-    m.add_class::<buffer_pool::PyBufferView>()?;
+    m.add_class::<parcel::PyParcel>()?;
+    m.add_class::<retained_pool::PyRetainedPool>()?;
+    m.add_class::<retained_pool::PyMosaicBuilder>()?;
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;

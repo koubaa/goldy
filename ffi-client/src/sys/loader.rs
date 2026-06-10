@@ -20,15 +20,6 @@ pub(crate) fn lib() -> &'static GoldyFfi {
 
 pub(crate) struct GoldyFfi {
     _library: Library,
-    pub goldy_buffer_access: FnGoldyBufferAccess,
-    pub goldy_buffer_create: FnGoldyBufferCreate,
-    pub goldy_buffer_create_with_data: FnGoldyBufferCreateWithData,
-    pub goldy_buffer_create_with_data_stride: FnGoldyBufferCreateWithDataStride,
-    pub goldy_buffer_destroy: FnGoldyBufferDestroy,
-    pub goldy_buffer_read_to_cpu: FnGoldyBufferReadToCpu,
-    pub goldy_buffer_resource_index: FnGoldyBufferResourceIndex,
-    pub goldy_buffer_size: FnGoldyBufferSize,
-    pub goldy_buffer_write: FnGoldyBufferWrite,
     pub goldy_clear_error: FnGoldyClearError,
     pub goldy_compute_pipeline_create: FnGoldyComputePipelineCreate,
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
@@ -79,15 +70,14 @@ pub(crate) struct GoldyFfi {
     pub goldy_task_graph_create: FnGoldyTaskGraphCreate,
     pub goldy_task_graph_declare_swapchain_output: FnGoldyTaskGraphDeclareSwapchainOutput,
     pub goldy_task_graph_compute_node_begin: FnGoldyTaskGraphComputeNodeBegin,
-    pub goldy_task_graph_compute_node_bind_buffer: FnGoldyTaskGraphComputeNodeBindBuffer,
+    pub goldy_task_graph_compute_node_bind_parcel: FnGoldyTaskGraphComputeNodeBindParcel,
     pub goldy_task_graph_compute_node_bind_resources_raw: FnGoldyTaskGraphComputeNodeBindResourcesRaw,
     pub goldy_task_graph_compute_node_dispatch: FnGoldyTaskGraphComputeNodeDispatch,
     pub goldy_task_graph_destroy: FnGoldyTaskGraphDestroy,
     pub goldy_task_graph_dispatch: FnGoldyTaskGraphDispatch,
-    pub goldy_task_graph_write_buffer: FnGoldyTaskGraphWriteBuffer,
+    pub goldy_task_graph_write_parcel: FnGoldyTaskGraphWriteParcel,
     pub goldy_task_graph_render_pass_begin: FnGoldyTaskGraphRenderPassBegin,
-    pub goldy_task_graph_render_pass_bind_buffer: FnGoldyTaskGraphRenderPassBindBuffer,
-    pub goldy_task_graph_render_pass_bind_resources: FnGoldyTaskGraphRenderPassBindResources,
+    pub goldy_task_graph_render_pass_bind_parcel: FnGoldyTaskGraphRenderPassBindParcel,
     pub goldy_task_graph_render_pass_bind_resources_typed: FnGoldyTaskGraphRenderPassBindResourcesTyped,
     pub goldy_task_graph_render_pass_clear: FnGoldyTaskGraphRenderPassClear,
     pub goldy_task_graph_render_pass_clear_depth: FnGoldyTaskGraphRenderPassClearDepth,
@@ -97,13 +87,23 @@ pub(crate) struct GoldyFfi {
     pub goldy_task_graph_render_pass_finish: FnGoldyTaskGraphRenderPassFinish,
     pub goldy_task_graph_render_pass_set_index_buffer: FnGoldyTaskGraphRenderPassSetIndexBuffer,
     pub goldy_task_graph_render_pass_set_pipeline: FnGoldyTaskGraphRenderPassSetPipeline,
-    pub goldy_task_graph_render_pass_set_vertex_buffer: FnGoldyTaskGraphRenderPassSetVertexBuffer,
-    pub goldy_task_graph_render_pass_set_vertex_buffer_offset: FnGoldyTaskGraphRenderPassSetVertexBufferOffset,
-    pub goldy_texture_create: FnGoldyTextureCreate,
-    pub goldy_texture_destroy: FnGoldyTextureDestroy,
-    pub goldy_texture_format: FnGoldyTextureFormat,
-    pub goldy_texture_height: FnGoldyTextureHeight,
-    pub goldy_texture_width: FnGoldyTextureWidth,
+    pub goldy_task_graph_render_pass_set_vertex_buffer_parcel: FnGoldyTaskGraphRenderPassSetVertexBufferParcel,
+    pub goldy_retained_pool_acquire_buffer: FnGoldyRetainedPoolAcquireBuffer,
+    pub goldy_retained_pool_create: FnGoldyRetainedPoolCreate,
+    pub goldy_retained_pool_destroy: FnGoldyRetainedPoolDestroy,
+    pub goldy_mosaic_builder_create: FnGoldyMosaicBuilderCreate,
+    pub goldy_mosaic_builder_destroy: FnGoldyMosaicBuilderDestroy,
+    pub goldy_mosaic_builder_emplace: FnGoldyMosaicBuilderEmplace,
+    pub goldy_mosaic_builder_build: FnGoldyMosaicBuilderBuild,
+    pub goldy_parcel_byte_size: FnGoldyParcelByteSize,
+    pub goldy_parcel_destroy: FnGoldyParcelDestroy,
+    pub goldy_parcel_resource_index: FnGoldyParcelResourceIndex,
+    pub goldy_parcel_mosaic_view_resource_index: FnGoldyParcelMosaicViewResourceIndex,
+    pub goldy_parcel_mosaic_view_read_to_cpu: FnGoldyParcelMosaicViewReadToCpu,
+    pub goldy_parcel_mosaic_view_size: FnGoldyParcelMosaicViewSize,
+    pub goldy_parcel_read_to_cpu: FnGoldyParcelReadToCpu,
+    pub goldy_task_graph_compute_node_bind_parcel_view: FnGoldyTaskGraphComputeNodeBindParcelView,
+    pub goldy_task_graph_render_pass_bind_parcel_view: FnGoldyTaskGraphRenderPassBindParcelView,
 }
 
 impl GoldyFfi {
@@ -127,18 +127,6 @@ impl GoldyFfi {
         }
 
         Ok(Self {
-            goldy_buffer_access: sym!("goldy_buffer_access", FnGoldyBufferAccess),
-            goldy_buffer_create: sym!("goldy_buffer_create", FnGoldyBufferCreate),
-            goldy_buffer_create_with_data: sym!("goldy_buffer_create_with_data", FnGoldyBufferCreateWithData),
-            goldy_buffer_create_with_data_stride: sym!(
-                "goldy_buffer_create_with_data_stride",
-                FnGoldyBufferCreateWithDataStride
-            ),
-            goldy_buffer_destroy: sym!("goldy_buffer_destroy", FnGoldyBufferDestroy),
-            goldy_buffer_read_to_cpu: sym!("goldy_buffer_read_to_cpu", FnGoldyBufferReadToCpu),
-            goldy_buffer_resource_index: sym!("goldy_buffer_resource_index", FnGoldyBufferResourceIndex),
-            goldy_buffer_size: sym!("goldy_buffer_size", FnGoldyBufferSize),
-            goldy_buffer_write: sym!("goldy_buffer_write", FnGoldyBufferWrite),
             goldy_clear_error: sym!("goldy_clear_error", FnGoldyClearError),
             goldy_compute_pipeline_create: sym!("goldy_compute_pipeline_create", FnGoldyComputePipelineCreate),
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
@@ -213,9 +201,9 @@ impl GoldyFfi {
                 "goldy_task_graph_compute_node_begin",
                 FnGoldyTaskGraphComputeNodeBegin
             ),
-            goldy_task_graph_compute_node_bind_buffer: sym!(
-                "goldy_task_graph_compute_node_bind_buffer",
-                FnGoldyTaskGraphComputeNodeBindBuffer
+            goldy_task_graph_compute_node_bind_parcel: sym!(
+                "goldy_task_graph_compute_node_bind_parcel",
+                FnGoldyTaskGraphComputeNodeBindParcel
             ),
             goldy_task_graph_compute_node_bind_resources_raw: sym!(
                 "goldy_task_graph_compute_node_bind_resources_raw",
@@ -227,18 +215,14 @@ impl GoldyFfi {
             ),
             goldy_task_graph_destroy: sym!("goldy_task_graph_destroy", FnGoldyTaskGraphDestroy),
             goldy_task_graph_dispatch: sym!("goldy_task_graph_dispatch", FnGoldyTaskGraphDispatch),
-            goldy_task_graph_write_buffer: sym!("goldy_task_graph_write_buffer", FnGoldyTaskGraphWriteBuffer),
+            goldy_task_graph_write_parcel: sym!("goldy_task_graph_write_parcel", FnGoldyTaskGraphWriteParcel),
             goldy_task_graph_render_pass_begin: sym!(
                 "goldy_task_graph_render_pass_begin",
                 FnGoldyTaskGraphRenderPassBegin
             ),
-            goldy_task_graph_render_pass_bind_buffer: sym!(
-                "goldy_task_graph_render_pass_bind_buffer",
-                FnGoldyTaskGraphRenderPassBindBuffer
-            ),
-            goldy_task_graph_render_pass_bind_resources: sym!(
-                "goldy_task_graph_render_pass_bind_resources",
-                FnGoldyTaskGraphRenderPassBindResources
+            goldy_task_graph_render_pass_bind_parcel: sym!(
+                "goldy_task_graph_render_pass_bind_parcel",
+                FnGoldyTaskGraphRenderPassBindParcel
             ),
             goldy_task_graph_render_pass_bind_resources_typed: sym!(
                 "goldy_task_graph_render_pass_bind_resources_typed",
@@ -276,19 +260,41 @@ impl GoldyFfi {
                 "goldy_task_graph_render_pass_set_pipeline",
                 FnGoldyTaskGraphRenderPassSetPipeline
             ),
-            goldy_task_graph_render_pass_set_vertex_buffer: sym!(
-                "goldy_task_graph_render_pass_set_vertex_buffer",
-                FnGoldyTaskGraphRenderPassSetVertexBuffer
+            goldy_task_graph_render_pass_set_vertex_buffer_parcel: sym!(
+                "goldy_task_graph_render_pass_set_vertex_buffer_parcel",
+                FnGoldyTaskGraphRenderPassSetVertexBufferParcel
             ),
-            goldy_task_graph_render_pass_set_vertex_buffer_offset: sym!(
-                "goldy_task_graph_render_pass_set_vertex_buffer_offset",
-                FnGoldyTaskGraphRenderPassSetVertexBufferOffset
+            goldy_retained_pool_acquire_buffer: sym!(
+                "goldy_retained_pool_acquire_buffer",
+                FnGoldyRetainedPoolAcquireBuffer
             ),
-            goldy_texture_create: sym!("goldy_texture_create", FnGoldyTextureCreate),
-            goldy_texture_destroy: sym!("goldy_texture_destroy", FnGoldyTextureDestroy),
-            goldy_texture_format: sym!("goldy_texture_format", FnGoldyTextureFormat),
-            goldy_texture_height: sym!("goldy_texture_height", FnGoldyTextureHeight),
-            goldy_texture_width: sym!("goldy_texture_width", FnGoldyTextureWidth),
+            goldy_retained_pool_create: sym!("goldy_retained_pool_create", FnGoldyRetainedPoolCreate),
+            goldy_retained_pool_destroy: sym!("goldy_retained_pool_destroy", FnGoldyRetainedPoolDestroy),
+            goldy_mosaic_builder_create: sym!("goldy_mosaic_builder_create", FnGoldyMosaicBuilderCreate),
+            goldy_mosaic_builder_destroy: sym!("goldy_mosaic_builder_destroy", FnGoldyMosaicBuilderDestroy),
+            goldy_mosaic_builder_emplace: sym!("goldy_mosaic_builder_emplace", FnGoldyMosaicBuilderEmplace),
+            goldy_mosaic_builder_build: sym!("goldy_mosaic_builder_build", FnGoldyMosaicBuilderBuild),
+            goldy_parcel_byte_size: sym!("goldy_parcel_byte_size", FnGoldyParcelByteSize),
+            goldy_parcel_destroy: sym!("goldy_parcel_destroy", FnGoldyParcelDestroy),
+            goldy_parcel_resource_index: sym!("goldy_parcel_resource_index", FnGoldyParcelResourceIndex),
+            goldy_parcel_mosaic_view_resource_index: sym!(
+                "goldy_parcel_mosaic_view_resource_index",
+                FnGoldyParcelMosaicViewResourceIndex
+            ),
+            goldy_parcel_mosaic_view_read_to_cpu: sym!(
+                "goldy_parcel_mosaic_view_read_to_cpu",
+                FnGoldyParcelMosaicViewReadToCpu
+            ),
+            goldy_parcel_mosaic_view_size: sym!("goldy_parcel_mosaic_view_size", FnGoldyParcelMosaicViewSize),
+            goldy_parcel_read_to_cpu: sym!("goldy_parcel_read_to_cpu", FnGoldyParcelReadToCpu),
+            goldy_task_graph_compute_node_bind_parcel_view: sym!(
+                "goldy_task_graph_compute_node_bind_parcel_view",
+                FnGoldyTaskGraphComputeNodeBindParcelView
+            ),
+            goldy_task_graph_render_pass_bind_parcel_view: sym!(
+                "goldy_task_graph_render_pass_bind_parcel_view",
+                FnGoldyTaskGraphRenderPassBindParcelView
+            ),
             _library: library,
         })
     }

@@ -23,16 +23,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Data access pattern for buffers.
-//
-// - `Scattered`: Any thread, any address, read/write. No coherence assumptions.
-// - `Broadcast`: All threads read same address. Hardware broadcast optimization.
-typedef enum GoldyBufferKind {
-    // Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
-    GOLDY_BUFFER_KIND_SCATTERED = 0,
-    // All threads same address, broadcast optimized (ConstantBuffer).
-    GOLDY_BUFFER_KIND_BROADCAST = 1,
-} GoldyBufferKind;
+// Graphics backend type.
+typedef enum GoldyBackendType {
+    GOLDY_BACKEND_TYPE_VULKAN = 0,
+    GOLDY_BACKEND_TYPE_METAL = 1,
+    GOLDY_BACKEND_TYPE_DX12 = 2,
+    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
+} GoldyBackendType;
 
 // Result codes for FFI functions.
 typedef enum GoldyResult {
@@ -52,21 +49,6 @@ typedef enum GoldyResult {
     GOLDY_RESULT_INTERNAL_ERROR = 6,
 } GoldyResult;
 
-// Shader resource binding access (SRV vs UAV).
-typedef enum GoldyResourceAccess {
-    GOLDY_RESOURCE_ACCESS_READ = 0,
-    GOLDY_RESOURCE_ACCESS_WRITE = 1,
-    GOLDY_RESOURCE_ACCESS_READ_WRITE = 2,
-} GoldyResourceAccess;
-
-// Graphics backend type.
-typedef enum GoldyBackendType {
-    GOLDY_BACKEND_TYPE_VULKAN = 0,
-    GOLDY_BACKEND_TYPE_METAL = 1,
-    GOLDY_BACKEND_TYPE_DX12 = 2,
-    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
-} GoldyBackendType;
-
 // GPU device type.
 typedef enum GoldyDeviceType {
     GOLDY_DEVICE_TYPE_DISCRETE_GPU = 0,
@@ -74,6 +56,13 @@ typedef enum GoldyDeviceType {
     GOLDY_DEVICE_TYPE_CPU = 2,
     GOLDY_DEVICE_TYPE_OTHER = 3,
 } GoldyDeviceType;
+
+// Shader resource binding access (SRV vs UAV).
+typedef enum GoldyResourceAccess {
+    GOLDY_RESOURCE_ACCESS_READ = 0,
+    GOLDY_RESOURCE_ACCESS_WRITE = 1,
+    GOLDY_RESOURCE_ACCESS_READ_WRITE = 2,
+} GoldyResourceAccess;
 
 // Vertex format.
 typedef enum GoldyVertexFormat {
@@ -129,6 +118,31 @@ typedef enum GoldyCompareFunction {
     GOLDY_COMPARE_FUNCTION_ALWAYS = 7,
 } GoldyCompareFunction;
 
+// Data access pattern for buffers.
+//
+// - `Scattered`: Any thread, any address, read/write. No coherence assumptions.
+// - `Broadcast`: All threads read same address. Hardware broadcast optimization.
+typedef enum GoldyBufferKind {
+    // Any thread, any address, read/write (StructuredBuffer, RWStructuredBuffer).
+    GOLDY_BUFFER_KIND_SCATTERED = 0,
+    // All threads same address, broadcast optimized (ConstantBuffer).
+    GOLDY_BUFFER_KIND_BROADCAST = 1,
+} GoldyBufferKind;
+
+// Spatial access pattern for textures.
+//
+// - `Interpolated`: Hardware filtering between neighbors (texture units).
+// - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
+// - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
+typedef enum GoldyTextureKind {
+    // Hardware filtering between neighbors (Texture2D with sampler).
+    GOLDY_TEXTURE_KIND_INTERPOLATED = 0,
+    // Direct 2D/3D indexing, no filtering (RWTexture2D).
+    GOLDY_TEXTURE_KIND_DIRECT = 1,
+    // Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
+    GOLDY_TEXTURE_KIND_DIRECT_INTERPOLATED = 2,
+} GoldyTextureKind;
+
 // Texture addressing mode.
 typedef enum GoldyAddressMode {
     GOLDY_ADDRESS_MODE_CLAMP_TO_EDGE = 0,
@@ -155,29 +169,6 @@ typedef enum GoldyIndexFormat {
     GOLDY_INDEX_FORMAT_UINT32 = 1,
 } GoldyIndexFormat;
 
-// Spatial access pattern for textures.
-//
-// - `Interpolated`: Hardware filtering between neighbors (texture units).
-// - `Direct`: Direct 2D/3D indexing, no filtering, read/write.
-// - `DirectInterpolated`: Both storage (UAV) and sampled (SRV) access on the same texture.
-typedef enum GoldyTextureKind {
-    // Hardware filtering between neighbors (Texture2D with sampler).
-    GOLDY_TEXTURE_KIND_INTERPOLATED = 0,
-    // Direct 2D/3D indexing, no filtering (RWTexture2D).
-    GOLDY_TEXTURE_KIND_DIRECT = 1,
-    // Both UAV (storage/write) and SRV (sampled/read) access on the same texture.
-    GOLDY_TEXTURE_KIND_DIRECT_INTERPOLATED = 2,
-} GoldyTextureKind;
-
-// Opaque handle to a Goldy Buffer.
-typedef struct GoldyBuffer GoldyBuffer;
-
-// Opaque handle to a Goldy BufferPool.
-typedef struct GoldyBufferPool GoldyBufferPool;
-
-// Opaque handle to a Goldy BufferView (sub-range of a pool backing buffer).
-typedef struct GoldyBufferView GoldyBufferView;
-
 // Opaque handle to a Goldy ComputePipeline.
 typedef struct GoldyComputePipeline GoldyComputePipeline;
 
@@ -187,11 +178,20 @@ typedef struct GoldyDevice GoldyDevice;
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
+// Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
+typedef struct GoldyMosaicBuilder GoldyMosaicBuilder;
+
+// Opaque handle to a retained [`goldy::Parcel`].
+typedef struct GoldyParcel GoldyParcel;
+
 // Opaque handle to a Goldy RenderPipeline.
 typedef struct GoldyRenderPipeline GoldyRenderPipeline;
 
 // Opaque handle to a Goldy RenderTarget.
 typedef struct GoldyRenderTarget GoldyRenderTarget;
+
+// Opaque handle to a Goldy retained allocation pool.
+typedef struct GoldyRetainedPool GoldyRetainedPool;
 
 // Opaque handle to a Goldy Sampler.
 typedef struct GoldySampler GoldySampler;
@@ -210,9 +210,6 @@ typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
 // Opaque handle to a Goldy TaskGraph.
 typedef struct GoldyTaskGraph GoldyTaskGraph;
-
-// Opaque handle to a Goldy Texture.
-typedef struct GoldyTexture GoldyTexture;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -251,6 +248,15 @@ typedef struct GoldyRenderPipelineDesc {
     enum GoldyCompareFunction depth_compare;
 } GoldyRenderPipelineDesc;
 
+// Texture flags for copy and render operations.
+typedef struct GoldyTextureFlags {
+    uint32_t _0;
+} GoldyTextureFlags;
+#define GoldyTextureFlags_NONE (GoldyTextureFlags){ ._0 = 0 }
+#define GoldyTextureFlags_COPY_SRC (GoldyTextureFlags){ ._0 = (1 << 0) }
+#define GoldyTextureFlags_COPY_DST (GoldyTextureFlags){ ._0 = (1 << 1) }
+#define GoldyTextureFlags_RENDER_TARGET (GoldyTextureFlags){ ._0 = (1 << 2) }
+
 // Sampler descriptor.
 typedef struct GoldySamplerDesc {
     enum GoldyAddressMode address_mode_u;
@@ -279,170 +285,9 @@ typedef struct GoldyColor {
     float a;
 } GoldyColor;
 
-// Texture flags for copy and render operations.
-typedef struct GoldyTextureFlags {
-    uint32_t _0;
-} GoldyTextureFlags;
-#define GoldyTextureFlags_NONE (GoldyTextureFlags){ ._0 = 0 }
-#define GoldyTextureFlags_COPY_SRC (GoldyTextureFlags){ ._0 = (1 << 0) }
-#define GoldyTextureFlags_COPY_DST (GoldyTextureFlags){ ._0 = (1 << 1) }
-#define GoldyTextureFlags_RENDER_TARGET (GoldyTextureFlags){ ._0 = (1 << 2) }
-
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
-
-// Get the buffer's access pattern.
-//
-// # Safety
-// The buffer pointer must be valid.
-enum GoldyBufferKind goldy_buffer_access(const struct GoldyBuffer *buffer);
-
-// Create a new buffer with the specified access pattern.
-//
-// # Access Patterns
-// - `Scattered` (0): Any thread can access any address (StructuredBuffer, RWStructuredBuffer)
-// - `Broadcast` (1): All threads read same address (ConstantBuffer)
-//
-// Returns a pointer to the buffer, or null on failure.
-//
-// # Safety
-// The device pointer must be valid.
-struct GoldyBuffer *goldy_buffer_create(const struct GoldyDevice *device,
-                                        uint64_t size,
-                                        enum GoldyBufferKind access);
-
-// Create a buffer initialized with data.
-//
-// See `goldy_buffer_create` for access pattern documentation.
-//
-// Returns a pointer to the buffer, or null on failure.
-//
-// # Safety
-// The device pointer must be valid.
-// The data pointer must point to at least `size` bytes.
-struct GoldyBuffer *goldy_buffer_create_with_data(const struct GoldyDevice *device,
-                                                  const uint8_t *data,
-                                                  size_t size,
-                                                  enum GoldyBufferKind access);
-
-// Create a buffer initialized with data and an explicit element stride.
-//
-// Use stride `4` for `uint`/`float` scattered buffers; stride `1` for raw byte blobs.
-//
-// # Safety
-// The device pointer must be valid.
-// The data pointer must point to at least `size` bytes.
-struct GoldyBuffer *goldy_buffer_create_with_data_stride(const struct GoldyDevice *device,
-                                                         const uint8_t *data,
-                                                         size_t size,
-                                                         enum GoldyBufferKind access,
-                                                         uint32_t element_stride);
-
-// Destroy a buffer.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_buffer_destroy(struct GoldyBuffer *buffer);
-
-// Allocate `count` u32 elements from the pool.
-//
-// Returns a heap-allocated view handle, or null on failure.
-//
-// # Safety
-// The pool pointer must be valid.
-struct GoldyBufferView *goldy_buffer_pool_alloc_u32(struct GoldyBufferPool *pool, uint64_t count);
-
-// Create a buffer pool with the given total capacity in bytes.
-//
-// # Safety
-// The device pointer must be valid.
-struct GoldyBufferPool *goldy_buffer_pool_create(const struct GoldyDevice *device,
-                                                 uint64_t capacity);
-
-// Destroy a buffer pool and its views.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_buffer_pool_destroy(struct GoldyBufferPool *pool);
-
-// Write raw bytes into the pool's backing buffer at a byte offset.
-//
-// # Safety
-// The pool pointer must be valid. `data` must point to at least `size` bytes.
-enum GoldyResult goldy_buffer_pool_write_backing(const struct GoldyBufferPool *pool,
-                                                 uint64_t byte_offset,
-                                                 const uint8_t *data,
-                                                 size_t size);
-
-// Read buffer contents to CPU memory.
-//
-// # Safety
-// All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_buffer_read_to_cpu(const struct GoldyBuffer *buffer,
-                                          const struct GoldyDevice *device,
-                                          uint8_t *output,
-                                          size_t output_size);
-
-// Bindless resource slot index for shader binding.
-//
-// Returns `u32::MAX` if the index is unavailable.
-//
-// # Safety
-// The buffer pointer must be valid.
-uint32_t goldy_buffer_resource_index(const struct GoldyBuffer *buffer,
-                                     enum GoldyResourceAccess access);
-
-// Get the buffer size in bytes.
-//
-// # Safety
-// The buffer pointer must be valid.
-uint64_t goldy_buffer_size(const struct GoldyBuffer *buffer);
-
-// Destroy a buffer view.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_buffer_view_destroy(struct GoldyBufferView *view);
-
-// View offset within the parent buffer in bytes.
-//
-// # Safety
-// The view pointer must be valid.
-uint64_t goldy_buffer_view_offset(const struct GoldyBufferView *view);
-
-// Bindless resource slot index for shader binding.
-//
-// Returns `u32::MAX` if the index is unavailable.
-//
-// # Safety
-// The view pointer must be valid.
-uint32_t goldy_buffer_view_resource_index(const struct GoldyBufferView *view,
-                                          enum GoldyResourceAccess access);
-
-// View size in bytes.
-//
-// # Safety
-// The view pointer must be valid.
-uint64_t goldy_buffer_view_size(const struct GoldyBufferView *view);
-
-// Write u32 cells into the view (`data` is `count * 4` bytes).
-//
-// # Safety
-// The view pointer must be valid. `data` must point to at least `count * 4` bytes.
-enum GoldyResult goldy_buffer_view_write_u32(const struct GoldyBufferView *view,
-                                             const uint32_t *data,
-                                             size_t count);
-
-// Write data to a buffer.
-//
-// # Safety
-// The buffer pointer must be valid.
-// The data pointer must point to at least `size` bytes.
-enum GoldyResult goldy_buffer_write(const struct GoldyBuffer *buffer,
-                                    uint64_t offset,
-                                    const uint8_t *data,
-                                    size_t size);
 
 // Clear the last error message.
 void goldy_clear_error(void);
@@ -536,6 +381,96 @@ enum GoldyResult goldy_instance_get_adapter(const struct GoldyInstance *instance
                                             uint32_t index,
                                             struct GoldyAdapterInfo *info);
 
+// Build a mosaic parcel from a builder and destroy the builder.
+//
+// Returns a heap-allocated parcel handle, or null on failure.
+//
+// # Safety
+// `builder` and `pool` must be valid. `builder` is consumed regardless of outcome.
+struct GoldyParcel *goldy_mosaic_builder_build(struct GoldyMosaicBuilder *builder,
+                                               struct GoldyRetainedPool *pool);
+
+// Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
+struct GoldyMosaicBuilder *goldy_mosaic_builder_create(void);
+
+// Destroy a mosaic builder without building.
+//
+// # Safety
+// The pointer must be valid and not used after this call.
+void goldy_mosaic_builder_destroy(struct GoldyMosaicBuilder *builder);
+
+// Reserve a mosaic sub-view and upload `data` (`data_size` must equal `element_count * element_stride`).
+//
+// Returns the slot index, or `u32::MAX` on failure.
+//
+// # Safety
+// `builder` must be valid. `data` must point to at least `data_size` bytes when non-null.
+uint32_t goldy_mosaic_builder_emplace(struct GoldyMosaicBuilder *builder,
+                                      const uint8_t *data,
+                                      size_t data_size,
+                                      uint64_t element_count,
+                                      uint32_t element_stride);
+
+// Approximate committed byte size of a parcel.
+//
+// # Safety
+// The parcel pointer must be valid.
+uint64_t goldy_parcel_byte_size(const struct GoldyParcel *parcel);
+
+// Destroy a retained parcel.
+//
+// # Safety
+// The pointer must be valid and not used after this call.
+void goldy_parcel_destroy(struct GoldyParcel *parcel);
+
+// Read one mosaic sub-view back to CPU memory.
+//
+// `output_size` must equal the sub-view byte size.
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_parcel_mosaic_view_read_to_cpu(const struct GoldyParcel *parcel,
+                                                      uint32_t slot,
+                                                      const struct GoldyDevice *device,
+                                                      uint8_t *output,
+                                                      size_t output_size);
+
+// Bindless resource index for one mosaic sub-view.
+//
+// Returns `u32::MAX` if unavailable.
+//
+// # Safety
+// The parcel pointer must be valid.
+uint32_t goldy_parcel_mosaic_view_resource_index(const struct GoldyParcel *parcel,
+                                                 uint32_t slot,
+                                                 enum GoldyResourceAccess access);
+
+// Byte size of one mosaic sub-view.
+//
+// Returns `0` if the parcel or slot is invalid.
+//
+// # Safety
+// The parcel pointer must be valid.
+uint64_t goldy_parcel_mosaic_view_size(const struct GoldyParcel *parcel, uint32_t slot);
+
+// Read buffer parcel contents back to CPU memory.
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_parcel_read_to_cpu(const struct GoldyParcel *parcel,
+                                          const struct GoldyDevice *device,
+                                          uint8_t *output,
+                                          size_t output_size);
+
+// Bindless resource slot index for shader binding.
+//
+// Returns `u32::MAX` if the index is unavailable (e.g. mosaic parcels).
+//
+// # Safety
+// The parcel pointer must be valid.
+uint32_t goldy_parcel_resource_index(const struct GoldyParcel *parcel,
+                                     enum GoldyResourceAccess access);
+
 // Create a new render pipeline.
 //
 // Returns a pointer to the pipeline, or null on failure.
@@ -620,6 +555,51 @@ enum GoldyResult goldy_render_target_read_to_buffer(const struct GoldyRenderTarg
 // # Safety
 // The target pointer must be valid.
 uint32_t goldy_render_target_width(const struct GoldyRenderTarget *target);
+
+// Acquire a retained buffer parcel.
+//
+// `element_stride` of `0` selects stride `1` (raw bytes). Pass `data == null` with
+// `data_size == 0` for an uninitialized buffer.
+//
+// Returns a heap-allocated parcel handle, or null on failure.
+//
+// # Safety
+// `pool` and `device` must be valid. `data` must point to at least `data_size` bytes when non-null.
+struct GoldyParcel *goldy_retained_pool_acquire_buffer(struct GoldyRetainedPool *pool,
+                                                       uint64_t size,
+                                                       enum GoldyBufferKind access,
+                                                       uint32_t element_stride,
+                                                       const uint8_t *data,
+                                                       size_t data_size);
+
+// Acquire a retained texture parcel with optional initial pixel data.
+//
+// `data` may be null when `data_size == 0` (uninitialized texture).
+//
+// # Safety
+// `pool` must be valid. `data` must point to at least `data_size` bytes when non-null.
+struct GoldyParcel *goldy_retained_pool_acquire_texture(struct GoldyRetainedPool *pool,
+                                                        uint32_t width,
+                                                        uint32_t height,
+                                                        enum GoldyTextureFormat format,
+                                                        enum GoldyTextureKind access,
+                                                        struct GoldyTextureFlags flags,
+                                                        const uint8_t *data,
+                                                        size_t data_size);
+
+// Create a retained pool tied to `device`.
+//
+// # Safety
+// The device pointer must be valid.
+struct GoldyRetainedPool *goldy_retained_pool_create(const struct GoldyDevice *device);
+
+// Destroy a retained pool.
+//
+// Parcels acquired from this pool remain valid until destroyed separately.
+//
+// # Safety
+// The pointer must be valid and not used after this call.
+void goldy_retained_pool_destroy(struct GoldyRetainedPool *pool);
 
 // Create a new sampler with the given descriptor.
 //
@@ -788,20 +768,21 @@ enum GoldyResult goldy_task_graph_compute_node_begin(struct GoldyTaskGraph *grap
                                                      const char *label,
                                                      const struct GoldyComputePipeline *pipeline);
 
-// Declare a buffer dependency for the active compute node.
+// Declare a graph dependency on a retained parcel for the active compute node.
 //
 // # Safety
 // All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_bind_buffer(struct GoldyTaskGraph *graph,
-                                                           const struct GoldyBuffer *buffer,
+enum GoldyResult goldy_task_graph_compute_node_bind_parcel(struct GoldyTaskGraph *graph,
+                                                           const struct GoldyParcel *parcel,
                                                            enum GoldyNodeAccess access);
 
-// Declare a buffer-view dependency for the active compute node.
+// Declare a mosaic sub-view dependency for the active compute node.
 //
 // # Safety
 // All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_bind_buffer_view(struct GoldyTaskGraph *graph,
-                                                                const struct GoldyBufferView *view,
+enum GoldyResult goldy_task_graph_compute_node_bind_parcel_view(struct GoldyTaskGraph *graph,
+                                                                const struct GoldyParcel *parcel,
+                                                                uint32_t slot,
                                                                 enum GoldyNodeAccess access);
 
 // Set bindless resource slot indices for the active compute node.
@@ -871,29 +852,22 @@ enum GoldyResult goldy_task_graph_render_pass_begin(struct GoldyTaskGraph *graph
                                                     const char *label,
                                                     const struct GoldyRenderTarget *target);
 
-// Declare a graph dependency on a buffer for the active render pass.
+// Declare a graph dependency on a retained parcel for the active render pass.
 //
 // # Safety
 // All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_bind_buffer(struct GoldyTaskGraph *graph,
-                                                          const struct GoldyBuffer *buffer,
+enum GoldyResult goldy_task_graph_render_pass_bind_parcel(struct GoldyTaskGraph *graph,
+                                                          const struct GoldyParcel *parcel,
                                                           enum GoldyNodeAccess access);
 
-// Declare a buffer-view dependency for the active render pass.
+// Declare a mosaic sub-view dependency for the active render pass.
 //
 // # Safety
 // All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_bind_buffer_view(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyBufferView *view,
+enum GoldyResult goldy_task_graph_render_pass_bind_parcel_view(struct GoldyTaskGraph *graph,
+                                                               const struct GoldyParcel *parcel,
+                                                               uint32_t slot,
                                                                enum GoldyNodeAccess access);
-
-// Bind shader resource slots from buffers for the active render pass.
-//
-// # Safety
-// All pointers must be valid. `buffers` must contain `buffer_count` elements.
-enum GoldyResult goldy_task_graph_render_pass_bind_resources(struct GoldyTaskGraph *graph,
-                                                             const struct GoldyBuffer *const *buffers,
-                                                             uint32_t buffer_count);
 
 // Bind typed resource handles (category + index pairs) for the active render pass.
 //
@@ -953,12 +927,12 @@ enum GoldyResult goldy_task_graph_render_pass_draw_indexed(struct GoldyTaskGraph
 // The graph pointer must be valid.
 enum GoldyResult goldy_task_graph_render_pass_finish(struct GoldyTaskGraph *graph);
 
-// Bind an index buffer for the active render pass.
+// Bind an index buffer parcel for the active render pass.
 //
 // # Safety
-// All pointers must be valid.
+// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
 enum GoldyResult goldy_task_graph_render_pass_set_index_buffer(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyBuffer *buffer,
+                                                               const struct GoldyParcel *parcel,
                                                                enum GoldyIndexFormat format);
 
 // Set the render pipeline for the active render pass.
@@ -968,78 +942,23 @@ enum GoldyResult goldy_task_graph_render_pass_set_index_buffer(struct GoldyTaskG
 enum GoldyResult goldy_task_graph_render_pass_set_pipeline(struct GoldyTaskGraph *graph,
                                                            const struct GoldyRenderPipeline *pipeline);
 
-// Bind a vertex buffer slot for the active render pass.
+// Bind a vertex buffer slot from a retained buffer parcel for the active render pass.
 //
 // # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer(struct GoldyTaskGraph *graph,
-                                                                uint32_t slot,
-                                                                const struct GoldyBuffer *buffer);
-
-// Bind a vertex buffer slot with a byte offset for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer_offset(struct GoldyTaskGraph *graph,
+// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
+enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer_parcel(struct GoldyTaskGraph *graph,
                                                                        uint32_t slot,
-                                                                       const struct GoldyBuffer *buffer,
-                                                                       uint64_t offset);
+                                                                       const struct GoldyParcel *parcel);
 
-// Add a CPU→GPU buffer upload node to the graph.
+// Add a CPU→GPU upload node targeting a retained buffer parcel.
 //
 // # Safety
-// All pointers must be valid. `data` must point to at least `size` bytes.
-enum GoldyResult goldy_task_graph_write_buffer(struct GoldyTaskGraph *graph,
-                                               const struct GoldyBuffer *buffer,
+// All pointers must be valid. `data` must point to at least `size` bytes when non-null.
+enum GoldyResult goldy_task_graph_write_parcel(struct GoldyTaskGraph *graph,
+                                               const struct GoldyParcel *parcel,
                                                uint64_t offset,
                                                const uint8_t *data,
                                                size_t size);
-
-// Create a new texture with the specified spatial access pattern.
-//
-// # Access Patterns
-// - `Interpolated` (0): Hardware filtering between neighbors (Texture2D with sampler)
-// - `Direct` (1): Direct 2D indexing, no filtering (RWTexture2D)
-//
-// # Flags
-// - `COPY_SRC` (1): Can be used as a copy source
-// - `COPY_DST` (2): Can be used as a copy destination
-// - `RENDER_TARGET` (4): Can be used as a render attachment
-//
-// Returns a pointer to the texture, or null on failure.
-//
-// # Safety
-// The device pointer must be valid.
-struct GoldyTexture *goldy_texture_create(const struct GoldyDevice *device,
-                                          uint32_t width,
-                                          uint32_t height,
-                                          enum GoldyTextureFormat format,
-                                          enum GoldyTextureKind access,
-                                          struct GoldyTextureFlags flags);
-
-// Destroy a texture.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_texture_destroy(struct GoldyTexture *texture);
-
-// Get the texture format.
-//
-// # Safety
-// The texture pointer must be valid.
-enum GoldyTextureFormat goldy_texture_format(const struct GoldyTexture *texture);
-
-// Get the texture height.
-//
-// # Safety
-// The texture pointer must be valid.
-uint32_t goldy_texture_height(const struct GoldyTexture *texture);
-
-// Get the texture width.
-//
-// # Safety
-// The texture pointer must be valid.
-uint32_t goldy_texture_width(const struct GoldyTexture *texture);
 
 #ifdef __cplusplus
 }  // extern "C"

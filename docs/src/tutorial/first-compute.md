@@ -72,14 +72,14 @@ impl goldy::StructuredBufferElement for Uniforms {}
 Create the buffer with `BufferKind::Scattered` so it gets a bindless descriptor:
 
 ```rust
-let uniform_buffer = device.alloc_buffer_with_data(
-    &device,
+let mut retained_pool = RetainedPool::new(device.clone());
+let uniform_buffer = retained_pool.acquire_buffer_with_data(
     &[Uniforms { width, height, time: 0.0, _padding: 0.0 }],
     BufferKind::Scattered,
 )?;
 ```
 
-Pass a typed `&[Uniforms]` slice, not raw bytes. `device.alloc_buffer_with_data` uses `size_of::<T>()` as the structured-buffer stride, which backends rely on for correct addressing.
+Pass a typed `&[Uniforms]` slice, not raw bytes. `acquire_buffer_with_data` uses `size_of::<T>()` as the structured-buffer stride, which backends rely on for correct addressing.
 
 ### Compute Pipeline
 

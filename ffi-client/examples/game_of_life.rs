@@ -5,9 +5,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
-    TaskGraph,
+    Color, ComputePipeline, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle,
+    RetainedPool, ShaderModule, Surface, TaskGraph,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -22,6 +22,9 @@ use winit::{
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: usize = (GRID_WIDTH * GRID_HEIGHT) as usize;
+
+const SLOT_A: MosaicSlot = MosaicSlot(0);
+const SLOT_B: MosaicSlot = MosaicSlot(1);
 
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
@@ -124,8 +127,8 @@ struct App {
     frame_graph: TaskGraph,
     compute_pipeline: Option<ComputePipeline>,
     render_pipeline: Option<RenderPipeline>,
-    buf_a: Option<Buffer>,
-    buf_b: Option<Buffer>,
+    _retained_pool: Option<RetainedPool>,
+    cells: Option<goldy_ffi_client::Parcel>,
     use_buffer_a: bool,
     frame_count: u32,
     last_update: std::time::Instant,
@@ -143,8 +146,8 @@ impl App {
             frame_graph: TaskGraph::new(),
             compute_pipeline: None,
             render_pipeline: None,
-            buf_a: None,
-            buf_b: None,
+            _retained_pool: None,
+            cells: None,
             use_buffer_a: true,
             frame_count: 0,
             last_update: std::time::Instant::now(),
@@ -167,9 +170,11 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let initial = create_initial_state();
-        let zeros = vec![0u32; CELL_COUNT];
-        let buf_a = Buffer::from_slice(&device, &initial, BufferKind::Scattered)?;
-        let buf_b = Buffer::from_slice(&device, &zeros, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(&device)?;
+        let mut mosaic = retained_pool.mosaic()?;
+        mosaic.emplace_pod::<u32>(&initial)?;
+        mosaic.emplace_pod::<u32>(&initial)?;
+        let cells = mosaic.build(&mut retained_pool)?;
 
         let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -193,8 +198,8 @@ impl App {
         self.scene_rt = Some(scene_rt);
         self.compute_pipeline = Some(compute_pipeline);
         self.render_pipeline = Some(render_pipeline);
-        self.buf_a = Some(buf_a);
-        self.buf_b = Some(buf_b);
+        self._retained_pool = Some(retained_pool);
+        self.cells = Some(cells);
         self.use_buffer_a = true;
 
         Ok(())
@@ -210,39 +215,42 @@ impl App {
         let render_pipeline = self.render_pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
-        let buf_a = self.buf_a.as_ref().unwrap();
-        let buf_b = self.buf_b.as_ref().unwrap();
+        let cells = self.cells.as_ref().unwrap();
 
         self.frame_graph.clear();
 
         if should_update {
             self.last_update = now;
 
-            let (read_buf, write_buf) = if self.use_buffer_a {
-                (buf_a, buf_b)
+            let (read_slot, write_slot) = if self.use_buffer_a {
+                (SLOT_A, SLOT_B)
             } else {
-                (buf_b, buf_a)
+                (SLOT_B, SLOT_A)
             };
 
-            let read_idx = read_buf.resource_index(ResourceAccess::ReadWrite)?;
-            let write_idx = write_buf.resource_index(ResourceAccess::Write)?;
+            let read_idx = cells.mosaic_view_resource_index(read_slot, ResourceAccess::ReadWrite)?;
+            let write_idx = cells.mosaic_view_resource_index(write_slot, ResourceAccess::Write)?;
 
             let mut node = self.frame_graph.compute_node("game_of_life", compute_pipeline);
-            node.bind_buffer(read_buf, NodeAccess::Read);
-            node.bind_buffer(write_buf, NodeAccess::Write);
+            node.bind_parcel_view(cells, read_slot, NodeAccess::Read);
+            node.bind_parcel_view(cells, write_slot, NodeAccess::Write);
             node.bind_resources_raw(&[read_idx, write_idx]);
             node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
 
             self.use_buffer_a = !self.use_buffer_a;
         }
 
-        let current_buf = if self.use_buffer_a { buf_a } else { buf_b };
+        let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+        let render_idx = cells.mosaic_view_resource_index(current_slot, ResourceAccess::ReadWrite)?;
 
         let mut pass = self.frame_graph.render_pass("game_of_life_render", scene_rt);
-        pass.bind_buffer_mut(current_buf, NodeAccess::Read);
+        pass.bind_parcel_view_mut(cells, current_slot, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
-        pass.bind_resources(&[current_buf]);
+        pass.bind_resources_typed(&[ResourceHandle {
+            category: ResourceCategory::Scattered,
+            index: render_idx,
+        }]);
         pass.draw_fullscreen();
         pass.finish_recorded();
 

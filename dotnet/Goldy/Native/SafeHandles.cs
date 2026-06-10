@@ -35,22 +35,6 @@ internal sealed class DeviceHandle : SafeHandle
 }
 
 /// <summary>
-/// SafeHandle for Goldy Buffer.
-/// </summary>
-internal sealed class BufferHandle : SafeHandle
-{
-    public BufferHandle() : base(nint.Zero, true) { }
-    
-    public override bool IsInvalid => handle == nint.Zero;
-    
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.BufferDestroy(handle);
-        return true;
-    }
-}
-
-/// <summary>
 /// SafeHandle for Goldy RenderTarget.
 /// </summary>
 internal sealed class RenderTargetHandle : SafeHandle
@@ -110,22 +94,6 @@ internal sealed class ComputePipelineHandle : SafeHandle
     protected override bool ReleaseHandle()
     {
         NativeMethods.ComputePipelineDestroy(handle);
-        return true;
-    }
-}
-
-/// <summary>
-/// SafeHandle for Goldy Texture.
-/// </summary>
-internal sealed class TextureHandle : SafeHandle
-{
-    public TextureHandle() : base(nint.Zero, true) { }
-    
-    public override bool IsInvalid => handle == nint.Zero;
-    
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.TextureDestroy(handle);
         return true;
     }
 }

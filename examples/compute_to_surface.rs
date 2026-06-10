@@ -8,8 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Instance, PresentMode,
-    RequestAdapterOptions, ResourceAccess, ShaderModule, Surface, SurfaceConfig, TaskGraph, SWAPCHAIN_SLOT_PLACEHOLDER,
+    task_graph::NodeAccess, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel, PresentMode,
+    RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface, SurfaceConfig, TaskGraph,
+    SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 use std::sync::Arc;
 use winit::{
@@ -19,6 +20,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -98,7 +100,9 @@ struct RenderState {
     window: Arc<Window>,
     surface: Surface,
     compute_pipeline: ComputePipeline,
-    uniform_buffer: Buffer,
+    _retained_pool: RetainedPool,
+    uniform_buffer: Parcel,
+    frame_graph: TaskGraph,
     start_time: std::time::Instant,
     vsync: bool,
     frame_count: u32,
@@ -127,13 +131,9 @@ impl App {
         let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
         // NOTE: pass a typed `&[Uniforms]`, NOT `bytemuck::bytes_of(&u)`.
-        // `Buffer::with_data::<T>` uses `size_of::<T>()` as the structured-buffer
-        // stride. Passing `&[u8]` gave stride=1, which on DX12 caused
-        // `rawBufferLoad` of any field past offset 0 to return 0 (out-of-bounds
-        // for a stride-1 structured buffer) — turning `u.height` into 0 and
-        // triggering the `if (tid.y >= u.height) return;` guard for every
-        // thread on the `compute_to_surface` path.
-        let uniform_buffer = device.alloc_buffer_with_data(
+        // Structured-buffer stride must match `size_of::<Uniforms>()` on DX12.
+        let mut retained_pool = RetainedPool::new(device);
+        let uniform_buffer = retained_pool.acquire_buffer_with_data(
             &[Uniforms {
                 width: surface.width(),
                 height: surface.height(),
@@ -147,7 +147,9 @@ impl App {
             window,
             surface,
             compute_pipeline,
+            _retained_pool: retained_pool,
             uniform_buffer,
+            frame_graph: TaskGraph::new(),
             start_time: std::time::Instant::now(),
             vsync: true,
             frame_count: 0,
@@ -190,6 +192,12 @@ impl ApplicationHandler for App {
         }
 
         window.request_redraw();
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            common::exit_if_timed_out(event_loop, state.start_time);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -244,46 +252,38 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     }
 
     let elapsed = state.start_time.elapsed().as_secs_f32();
+    let uniforms = Uniforms {
+        width,
+        height,
+        time: elapsed,
+        _padding: 0.0,
+    };
 
-    // Update uniforms
-    state.uniform_buffer.write(
-        0,
-        bytemuck::bytes_of(&Uniforms {
-            width,
-            height,
-            time: elapsed,
-            _padding: 0.0,
-        }),
-    )?;
-
-    // Acquire the surface frame; swapchain UAV is resolved at submit time.
     let frame = state.surface.begin()?;
 
-    // Dispatch the compute shader to write directly to the swapchain texture.
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    // The shader reads the uniform buffer via `goldy_buf_ro<Uniforms>(uniforms_slot)`,
-    // which maps to an SRV (read-only) on DX12. Use `bindless_srv_handle()` so the
-    // index matches the SRV heap on DX12, while on Vulkan/Metal it falls back to
-    // the unified storage-buffer index.
     let uniform_handle = state
         .uniform_buffer
         .handle(ResourceAccess::Read)
-        .expect("Uniform buffer has no bindless SRV handle");
+        .expect("Uniform parcel has no bindless SRV handle");
 
-    let mut graph = TaskGraph::new();
-    let swapchain = graph.declare_swapchain_output();
-    graph
+    state.frame_graph.clear();
+    state
+        .frame_graph
+        .write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+    let swapchain = state.frame_graph.declare_swapchain_output();
+    state
+        .frame_graph
         .node("compute", &state.compute_pipeline)
-        .bind_buffer(&state.uniform_buffer, NodeAccess::Read)
+        .bind_parcel(&state.uniform_buffer, NodeAccess::Read)
         .bind_swapchain_output(swapchain, NodeAccess::Write)
         .bind_resources_raw_slice(&[uniform_handle.index(), SWAPCHAIN_SLOT_PLACEHOLDER])
         .dispatch(wg_x, wg_y, 1);
 
-    let frame = state.surface.submit_graph_to_frame(&mut graph, frame)?;
+    let frame = state.surface.submit_graph_to_frame(&mut state.frame_graph, frame)?;
 
-    // Present — the compute shader already wrote the pixels
     frame.present()?;
 
     Ok(())

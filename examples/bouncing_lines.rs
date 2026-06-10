@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
-    TaskGraph, VertexBufferLayout,
+    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -19,6 +19,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 const NUM_LINES: u32 = 20;
 
@@ -68,7 +69,8 @@ struct RenderState {
     scene_rt: RenderTarget,
     frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    line_buffer: Buffer,
+    _retained_pool: RetainedPool,
+    line_buffer: Parcel,
     render_pipeline: RenderPipeline,
     frame_count: u32,
     start_time: std::time::Instant,
@@ -109,7 +111,8 @@ impl RenderState {
             });
         }
 
-        let line_buffer = device.alloc_buffer_with_data(&lines, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let line_buffer = retained_pool.acquire_buffer_with_data(&lines, BufferKind::Scattered)?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
@@ -134,6 +137,7 @@ impl RenderState {
             scene_rt,
             frame_graph: TaskGraph::new(),
             compute_pipeline,
+            _retained_pool: retained_pool,
             line_buffer,
             render_pipeline,
             frame_count: 0,
@@ -147,7 +151,7 @@ impl RenderState {
         self.frame_graph.clear();
         self.frame_graph
             .node("update_lines", &self.compute_pipeline)
-            .bind_buffer(&self.line_buffer, NodeAccess::ReadWrite)
+            .bind_parcel(&self.line_buffer, NodeAccess::ReadWrite)
             .bind_resources_raw_slice(&[self.line_buffer.resource_index(ResourceAccess::Write).unwrap()])
             .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
 
@@ -159,10 +163,11 @@ impl RenderState {
         };
 
         let mut pass = self.frame_graph.render_pass("bouncing_lines", &self.scene_rt);
-        pass.bind_buffer_mut(&self.line_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(&self.line_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources(&[&self.line_buffer]);
+        // `Scattered<Line>` in the vertex shader expects a UAV bindless slot on DX12.
+        pass.bind_resources_raw(&[self.line_buffer.resource_index(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..2, 0..NUM_LINES);
         pass.finish_recorded();
 
@@ -217,6 +222,12 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            common::exit_if_timed_out(event_loop, state.start_time);
         }
     }
 

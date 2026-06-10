@@ -24,6 +24,9 @@ CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
 WORKGROUPS_X = (GRID_WIDTH + 7) // 8
 WORKGROUPS_Y = (GRID_HEIGHT + 7) // 8
 
+SLOT_A = 0
+SLOT_B = 1
+
 SHADERS_DIR = Path(__file__).resolve().parents[2] / "shaders"
 
 
@@ -122,8 +125,11 @@ def main() -> int:
 
     initial = create_initial_state()
     zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
-    buf_a = goldy.Buffer(device, initial, goldy.BufferKind.SCATTERED)
-    buf_b = goldy.Buffer(device, zeros, goldy.BufferKind.SCATTERED)
+    retained_pool = goldy.RetainedPool(device)
+    mosaic = retained_pool.mosaic()
+    mosaic.emplace(initial)
+    mosaic.emplace(zeros)
+    cells = mosaic.build(retained_pool)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
     render_shader = goldy.ShaderModule.from_slang(device, render_src)
@@ -161,27 +167,34 @@ def main() -> int:
 
             if should_update:
                 last_update = now
-                read_buf, write_buf = (buf_a, buf_b) if use_buffer_a else (buf_b, buf_a)
-                read_idx = read_buf.resource_index(goldy.ResourceAccess.READ)
-                write_idx = write_buf.resource_index(goldy.ResourceAccess.WRITE)
+                read_slot = SLOT_A if use_buffer_a else SLOT_B
+                write_slot = SLOT_B if use_buffer_a else SLOT_A
+                read_idx = cells.mosaic_view_resource_index(
+                    read_slot, goldy.ResourceAccess.READ_WRITE
+                )
+                write_idx = cells.mosaic_view_resource_index(
+                    write_slot, goldy.ResourceAccess.WRITE
+                )
                 with frame_graph.compute_node(
                     "game_of_life",
                     compute_pipeline,
                     workgroups=(WORKGROUPS_X, WORKGROUPS_Y, 1),
                 ) as node:
                     (
-                        node.bind_buffer(read_buf, goldy.NodeAccess.READ)
-                        .bind_buffer(write_buf, goldy.NodeAccess.WRITE)
+                        node.bind_parcel_view(cells, read_slot, goldy.NodeAccess.READ)
+                        .bind_parcel_view(cells, write_slot, goldy.NodeAccess.WRITE)
                         .bind_resources_raw([read_idx, write_idx])
                     )
                 use_buffer_a = not use_buffer_a
 
-            current_buf = buf_a if use_buffer_a else buf_b
-            cells_idx = current_buf.resource_index(goldy.ResourceAccess.READ)
+            current_slot = SLOT_A if use_buffer_a else SLOT_B
+            cells_idx = cells.mosaic_view_resource_index(
+                current_slot, goldy.ResourceAccess.READ_WRITE
+            )
 
             with frame_graph.render_pass("game_of_life_render", scene_rt) as rp:
                 (
-                    rp.bind_buffer(current_buf, goldy.NodeAccess.READ)
+                    rp.bind_parcel_view(cells, current_slot, goldy.NodeAccess.READ)
                     .clear(goldy.Color.BLACK)
                     .set_pipeline(render_pipeline)
                     .bind_resource_index(cells_idx)

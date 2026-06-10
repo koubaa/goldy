@@ -1,8 +1,8 @@
 //! Rust-friendly types mirroring the native Goldy API.
 
 use crate::sys::{
-    self, GoldyBufferKind, GoldyCompareFunction, GoldyDepthFormat, GoldyNodeAccess, GoldyPrimitiveTopology,
-    GoldyTextureFormat, GoldyVertexFormat,
+    self, GoldyBufferKind, GoldyCompareFunction, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess,
+    GoldyPrimitiveTopology, GoldyTextureFormat, GoldyVertexFormat,
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -117,6 +117,22 @@ impl From<BufferKind> for GoldyBufferKind {
         match k {
             BufferKind::Scattered => GoldyBufferKind::GOLDY_BUFFER_KIND_SCATTERED,
             BufferKind::Broadcast => GoldyBufferKind::GOLDY_BUFFER_KIND_BROADCAST,
+        }
+    }
+}
+
+/// Index buffer element format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexFormat {
+    Uint16,
+    Uint32,
+}
+
+impl From<IndexFormat> for GoldyIndexFormat {
+    fn from(f: IndexFormat) -> Self {
+        match f {
+            IndexFormat::Uint16 => GoldyIndexFormat::GOLDY_INDEX_FORMAT_UINT16,
+            IndexFormat::Uint32 => GoldyIndexFormat::GOLDY_INDEX_FORMAT_UINT32,
         }
     }
 }

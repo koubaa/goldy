@@ -6,6 +6,19 @@ use goldy::{
     ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
+fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
+    device: &goldy::Device,
+    data: &[T],
+    kind: goldy::BufferKind,
+) -> goldy::Buffer {
+    use std::sync::Arc;
+    goldy::RetainedPool::new(Arc::new(device.clone()))
+        .acquire_buffer_with_data(data, kind)
+        .expect("acquire_buffer_with_data")
+        .detach_buffer()
+        .expect("detach_buffer")
+}
+
 fn graph_render(
     device: &Device,
     target: &RenderTarget,
@@ -88,9 +101,7 @@ pub fn render_triangle(
     )
     .expect("Failed to create pipeline");
 
-    let vertex_buffer = device
-        .alloc_buffer_with_data(&vertices, BufferKind::Scattered)
-        .expect("Failed to create VB");
+    let vertex_buffer = test_alloc_buffer_with_data(&device, &vertices, BufferKind::Scattered);
 
     graph_render(device, &target, "triangle", |pass| {
         pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
@@ -188,12 +199,8 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         .expect("Failed to load render shader");
 
     let initial_state = create_gol_initial_state();
-    let buffer_a = device
-        .alloc_buffer_with_data(&initial_state, BufferKind::Scattered)
-        .expect("Failed to create buffer A");
-    let buffer_b = device
-        .alloc_buffer_with_data(&initial_state, BufferKind::Scattered)
-        .expect("Failed to create buffer B");
+    let buffer_a = test_alloc_buffer_with_data(&device, &initial_state, BufferKind::Scattered);
+    let buffer_b = test_alloc_buffer_with_data(&device, &initial_state, BufferKind::Scattered);
 
     let compute_pipeline = ComputePipeline::new(device, &compute_shader).expect("Failed to create compute pipeline");
 
@@ -331,12 +338,8 @@ pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u
     let red_verts = make_tri(0.2, [1.0, 0.0, 0.0, 1.0]);
     let green_verts = make_tri(0.6, [0.0, 1.0, 0.0, 1.0]);
 
-    let red_vb = device
-        .alloc_buffer_with_data(&red_verts, BufferKind::Scattered)
-        .expect("Failed to create VB");
-    let green_vb = device
-        .alloc_buffer_with_data(&green_verts, BufferKind::Scattered)
-        .expect("Failed to create VB");
+    let red_vb = test_alloc_buffer_with_data(&device, &red_verts, BufferKind::Scattered);
+    let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(device, &target, "depth_occlusion", |pass| {
         pass.bind_buffer_mut(&red_vb, NodeAccess::Read);

@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
-    TaskGraph, VertexBufferLayout,
+    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess, Parcel,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +20,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 const GRID_SIZE: u32 = 20;
 const QUAD_SIZE: f32 = 0.03;
@@ -68,8 +69,9 @@ struct RenderState {
     frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
-    instance_buffer: Buffer,
-    params_buffer: Buffer,
+    _retained_pool: RetainedPool,
+    instance_buffer: Parcel,
+    params_buffer: Parcel,
     start_time: Instant,
     last_time: f32,
     frame_count: u32,
@@ -107,15 +109,10 @@ impl RenderState {
             }
         }
 
-        let instance_buffer = device.alloc_buffer_with_data(&instances, BufferKind::Scattered)?;
-
-        let params = AnimParams {
-            time: 0.0,
-            delta_time: 0.016,
-            total_instances: NUM_QUADS,
-            _pad: 0,
-        };
-        let params_buffer = device.alloc_buffer_with_data(&[params], BufferKind::Broadcast)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let instance_buffer = retained_pool.acquire_buffer_with_data(&instances, BufferKind::Scattered)?;
+        let params_buffer =
+            retained_pool.acquire_buffer_sized::<AnimParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
@@ -144,6 +141,7 @@ impl RenderState {
             frame_graph: TaskGraph::new(),
             compute_pipeline,
             render_pipeline,
+            _retained_pool: retained_pool,
             instance_buffer,
             params_buffer,
             start_time: Instant::now(),
@@ -165,13 +163,14 @@ impl RenderState {
             total_instances: NUM_QUADS,
             _pad: 0,
         };
-        self.params_buffer.write_data(0, &[params])?;
 
         self.frame_graph.clear();
         self.frame_graph
+            .write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
+        self.frame_graph
             .node("update_instances", &self.compute_pipeline)
-            .bind_buffer(&self.instance_buffer, NodeAccess::ReadWrite)
-            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_parcel(&self.instance_buffer, NodeAccess::ReadWrite)
+            .bind_parcel(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
                 self.instance_buffer.resource_index(ResourceAccess::Write).unwrap(),
                 self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
@@ -186,10 +185,10 @@ impl RenderState {
         };
 
         let mut pass = self.frame_graph.render_pass("instancing", &self.scene_rt);
-        pass.bind_buffer_mut(&self.instance_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(&self.instance_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources(&[&self.instance_buffer]);
+        pass.bind_resources_raw(&[self.instance_buffer.resource_index(ResourceAccess::Read).unwrap()]);
         pass.draw_quads(NUM_QUADS);
         pass.finish_recorded();
 
@@ -244,6 +243,12 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            common::exit_if_timed_out(event_loop, state.start_time);
         }
     }
 

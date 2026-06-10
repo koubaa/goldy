@@ -39,9 +39,9 @@ def main():
     input_data = np.arange(256, dtype=np.float32)
     print(f"Input data (first 10): {input_data[:10]}")
     
-    # Create GPU storage buffer
-    buffer = goldy.Buffer(device, input_data, goldy.BufferKind.SCATTERED)
-    print(f"Created buffer: {buffer.size} bytes")
+    retained_pool = goldy.RetainedPool(device)
+    parcel = retained_pool.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
+    print(f"Created parcel: {parcel.byte_size} bytes")
     
     # Compile compute shader
     shader = goldy.ShaderModule.from_slang(device, COMPUTE_SHADER)
@@ -52,9 +52,9 @@ def main():
     print("Created compute pipeline")
     
     graph = goldy.TaskGraph()
-    idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+    idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
     with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
-        node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+        node.bind_parcel(parcel, goldy.NodeAccess.READ_WRITE)
         node.bind_resources_raw([idx])
 
     graph.dispatch(device)

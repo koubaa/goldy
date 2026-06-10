@@ -5,7 +5,7 @@
 //! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
 use crate::backend::{BufferHandle, ContextHandle};
-use crate::buffer::{Buffer, BufferPool, BufferView};
+use crate::buffer::{Buffer, BufferPool, BufferSource, BufferView};
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
@@ -177,6 +177,18 @@ impl Parcel {
         }
     }
 
+    /// Read buffer parcel contents back to CPU memory.
+    ///
+    /// Valid only for non-mosaic buffer parcels acquired via [`crate::RetainedPool::acquire_buffer`].
+    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => b.read_to_cpu(device, output),
+            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
+                anyhow::bail!("read_to_cpu is only valid for non-mosaic buffer parcels")
+            }
+        }
+    }
+
     /// Approximate committed byte size for accounting.
     pub fn byte_size(&self) -> u64 {
         match &self.storage {
@@ -284,5 +296,65 @@ impl Parcel {
     /// Release pool bookkeeping so [`Drop`] does not double-decrement after [`RetainedPool::release`].
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
+    }
+
+    /// Extract the backing buffer from a non-mosaic buffer parcel.
+    ///
+    /// Consumes the parcel and releases retained-pool bookkeeping. The returned
+    /// [`Buffer`] is independently owned (ekrano scratch pools and similar escape hatches).
+    pub fn detach_buffer(mut self) -> anyhow::Result<Buffer> {
+        self.release_bookkeeping();
+        match self.storage {
+            ParcelStorage::Buffer(b) => Ok(b),
+            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
+                anyhow::bail!("detach_buffer requires a non-mosaic buffer parcel")
+            }
+        }
+    }
+
+    /// Extract the backing texture from a texture parcel.
+    ///
+    /// Consumes the parcel and releases retained-pool bookkeeping.
+    pub fn detach_texture(mut self) -> anyhow::Result<Texture> {
+        self.release_bookkeeping();
+        match self.storage {
+            ParcelStorage::Texture(t) => Ok(t),
+            ParcelStorage::Buffer(_) | ParcelStorage::Mosaic(_) => {
+                anyhow::bail!("detach_texture requires a texture parcel")
+            }
+        }
+    }
+
+    /// Bindless resource index for one mosaic sub-view.
+    pub fn mosaic_view_resource_index(&self, slot: MosaicSlot, access: ResourceAccess) -> Option<u32> {
+        self.view(slot).resource_index(access)
+    }
+
+    /// Read one mosaic sub-view back to CPU memory.
+    pub fn mosaic_view_read_to_cpu(
+        &self,
+        device: &crate::Device,
+        slot: MosaicSlot,
+        output: &mut [u8],
+    ) -> anyhow::Result<()> {
+        self.view(slot).read_to_cpu(device, output)
+    }
+}
+
+impl BufferSource for Parcel {
+    fn source_handle(&self) -> BufferHandle {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => b.gpu_buffer_handle(),
+            ParcelStorage::Mosaic(_) => {
+                panic!("use Parcel::view for mosaic vertex/index binding")
+            }
+            ParcelStorage::Texture(_) => {
+                panic!("BufferSource is not implemented for texture parcels")
+            }
+        }
+    }
+
+    fn source_offset(&self) -> u64 {
+        0
     }
 }

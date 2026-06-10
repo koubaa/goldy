@@ -62,7 +62,9 @@ from goldy._goldy import (
     Instance,
     Adapter,
     Device,
-    Buffer,
+    Parcel,
+    RetainedPool,
+    MosaicBuilder,
     ShaderModule,
     RenderPipeline,
     RenderPipelineDesc,
@@ -73,8 +75,6 @@ from goldy._goldy import (
     SwapchainOutput,
     NodeAccess,
     ResourceAccess,
-    BufferPool,
-    BufferView,
     # Shader builtins
     Builtins,
     # Compute
@@ -107,7 +107,9 @@ __all__ = [
     "Instance",
     "Adapter",
     "Device",
-    "Buffer",
+    "Parcel",
+    "RetainedPool",
+    "MosaicBuilder",
     "ShaderModule",
     "RenderPipeline",
     "RenderPipelineDesc",
@@ -118,8 +120,6 @@ __all__ = [
     "SwapchainOutput",
     "NodeAccess",
     "ResourceAccess",
-    "BufferPool",
-    "BufferView",
     # Shader builtins
     "Builtins",
     # Compute

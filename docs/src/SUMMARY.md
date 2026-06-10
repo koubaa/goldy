@@ -34,6 +34,7 @@
 # Resources at Scale
 
 - [Buffers](./resources/buffers.md)
+- [RetainedPool and Parcel](./resources/retained-pool.md)
 - [Textures and Samplers](./resources/textures.md)
 - [Pooling and Sub-Allocation](./resources/pooling.md)
 - [Transient Allocation](./resources/transient-allocation.md)

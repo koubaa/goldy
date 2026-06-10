@@ -6,10 +6,10 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_buffer_create, goldy_buffer_create_with_data_stride, goldy_buffer_destroy, goldy_buffer_read_to_cpu,
-    goldy_buffer_resource_index, goldy_buffer_size, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
-    goldy_device_destroy, goldy_instance_destroy, goldy_shader_create, goldy_shader_destroy,
-    goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_buffer,
+    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_instance_destroy,
+    goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu, goldy_parcel_resource_index,
+    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create,
+    goldy_shader_destroy, goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_parcel,
     goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
     goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess,
     GoldyResult,
@@ -40,7 +40,7 @@ unsafe fn record_compute_node(
     graph: *mut goldy_ffi::GoldyTaskGraph,
     label: &str,
     pipeline: *const goldy_ffi::GoldyComputePipeline,
-    buffer_bindings: &[(*const goldy_ffi::GoldyBuffer, GoldyNodeAccess)],
+    parcel_bindings: &[(*const goldy_ffi::GoldyParcel, GoldyNodeAccess)],
     resource_indices: &[u32],
     workgroups: (u32, u32, u32),
 ) {
@@ -51,9 +51,9 @@ unsafe fn record_compute_node(
         "{}",
         last_ffi_message()
     );
-    for &(buffer, access) in buffer_bindings {
+    for &(parcel, access) in parcel_bindings {
         assert_eq!(
-            goldy_task_graph_compute_node_bind_buffer(graph, buffer, access),
+            goldy_task_graph_compute_node_bind_parcel(graph, parcel, access),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -85,16 +85,21 @@ fn task_graph_compute_double_then_add_ten() {
         let input: Vec<u32> = (0..64).collect();
         let input_bytes =
             std::slice::from_raw_parts(input.as_ptr() as *const u8, input.len() * std::mem::size_of::<u32>());
-        let src = goldy_buffer_create_with_data_stride(
-            device,
-            input_bytes.as_ptr(),
-            input_bytes.len(),
+
+        let pool = goldy_retained_pool_create(device);
+        assert!(!pool.is_null(), "{}", last_ffi_message());
+
+        let src = goldy_retained_pool_acquire_buffer(
+            pool,
+            input_bytes.len() as u64,
             GoldyBufferKind::Scattered,
             std::mem::size_of::<u32>() as u32,
+            input_bytes.as_ptr(),
+            input_bytes.len(),
         );
         assert!(!src.is_null(), "{}", last_ffi_message());
 
-        let dst = goldy_buffer_create(device, 64 * 4, GoldyBufferKind::Scattered);
+        let dst = goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!dst.is_null(), "{}", last_ffi_message());
 
         let double_src = CString::new(DOUBLE_SHADER).unwrap();
@@ -110,8 +115,8 @@ fn task_graph_compute_double_then_add_ten() {
         assert!(!add_pipeline.is_null(), "{}", last_ffi_message());
 
         // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (UAV on DX12).
-        let src_idx = goldy_buffer_resource_index(src, GoldyResourceAccess::ReadWrite);
-        let dst_idx = goldy_buffer_resource_index(dst, GoldyResourceAccess::Write);
+        let src_idx = goldy_parcel_resource_index(src, GoldyResourceAccess::ReadWrite);
+        let dst_idx = goldy_parcel_resource_index(dst, GoldyResourceAccess::Write);
         assert_ne!(src_idx, u32::MAX);
         assert_ne!(dst_idx, u32::MAX);
 
@@ -147,9 +152,9 @@ fn task_graph_compute_double_then_add_ten() {
             last_ffi_message()
         );
 
-        let mut readback = vec![0u8; goldy_buffer_size(dst) as usize];
+        let mut readback = vec![0u8; goldy_parcel_byte_size(dst) as usize];
         assert_eq!(
-            goldy_buffer_read_to_cpu(dst, device, readback.as_mut_ptr(), readback.len()),
+            goldy_parcel_read_to_cpu(dst, device, readback.as_mut_ptr(), readback.len()),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -169,8 +174,9 @@ fn task_graph_compute_double_then_add_ten() {
         goldy_shader_destroy(add_shader);
         goldy_compute_pipeline_destroy(double_pipeline);
         goldy_shader_destroy(double_shader);
-        goldy_buffer_destroy(dst);
-        goldy_buffer_destroy(src);
+        goldy_parcel_destroy(dst);
+        goldy_parcel_destroy(src);
+        goldy_retained_pool_destroy(pool);
         goldy_device_destroy(device);
         goldy_instance_destroy(instance);
     }
