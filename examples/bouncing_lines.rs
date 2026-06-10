@@ -173,7 +173,11 @@ impl RenderState {
         pass.bind_parcel_mut(&self.line_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[self.line_buffer.resource_index(ResourceAccess::Read).unwrap()]);
+        // `Scattered<Line>` in the vertex shader expects a UAV bindless slot on DX12.
+        pass.bind_resources_raw(&[self
+            .line_buffer
+            .resource_index(ResourceAccess::ReadWrite)
+            .unwrap()]);
         pass.draw(0..2, 0..NUM_LINES);
         pass.finish_recorded();
 
