@@ -20,6 +20,9 @@ CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
 WORKGROUPS_X = (GRID_WIDTH + 7) // 8
 WORKGROUPS_Y = (GRID_HEIGHT + 7) // 8
 
+SLOT_A = 0
+SLOT_B = 1
+
 SHADERS_DIR = Path(__file__).resolve().parents[2] / "shaders"
 
 
@@ -49,8 +52,10 @@ def main() -> int:
     initial = initial_cells()
     zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
     retained_pool = goldy.RetainedPool(device)
-    buf_a = retained_pool.acquire_buffer(initial, goldy.BufferKind.SCATTERED)
-    buf_b = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
+    mosaic = retained_pool.mosaic()
+    mosaic.emplace(initial)
+    mosaic.emplace(zeros)
+    cells = mosaic.build(retained_pool)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
     render_shader = goldy.ShaderModule.from_slang(device, render_src)
@@ -67,8 +72,8 @@ def main() -> int:
 
     target = goldy.RenderTarget(device, GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
 
-    read_idx = buf_a.resource_index(goldy.ResourceAccess.READ_WRITE)
-    write_idx = buf_b.resource_index(goldy.ResourceAccess.WRITE)
+    read_idx = cells.mosaic_view_resource_index(SLOT_A, goldy.ResourceAccess.READ_WRITE)
+    write_idx = cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.WRITE)
 
     graph = goldy.TaskGraph()
     with graph.compute_node(
@@ -77,23 +82,27 @@ def main() -> int:
         workgroups=(WORKGROUPS_X, WORKGROUPS_Y, 1),
     ) as node:
         (
-            node.bind_parcel(buf_a, goldy.NodeAccess.READ)
-            .bind_parcel(buf_b, goldy.NodeAccess.WRITE)
+            node.bind_parcel_view(cells, SLOT_A, goldy.NodeAccess.READ)
+            .bind_parcel_view(cells, SLOT_B, goldy.NodeAccess.WRITE)
             .bind_resources_raw([read_idx, write_idx])
         )
 
     with graph.render_pass("game_of_life_render", target) as rp:
         (
-            rp.bind_parcel(buf_b, goldy.NodeAccess.READ)
+            rp.bind_parcel_view(cells, SLOT_B, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
-            .bind_resource_index(buf_b.resource_index(goldy.ResourceAccess.READ))
+            .bind_resource_index(
+                cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.READ)
+            )
             .draw_fullscreen()
         )
 
     graph.dispatch(device)
 
-    cells_out = np.frombuffer(buf_b.read_to_cpu(device), dtype=np.uint32)
+    cells_out = np.frombuffer(
+        cells.mosaic_view_read_to_cpu(SLOT_B, device), dtype=np.uint32
+    )
     assert cells_out.shape == (CELL_COUNT,)
     live = count_live(cells_out)
     assert live == 4, f"still-life block should remain 4 live cells, got {live}"

@@ -7,6 +7,20 @@ use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
+fn legacy_buffer(
+    device: &goldy::Device,
+    size: u64,
+    access: goldy::BufferKind,
+    stride: Option<u32>,
+    init: Option<&[u8]>,
+) -> PyResult<goldy::Buffer> {
+    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    pool.acquire_buffer(size, access, stride, goldy::BufferFlags::empty(), init)
+        .into_py_result()?
+        .detach_buffer()
+        .into_py_result()
+}
+
 /// A GPU buffer.
 ///
 /// Buffers hold data on the GPU with a specific access pattern:
@@ -37,10 +51,13 @@ impl PyBuffer {
     fn new(device: &PyDevice, data: &Bound<'_, PyAny>, access: PyBufferKind) -> PyResult<Self> {
         let (bytes, element_stride) = extract_bytes_with_stride(data)?;
         // Use the correct element stride for StructuredBuffer views on DX12
-        let buffer = device
-            .inner
-            .alloc_buffer_with_bytes_stride(&bytes, access.into(), element_stride)
-            .into_py_result()?;
+        let buffer = legacy_buffer(
+            &device.inner,
+            bytes.len() as u64,
+            access.into(),
+            Some(element_stride),
+            Some(&bytes),
+        )?;
 
         Ok(PyBuffer {
             inner: Arc::new(buffer),
@@ -58,10 +75,7 @@ impl PyBuffer {
     ///     A new empty Buffer instance.
     #[staticmethod]
     fn empty(device: &PyDevice, size: u64, access: PyBufferKind) -> PyResult<Self> {
-        let buffer = device
-            .inner
-            .alloc_buffer(size, access.into(), None, goldy::BufferFlags::empty())
-            .into_py_result()?;
+        let buffer = legacy_buffer(&device.inner, size, access.into(), None, None)?;
         Ok(PyBuffer {
             inner: Arc::new(buffer),
         })

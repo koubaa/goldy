@@ -59,6 +59,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;
+    m.add_class::<retained_pool::PyMosaicBuilder>()?;
     m.add_class::<buffer_pool::PyBufferPool>()?;
     m.add_class::<buffer_pool::PyBufferView>()?;
     m.add_class::<shader::PyShaderModule>()?;

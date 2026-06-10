@@ -5,6 +5,19 @@ use crate::error::{set_last_error_from_anyhow, GoldyResult};
 use crate::types::{GoldyBufferKind, GoldyResourceAccess};
 use std::ptr;
 use std::slice;
+use std::sync::Arc;
+
+fn legacy_buffer(
+    device: &goldy::Device,
+    size: u64,
+    access: goldy::BufferKind,
+    stride: Option<u32>,
+    init: Option<&[u8]>,
+) -> anyhow::Result<goldy::Buffer> {
+    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    pool.acquire_buffer(size, access, stride, goldy::BufferFlags::empty(), init)?
+        .detach_buffer()
+}
 
 /// Opaque handle to a Goldy Buffer.
 pub struct GoldyBuffer {
@@ -32,10 +45,7 @@ pub unsafe extern "C" fn goldy_buffer_create(
         return ptr::null_mut();
     }
 
-    match (*device)
-        .inner
-        .alloc_buffer(size, access.into(), None, goldy::BufferFlags::empty())
-    {
+    match legacy_buffer(&(*device).inner, size, access.into(), None, None) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
@@ -75,7 +85,13 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data(
         &[]
     };
 
-    match (*device).inner.alloc_buffer_with_bytes(data_slice, access.into()) {
+    match legacy_buffer(
+        &(*device).inner,
+        data_slice.len() as u64,
+        access.into(),
+        None,
+        Some(data_slice),
+    ) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
@@ -114,10 +130,13 @@ pub unsafe extern "C" fn goldy_buffer_create_with_data_stride(
         &[]
     };
 
-    match (*device)
-        .inner
-        .alloc_buffer_with_bytes_stride(data_slice, access.into(), element_stride)
-    {
+    match legacy_buffer(
+        &(*device).inner,
+        data_slice.len() as u64,
+        access.into(),
+        Some(element_stride),
+        Some(data_slice),
+    ) {
         Ok(buffer) => Box::into_raw(Box::new(GoldyBuffer { inner: buffer })),
         Err(e) => {
             set_last_error_from_anyhow(&e);

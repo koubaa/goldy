@@ -617,7 +617,7 @@ impl Device {
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_buffer`]: crate::vram_allocator::VramAllocator::alloc_buffer
-    pub fn alloc_buffer(
+    pub(crate) fn alloc_buffer(
         &self,
         size: u64,
         access: BufferKind,
@@ -634,7 +634,7 @@ impl Device {
     /// Allocate a GPU buffer with a capacity hint through the device's [`VramAllocator`].
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn alloc_buffer_with_capacity(
+    pub(crate) fn alloc_buffer_with_capacity(
         &self,
         initial_size: u64,
         expected_max: u64,
@@ -649,7 +649,7 @@ impl Device {
     }
 
     /// Allocate a buffer initialized with typed data (element stride from `T`).
-    pub fn alloc_buffer_with_data<T: crate::buffer::StructuredBufferElement>(
+    pub(crate) fn alloc_buffer_with_data<T: crate::buffer::StructuredBufferElement>(
         &self,
         data: &[T],
         access: BufferKind,
@@ -660,12 +660,12 @@ impl Device {
     }
 
     /// Allocate a buffer initialized with raw bytes (element stride 1).
-    pub fn alloc_buffer_with_bytes(&self, data: &[u8], access: BufferKind) -> anyhow::Result<crate::buffer::Buffer> {
+    pub(crate) fn alloc_buffer_with_bytes(&self, data: &[u8], access: BufferKind) -> anyhow::Result<crate::buffer::Buffer> {
         self.alloc_buffer_with_bytes_stride(data, access, 1)
     }
 
     /// Allocate a buffer initialized with raw bytes and a custom element stride.
-    pub fn alloc_buffer_with_bytes_stride(
+    pub(crate) fn alloc_buffer_with_bytes_stride(
         &self,
         data: &[u8],
         access: BufferKind,
@@ -675,7 +675,7 @@ impl Device {
     }
 
     /// Like [`Self::alloc_buffer_with_bytes_stride`], with explicit [`BufferFlags`].
-    pub fn alloc_buffer_with_bytes_stride_and_flags(
+    pub(crate) fn alloc_buffer_with_bytes_stride_and_flags(
         &self,
         data: &[u8],
         access: BufferKind,
@@ -694,7 +694,7 @@ impl Device {
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_texture`]: crate::vram_allocator::VramAllocator::alloc_texture
-    pub fn alloc_texture(
+    pub(crate) fn alloc_texture(
         &self,
         width: u32,
         height: u32,

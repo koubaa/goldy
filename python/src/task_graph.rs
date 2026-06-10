@@ -275,6 +275,21 @@ impl PyRenderPass {
         Ok(slf)
     }
 
+    /// Declare a mosaic sub-view dependency for this render pass.
+    fn bind_parcel_view<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        parcel: &PyParcel,
+        slot: u32,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            let view = parcel.inner.view(goldy::MosaicSlot(slot));
+            pass.bind_buffer_view(view, access.into());
+        })?;
+        Ok(slf)
+    }
+
     /// Graph dependency + shader push-constant slot for a retained parcel (broadcast or scattered).
     ///
     /// Combines [`Self::bind_parcel`] with [`RenderPassRecord::bind_resources_typed`] using the
@@ -285,16 +300,15 @@ impl PyRenderPass {
         parcel: &PyParcel,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
+        let resource_access = resource_access_for_shader(access);
+        let handle = parcel
+            .inner
+            .handle(resource_access)
+            .ok_or_else(|| GoldyError::new_err("bindless resource handle unavailable"))?;
         slf.graph.borrow(py).with_active_pass(|pass| {
             pass.bind_parcel(parcel.inner.as_ref(), access.into());
-            let resource_access = resource_access_for_shader(access);
-            let handle = parcel
-                .inner
-                .handle(resource_access)
-                .ok_or_else(|| GoldyError::new_err("bindless resource handle unavailable"))?;
             pass.bind_resources_typed(&[handle]);
-            Ok(())
-        })??;
+        })?;
         Ok(slf)
     }
 
@@ -518,6 +532,21 @@ impl PyComputeNode {
         Ok(slf)
     }
 
+    /// Declare a mosaic sub-view dependency for this compute node.
+    fn bind_parcel_view<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        parcel: &PyParcel,
+        slot: u32,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_compute(|node| {
+            let view = parcel.inner.view(goldy::MosaicSlot(slot));
+            node.bind_buffer_view(view, access.into());
+        })?;
+        Ok(slf)
+    }
+
     fn bind_buffer<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
@@ -571,5 +600,13 @@ impl PyComputeNode {
 
     fn __repr__(&self) -> String {
         "ComputeNode(recording)".to_string()
+    }
+}
+
+fn resource_access_for_shader(access: PyNodeAccess) -> ResourceAccess {
+    match access {
+        PyNodeAccess::READ => ResourceAccess::Read,
+        PyNodeAccess::WRITE => ResourceAccess::Write,
+        PyNodeAccess::READ_WRITE => ResourceAccess::ReadWrite,
     }
 }

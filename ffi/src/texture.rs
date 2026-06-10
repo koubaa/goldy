@@ -4,6 +4,20 @@ use crate::device::GoldyDevice;
 use crate::error::set_last_error_from_anyhow;
 use crate::types::{GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind};
 use std::ptr;
+use std::sync::Arc;
+
+fn legacy_texture(
+    device: &goldy::Device,
+    width: u32,
+    height: u32,
+    format: goldy::TextureFormat,
+    access: goldy::TextureKind,
+    flags: goldy::TextureFlags,
+) -> anyhow::Result<goldy::Texture> {
+    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    pool.acquire_texture(width, height, format, access, flags, None)?
+        .detach_texture()
+}
 
 /// Opaque handle to a Goldy Texture.
 pub struct GoldyTexture {
@@ -39,10 +53,14 @@ pub unsafe extern "C" fn goldy_texture_create(
         return ptr::null_mut();
     }
 
-    match (*device)
-        .inner
-        .alloc_texture(width, height, format.into(), access.into(), flags.into())
-    {
+    match legacy_texture(
+        &(*device).inner,
+        width,
+        height,
+        format.into(),
+        access.into(),
+        flags.into(),
+    ) {
         Ok(texture) => Box::into_raw(Box::new(GoldyTexture { inner: texture })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
