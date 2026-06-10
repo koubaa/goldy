@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
-    TaskGraph, VertexBufferLayout,
+    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -68,8 +68,9 @@ struct RenderState {
     scene_rt: RenderTarget,
     frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    particle_buffer: Buffer,
-    params_buffer: Buffer,
+    _retained_pool: RetainedPool,
+    particle_buffer: Parcel,
+    params_buffer: Parcel,
     render_pipeline: RenderPipeline,
     frame_count: u32,
     start_time: std::time::Instant,
@@ -114,13 +115,22 @@ impl RenderState {
             });
         }
 
-        let particle_buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let particle_stride = std::mem::size_of::<Particle>() as u32;
+        let particle_buffer = retained_pool.acquire_buffer(
+            (particles.len() * particle_stride as usize) as u64,
+            BufferKind::Scattered,
+            Some(particle_stride),
+            BufferFlags::empty(),
+            Some(bytemuck::cast_slice(&particles)),
+        )?;
 
-        let params_buffer = device.alloc_buffer(
+        let params_buffer = retained_pool.acquire_buffer(
             std::mem::size_of::<SimParams>() as u64,
             BufferKind::Broadcast,
             None,
             BufferFlags::empty(),
+            None,
         )?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
@@ -147,6 +157,7 @@ impl RenderState {
             scene_rt,
             frame_graph: TaskGraph::new(),
             compute_pipeline,
+            _retained_pool: retained_pool,
             particle_buffer,
             params_buffer,
             render_pipeline,
@@ -161,15 +172,19 @@ impl RenderState {
 
         let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
         self.last_frame_time = std::time::Instant::now();
-        self.params_buffer.write_data(0, &[SimParams { delta_time: dt }])?;
 
         let workgroups = NUM_PARTICLES.div_ceil(64);
 
         self.frame_graph.clear();
+        self.frame_graph.write_parcel(
+            &self.params_buffer,
+            0,
+            bytemuck::bytes_of(&SimParams { delta_time: dt }).to_vec(),
+        )?;
         self.frame_graph
             .node("update_particles", &self.compute_pipeline)
-            .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
-            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_parcel(&self.particle_buffer, NodeAccess::ReadWrite)
+            .bind_parcel(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
                 self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
                 self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
@@ -184,10 +199,13 @@ impl RenderState {
         };
 
         let mut pass = self.frame_graph.render_pass("particles", &self.scene_rt);
-        pass.bind_buffer_mut(&self.particle_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(&self.particle_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources(&[&self.particle_buffer]);
+        pass.bind_resources_raw(&[self
+            .particle_buffer
+            .resource_index(ResourceAccess::Read)
+            .unwrap()]);
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish_recorded();
 

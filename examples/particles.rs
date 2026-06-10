@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ShaderModule, Surface,
-    TaskGraph, VertexBufferLayout,
+    BufferFlags, BufferKind, Color, ComputePipeline, Context, DeviceDescriptor, Instance, NodeAccess, Parcel,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -84,12 +84,15 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
+    context: Context,
     surface: Surface,
     scene_rt: RenderTarget,
     frame_graph: TaskGraph,
+    upload_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
-    particle_buffer: Buffer,
-    params_buffer: Buffer,
+    _retained_pool: RetainedPool,
+    particle_buffer: Parcel,
+    params_buffer: Parcel,
     render_pipeline: RenderPipeline,
     is_snow: bool,
     frame_count: f32,
@@ -109,23 +112,31 @@ impl RenderState {
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
-        let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
+        let context = device.create_context()?;
+        let surface = Surface::new(&context, window.as_ref())?;
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
 
         let particles = Self::create_particles(false);
-        let particle_buffer = device.alloc_buffer_with_data(&particles, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let particle_stride = std::mem::size_of::<Particle>() as u32;
+        let particle_buffer = retained_pool.acquire_buffer(
+            (particles.len() * particle_stride as usize) as u64,
+            BufferKind::Scattered,
+            Some(particle_stride),
+            BufferFlags::empty(),
+            Some(bytemuck::cast_slice(&particles)),
+        )?;
 
-        let initial_params = ParticleParams {
-            is_snow: 0.0,
-            frame: 0.0,
-            _pad1: 0.0,
-            _pad2: 0.0,
-        };
-        let params_buffer = device.alloc_buffer_with_data(&[initial_params], BufferKind::Broadcast)?;
+        let params_buffer = retained_pool.acquire_buffer(
+            std::mem::size_of::<ParticleParams>() as u64,
+            BufferKind::Broadcast,
+            None,
+            BufferFlags::empty(),
+            None,
+        )?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
 
@@ -146,10 +157,13 @@ impl RenderState {
         Ok(Self {
             window,
             device,
+            context,
             surface,
             scene_rt,
             frame_graph: TaskGraph::new(),
+            upload_graph: TaskGraph::new(),
             compute_pipeline,
+            _retained_pool: retained_pool,
             particle_buffer,
             params_buffer,
             render_pipeline,
@@ -195,7 +209,15 @@ impl RenderState {
         self.is_snow = !self.is_snow;
 
         let particles = Self::create_particles(self.is_snow);
-        self.particle_buffer.write_data(0, &particles)?;
+        self.upload_graph.clear();
+        self.upload_graph.write_parcel(
+            &self.particle_buffer,
+            0,
+            bytemuck::cast_slice(&particles).to_vec(),
+        )?;
+        self.context
+            .submit(&mut self.upload_graph)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         self.window.set_title(&format!(
             "Goldy - {} (Space to toggle)",
@@ -214,7 +236,6 @@ impl RenderState {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        self.params_buffer.write_data(0, &[params])?;
 
         let bg_color = if self.is_snow {
             Color {
@@ -234,9 +255,11 @@ impl RenderState {
 
         self.frame_graph.clear();
         self.frame_graph
+            .write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
+        self.frame_graph
             .node("update_particles", &self.compute_pipeline)
-            .bind_buffer(&self.particle_buffer, NodeAccess::ReadWrite)
-            .bind_buffer(&self.params_buffer, NodeAccess::Read)
+            .bind_parcel(&self.particle_buffer, NodeAccess::ReadWrite)
+            .bind_parcel(&self.params_buffer, NodeAccess::Read)
             .bind_resources_raw_slice(&[
                 self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
                 self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
@@ -244,11 +267,14 @@ impl RenderState {
             .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
 
         let mut pass = self.frame_graph.render_pass("particles", &self.scene_rt);
-        pass.bind_buffer_mut(&self.particle_buffer, NodeAccess::Read);
-        pass.bind_buffer_mut(&self.params_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(&self.particle_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(&self.params_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources(&[&self.particle_buffer, &self.params_buffer]);
+        pass.bind_resources_raw(&[
+            self.particle_buffer.resource_index(ResourceAccess::Read).unwrap(),
+            self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
+        ]);
         pass.draw_quads(NUM_PARTICLES);
         pass.finish_recorded();
 

@@ -12,9 +12,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
+    NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool,
+    ShaderModule, Surface, TaskGraph, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -83,6 +83,9 @@ struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
+    _retained_pool: Option<RetainedPool>,
+    warm_parcel: Option<Parcel>,
+    cool_parcel: Option<Parcel>,
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
     frame_graph: TaskGraph,
@@ -98,6 +101,9 @@ impl App {
             instance,
             device: None,
             pipeline: None,
+            _retained_pool: None,
+            warm_parcel: None,
+            cool_parcel: None,
             surface: None,
             scene_rt: None,
             frame_graph: TaskGraph::new(),
@@ -148,8 +154,29 @@ impl App {
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let stride = std::mem::size_of::<DepthVertex>() as u32;
+        let quad_bytes = 6 * stride as usize;
+        let warm_parcel = retained_pool.acquire_buffer(
+            quad_bytes as u64,
+            BufferKind::Scattered,
+            Some(stride),
+            BufferFlags::empty(),
+            None,
+        )?;
+        let cool_parcel = retained_pool.acquire_buffer(
+            quad_bytes as u64,
+            BufferKind::Scattered,
+            Some(stride),
+            BufferFlags::empty(),
+            None,
+        )?;
+
         self.device = Some(device);
         self.pipeline = Some(pipeline);
+        self._retained_pool = Some(retained_pool);
+        self.warm_parcel = Some(warm_parcel);
+        self.cool_parcel = Some(cool_parcel);
         self.surface = Some(surface);
         self.scene_rt = Some(scene_rt);
 
@@ -162,10 +189,11 @@ impl App {
             return Ok(());
         }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
+        let warm_parcel = self.warm_parcel.as_ref().unwrap();
+        let cool_parcel = self.cool_parcel.as_ref().unwrap();
 
         // Two independent sine-wave oscillations chosen so they cross ~twice per
         // second at 60 fps.  Both stay in (0.1, 0.9) so neither is ever clipped.
@@ -179,9 +207,6 @@ impl App {
         let warm_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, warm_z, 0.95, 0.35, 0.1);
         let cool_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, cool_z, 0.1, 0.6, 0.95);
 
-        let warm_vb = device.alloc_buffer_with_data(&warm_verts, BufferKind::Scattered)?;
-        let cool_vb = device.alloc_buffer_with_data(&cool_verts, BufferKind::Scattered)?;
-
         // Update window title with live depth values so it is easy to reason
         // about what is happening.
         let winner = if warm_z < cool_z { "WARM wins" } else { "COOL wins" };
@@ -193,16 +218,26 @@ impl App {
         }
 
         self.frame_graph.clear();
+        self.frame_graph.write_parcel(
+            warm_parcel,
+            0,
+            bytemuck::cast_slice(&warm_verts).to_vec(),
+        )?;
+        self.frame_graph.write_parcel(
+            cool_parcel,
+            0,
+            bytemuck::cast_slice(&cool_verts).to_vec(),
+        )?;
 
         let mut pass = self.frame_graph.render_pass("depth_quads", scene_rt);
-        pass.bind_buffer_mut(&warm_vb, NodeAccess::Read);
-        pass.bind_buffer_mut(&cool_vb, NodeAccess::Read);
+        pass.bind_parcel_mut(warm_parcel, NodeAccess::Read);
+        pass.bind_parcel_mut(cool_parcel, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, &warm_vb);
+        pass.set_vertex_buffer(0, warm_parcel);
         pass.draw(0..6, 0..1);
-        pass.set_vertex_buffer(0, &cool_vb);
+        pass.set_vertex_buffer(0, cool_parcel);
         pass.draw(0..6, 0..1);
         pass.finish_recorded();
 

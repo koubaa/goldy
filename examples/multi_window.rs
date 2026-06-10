@@ -8,9 +8,9 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    shaders, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
 
@@ -262,14 +262,12 @@ struct WindowState {
     paused_at: f32,
     time_multiplier: f32,
 
-    // Frame pipelining
-    vertex_buffers: Vec<Buffer>,
+    _retained_pool: RetainedPool,
+    vertex_parcel: Parcel,
 
     // For status display
     has_focus: bool,
 }
-
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 impl WindowState {
     fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
@@ -293,6 +291,16 @@ impl WindowState {
             },
         )?;
 
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let stride = std::mem::size_of::<QuadVertex>() as u32;
+        let vertex_parcel = retained_pool.acquire_buffer(
+            (6 * stride as usize) as u64,
+            BufferKind::Scattered,
+            Some(stride),
+            BufferFlags::empty(),
+            None,
+        )?;
+
         Ok(Self {
             window,
             surface,
@@ -304,7 +312,8 @@ impl WindowState {
             paused: false,
             paused_at: 0.0,
             time_multiplier: 1.0,
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+            _retained_pool: retained_pool,
+            vertex_parcel,
             has_focus: false,
         })
     }
@@ -354,7 +363,7 @@ impl WindowState {
         self.time_multiplier = 1.0;
     }
 
-    fn render(&mut self, device: &goldy::Device) -> anyhow::Result<()> {
+    fn render(&mut self, _device: &goldy::Device) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
@@ -362,23 +371,21 @@ impl WindowState {
 
         let time = self.current_time();
         let vertices = create_quad(time);
-        let vertex_buffer = device.alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-        // Acquire frame - this waits for oldest in-flight frame
         let frame = self.surface.begin()?;
 
-        // Safe to drop oldest buffer now
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
-
         self.frame_graph.clear();
+        self.frame_graph.write_parcel(
+            &self.vertex_parcel,
+            0,
+            bytemuck::cast_slice(&vertices).to_vec(),
+        )?;
 
         let mut pass = self.frame_graph.render_pass(self.effect_type.title(), &self.scene_rt);
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(&self.vertex_parcel, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&self.pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.set_vertex_buffer(0, &self.vertex_parcel);
         pass.draw(0..6, 0..1);
         pass.finish_recorded();
 
@@ -389,7 +396,6 @@ impl WindowState {
         let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
 
-        self.vertex_buffers.push(vertex_buffer);
         Ok(())
     }
 

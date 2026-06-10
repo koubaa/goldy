@@ -5,8 +5,9 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, Vertex2D,
+    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface,
+    TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -59,21 +60,19 @@ fn waveform_to_vertices(samples: &[f32], y_offset: f32, color: Color) -> Vec<Ver
         .collect()
 }
 
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
-
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
+    _retained_pool: Option<RetainedPool>,
+    channel_parcels: Option<[Parcel; NUM_CHANNELS]>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
     frame_graph: TaskGraph,
     start_time: Instant,
     frame_count: u32,
-    // Each frame may have multiple channel buffers
-    frame_buffers: Vec<Vec<Buffer>>,
 }
 
 impl App {
@@ -89,7 +88,8 @@ impl App {
             frame_graph: TaskGraph::new(),
             start_time: Instant::now(),
             frame_count: 0,
-            frame_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+            _retained_pool: None,
+            channel_parcels: None,
         })
     }
 
@@ -120,9 +120,26 @@ impl App {
         )?;
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let stride = std::mem::size_of::<Vertex2D>() as u32;
+        let channel_bytes = (NUM_SAMPLES * stride as usize) as u64;
+        let channel_parcels = std::array::from_fn(|_| {
+            retained_pool
+                .acquire_buffer(
+                    channel_bytes,
+                    BufferKind::Scattered,
+                    Some(stride),
+                    BufferFlags::empty(),
+                    None,
+                )
+                .expect("waveform channel parcel")
+        });
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
+        self._retained_pool = Some(retained_pool);
+        self.channel_parcels = Some(channel_parcels);
         self.surface = Some(surface);
         self.scene_rt = Some(scene_rt);
         Ok(())
@@ -137,10 +154,10 @@ impl App {
             return Ok(());
         }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
+        let channel_parcels = self.channel_parcels.as_ref().unwrap();
         let time = self.start_time.elapsed().as_secs_f32();
 
         // Colors for each channel
@@ -174,30 +191,22 @@ impl App {
         // Y offsets for each channel
         let y_offsets = [0.6, 0.2, -0.2, -0.6];
 
-        // Pre-create all buffers for this frame
-        let mut channel_buffers = Vec::with_capacity(NUM_CHANNELS);
         let mut vertex_counts = Vec::with_capacity(NUM_CHANNELS);
+        self.frame_graph.clear();
         for ch in 0..NUM_CHANNELS {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
             vertex_counts.push(vertices.len() as u32);
-            channel_buffers.push(
-                device
-                    .as_ref()
-                    .alloc_buffer_with_data(&vertices, BufferKind::Scattered)?,
-            );
+            self.frame_graph.write_parcel(
+                &channel_parcels[ch],
+                0,
+                bytemuck::cast_slice(&vertices).to_vec(),
+            )?;
         }
-
-        // Drop oldest frame's buffers now that GPU is done
-        if self.frame_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.frame_buffers.remove(0);
-        }
-
-        self.frame_graph.clear();
 
         let mut pass = self.frame_graph.render_pass("waveform", scene_rt);
-        for vb in &channel_buffers {
-            pass.bind_buffer_mut(vb, NodeAccess::Read);
+        for parcel in channel_parcels {
+            pass.bind_parcel_mut(parcel, NodeAccess::Read);
         }
         pass.clear(Color {
             r: 0.02,
@@ -206,8 +215,8 @@ impl App {
             a: 1.0,
         });
         pass.set_pipeline(pipeline);
-        for (ch, vb) in channel_buffers.iter().enumerate() {
-            pass.set_vertex_buffer(0, vb);
+        for (ch, parcel) in channel_parcels.iter().enumerate() {
+            pass.set_vertex_buffer(0, parcel);
             pass.draw(0..vertex_counts[ch], 0..1);
         }
         pass.finish_recorded();
@@ -218,9 +227,6 @@ impl App {
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
-
-        // Keep this frame's buffers alive
-        self.frame_buffers.push(channel_buffers);
 
         Ok(())
     }

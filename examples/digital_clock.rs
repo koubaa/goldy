@@ -8,8 +8,8 @@
 
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    Buffer, BufferKind, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    RequestAdapterOptions, ShaderModule, Surface, TaskGraph,
+    BufferFlags, BufferKind, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc,
+    RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,14 +22,16 @@ use winit::{
 };
 mod common;
 
-/// Keep vertex buffers alive until the GPU is ~2 frames ahead (matches swapchain / in-flight work).
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
+/// Upper bound on seven-segment clock vertices (8 glyphs × 7 segments × 6 verts).
+const MAX_CLOCK_VERTICES: usize = 384;
 
 struct App {
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
+    _retained_pool: Option<RetainedPool>,
+    vertex_parcel: Option<Parcel>,
 
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
@@ -40,8 +42,6 @@ struct App {
     perf_start: Instant,
     frame_count: u32,
     clock_state: ClockState,
-    /// Retain dynamic vertex buffers until they are no longer referenced by in-flight submits.
-    vertex_buffers: Vec<Buffer>,
 }
 
 impl App {
@@ -60,7 +60,8 @@ impl App {
             perf_start: Instant::now(),
             frame_count: 0,
             clock_state: ClockState::default(),
-            vertex_buffers: Vec::with_capacity(MAX_FRAMES_IN_FLIGHT),
+            _retained_pool: None,
+            vertex_parcel: None,
         })
     }
 
@@ -91,9 +92,21 @@ impl App {
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let stride = std::mem::size_of::<ClockVertex>() as u32;
+        let vertex_parcel = retained_pool.acquire_buffer(
+            (MAX_CLOCK_VERTICES * stride as usize) as u64,
+            BufferKind::Scattered,
+            Some(stride),
+            BufferFlags::empty(),
+            None,
+        )?;
+
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
+        self._retained_pool = Some(retained_pool);
+        self.vertex_parcel = Some(vertex_parcel);
         self.surface = Some(surface);
         self.scene_rt = Some(scene_rt);
 
@@ -129,36 +142,30 @@ impl App {
             return Ok(());
         }
 
-        let device = self.device.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
+        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
 
         let elapsed = self.elapsed_secs();
         let time = TimeData::from_elapsed_secs(elapsed);
         let color = self.clock_state.color();
         let bg_color = self.clock_state.background_color();
 
-        // Generate clock vertices using SHARED function
         let vertices = generate_clock_vertices(time, color, width, height);
 
-        // Convert ClockVertex to bytes for the buffer
-        let vertex_data: &[u8] = bytemuck::cast_slice(&vertices);
-        let vertex_buffer = device
-            .as_ref()
-            .alloc_buffer_with_bytes(vertex_data, BufferKind::Scattered)?;
-
-        if self.vertex_buffers.len() >= MAX_FRAMES_IN_FLIGHT {
-            self.vertex_buffers.remove(0);
-        }
-
         self.frame_graph.clear();
+        self.frame_graph.write_parcel(
+            vertex_parcel,
+            0,
+            bytemuck::cast_slice(&vertices).to_vec(),
+        )?;
 
         let mut pass = self.frame_graph.render_pass("digital_clock", scene_rt);
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
+        pass.set_vertex_buffer(0, vertex_parcel);
         pass.draw(0..vertices.len() as u32, 0..1);
         pass.finish_recorded();
 
@@ -168,7 +175,6 @@ impl App {
         let frame = surface.begin()?;
         let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
         frame.present()?;
-        self.vertex_buffers.push(vertex_buffer);
 
         Ok(())
     }
