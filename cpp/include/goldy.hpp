@@ -538,9 +538,7 @@ public:
     [[nodiscard]] Parcel acquire_buffer_with_data(std::span<const T> data, BufferKind access);
 
     template<typename T, typename Allocator>
-    [[nodiscard]] Parcel acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
-        return acquire_buffer_with_data(std::span<const T>(data.data(), data.size()), access);
-    }
+    [[nodiscard]] Parcel acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access);
 
     /**
      * @brief Acquire a buffer parcel initialized with raw bytes and an explicit element stride.
@@ -626,6 +624,11 @@ inline Parcel RetainedPool::acquire_buffer_with_data(std::span<const T> data, Bu
         throw Exception::from_last_error();
     }
     return Parcel(ptr);
+}
+
+template<typename T, typename Allocator>
+inline Parcel RetainedPool::acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
+    return acquire_buffer_with_data(std::span<const T>(data.data(), data.size()), access);
 }
 
 inline Parcel RetainedPool::acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
