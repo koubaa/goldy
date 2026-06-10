@@ -20,6 +20,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 const GRID_SIZE: u32 = 20;
 const QUAD_SIZE: f32 = 0.03;
@@ -244,6 +245,12 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            common::exit_if_timed_out(event_loop, state.start_time);
         }
     }
 

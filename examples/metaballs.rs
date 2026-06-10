@@ -15,6 +15,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 /// Uniform buffer data (must match shader cbuffer layout)
 #[repr(C)]
@@ -189,6 +190,10 @@ impl ApplicationHandler for App {
             self.init_gpu(&window).unwrap();
             window.request_redraw();
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        common::exit_if_timed_out(event_loop, self.start_time);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {

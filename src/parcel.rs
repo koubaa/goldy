@@ -5,7 +5,7 @@
 //! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
 use crate::backend::{BufferHandle, ContextHandle};
-use crate::buffer::{Buffer, BufferPool, BufferView};
+use crate::buffer::{Buffer, BufferPool, BufferSource, BufferView};
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
@@ -177,6 +177,18 @@ impl Parcel {
         }
     }
 
+    /// Read buffer parcel contents back to CPU memory.
+    ///
+    /// Valid only for non-mosaic buffer parcels acquired via [`crate::RetainedPool::acquire_buffer`].
+    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => b.read_to_cpu(device, output),
+            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
+                anyhow::bail!("read_to_cpu is only valid for non-mosaic buffer parcels")
+            }
+        }
+    }
+
     /// Approximate committed byte size for accounting.
     pub fn byte_size(&self) -> u64 {
         match &self.storage {
@@ -284,5 +296,23 @@ impl Parcel {
     /// Release pool bookkeeping so [`Drop`] does not double-decrement after [`RetainedPool::release`].
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
+    }
+}
+
+impl BufferSource for Parcel {
+    fn source_handle(&self) -> BufferHandle {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => b.gpu_buffer_handle(),
+            ParcelStorage::Mosaic(_) => {
+                panic!("use Parcel::view for mosaic vertex/index binding")
+            }
+            ParcelStorage::Texture(_) => {
+                panic!("BufferSource is not implemented for texture parcels")
+            }
+        }
+    }
+
+    fn source_offset(&self) -> u64 {
+        0
     }
 }

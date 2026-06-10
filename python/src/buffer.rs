@@ -104,7 +104,7 @@ impl PyBuffer {
 
 /// Extract bytes and element stride from a Python object (numpy array or bytes).
 /// Returns (bytes, element_stride) where element_stride is the size of each element in bytes.
-fn extract_bytes_with_stride(data: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, u32)> {
+pub(crate) fn extract_bytes_with_stride(data: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, u32)> {
     // Try numpy array first (most common case)
     if let Ok(arr) = data.cast::<PyArray1<f32>>() {
         let readonly = arr.readonly();

@@ -6,7 +6,7 @@
 
 use goldy_ffi_client::{
     shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ShaderModule, TaskGraph, Vertex2D,
+    RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, TaskGraph, Vertex2D,
 };
 
 fn main() -> goldy_ffi_client::Result<()> {
@@ -31,7 +31,9 @@ fn main() -> goldy_ffi_client::Result<()> {
             color: [0.0, 0.0, 1.0, 1.0],
         },
     ];
-    let vertex_buffer = device.alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
+    let mut retained_pool = RetainedPool::new(&device)?;
+    let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
+    let _retained_pool = retained_pool;
 
     let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
     let pipeline = RenderPipeline::new(
@@ -49,10 +51,10 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     let mut graph = TaskGraph::new();
     let mut pass = graph.render_pass("triangle", &target);
-    pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+    pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
     pass.clear(Color::BLACK);
     pass.set_pipeline(&pipeline);
-    pass.set_vertex_buffer(0, &vertex_buffer);
+    pass.set_vertex_buffer_parcel(0, &vertex_buffer);
     pass.draw(0..3, 0..1);
     pass.finish_recorded();
     graph.dispatch(&device)?;

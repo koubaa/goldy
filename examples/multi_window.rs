@@ -12,6 +12,7 @@ use goldy::{
     RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexAttribute, VertexBufferLayout,
     VertexFormat,
 };
+mod common;
 
 // Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
 const PLASMA_VERTEX_TIME: &str = r#"
@@ -568,7 +569,8 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        common::exit_if_timed_out(event_loop, self.start_time);
         // Request redraw for ALL windows every frame, regardless of focus
         // This ensures unfocused windows continue animating
         let device = match &self.device {

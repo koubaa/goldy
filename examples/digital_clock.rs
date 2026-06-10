@@ -20,6 +20,7 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 /// Keep vertex buffers alive until the GPU is ~2 frames ahead (matches swapchain / in-flight work).
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -216,6 +217,10 @@ impl ApplicationHandler for App {
             }
             window.request_redraw();
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        common::exit_if_timed_out(event_loop, self.perf_start);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

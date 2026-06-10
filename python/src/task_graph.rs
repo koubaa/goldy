@@ -5,6 +5,7 @@ use crate::buffer_pool::PyBufferView;
 use crate::compute::PyComputePipeline;
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
+use crate::parcel::PyParcel;
 use crate::pipeline::PyRenderPipeline;
 use crate::render_target::PyRenderTarget;
 use crate::types::{PyColor, PyIndexFormat, PyNodeAccess};
@@ -252,6 +253,18 @@ impl PyRenderPass {
         Ok(slf)
     }
 
+    fn bind_parcel<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        parcel: &PyParcel,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.bind_parcel(parcel.inner.as_ref(), access.into());
+        })?;
+        Ok(slf)
+    }
+
     /// Bind a scattered buffer resource by bindless index (from `BufferView.resource_index`).
     fn bind_resource_index<'py>(slf: PyRef<'py, Self>, py: Python<'py>, index: u32) -> PyResult<PyRef<'py, Self>> {
         let handle = ResourceHandle::new(ResourceCategory::Scattered, index);
@@ -294,6 +307,18 @@ impl PyRenderPass {
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
             pass.set_vertex_buffer(slot, buffer.inner.as_ref());
+        })?;
+        Ok(slf)
+    }
+
+    fn set_vertex_buffer_parcel<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        slot: u32,
+        parcel: &PyParcel,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.set_vertex_buffer(slot, parcel.inner.as_ref());
         })?;
         Ok(slf)
     }
@@ -448,6 +473,18 @@ pub struct PyComputeNode {
 
 #[pymethods]
 impl PyComputeNode {
+    fn bind_parcel<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        parcel: &PyParcel,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_compute(|node| {
+            node.bind_parcel(parcel.inner.as_ref(), access.into());
+        })?;
+        Ok(slf)
+    }
+
     fn bind_buffer<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,

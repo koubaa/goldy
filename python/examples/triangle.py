@@ -79,7 +79,8 @@ def main() -> int:
         ],
         dtype=np.float32,
     )
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+    retained_pool = goldy.RetainedPool(device)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 
     scene_rt = make_scene_rt(device, surface)
     frame_graph = goldy.TaskGraph()
@@ -99,10 +100,10 @@ def main() -> int:
             frame_graph.clear()
             with frame_graph.render_pass("triangle", scene_rt) as rp:
                 (
-                    rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+                    rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
                     .clear(bg)
                     .set_pipeline(pipeline)
-                    .set_vertex_buffer(0, vertex_buffer)
+                    .set_vertex_buffer_parcel(0, vertex_parcel)
                     .draw(range(3))
                 )
 

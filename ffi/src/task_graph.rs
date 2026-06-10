@@ -7,6 +7,7 @@ use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::render_target::GoldyRenderTarget;
+use crate::retained_pool::GoldyParcel;
 use crate::types::{GoldyColor, GoldyIndexFormat, GoldyNodeAccess};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
 use goldy::types::{ResourceCategory, ResourceHandle};
@@ -204,6 +205,27 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_buffer_view(
     GoldyResult::Ok
 }
 
+/// Declare a graph dependency on a retained parcel for the active render pass.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || parcel.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let pass = match active_pass_mut(&mut *graph) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    pass.bind_parcel(&(*parcel).inner, node_access(access));
+    GoldyResult::Ok
+}
+
 /// Bind typed resource handles (category + index pairs) for the active render pass.
 ///
 /// `indices` is a flat array of u32 values: `[category0, index0, category1, index1, ...]`.
@@ -345,6 +367,27 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_set_vertex_buffer_offset(
         Err(e) => return e,
     };
     pass.set_vertex_buffer_offset(slot, &(*buffer).inner, offset);
+    GoldyResult::Ok
+}
+
+/// Bind a vertex buffer slot from a retained buffer parcel for the active render pass.
+///
+/// # Safety
+/// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
+    graph: *mut GoldyTaskGraph,
+    slot: u32,
+    parcel: *const GoldyParcel,
+) -> GoldyResult {
+    if graph.is_null() || parcel.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let pass = match active_pass_mut(&mut *graph) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    pass.set_vertex_buffer(slot, &(*parcel).inner);
     GoldyResult::Ok
 }
 
@@ -553,6 +596,27 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_buffer_view(
     GoldyResult::Ok
 }
 
+/// Declare a graph dependency on a retained parcel for the active compute node.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    if graph.is_null() || parcel.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *graph) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    node.bind_parcel(&(*parcel).inner, node_access(access));
+    GoldyResult::Ok
+}
+
 /// Set bindless resource slot indices for the active compute node.
 ///
 /// # Safety
@@ -634,6 +698,43 @@ pub unsafe extern "C" fn goldy_task_graph_write_buffer(
     };
     (*graph).inner.write_buffer(&(*buffer).inner, offset, bytes);
     GoldyResult::Ok
+}
+
+/// Add a CPU→GPU upload node targeting a retained buffer parcel.
+///
+/// # Safety
+/// All pointers must be valid. `data` must point to at least `size` bytes when non-null.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_write_parcel(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    offset: u64,
+    data: *const u8,
+    size: usize,
+) -> GoldyResult {
+    if graph.is_null() || parcel.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    if data.is_null() && size > 0 {
+        return GoldyResult::NullPointer;
+    }
+    if (*graph).has_active_recorder() {
+        set_last_error("Cannot add write_parcel while recording a pass or compute node");
+        return GoldyResult::InvalidArgument;
+    }
+
+    let bytes = if size > 0 {
+        std::slice::from_raw_parts(data, size).to_vec()
+    } else {
+        Vec::new()
+    };
+    match (*graph).inner.write_parcel(&(*parcel).inner, offset, bytes) {
+        Ok(()) => GoldyResult::Ok,
+        Err(e) => {
+            set_last_error_from_anyhow(&e);
+            GoldyResult::GpuError
+        }
+    }
 }
 
 /// Declare that this graph will copy to the swapchain at submit time.

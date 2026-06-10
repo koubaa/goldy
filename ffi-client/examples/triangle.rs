@@ -6,8 +6,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example triangle`
 
 use goldy_ffi_client::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, Vertex2D,
+    shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -39,7 +39,8 @@ fn surface_from_window(device: &goldy_ffi_client::Device, window: &Window) -> go
 struct App {
     instance: Instance,
     device: Option<goldy_ffi_client::Device>,
-    vertex_buffer: Option<Buffer>,
+    _retained_pool: Option<RetainedPool>,
+    vertex_buffer: Option<Parcel>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -56,6 +57,7 @@ impl App {
         Ok(Self {
             instance,
             device: None,
+            _retained_pool: None,
             vertex_buffer: None,
             pipeline: None,
             shader: None,
@@ -84,7 +86,8 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = device.alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(&device)?;
+        let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
         let surface = surface_from_window(&device, window.as_ref())?;
 
@@ -99,6 +102,7 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         self.device = Some(device);
+        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -132,10 +136,10 @@ impl App {
         self.frame_graph.clear();
 
         let mut pass = self.frame_graph.render_pass("triangle", scene_rt);
-        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, vertex_buffer);
+        pass.set_vertex_buffer_parcel(0, vertex_buffer);
         pass.draw(0..3, 0..1);
         pass.finish_recorded();
 

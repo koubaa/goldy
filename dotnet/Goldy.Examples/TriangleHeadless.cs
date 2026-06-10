@@ -40,7 +40,8 @@ static class TriangleHeadless
             new() { Px = -0.5f, Py = 0.5f, R = 0, G = 1, B = 0, A = 1 },
             new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
         ];
-        using var vertexBuffer = Goldy.Buffer.WithData(device, vertices, BufferKind.Scattered);
+        using var retainedPool = new RetainedPool(device);
+        using var vertexParcel = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
 
         const uint width = 100;
         const uint height = 100;
@@ -50,10 +51,10 @@ static class TriangleHeadless
         using (var pass = graph.RenderPass("triangle", target))
         {
             pass
-                .BindBuffer(vertexBuffer, NodeAccess.Read)
+                .BindParcel(vertexParcel, NodeAccess.Read)
                 .Clear(new Color(0.1f, 0.1f, 0.2f, 1.0f))
                 .SetPipeline(pipeline)
-                .SetVertexBuffer(0, vertexBuffer)
+                .SetVertexBuffer(0, vertexParcel)
                 .Draw(3);
         }
 

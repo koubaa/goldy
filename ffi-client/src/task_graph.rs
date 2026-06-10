@@ -2,6 +2,7 @@ use crate::buffer::Buffer;
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::error::{check, expect_ok, non_null_expect, Result};
+use crate::parcel::Parcel;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::sys::{self, GoldySwapchainOutput, GoldyTaskGraph};
@@ -107,6 +108,13 @@ impl RenderPassBuilder<'_> {
         self
     }
 
+    pub fn bind_parcel_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_render_pass_bind_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
+        });
+        self
+    }
+
     pub fn clear(&mut self, color: Color) -> &mut Self {
         expect_ok(unsafe { sys::goldy_task_graph_render_pass_clear(self.graph.ptr, color.into()) });
         self
@@ -120,6 +128,13 @@ impl RenderPassBuilder<'_> {
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) -> &mut Self {
         expect_ok(unsafe {
             sys::goldy_task_graph_render_pass_set_vertex_buffer(self.graph.ptr, slot, buffer.as_ptr())
+        });
+        self
+    }
+
+    pub fn set_vertex_buffer_parcel(&mut self, slot: u32, parcel: &Parcel) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_render_pass_set_vertex_buffer_parcel(self.graph.ptr, slot, parcel.as_ptr())
         });
         self
     }
@@ -181,6 +196,13 @@ impl ComputeNodeBuilder<'_> {
     pub fn bind_buffer(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
             sys::goldy_task_graph_compute_node_bind_buffer(self.graph.ptr, buffer.as_ptr(), access.into())
+        });
+        self
+    }
+
+    pub fn bind_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_compute_node_bind_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
         });
         self
     }

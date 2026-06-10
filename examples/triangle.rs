@@ -6,8 +6,8 @@
 //! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, Vertex2D,
+    shader::builtins, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -17,12 +17,14 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
 struct App {
     // Goldy resources
     instance: Instance,
     device: Option<Arc<goldy::Device>>,
-    vertex_buffer: Option<Buffer>,
+    _retained_pool: Option<RetainedPool>,
+    vertex_buffer: Option<Parcel>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
 
@@ -43,6 +45,7 @@ impl App {
         Ok(Self {
             instance,
             device: None,
+            _retained_pool: None,
             vertex_buffer: None,
             pipeline: None,
             shader: None,
@@ -74,7 +77,15 @@ impl App {
             Vertex2D::new(-0.5, 0.5, Color::GREEN),
             Vertex2D::new(0.5, 0.5, Color::BLUE),
         ];
-        let vertex_buffer = device.alloc_buffer_with_data(&vertices, BufferKind::Scattered)?;
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let stride = std::mem::size_of::<Vertex2D>() as u32;
+        let vertex_buffer = retained_pool.acquire_buffer(
+            (vertices.len() * stride as usize) as u64,
+            BufferKind::Scattered,
+            Some(stride),
+            BufferFlags::empty(),
+            Some(bytemuck::cast_slice(&vertices)),
+        )?;
 
         // Create Surface for presentation
         let surface = Surface::new(&ctx, window.as_ref())?;
@@ -91,6 +102,7 @@ impl App {
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         self.device = Some(device);
+        self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
@@ -125,7 +137,7 @@ impl App {
         self.frame_graph.clear();
 
         let mut pass = self.frame_graph.render_pass("triangle", scene_rt);
-        pass.bind_buffer_mut(vertex_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer);
@@ -192,6 +204,10 @@ impl ApplicationHandler for App {
             }
             window.request_redraw();
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        common::exit_if_timed_out(event_loop, self.start_time);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

@@ -96,6 +96,46 @@ pub unsafe fn goldy_get_last_error() -> *const std::ffi::c_char {
     (lib().goldy_get_last_error)()
 }
 
+pub unsafe fn goldy_retained_pool_create(device: *const GoldyDevice) -> *mut GoldyRetainedPool {
+    (lib().goldy_retained_pool_create)(device)
+}
+
+pub unsafe fn goldy_retained_pool_destroy(pool: *mut GoldyRetainedPool) {
+    (lib().goldy_retained_pool_destroy)(pool)
+}
+
+pub unsafe fn goldy_retained_pool_acquire_buffer(
+    pool: *mut GoldyRetainedPool,
+    size: u64,
+    access: GoldyBufferKind,
+    element_stride: u32,
+    data: *const u8,
+    data_size: usize,
+) -> *mut GoldyParcel {
+    (lib().goldy_retained_pool_acquire_buffer)(pool, size, access, element_stride, data, data_size)
+}
+
+pub unsafe fn goldy_parcel_destroy(parcel: *mut GoldyParcel) {
+    (lib().goldy_parcel_destroy)(parcel)
+}
+
+pub unsafe fn goldy_parcel_byte_size(parcel: *const GoldyParcel) -> u64 {
+    (lib().goldy_parcel_byte_size)(parcel)
+}
+
+pub unsafe fn goldy_parcel_resource_index(parcel: *const GoldyParcel, access: GoldyResourceAccess) -> u32 {
+    (lib().goldy_parcel_resource_index)(parcel, access)
+}
+
+pub unsafe fn goldy_parcel_read_to_cpu(
+    parcel: *const GoldyParcel,
+    device: *const GoldyDevice,
+    output: *mut u8,
+    output_size: usize,
+) -> GoldyResult {
+    (lib().goldy_parcel_read_to_cpu)(parcel, device, output, output_size)
+}
+
 pub unsafe fn goldy_instance_adapter_count(instance: *const GoldyInstance) -> u32 {
     (lib().goldy_instance_adapter_count)(instance)
 }
@@ -319,6 +359,14 @@ pub unsafe fn goldy_task_graph_compute_node_bind_buffer(
     (lib().goldy_task_graph_compute_node_bind_buffer)(graph, buffer, access)
 }
 
+pub unsafe fn goldy_task_graph_compute_node_bind_parcel(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    (lib().goldy_task_graph_compute_node_bind_parcel)(graph, parcel, access)
+}
+
 pub unsafe fn goldy_task_graph_compute_node_bind_resources_raw(
     graph: *mut GoldyTaskGraph,
     indices: *const u32,
@@ -346,6 +394,16 @@ pub unsafe fn goldy_task_graph_write_buffer(
     (lib().goldy_task_graph_write_buffer)(graph, buffer, offset, data, size)
 }
 
+pub unsafe fn goldy_task_graph_write_parcel(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    offset: u64,
+    data: *const u8,
+    size: usize,
+) -> GoldyResult {
+    (lib().goldy_task_graph_write_parcel)(graph, parcel, offset, data, size)
+}
+
 pub unsafe fn goldy_task_graph_render_pass_begin(
     graph: *mut GoldyTaskGraph,
     label: *const std::ffi::c_char,
@@ -360,6 +418,14 @@ pub unsafe fn goldy_task_graph_render_pass_bind_buffer(
     access: GoldyNodeAccess,
 ) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_bind_buffer)(graph, buffer, access)
+}
+
+pub unsafe fn goldy_task_graph_render_pass_bind_parcel(
+    graph: *mut GoldyTaskGraph,
+    parcel: *const GoldyParcel,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    (lib().goldy_task_graph_render_pass_bind_parcel)(graph, parcel, access)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_bind_resources(
@@ -443,6 +509,14 @@ pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer(
     buffer: *const GoldyBuffer,
 ) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_set_vertex_buffer)(graph, slot, buffer)
+}
+
+pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
+    graph: *mut GoldyTaskGraph,
+    slot: u32,
+    parcel: *const GoldyParcel,
+) -> GoldyResult {
+    (lib().goldy_task_graph_render_pass_set_vertex_buffer_parcel)(graph, slot, parcel)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_offset(

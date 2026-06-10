@@ -68,17 +68,18 @@ public class TaskGraphTests
                 new() { Px = -0.5f, Py = 0.5f, R = 0, G = 1, B = 0, A = 1 },
                 new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
             ];
-            using var vertexBuffer = Goldy.Buffer.WithData(device, vertices, BufferKind.Scattered);
+            using var retainedPool = new RetainedPool(device);
+            using var vertexParcel = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
             using var target = new RenderTarget(device, 64, 64, TextureFormat.Rgba8Unorm);
             using var graph = new TaskGraph();
 
             using (var pass = graph.RenderPass("triangle", target))
             {
                 pass
-                    .BindBuffer(vertexBuffer, NodeAccess.Read)
+                    .BindParcel(vertexParcel, NodeAccess.Read)
                     .Clear(Color.Black)
                     .SetPipeline(pipeline)
-                    .SetVertexBuffer(0, vertexBuffer)
+                    .SetVertexBuffer(0, vertexParcel)
                     .Draw(3);
             }
 
@@ -112,23 +113,24 @@ public class TaskGraphTests
             using var device = instance.RequestAdapter().RequestDevice();
 
             uint[] initial = Enumerable.Range(0, 64).Select(i => (uint)i).ToArray();
-            using var buffer = Goldy.Buffer.WithData<uint>(device, initial, BufferKind.Scattered);
+            using var retainedPool = new RetainedPool(device);
+            using var parcel = retainedPool.AcquireBuffer<uint>(initial, BufferKind.Scattered);
             using var shader = new ShaderModule(device, fillShader);
             using var pipeline = new ComputePipeline(device, shader);
             using var graph = new TaskGraph();
 
-            var idx = buffer.ResourceIndex(ResourceAccess.Write);
+            var idx = parcel.ResourceIndex(ResourceAccess.Write);
             using (var node = graph.ComputeNode("fill", pipeline))
             {
                 node
-                    .BindBuffer(buffer, NodeAccess.Write)
+                    .BindParcel(parcel, NodeAccess.Write)
                     .BindResourcesRaw(idx)
                     .Dispatch(1, 1, 1);
             }
 
             graph.Dispatch(device);
 
-            var bytes = buffer.ReadToCpu(device);
+            var bytes = parcel.ReadToCpu(device);
             var values = MemoryMarshal.Cast<byte, uint>(bytes);
             foreach (var v in values)
                 Assert.Equal(42u, v);

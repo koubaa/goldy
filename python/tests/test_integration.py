@@ -188,18 +188,20 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 """
 
-    buffer = goldy.Buffer.empty(device, 64 * 4, goldy.BufferKind.SCATTERED)
+    retained_pool = goldy.RetainedPool(device)
+    zeros = np.zeros(64, dtype=np.uint32)
+    parcel = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
     shader = goldy.ShaderModule.from_slang(device, fill_shader)
     pipeline = goldy.ComputePipeline(device, shader)
-    idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+    idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
 
     graph = goldy.TaskGraph()
     with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
-        node.bind_buffer(buffer, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
+        node.bind_parcel(parcel, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
 
     graph.dispatch(device)
 
-    values = np.frombuffer(buffer.read_to_cpu(device), dtype=np.uint32)
+    values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
     assert values.shape == (64,)
     assert np.all(values == 42)
 
@@ -242,16 +244,17 @@ def test_triangle_via_graph(device):
         ],
         dtype=np.float32,
     )
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+    retained_pool = goldy.RetainedPool(device)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
     target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
 
     graph = goldy.TaskGraph()
     with graph.render_pass("triangle", target) as rp:
         (
-            rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+            rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
             .set_pipeline(pipeline)
-            .set_vertex_buffer(0, vertex_buffer)
+            .set_vertex_buffer_parcel(0, vertex_parcel)
             .draw(range(3))
         )
 

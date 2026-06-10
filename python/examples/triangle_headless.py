@@ -51,17 +51,18 @@ def main():
         ],
         dtype=np.float32,
     )
-    vertex_buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+    retained_pool = goldy.RetainedPool(device)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 
     target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
 
     graph = goldy.TaskGraph()
     with graph.render_pass("triangle", target) as rp:
         (
-            rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+            rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
             .set_pipeline(pipeline)
-            .set_vertex_buffer(0, vertex_buffer)
+            .set_vertex_buffer_parcel(0, vertex_parcel)
             .draw(range(3))
         )
 

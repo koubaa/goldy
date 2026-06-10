@@ -9,9 +9,11 @@ use super::ResourceId;
 use crate::backend::RenderCommand;
 use crate::buffer::{Buffer, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
+use crate::parcel::ParcelStamp;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::types::{Color, IndexFormat, ResourceHandle};
+use std::sync::Arc;
 
 /// Accumulates one offscreen render-pass node before [`Self::commit`].
 pub struct RenderPassRecord {
@@ -19,6 +21,7 @@ pub struct RenderPassRecord {
     target: crate::backend::RenderTargetHandle,
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
+    stamp_targets: Vec<Arc<ParcelStamp>>,
 }
 
 impl RenderPassRecord {
@@ -28,7 +31,17 @@ impl RenderPassRecord {
             target: target.backend_handle(),
             bindings: Vec::new(),
             commands: Vec::new(),
+            stamp_targets: Vec::new(),
         }
+    }
+
+    pub fn bind_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
     }
 
     pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
@@ -158,6 +171,7 @@ impl RenderPassRecord {
     }
 
     pub fn commit(self, graph: &mut TaskGraph) {
+        graph.extend_stamp_targets(self.stamp_targets);
         graph.push_task_node(TaskNode {
             label: self.label,
             bindings: self.bindings,
@@ -176,6 +190,7 @@ pub struct ComputeNodeRecord {
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
     user_slots: Vec<u32>,
+    stamp_targets: Vec<Arc<ParcelStamp>>,
 }
 
 impl ComputeNodeRecord {
@@ -186,7 +201,17 @@ impl ComputeNodeRecord {
             bindings: Vec::new(),
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
+            stamp_targets: Vec::new(),
         }
+    }
+
+    pub fn bind_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
     }
 
     pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
@@ -215,6 +240,7 @@ impl ComputeNodeRecord {
     }
 
     pub fn commit_dispatch(self, graph: &mut TaskGraph, x: u32, y: u32, z: u32) {
+        graph.extend_stamp_targets(self.stamp_targets);
         graph.push_task_node(TaskNode {
             label: self.label,
             bindings: self.bindings,

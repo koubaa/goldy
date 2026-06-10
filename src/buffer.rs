@@ -488,9 +488,10 @@ impl Drop for Buffer {
 
 /// Trait for types that can be bound as vertex or index buffers.
 ///
-/// Both [`Buffer`] and [`BufferView`] implement this trait, allowing either to be passed
-/// to `set_vertex_buffer` and `set_index_buffer`. For `BufferView`, the encoder binds
-/// the parent buffer at the view's offset internally.
+/// [`Buffer`], [`BufferView`], and non-mosaic [`crate::Parcel`] buffers implement this trait,
+/// allowing any of them to be passed to `set_vertex_buffer` and `set_index_buffer`.
+/// For `BufferView`, the encoder binds the parent buffer at the view's offset internally.
+/// For mosaic parcels, use [`crate::Parcel::view`] instead.
 pub trait BufferSource {
     #[doc(hidden)]
     fn source_handle(&self) -> BufferHandle;

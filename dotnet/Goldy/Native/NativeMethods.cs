@@ -292,6 +292,12 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_buffer_view")]
     internal static partial GoldyResult TaskGraphRenderPassBindBufferView(nint graph, nint view, NodeAccess access);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_parcel")]
+    internal static partial GoldyResult TaskGraphRenderPassBindParcel(nint graph, nint parcel, NodeAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_set_vertex_buffer_parcel")]
+    internal static partial GoldyResult TaskGraphRenderPassSetVertexBufferParcel(nint graph, uint slot, nint parcel);
+
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_resources_typed")]
     internal static partial GoldyResult TaskGraphRenderPassBindResourcesTyped(nint graph, nint indices, uint handleCount);
 
@@ -304,6 +310,9 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_buffer_view")]
     internal static partial GoldyResult TaskGraphComputeNodeBindBufferView(nint graph, nint view, NodeAccess access);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_parcel")]
+    internal static partial GoldyResult TaskGraphComputeNodeBindParcel(nint graph, nint parcel, NodeAccess access);
+
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_resources_raw")]
     internal static partial GoldyResult TaskGraphComputeNodeBindResourcesRaw(nint graph, nint indices, uint count);
 
@@ -313,8 +322,37 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_write_buffer")]
     internal static partial GoldyResult TaskGraphWriteBuffer(nint graph, nint buffer, ulong offset, nint data, nuint size);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_write_parcel")]
+    internal static partial GoldyResult TaskGraphWriteParcel(nint graph, nint parcel, ulong offset, nint data, nuint size);
+
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_resource_index")]
     internal static partial uint BufferResourceIndex(nint buffer, ResourceAccess access);
+
+    // ========================================================================
+    // RetainedPool / Parcel
+    // ========================================================================
+
+    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_create")]
+    internal static partial nint RetainedPoolCreate(nint device);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_destroy")]
+    internal static partial void RetainedPoolDestroy(nint pool);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_acquire_buffer")]
+    internal static partial nint RetainedPoolAcquireBuffer(
+        nint pool, ulong size, BufferKind access, uint elementStride, nint data, nuint dataSize);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_parcel_destroy")]
+    internal static partial void ParcelDestroy(nint parcel);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_parcel_byte_size")]
+    internal static partial ulong ParcelByteSize(nint parcel);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_parcel_resource_index")]
+    internal static partial uint ParcelResourceIndex(nint parcel, ResourceAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_parcel_read_to_cpu")]
+    internal static partial GoldyResult ParcelReadToCpu(nint parcel, nint device, nint output, nuint outputSize);
 
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_pool_create")]
     internal static partial nint BufferPoolCreate(nint device, ulong capacity);

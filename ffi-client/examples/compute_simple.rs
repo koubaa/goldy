@@ -4,7 +4,7 @@
 
 use goldy_ffi_client::{
     BufferKind, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions, ResourceAccess,
-    ShaderModule, TaskGraph,
+    RetainedPool, ShaderModule, TaskGraph,
 };
 
 const COMPUTE_SRC: &str = r#"
@@ -29,7 +29,9 @@ fn main() -> goldy_ffi_client::Result<()> {
         .request_device(&DeviceDescriptor::default())?;
 
     let data = [0f32; 64];
-    let buffer = device.alloc_buffer_with_data(&data, BufferKind::Scattered)?;
+    let mut retained_pool = RetainedPool::new(&device)?;
+    let buffer = retained_pool.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
+    let _retained_pool = retained_pool;
 
     let shader = ShaderModule::from_slang(&device, COMPUTE_SRC)?;
     let pipeline = ComputePipeline::new(&device, &shader)?;
@@ -37,7 +39,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let idx = buffer.resource_index(ResourceAccess::Write)?;
     let mut graph = TaskGraph::new();
     let mut node = graph.compute_node("double", &pipeline);
-    node.bind_buffer(&buffer, NodeAccess::ReadWrite);
+    node.bind_parcel(&buffer, NodeAccess::ReadWrite);
     node.bind_resources_raw(&[idx]);
     node.dispatch(1, 1, 1);
     graph.dispatch(&device)?;

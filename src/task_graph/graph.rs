@@ -1011,6 +1011,10 @@ impl TaskGraph {
         self.ir.nodes.push(node);
     }
 
+    pub(crate) fn extend_stamp_targets(&mut self, stamps: Vec<Arc<crate::parcel::ParcelStamp>>) {
+        self.stamp_targets.extend(stamps);
+    }
+
     /// Begin building an offscreen [`crate::RenderTarget`] render pass node.
     pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         RenderPassBuilder {
