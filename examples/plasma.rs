@@ -3,8 +3,9 @@
 //! Run with: cargo run --example plasma
 
 use goldy::{
-    shaders, Buffer, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    shaders, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface,
+    TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,7 +30,8 @@ struct App {
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
-    uniform_buffer: Option<Buffer>,
+    _retained_pool: Option<RetainedPool>,
+    uniform: Option<Parcel>,
     window: Option<Arc<Window>>,
     surface: Option<Surface>,
     scene_rt: Option<RenderTarget>,
@@ -45,7 +47,8 @@ impl App {
             device: None,
             pipeline: None,
             shader: None,
-            uniform_buffer: None,
+            _retained_pool: None,
+            uniform: None,
             window: None,
             surface: None,
             scene_rt: None,
@@ -86,12 +89,13 @@ impl App {
             },
         )?;
 
-        // Create uniform buffer
-        let uniform_buffer = device.as_ref().alloc_buffer(
+        let mut retained_pool = RetainedPool::new(device.clone());
+        let uniform = retained_pool.acquire_buffer(
             std::mem::size_of::<Uniforms>() as u64,
             BufferKind::Broadcast,
             None,
-            goldy::BufferFlags::empty(),
+            BufferFlags::empty(),
+            None,
         )?;
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
@@ -99,7 +103,8 @@ impl App {
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self.uniform_buffer = Some(uniform_buffer);
+        self._retained_pool = Some(retained_pool);
+        self.uniform = Some(uniform);
         self.surface = Some(surface);
         self.scene_rt = Some(scene_rt);
 
@@ -118,20 +123,24 @@ impl App {
         let pipeline = self.pipeline.as_ref().unwrap();
         let surface = self.surface.as_ref().unwrap();
         let scene_rt = self.scene_rt.as_ref().unwrap();
-        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
+        let uniform = self.uniform.as_ref().unwrap();
 
-        // Update uniform buffer with current time
         let time = self.start_time.elapsed().as_secs_f32();
         let uniforms = Uniforms { time };
-        uniform_buffer.write_data(0, &[uniforms])?;
 
         self.frame_graph.clear();
+        self.frame_graph
+            .write_parcel(uniform, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+
+        let uniform_handle = uniform
+            .handle(ResourceAccess::Read)
+            .expect("uniform parcel missing read handle");
 
         let mut pass = self.frame_graph.render_pass("plasma", scene_rt);
-        pass.bind_buffer_mut(uniform_buffer, NodeAccess::Read);
+        pass.bind_parcel_mut(uniform, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(pipeline);
-        pass.bind_resources(&[uniform_buffer]);
+        pass.bind_resources_typed(&[uniform_handle]);
         pass.draw_fullscreen();
         pass.finish_recorded();
 

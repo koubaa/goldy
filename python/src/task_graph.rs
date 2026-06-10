@@ -4,13 +4,13 @@ use crate::buffer::PyBuffer;
 use crate::buffer_pool::PyBufferView;
 use crate::compute::PyComputePipeline;
 use crate::device::PyDevice;
-use crate::error::IntoPyResult;
+use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::pipeline::PyRenderPipeline;
 use crate::render_target::PyRenderTarget;
 use crate::types::{PyColor, PyIndexFormat, PyNodeAccess};
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
-use goldy::types::{ResourceCategory, ResourceHandle};
+use goldy::types::{ResourceAccess, ResourceCategory, ResourceHandle};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -272,6 +272,29 @@ impl PyRenderPass {
         slf.graph.borrow(py).with_active_pass(|pass| {
             pass.bind_parcel(parcel.inner.as_ref(), access.into());
         })?;
+        Ok(slf)
+    }
+
+    /// Graph dependency + shader push-constant slot for a retained parcel (broadcast or scattered).
+    ///
+    /// Combines [`Self::bind_parcel`] with [`RenderPassRecord::bind_resources_typed`] using the
+    /// parcel's typed [`ResourceHandle`] (correct category for broadcast uniforms).
+    fn bind_parcel_shader_resource<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        parcel: &PyParcel,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.bind_parcel(parcel.inner.as_ref(), access.into());
+            let resource_access = resource_access_for_shader(access);
+            let handle = parcel
+                .inner
+                .handle(resource_access)
+                .ok_or_else(|| GoldyError::new_err("bindless resource handle unavailable"))?;
+            pass.bind_resources_typed(&[handle]);
+            Ok(())
+        })??;
         Ok(slf)
     }
 
