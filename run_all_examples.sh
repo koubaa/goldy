@@ -8,6 +8,7 @@
 # Usage:
 #   GOLDY_BACKEND=vk ./run_all_examples.sh          # normal
 #   SLEEP_BETWEEN=3 ./run_all_examples.sh            # 3s sleep between examples
+#   EXAMPLE_TIMEOUT=10 ./run_all_examples.sh         # auto-exit each example after 10s
 #   VULKAN_VALIDATE=1 ./run_all_examples.sh          # with validation layers
 
 set -e
@@ -16,10 +17,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-0}"
+EXAMPLE_TIMEOUT="${EXAMPLE_TIMEOUT:-0}"
 
 if [[ "${VULKAN_VALIDATE:-0}" == "1" ]]; then
     export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
     echo "Vulkan validation layers ENABLED"
+fi
+
+if [[ "$EXAMPLE_TIMEOUT" -gt 0 ]]; then
+    export GOLDY_EXAMPLE_TIMEOUT="$EXAMPLE_TIMEOUT"
 fi
 
 # Extract example names from Cargo.toml
@@ -44,7 +50,11 @@ for i in "${!EXAMPLES[@]}"; do
     echo ""
     echo "========================================"
     echo "[$n/$total] Running example: $name"
-    echo "Close the window or press Esc to continue to next"
+    if [[ "$EXAMPLE_TIMEOUT" -gt 0 ]]; then
+        echo "Auto-advancing after ${EXAMPLE_TIMEOUT}s (EXAMPLE_TIMEOUT)"
+    else
+        echo "Close the window or press Esc to continue to next"
+    fi
     echo "========================================"
 
     start_ns=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
