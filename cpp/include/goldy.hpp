@@ -535,18 +535,11 @@ public:
      * @brief Acquire a buffer parcel initialized with typed data.
      */
     template<typename T>
-    [[nodiscard]] Parcel acquire_buffer_with_data(std::span<const T> data, BufferKind access) {
-        GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
-            ptr_.get(),
-            data.size_bytes(),
-            static_cast<GoldyBufferKind>(access),
-            static_cast<uint32_t>(sizeof(T)),
-            reinterpret_cast<const uint8_t*>(data.data()),
-            data.size_bytes());
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        return Parcel(ptr);
+    [[nodiscard]] Parcel acquire_buffer_with_data(std::span<const T> data, BufferKind access);
+
+    template<typename T, typename Allocator>
+    [[nodiscard]] Parcel acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
+        return acquire_buffer_with_data(std::span<const T>(data.data(), data.size()), access);
     }
 
     /**
@@ -555,19 +548,7 @@ public:
      * Equivalent to `acquire_buffer` with initial data. Prefer `acquire_buffer_with_data` for typed slices.
      */
     [[nodiscard]] Parcel acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
-                                            uint32_t element_stride = 1) {
-        GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
-            ptr_.get(),
-            data.size(),
-            static_cast<GoldyBufferKind>(access),
-            element_stride,
-            data.data(),
-            data.size());
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        return Parcel(ptr);
-    }
+                                            uint32_t element_stride = 1);
 
     GoldyRetainedPool* get() const { return ptr_.get(); }
 
@@ -632,6 +613,36 @@ private:
     std::unique_ptr<GoldyParcel, detail::ParcelDeleter> ptr_;
 };
 
+template<typename T>
+inline Parcel RetainedPool::acquire_buffer_with_data(std::span<const T> data, BufferKind access) {
+    GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
+        ptr_.get(),
+        data.size_bytes(),
+        static_cast<GoldyBufferKind>(access),
+        static_cast<uint32_t>(sizeof(T)),
+        reinterpret_cast<const uint8_t*>(data.data()),
+        data.size_bytes());
+    if (!ptr) {
+        throw Exception::from_last_error();
+    }
+    return Parcel(ptr);
+}
+
+inline Parcel RetainedPool::acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
+                                                 uint32_t element_stride) {
+    GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
+        ptr_.get(),
+        data.size(),
+        static_cast<GoldyBufferKind>(access),
+        element_stride,
+        data.data(),
+        data.size());
+    if (!ptr) {
+        throw Exception::from_last_error();
+    }
+    return Parcel(ptr);
+}
+
 /**
  * @brief Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
  */
@@ -656,6 +667,11 @@ public:
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(data.data()), data.size_bytes()),
             data.size(),
             static_cast<uint32_t>(sizeof(T)));
+    }
+
+    template<typename T, typename Allocator>
+    uint32_t emplace(const std::vector<T, Allocator>& data) {
+        return emplace(std::span<const T>(data.data(), data.size()));
     }
 
     uint32_t emplace_bytes(std::span<const uint8_t> data, uint64_t element_count, uint32_t element_stride) {

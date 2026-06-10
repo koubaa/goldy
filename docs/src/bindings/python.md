@@ -58,7 +58,7 @@ pixels = target.read_to_cpu()
 
 ## NumPy Integration
 
-### Creating GPU Buffers from Arrays
+### Creating GPU Parcels from Arrays
 
 ```python
 vertices = np.array([
@@ -68,7 +68,8 @@ vertices = np.array([
    -0.5,  0.5, 0.0, 0.0, 1.0, 1.0,
 ], dtype=np.float32)
 
-buffer = goldy.Buffer(device, vertices, goldy.BufferKind.SCATTERED)
+retained_pool = goldy.RetainedPool(device)
+parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 ```
 
 ### Supported dtypes
@@ -95,18 +96,20 @@ print(pixels.dtype)   # uint8
 ### Updating Buffers
 
 ```python
-buffer = goldy.Buffer(device, np.zeros(256, dtype=np.float32), goldy.BufferKind.BROADCAST)
+retained_pool = goldy.RetainedPool(device)
+parcel = retained_pool.acquire_buffer(np.zeros(256, dtype=np.float32), goldy.BufferKind.BROADCAST)
+graph = goldy.TaskGraph()
 
 # Full update
-buffer.write(0, np.random.rand(256).astype(np.float32))
+graph.write_parcel(parcel, 0, np.random.rand(256).astype(np.float32).tobytes())
 
 # Partial update (starting at byte offset 64)
-buffer.write(64, np.ones(32, dtype=np.float32))
+graph.write_parcel(parcel, 64, np.ones(32, dtype=np.float32).tobytes())
 ```
 
 ### Performance Tips
 
-- **Create once, update often** — avoid allocating new `Buffer` objects every frame. Use `buffer.write()` instead.
+- **Create once, update often** — avoid allocating new parcels every frame. Use `graph.write_parcel()` instead.
 - **Use `np.float32`** — match the GPU's expected dtype to avoid an extra conversion.
 - **Ensure contiguity** — sliced arrays may not be contiguous. Call `np.ascontiguousarray()` before uploading if needed.
 
@@ -124,7 +127,8 @@ instance = goldy.Instance()
 device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 
 data = np.arange(256, dtype=np.float32)
-buffer = goldy.Buffer(device, data, goldy.BufferKind.SCATTERED)
+retained_pool = goldy.RetainedPool(device)
+parcel = retained_pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
 
 SHADER = """
 import goldy_exp;
@@ -140,9 +144,9 @@ shader = goldy.ShaderModule.from_slang(device, SHADER)
 pipeline = goldy.ComputePipeline(device, shader)
 
 graph = goldy.TaskGraph()
-idx = buffer.resource_index(goldy.ResourceAccess.WRITE)
+idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
 with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
-    node.bind_buffer(buffer, goldy.NodeAccess.READ_WRITE)
+    node.bind_parcel(parcel, goldy.NodeAccess.READ_WRITE)
     node.bind_resources_raw([idx])   # 4 workgroups × 64 threads = 256 threads
 graph.dispatch(device)
 ```
@@ -152,8 +156,9 @@ graph.dispatch(device)
 For iterative algorithms, alternate two buffers as input/output:
 
 ```python
-buf_a = goldy.Buffer(device, initial_data, goldy.BufferKind.SCATTERED)
-buf_b = goldy.Buffer(device, initial_data, goldy.BufferKind.SCATTERED)
+retained_pool = goldy.RetainedPool(device)
+buf_a = retained_pool.acquire_buffer(initial_data, goldy.BufferKind.SCATTERED)
+buf_b = retained_pool.acquire_buffer(initial_data, goldy.BufferKind.SCATTERED)
 
 use_a = True
 for _ in range(100):
@@ -162,8 +167,8 @@ for _ in range(100):
     write_idx = write_buf.resource_index(goldy.ResourceAccess.WRITE)
     graph = goldy.TaskGraph()
     with graph.compute_node("step", pipeline, workgroups=(workgroups_x, workgroups_y, 1)) as node:
-        node.bind_buffer(read_buf, goldy.NodeAccess.READ)
-        node.bind_buffer(write_buf, goldy.NodeAccess.WRITE)
+        node.bind_parcel(read_buf, goldy.NodeAccess.READ)
+        node.bind_parcel(write_buf, goldy.NodeAccess.WRITE)
         node.bind_resources_raw([read_idx, write_idx])
     graph.dispatch(device)
     use_a = not use_a
@@ -217,13 +222,13 @@ device = instance.create_device(goldy.DeviceType.DISCRETE_GPU)
 device.is_valid()                # bool
 ```
 
-#### `Buffer`
+#### `RetainedPool` and `Parcel`
 
 ```python
-buf = goldy.Buffer(device, data, access)    # data: numpy array or bytes
-buf = goldy.Buffer.empty(device, size, access)
-buf.size                                    # int (bytes)
-buf.write(offset, data)                     # update contents
+pool = goldy.RetainedPool(device)
+parcel = pool.acquire_buffer(data, access)  # data: numpy array or bytes
+parcel.byte_size                            # int (bytes)
+graph.write_parcel(parcel, offset, data)    # update contents through TaskGraph
 ```
 
 #### `RenderTarget`
@@ -266,10 +271,10 @@ graph = goldy.TaskGraph()
 graph.clear()
 
 with graph.render_pass("main", scene_rt) as rp:
-    rp.bind_buffer(vertex_buffer, goldy.NodeAccess.READ)
+    rp.bind_parcel(vertex_buffer, goldy.NodeAccess.READ)
     rp.clear(goldy.Color.BLACK)
     rp.set_pipeline(pipeline)
-    rp.set_vertex_buffer(0, vertex_buffer)
+    rp.set_vertex_buffer_parcel(0, vertex_buffer)
     rp.draw(vertex_count=3)
 
 # Headless
@@ -287,7 +292,7 @@ surface.present(frame)
 
 ```python
 with graph.compute_node("update", compute_pipeline, workgroups=(8, 8, 1)) as node:
-    node.bind_buffer(state_buf, goldy.NodeAccess.READ_WRITE)
+    node.bind_parcel(state_buf, goldy.NodeAccess.READ_WRITE)
     node.bind_resources_raw([state_idx])
 ```
 
