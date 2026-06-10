@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
-    RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
+    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -189,10 +189,7 @@ impl RenderState {
         pass.bind_parcel_mut(&self.particle_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[self
-            .particle_buffer
-            .resource_index(ResourceAccess::Read)
-            .unwrap()]);
+        pass.bind_resources_raw(&[self.particle_buffer.resource_index(ResourceAccess::Read).unwrap()]);
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish_recorded();
 

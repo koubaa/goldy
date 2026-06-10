@@ -19,7 +19,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
         .expect("detach_buffer")
 }
 
-
 fn graph_render(
     device: &Device,
     target: &RenderTarget,

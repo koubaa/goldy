@@ -45,7 +45,6 @@ fn test_alloc_buffer(
         .expect("detach_buffer")
 }
 
-
 /// Doubles each element: out[i] = in[i] * 2
 const DOUBLE_SHADER: &str = r#"
 import goldy_exp;
@@ -571,7 +570,13 @@ fn stress_clear_then_dispatch_large() {
     const N: usize = 16384;
     let nonzero: Vec<u32> = (1..=N as u32).collect();
     let buf = test_alloc_buffer_with_data(&device, &nonzero, BufferKind::Scattered);
-    let out = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
+    let out = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
     let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
@@ -616,9 +621,13 @@ fn stress_many_clears_many_dispatches() {
     for _ in 0..NUM_BUFS {
         let nonzero: Vec<u32> = (1..=N as u32).collect();
         srcs.push(test_alloc_buffer_with_data(&device, &nonzero, BufferKind::Scattered));
-        outs.push(
-            test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty()),
-        );
+        outs.push(test_alloc_buffer(
+            &device,
+            (N * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        ));
     }
 
     let mut graph = TaskGraph::new();
@@ -664,7 +673,13 @@ fn stress_clear_write_dispatch_chain() {
     const N: usize = 1024;
     let nonzero: Vec<u32> = (1..=N as u32).collect();
     let buf = test_alloc_buffer_with_data(&device, &nonzero, BufferKind::Scattered);
-    let out = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
+    let out = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
     let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
@@ -714,7 +729,13 @@ fn stress_two_phase_submission() {
 
     // Phase 1: double in-place. Use a tmp buffer since DOUBLE_SHADER reads
     // from one buffer and writes to another.
-    let tmp = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
+    let tmp = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
     let tmp_idx = tmp.resource_index(ResourceAccess::Write).unwrap();
 
     {
@@ -818,7 +839,13 @@ void cs_main(Scattered<uint> args, ThreadId id) {
 
     let nonzero: Vec<u32> = (1..=N as u32).collect();
     let buf = test_alloc_buffer_with_data(&device, &nonzero, BufferKind::Scattered);
-    let out = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
+    let out = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
     let args = test_alloc_buffer(&device, 12, BufferKind::Scattered, None, BufferFlags::empty());
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
@@ -865,9 +892,27 @@ fn stress_alternating_write_dispatch() {
 
     const N: usize = 256;
 
-    let buf = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
-    let out1 = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
-    let out2 = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
+    let buf = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
+    let out1 = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
+    let out2 = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
 
     let buf_idx = buf.resource_index(ResourceAccess::Write).unwrap();
     let out1_idx = out1.resource_index(ResourceAccess::Write).unwrap();

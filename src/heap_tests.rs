@@ -24,8 +24,6 @@ mod heap_tests {
         device.create_context().expect("context")
     }
 
-
-
     fn make_device() -> Device {
         let instance = Instance::new().expect("Instance::new");
         instance
@@ -71,7 +69,8 @@ mod heap_tests {
     fn buffer_allocation_increments_count() {
         let device = make_device();
         let before = device.buffer_heap_stats().unwrap().buffer_count;
-        let _buf = device.alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+        let _buf = device
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         let after = device.buffer_heap_stats().unwrap().buffer_count;
         assert!(
@@ -85,7 +84,8 @@ mod heap_tests {
     fn gpu_only_buffer_does_not_use_heap() {
         let device = make_device();
         let before = device.buffer_heap_stats().unwrap().buffer_count;
-        let _buf = device.alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::GPU_ONLY)
+        let _buf = device
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::GPU_ONLY)
             .unwrap();
         let after = device.buffer_heap_stats().unwrap().buffer_count;
         assert_eq!(before, after, "GPU_ONLY buffers bypass the heap (device-allocated)");
@@ -99,7 +99,8 @@ mod heap_tests {
 
         // Submit trivial work so timeline advances.
         let mut graph = TaskGraph::new();
-        let setup_buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let setup_buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&setup_buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -109,7 +110,8 @@ mod heap_tests {
         let alloc_size = 32 * 1024 * 1024u64;
         let big_bufs: Vec<Buffer> = (0..3)
             .map(|_| {
-                device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                device
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap()
             })
             .collect();
@@ -209,7 +211,8 @@ mod heap_tests {
 
         // Submit some trivial GPU work so we have a timeline and in-flight CBs.
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -219,7 +222,8 @@ mod heap_tests {
         let mut payload = crate::DeferredPayload::new();
         let held_buffers: Vec<Buffer> = (0..8)
             .map(|_| {
-                device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                device
+                    .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap()
             })
             .collect();
@@ -235,7 +239,8 @@ mod heap_tests {
         ctx.flush_deferred_deletions();
 
         // Now allocating should succeed because we reclaimed the deferred buffers.
-        let _fresh = device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+        let _fresh = device
+            .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
             .expect("allocation should succeed after reclaiming deferred buffers");
     }
 
@@ -251,7 +256,8 @@ mod heap_tests {
             // Each "frame" allocates a few buffers, submits a graph, and defers them.
             let buffers: Vec<Buffer> = (0..4)
                 .map(|_| {
-                    device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    device
+                        .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                         .unwrap_or_else(|e| panic!("frame {frame}: allocation failed: {e}"))
                 })
                 .collect();
@@ -296,7 +302,8 @@ mod heap_tests {
         for _ in 0..warmup_frames {
             let buffers: Vec<Buffer> = (0..3)
                 .map(|_| {
-                    device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    device
+                        .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                         .unwrap()
                 })
                 .collect();
@@ -325,7 +332,8 @@ mod heap_tests {
         for _ in 0..steady_frames {
             let buffers: Vec<Buffer> = (0..3)
                 .map(|_| {
-                    device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    device
+                        .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                         .unwrap()
                 })
                 .collect();
@@ -363,7 +371,8 @@ mod heap_tests {
     fn texture_allocation_increments_count() {
         let device = make_device();
         let before = device.texture_heap_stats().unwrap().texture_count;
-        let _tex = device.alloc_texture(
+        let _tex = device
+            .alloc_texture(
                 64,
                 64,
                 TextureFormat::Rgba8Unorm,
@@ -419,7 +428,8 @@ mod heap_tests {
 
         // Submit trivial GPU work.
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -427,7 +437,8 @@ mod heap_tests {
         // Allocate textures and defer them.
         let mut payload = crate::DeferredPayload::new();
         for _ in 0..8 {
-            let tex = device.alloc_texture(
+            let tex = device
+                .alloc_texture(
                     256,
                     256,
                     TextureFormat::Rgba8Unorm,
@@ -444,7 +455,8 @@ mod heap_tests {
         ctx.flush_deferred_deletions();
 
         // Should succeed now.
-        let _tex = device.alloc_texture(
+        let _tex = device
+            .alloc_texture(
                 256,
                 256,
                 TextureFormat::Rgba8Unorm,
@@ -467,7 +479,8 @@ mod heap_tests {
         let mut timelines = Vec::new();
         for _ in 0..3 {
             let mut graph = TaskGraph::new();
-            let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+            let buf = device
+                .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap();
             graph.clear_buffer(&buf, 0, 256);
             let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -505,7 +518,8 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -531,7 +545,8 @@ mod heap_tests {
         assert_eq!(ctx.in_flight_command_buffer_count(), 0);
 
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let _tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -549,7 +564,8 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -577,7 +593,8 @@ mod heap_tests {
         let initial = ctx.gpu_progress();
 
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -598,7 +615,8 @@ mod heap_tests {
 
         for _ in 0..5 {
             let mut graph = TaskGraph::new();
-            let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+            let buf = device
+                .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
                 .unwrap();
             graph.clear_buffer(&buf, 0, 256);
             let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -618,13 +636,15 @@ mod heap_tests {
 
         // Submit so we have a non-zero timeline barrier.
         let mut graph = TaskGraph::new();
-        let trigger = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let trigger = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&trigger, 0, 256);
         let _tv = ctx.submit_pipelined(&mut graph).unwrap();
 
         let before = ctx.deferred_deletion_pending_count();
-        let buf = device.alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         drop(buf);
         let after = ctx.deferred_deletion_pending_count();
@@ -640,12 +660,14 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
 
-        let extra = device.alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+        let extra = device
+            .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         drop(extra);
 
@@ -676,7 +698,8 @@ mod heap_tests {
         for frame in 0..50 {
             let buffers: Vec<Buffer> = (0..3)
                 .map(|_| {
-                    device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    device
+                        .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                         .unwrap_or_else(|e| panic!("frame {frame}: alloc failed: {e}"))
                 })
                 .collect();
@@ -710,7 +733,8 @@ mod heap_tests {
         for frame in 0..50 {
             let buffers: Vec<Buffer> = (0..2)
                 .map(|_| {
-                    device.alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    device
+                        .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
                         .unwrap_or_else(|e| panic!("frame {frame}: alloc failed: {e}"))
                 })
                 .collect();
@@ -772,12 +796,14 @@ mod heap_tests {
         for frame in 0..30 {
             let bufs: Vec<Buffer> = (0..2)
                 .map(|_| {
-                    device.alloc_buffer(buf_size, BufferKind::Scattered, None, BufferFlags::empty())
+                    device
+                        .alloc_buffer(buf_size, BufferKind::Scattered, None, BufferFlags::empty())
                         .unwrap_or_else(|e| panic!("frame {frame}: buffer alloc failed: {e}"))
                 })
                 .collect();
 
-            let tex = device.alloc_texture(
+            let tex = device
+                .alloc_texture(
                     128,
                     128,
                     TextureFormat::Rgba8Unorm,
@@ -814,7 +840,8 @@ mod heap_tests {
         let ctx = submission_context(&device);
 
         // Allocate a buffer, submit work so it has a timeline.
-        let mut buf = device.alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer(1024, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
 
         let mut graph = TaskGraph::new();
@@ -836,7 +863,8 @@ mod heap_tests {
         let device = make_device();
         let ctx = submission_context(&device);
         let initial_data: Vec<u32> = (0..64).collect();
-        let mut buf = device.alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
+        let mut buf = device
+            .alloc_buffer_with_data(&initial_data, BufferKind::Scattered)
             .unwrap();
 
         // Grow the buffer (triggers blit-copy internally).
@@ -884,7 +912,8 @@ mod heap_tests {
         // Frame 1: allocate buffers, submit, defer.
         let bufs: Vec<Buffer> = (0..3)
             .map(|_| {
-                device.alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
+                device
+                    .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())
                     .unwrap()
             })
             .collect();
@@ -930,7 +959,8 @@ mod heap_tests {
         let device = make_device();
         let ctx = submission_context(&device);
         let mut graph = TaskGraph::new();
-        let buf = device.alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
+        let buf = device
+            .alloc_buffer(256, BufferKind::Scattered, None, BufferFlags::empty())
             .unwrap();
         graph.clear_buffer(&buf, 0, 256);
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -953,5 +983,4 @@ mod heap_tests {
         // On a fresh device with no work, timeline is 0 so this should timeout.
         assert!(result.is_err(), "waiting for far-future timeline should timeout");
     }
-
 }

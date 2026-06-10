@@ -5,9 +5,8 @@
 //! Run with: cargo run --example waveform
 
 use goldy::{
-    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface,
-    TaskGraph, Vertex2D,
+    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -189,11 +188,8 @@ impl App {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
             vertex_counts.push(vertices.len() as u32);
-            self.frame_graph.write_parcel(
-                &channel_parcels[ch],
-                0,
-                bytemuck::cast_slice(&vertices).to_vec(),
-            )?;
+            self.frame_graph
+                .write_parcel(&channel_parcels[ch], 0, bytemuck::cast_slice(&vertices).to_vec())?;
         }
 
         let mut pass = self.frame_graph.render_pass("waveform", scene_rt);

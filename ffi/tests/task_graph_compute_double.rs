@@ -99,14 +99,7 @@ fn task_graph_compute_double_then_add_ten() {
         );
         assert!(!src.is_null(), "{}", last_ffi_message());
 
-        let dst = goldy_retained_pool_acquire_buffer(
-            pool,
-            64 * 4,
-            GoldyBufferKind::Scattered,
-            0,
-            std::ptr::null(),
-            0,
-        );
+        let dst = goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!dst.is_null(), "{}", last_ffi_message());
 
         let double_src = CString::new(DOUBLE_SHADER).unwrap();

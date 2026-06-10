@@ -489,4 +489,3 @@ pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
 ) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_set_vertex_buffer_parcel)(graph, slot, parcel)
 }
-

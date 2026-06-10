@@ -34,9 +34,8 @@ pub use surface::{Frame, Surface};
 pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
-    NodeAccess,
-    PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory,
-    ResourceHandle, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
+    ResourceCategory, ResourceHandle, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 /// Built-in shader sources (`shader::builtins`, matching native Goldy).

@@ -125,13 +125,7 @@ impl RetainedPool {
         flags: crate::types::BufferFlags,
     ) -> Result<Parcel> {
         let stride = std::mem::size_of::<T>() as u32;
-        self.acquire_buffer(
-            element_count * stride as u64,
-            access,
-            Some(stride),
-            flags,
-            None,
-        )
+        self.acquire_buffer(element_count * stride as u64, access, Some(stride), flags, None)
     }
 
     fn alloc_raw_buffer(

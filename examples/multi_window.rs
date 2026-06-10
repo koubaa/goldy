@@ -369,11 +369,8 @@ impl WindowState {
         let frame = self.surface.begin()?;
 
         self.frame_graph.clear();
-        self.frame_graph.write_parcel(
-            &self.vertex_parcel,
-            0,
-            bytemuck::cast_slice(&vertices).to_vec(),
-        )?;
+        self.frame_graph
+            .write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
 
         let mut pass = self.frame_graph.render_pass(self.effect_type.title(), &self.scene_rt);
         pass.bind_parcel_mut(&self.vertex_parcel, NodeAccess::Read);

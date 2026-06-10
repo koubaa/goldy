@@ -792,7 +792,7 @@ impl BufferPool {
     /// Allocate and fill a typed region in one call.
     ///
     /// Equivalent to `alloc::<T>(data.len())` followed by `write_data(data)`.
-    /// Same element-stride rules as [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data).
+    /// Same element-stride rules as `Device::alloc_buffer_with_data`.
     pub fn alloc_with_data<T: StructuredBufferElement>(&mut self, data: &[T]) -> Result<BufferView> {
         let view = self.alloc::<T>(data.len() as u64)?;
         view.write_data(data)?;

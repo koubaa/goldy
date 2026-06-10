@@ -7,9 +7,9 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess,
-    Parcel, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    ResourceAccess, RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess, Parcel,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
+    RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -188,10 +188,7 @@ impl RenderState {
         pass.bind_parcel_mut(&self.instance_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[self
-            .instance_buffer
-            .resource_index(ResourceAccess::Read)
-            .unwrap()]);
+        pass.bind_resources_raw(&[self.instance_buffer.resource_index(ResourceAccess::Read).unwrap()]);
         pass.draw_quads(NUM_QUADS);
         pass.finish_recorded();
 

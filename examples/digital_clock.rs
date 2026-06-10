@@ -152,11 +152,8 @@ impl App {
         let vertices = generate_clock_vertices(time, color, width, height);
 
         self.frame_graph.clear();
-        self.frame_graph.write_parcel(
-            vertex_parcel,
-            0,
-            bytemuck::cast_slice(&vertices).to_vec(),
-        )?;
+        self.frame_graph
+            .write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
 
         let mut pass = self.frame_graph.render_pass("digital_clock", scene_rt);
         pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);

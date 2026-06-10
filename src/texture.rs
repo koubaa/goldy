@@ -94,7 +94,7 @@ impl Texture {
     /// The data must be in the correct format for the texture's pixel format.
     /// For RGBA8 textures, this is 4 bytes per pixel in RGBA order.
     ///
-    /// See [`Device::alloc_texture`](crate::Device::alloc_texture) for access pattern documentation.
+    /// See `Device::alloc_texture` for access pattern documentation.
     ///
     /// # Arguments
     ///

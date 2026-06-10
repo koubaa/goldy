@@ -33,7 +33,11 @@ impl Parcel {
         Ok(output)
     }
 
-    pub fn mosaic_view_resource_index(&self, slot: crate::retained_pool::MosaicSlot, access: ResourceAccess) -> Result<u32> {
+    pub fn mosaic_view_resource_index(
+        &self,
+        slot: crate::retained_pool::MosaicSlot,
+        access: ResourceAccess,
+    ) -> Result<u32> {
         let idx = unsafe { sys::goldy_parcel_mosaic_view_resource_index(self.ptr, slot.0, access.into()) };
         if idx == u32::MAX {
             return Err(crate::error::GoldyError::from_message(

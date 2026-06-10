@@ -95,8 +95,7 @@ impl App {
         )?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
-        let uniform =
-            retained_pool.acquire_buffer_sized::<Uniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
+        let uniform = retained_pool.acquire_buffer_sized::<Uniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 

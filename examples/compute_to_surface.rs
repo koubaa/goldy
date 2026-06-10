@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel,
-    PresentMode, RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface, SurfaceConfig,
-    TaskGraph, SWAPCHAIN_SLOT_PLACEHOLDER,
+    task_graph::NodeAccess, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel, PresentMode,
+    RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface, SurfaceConfig, TaskGraph,
+    SWAPCHAIN_SLOT_PLACEHOLDER,
 };
 use std::sync::Arc;
 use winit::{
@@ -282,9 +282,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         .bind_resources_raw_slice(&[uniform_handle.index(), SWAPCHAIN_SLOT_PLACEHOLDER])
         .dispatch(wg_x, wg_y, 1);
 
-    let frame = state
-        .surface
-        .submit_graph_to_frame(&mut state.frame_graph, frame)?;
+    let frame = state.surface.submit_graph_to_frame(&mut state.frame_graph, frame)?;
 
     frame.present()?;
 

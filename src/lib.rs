@@ -47,6 +47,10 @@ pub mod tracy;
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
 pub mod allocation_policy;
+#[cfg(test)]
+mod buffer_alloc_tests;
+#[cfg(test)]
+mod heap_tests;
 pub mod parcel;
 pub mod placement_heap;
 pub mod retained_pool;
@@ -54,10 +58,6 @@ pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod vram_allocator;
-#[cfg(test)]
-mod heap_tests;
-#[cfg(test)]
-mod buffer_alloc_tests;
 pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};

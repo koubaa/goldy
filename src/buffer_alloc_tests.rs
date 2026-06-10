@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
-    use crate::{BackendType, BufferKind, BufferPool, ComputePipeline, DeviceType, ShaderModule, TaskGraph};
     use crate::device::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::types::{BufferFlags, ResourceAccess};
+    use crate::{BackendType, BufferKind, BufferPool, ComputePipeline, DeviceType, ShaderModule, TaskGraph};
 
     fn make_device() -> Device {
         let inst = Instance::new().expect("instance");
@@ -14,7 +14,9 @@ mod buffer_alloc_tests {
 
     fn request_device_preferring(inst: &Instance, preferred: DeviceType) -> Device {
         let adapters = inst.enumerate_adapters();
-        let adapter = adapters.iter().find(|a| a.device_type() == preferred)
+        let adapter = adapters
+            .iter()
+            .find(|a| a.device_type() == preferred)
             .or(adapters.first())
             .expect("no adapter");
         adapter.request_device(&DeviceDescriptor::default()).expect("device")
@@ -25,7 +27,8 @@ mod buffer_alloc_tests {
     #[test]
     fn resize_preserves_contents() {
         let device = make_device();
-        let mut buf = device.alloc_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)
+        let mut buf = device
+            .alloc_buffer_with_data(&[1u32, 2, 3, 4], BufferKind::Scattered)
             .expect("buf");
         buf.resize_to(32).expect("resize");
         let mut out = vec![0u8; 32];
@@ -40,7 +43,8 @@ mod buffer_alloc_tests {
     #[test]
     fn resize_preserves_bindless_index() {
         let device = make_device();
-        let mut buf = device.alloc_buffer(16, BufferKind::Scattered, None, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer(16, BufferKind::Scattered, None, BufferFlags::empty())
             .expect("buf");
         let idx = buf.resource_index(ResourceAccess::Write).expect("bindless");
         buf.resize_to(256).expect("resize");
@@ -50,7 +54,8 @@ mod buffer_alloc_tests {
     #[test]
     fn resize_down_truncates() {
         let device = make_device();
-        let mut buf = device.alloc_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)
+        let mut buf = device
+            .alloc_buffer_with_data(&[10u32, 20, 30, 40], BufferKind::Scattered)
             .expect("buf");
         buf.resize_to(8).expect("resize down");
         let mut out = vec![0u8; 8];
@@ -62,7 +67,8 @@ mod buffer_alloc_tests {
     #[test]
     fn resize_uninitialized_skips_copy() {
         let device = make_device();
-        let mut buf = device.alloc_buffer_with_data(&[0xABCD_BEEFu32], BufferKind::Scattered)
+        let mut buf = device
+            .alloc_buffer_with_data(&[0xABCD_BEEFu32], BufferKind::Scattered)
             .expect("buf");
         buf.resize_to_uninitialized(8).expect("resize uni");
         let mut out = vec![0u8; 8];
@@ -86,7 +92,8 @@ mod buffer_alloc_tests {
     #[test]
     fn new_with_capacity_hint_smoke() {
         let device = make_device();
-        let b = device.alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
+        let b = device
+            .alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
             .expect("b");
         assert_eq!(b.size(), 16);
         assert!(b.allocated_size() >= 4096, "expected oversize allocation");
@@ -95,7 +102,8 @@ mod buffer_alloc_tests {
     #[test]
     fn oversize_resize_within_capacity_preserves_and_zeros_tail() {
         let device = make_device();
-        let mut buf = device.alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer_with_capacity(16, 4096, BufferKind::Scattered, BufferFlags::empty())
             .expect("buf");
         let idx = buf.resource_index(ResourceAccess::Write).expect("bindless");
         buf.write(0, &[0xabu8; 16]).expect("seed");
@@ -111,7 +119,8 @@ mod buffer_alloc_tests {
     #[test]
     fn oversize_resize_beyond_capacity_falls_back_and_preserves() {
         let device = make_device();
-        let mut buf = device.alloc_buffer_with_capacity(16, 256, BufferKind::Scattered, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer_with_capacity(16, 256, BufferKind::Scattered, BufferFlags::empty())
             .expect("buf");
         buf.write(0, &[7u8; 16]).expect("w");
         buf.resize_to(512).expect("grow past cap");
@@ -124,7 +133,8 @@ mod buffer_alloc_tests {
     #[test]
     fn hint_unused_above_does_not_corrupt_prefix() {
         let device = make_device();
-        let mut buf = device.alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
             .expect("buf");
         buf.write(0, &[0x11u8; 64]).expect("w");
         buf.hint_unused_above(32);
@@ -188,7 +198,8 @@ mod buffer_alloc_tests {
         if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
             return;
         }
-        let mut buf = device.alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer_with_capacity(64, 4096, BufferKind::Scattered, BufferFlags::empty())
             .expect("buf");
         buf.write(0, &[0x11u8; 64]).expect("w");
         buf.resize_to(256).expect("grow within cap");
@@ -227,7 +238,8 @@ mod buffer_alloc_tests {
             return;
         }
 
-        let mut buf = device.alloc_buffer_with_capacity(256, 4 * 64 * 1024, BufferKind::Scattered, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer_with_capacity(256, 4 * 64 * 1024, BufferKind::Scattered, BufferFlags::empty())
             .expect("buf");
         let bindless = buf.resource_index(ResourceAccess::Write).expect("bindless");
 
@@ -277,7 +289,8 @@ mod buffer_alloc_tests {
     #[test]
     fn hint_unused_above_smoke() {
         let device = make_device();
-        let mut buf = device.alloc_buffer(64, BufferKind::Scattered, None, BufferFlags::empty())
+        let mut buf = device
+            .alloc_buffer(64, BufferKind::Scattered, None, BufferFlags::empty())
             .expect("buf");
         buf.hint_unused_above(32);
     }

@@ -197,11 +197,8 @@ impl RenderState {
 
         let particles = Self::create_particles(self.is_snow);
         self.upload_graph.clear();
-        self.upload_graph.write_parcel(
-            &self.particle_buffer,
-            0,
-            bytemuck::cast_slice(&particles).to_vec(),
-        )?;
+        self.upload_graph
+            .write_parcel(&self.particle_buffer, 0, bytemuck::cast_slice(&particles).to_vec())?;
         self.context
             .submit(&mut self.upload_graph)
             .map_err(|e| anyhow::anyhow!("{e}"))?;

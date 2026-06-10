@@ -367,7 +367,11 @@ pub unsafe extern "C" fn goldy_parcel_mosaic_view_read_to_cpu(
     }
 
     let out = slice::from_raw_parts_mut(output, output_size);
-    match (*parcel).inner.view(MosaicSlot(slot)).read_to_cpu(&(*device).inner, out) {
+    match (*parcel)
+        .inner
+        .view(MosaicSlot(slot))
+        .read_to_cpu(&(*device).inner, out)
+    {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error_from_anyhow(&e);

@@ -1156,11 +1156,14 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 
     let width = 16u32;
     let height = 16u32;
-    let texture = test_alloc_texture(&device, width,
-            height,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::Direct,
-            TextureFlags::COPY_SRC,);
+    let texture = test_alloc_texture(
+        &device,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    );
 
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
@@ -1217,10 +1220,13 @@ fn test_cpu_readable_compute_write_and_read() {
     const N: usize = 64;
     let initial: Vec<u32> = (0..N as u32).collect();
 
-    let buffer = test_alloc_buffer_with_bytes_stride_and_flags(&device, bytemuck::cast_slice(&initial),
-            BufferKind::Scattered,
-            size_of::<u32>() as u32,
-            BufferFlags::CPU_READABLE,);
+    let buffer = test_alloc_buffer_with_bytes_stride_and_flags(
+        &device,
+        bytemuck::cast_slice(&initial),
+        BufferKind::Scattered,
+        size_of::<u32>() as u32,
+        BufferFlags::CPU_READABLE,
+    );
 
     let mut graph = TaskGraph::new();
     graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
@@ -1248,18 +1254,27 @@ fn test_write_buffer_reuse_across_submissions() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     const N: usize = 16;
-    let mid = test_alloc_buffer(&device, (N * core::mem::size_of::<u32>()) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),);
-    let out_a = test_alloc_buffer(&device, (N * core::mem::size_of::<u32>()) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),);
-    let out_b = test_alloc_buffer(&device, (N * core::mem::size_of::<u32>()) as u64,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::empty(),);
+    let mid = test_alloc_buffer(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
+    let out_a = test_alloc_buffer(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
+    let out_b = test_alloc_buffer(
+        &device,
+        (N * core::mem::size_of::<u32>()) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
 
     let idx_in = mid.resource_index(ResourceAccess::Write).expect("mid bindless");
     let idx_out_a = out_a.resource_index(ResourceAccess::Write).expect("out_a bindless");
@@ -1316,10 +1331,13 @@ fn test_cpu_readable_cpu_write_read_roundtrip() {
     const N: usize = 16;
     let initial: Vec<u32> = vec![0xABCD_1234u32; N];
 
-    let buffer = test_alloc_buffer_with_bytes_stride_and_flags(&device, bytemuck::cast_slice(&initial),
-            BufferKind::Scattered,
-            size_of::<u32>() as u32,
-            BufferFlags::CPU_READABLE,);
+    let buffer = test_alloc_buffer_with_bytes_stride_and_flags(
+        &device,
+        bytemuck::cast_slice(&initial),
+        BufferKind::Scattered,
+        size_of::<u32>() as u32,
+        BufferFlags::CPU_READABLE,
+    );
 
     let new_values: Vec<u32> = (100..100 + N as u32).collect();
     buffer.write(0, bytemuck::cast_slice(&new_values)).expect("write");
@@ -1962,7 +1980,6 @@ fn test_alloc_buffer_with_bytes_stride_and_flags(
         .detach_buffer()
         .expect("detach_buffer")
 }
-
 
 fn small_config() -> TransientAllocatorConfig {
     TransientAllocatorConfig {
@@ -2706,11 +2723,14 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let ctx = submission_context(&device);
 
     // Check that the device supports DirectInterpolated (all backends should).
-    let tex = test_alloc_texture(&device, W,
-            H,
-            TextureFormat::Rgba8Unorm,
-            TextureKind::DirectInterpolated,
-            TextureFlags::empty(),);
+    let tex = test_alloc_texture(
+        &device,
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::DirectInterpolated,
+        TextureFlags::empty(),
+    );
 
     let storage_idx = tex
         .resource_index(ResourceAccess::Write)
@@ -2734,7 +2754,13 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 
     // Read pass (SRV + sampler).
     let sampler = goldy::Sampler::nearest(&device).expect("create sampler");
-    let out = test_alloc_buffer(&device, (N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty());
+    let out = test_alloc_buffer(
+        &device,
+        (N * 4) as u64,
+        BufferKind::Scattered,
+        None,
+        BufferFlags::empty(),
+    );
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("compile read");
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
     let mut graph_enc2 = TaskGraph::new();

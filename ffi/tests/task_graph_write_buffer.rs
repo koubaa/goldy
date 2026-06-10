@@ -34,23 +34,9 @@ fn task_graph_write_parcel_then_dispatch_reads_uploaded_data() {
         let pool = goldy_retained_pool_create(device);
         assert!(!pool.is_null(), "{}", last_ffi_message());
 
-        let buf = goldy_retained_pool_acquire_buffer(
-            pool,
-            64 * 4,
-            GoldyBufferKind::Scattered,
-            0,
-            std::ptr::null(),
-            0,
-        );
+        let buf = goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!buf.is_null(), "{}", last_ffi_message());
-        let out = goldy_retained_pool_acquire_buffer(
-            pool,
-            64 * 4,
-            GoldyBufferKind::Scattered,
-            0,
-            std::ptr::null(),
-            0,
-        );
+        let out = goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!out.is_null(), "{}", last_ffi_message());
 
         let known_data: Vec<u32> = (100..164).collect();

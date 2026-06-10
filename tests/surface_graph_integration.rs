@@ -23,7 +23,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
         .expect("detach_buffer")
 }
 
-
 fn make_device() -> Option<goldy::Device> {
     let instance = Instance::new().ok()?;
     instance

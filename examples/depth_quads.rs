@@ -206,16 +206,10 @@ impl App {
         }
 
         self.frame_graph.clear();
-        self.frame_graph.write_parcel(
-            warm_parcel,
-            0,
-            bytemuck::cast_slice(&warm_verts).to_vec(),
-        )?;
-        self.frame_graph.write_parcel(
-            cool_parcel,
-            0,
-            bytemuck::cast_slice(&cool_verts).to_vec(),
-        )?;
+        self.frame_graph
+            .write_parcel(warm_parcel, 0, bytemuck::cast_slice(&warm_verts).to_vec())?;
+        self.frame_graph
+            .write_parcel(cool_parcel, 0, bytemuck::cast_slice(&cool_verts).to_vec())?;
 
         let mut pass = self.frame_graph.render_pass("depth_quads", scene_rt);
         pass.bind_parcel_mut(warm_parcel, NodeAccess::Read);
