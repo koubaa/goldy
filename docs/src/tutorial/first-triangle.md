@@ -175,7 +175,8 @@ let vertices = [
     Vertex2D::new(-0.5, 0.5, Color::GREEN),
     Vertex2D::new(0.5, 0.5, Color::BLUE),
 ];
-let vertex_buffer = device.alloc_buffer_with_data( &vertices, BufferKind::Scattered)?;
+let mut pool = RetainedPool::new(device.clone());
+let vertex_buffer = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 ```
 
 `Vertex2D` is a built-in vertex type with position and color. `RetainedPool::acquire_buffer_with_data` allocates a retained parcel and uploads the data. `BufferKind::Scattered` marks it as a bindless storage buffer. Keep the pool alive for the parcel's lifetime (see `examples/triangle.rs`).

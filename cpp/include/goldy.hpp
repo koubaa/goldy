@@ -550,7 +550,9 @@ public:
     }
 
     /**
-     * @brief Acquire a buffer parcel initialized with raw bytes.
+     * @brief Acquire a buffer parcel initialized with raw bytes and an explicit element stride.
+     *
+     * Equivalent to `acquire_buffer` with initial data. Prefer `acquire_buffer_with_data` for typed slices.
      */
     [[nodiscard]] Parcel acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
                                             uint32_t element_stride = 1) {

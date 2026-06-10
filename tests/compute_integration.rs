@@ -1936,8 +1936,14 @@ fn test_alloc_buffer_with_bytes_stride(
 ) -> goldy::Buffer {
     use std::sync::Arc;
     goldy::RetainedPool::new(Arc::new(device.clone()))
-        .acquire_buffer_with_bytes_stride(data, kind, stride)
-        .expect("acquire_buffer_with_bytes_stride")
+        .acquire_buffer(
+            data.len() as u64,
+            kind,
+            Some(stride),
+            goldy::BufferFlags::empty(),
+            Some(data),
+        )
+        .expect("acquire_buffer")
         .detach_buffer()
         .expect("detach_buffer")
 }
@@ -1951,8 +1957,8 @@ fn test_alloc_buffer_with_bytes_stride_and_flags(
 ) -> goldy::Buffer {
     use std::sync::Arc;
     goldy::RetainedPool::new(Arc::new(device.clone()))
-        .acquire_buffer_with_bytes_stride_and_flags(data, kind, stride, flags)
-        .expect("acquire_buffer_with_bytes_stride_and_flags")
+        .acquire_buffer(data.len() as u64, kind, Some(stride), flags, Some(data))
+        .expect("acquire_buffer")
         .detach_buffer()
         .expect("detach_buffer")
 }

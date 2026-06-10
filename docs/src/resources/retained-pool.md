@@ -13,6 +13,15 @@ let mut pool = RetainedPool::new(device.clone());
 let vertices = [/* ... */];
 let vb = pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
+// Raw bytes with explicit stride:
+let parcel = pool.acquire_buffer(
+    raw_bytes.len() as u64,
+    BufferKind::Scattered,
+    Some(16),
+    BufferFlags::empty(),
+    Some(&raw_bytes),
+)?;
+
 // Uninitialized buffer (rewrite each frame with write_parcel):
 let uniform = pool.acquire_buffer_sized::<MyUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
@@ -47,7 +56,7 @@ Call `pool.release(&ctx, parcel)` when resizing or tearing down. While held, par
 
 | Language | Types | Acquire |
 |----------|-------|---------|
-| Rust | `RetainedPool`, `Parcel` | `acquire_buffer_with_data`, `acquire_buffer_sized`, `mosaic` |
+| Rust | `RetainedPool`, `Parcel` | `acquire_buffer`, `acquire_buffer_with_data`, `acquire_buffer_sized`, `mosaic` |
 | Python | `goldy.RetainedPool`, `goldy.Parcel` | `acquire_buffer(numpy_array, kind)` |
 | C# | `RetainedPool`, `Parcel` | `AcquireBuffer<T>(data, kind)` |
 | C / ffi-client | `GoldyRetainedPool`, `GoldyParcel` | `goldy_retained_pool_acquire_buffer`, mosaic builder |

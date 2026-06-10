@@ -611,9 +611,10 @@ impl Device {
 
     /// Allocate a GPU buffer through the device's [`VramAllocator`].
     ///
-    /// All public buffer creation goes through this method (or the `alloc_buffer_with_*`
-    /// helpers below). Allocations receive an accounting deed and honor the installed
-    /// allocator's budget and telemetry.
+    /// Crate-internal entry point for runtime allocators and pools. Application code should
+    /// use [`RetainedPool::acquire_buffer`](crate::RetainedPool::acquire_buffer) instead.
+    /// Allocations receive an accounting deed and honor the installed allocator's budget
+    /// and telemetry.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`VramAllocator::alloc_buffer`]: crate::vram_allocator::VramAllocator::alloc_buffer

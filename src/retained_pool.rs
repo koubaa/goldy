@@ -117,30 +117,6 @@ impl RetainedPool {
         self.acquire_buffer(bytes.len() as u64, access, Some(stride), flags, Some(bytes))
     }
 
-    /// Allocate a retained buffer from a raw byte slice with an explicit element stride.
-    pub fn acquire_buffer_with_bytes_stride(
-        &mut self,
-        data: &[u8],
-        access: BufferKind,
-        element_stride: u32,
-    ) -> Result<Parcel> {
-        self.acquire_buffer_with_bytes_stride_and_flags(data, access, element_stride, crate::types::BufferFlags::empty())
-    }
-
-    /// Allocate a retained buffer from a raw byte slice with an explicit element stride and flags.
-    pub fn acquire_buffer_with_bytes_stride_and_flags(
-        &mut self,
-        data: &[u8],
-        access: BufferKind,
-        element_stride: u32,
-        flags: crate::types::BufferFlags,
-    ) -> Result<Parcel> {
-        let buf = self.device
-            .alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride, flags)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        self.wrap_buffer(buf)
-    }
-
     /// Allocate an uninitialized retained buffer sized for `element_count` elements of type `T`.
     pub fn acquire_buffer_sized<T: StructuredBufferElement>(
         &mut self,

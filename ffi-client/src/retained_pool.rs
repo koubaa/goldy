@@ -72,23 +72,48 @@ impl RetainedPool {
         MosaicBuilder::new()
     }
 
-    pub fn acquire_buffer_with_data<T: Pod>(&mut self, data: &[T], kind: BufferKind) -> Result<Parcel> {
-        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
-        self.acquire_buffer_bytes(bytes, kind, std::mem::size_of::<T>() as u32)
-    }
-
-    pub fn acquire_buffer_bytes(&mut self, data: &[u8], kind: BufferKind, element_stride: u32) -> Result<Parcel> {
+    /// Acquire a retained buffer parcel.
+    ///
+    /// Pass `init: None` for uninitialized storage. `element_stride` of `None` selects stride `1`.
+    pub fn acquire_buffer(
+        &mut self,
+        size: u64,
+        kind: BufferKind,
+        element_stride: Option<u32>,
+        init: Option<&[u8]>,
+    ) -> Result<Parcel> {
+        let (data, data_size) = match init {
+            Some(bytes) => (bytes.as_ptr(), bytes.len()),
+            None => (std::ptr::null(), 0),
+        };
+        let stride = element_stride.unwrap_or(0);
         let ptr = non_null(unsafe {
             sys::goldy_retained_pool_acquire_buffer(
                 self.ptr,
-                data.len() as u64,
+                size,
                 kind.into(),
-                element_stride,
-                data.as_ptr(),
-                data.len(),
+                stride,
+                data,
+                data_size,
             )
         })?;
         Parcel::from_ptr(ptr)
+    }
+
+    /// Acquire a retained buffer parcel from a typed slice. Element stride is inferred from `T`.
+    pub fn acquire_buffer_with_data<T: Pod>(&mut self, data: &[T], kind: BufferKind) -> Result<Parcel> {
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) };
+        self.acquire_buffer(bytes.len() as u64, kind, Some(std::mem::size_of::<T>() as u32), Some(bytes))
+    }
+
+    /// Acquire a retained buffer parcel from a raw byte slice with an explicit element stride.
+    pub fn acquire_buffer_bytes(&mut self, data: &[u8], kind: BufferKind, element_stride: u32) -> Result<Parcel> {
+        self.acquire_buffer(
+            data.len() as u64,
+            kind,
+            Some(element_stride),
+            Some(data),
+        )
     }
 
     pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldyRetainedPool {

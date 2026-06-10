@@ -7,14 +7,16 @@ use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-/// Types allowed as elements in [`Device::alloc_buffer_with_data`](crate::Device::alloc_buffer_with_data) and [`BufferPool::alloc_with_data`].
+/// Types allowed as elements in [`RetainedPool::acquire_buffer_with_data`](crate::RetainedPool::acquire_buffer_with_data)
+/// and [`BufferPool::alloc_with_data`].
 ///
 /// This is implemented for common multi-byte primitives, arrays of those types, and
 /// `#[repr(C)]` structs via `#[derive(goldy_derive::StructuredBufferElement)]`.
 ///
 /// **Not** implemented for `u8` / `i8`: passing `&[u8]` (e.g. from `bytemuck::bytes_of`) would
 /// set element stride to 1 while shaders usually expect a larger struct stride. Use
-/// [`Device::alloc_buffer_with_bytes_stride`](crate::Device::alloc_buffer_with_bytes_stride) or a typed slice instead.
+/// [`RetainedPool::acquire_buffer`](crate::RetainedPool::acquire_buffer) with an explicit
+/// element stride or a typed slice instead.
 ///
 /// Unit type `()` is included so empty slices type-check.
 pub trait StructuredBufferElement: bytemuck::Pod {}

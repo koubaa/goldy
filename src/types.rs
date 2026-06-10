@@ -179,16 +179,16 @@ impl BindlessSlotKind {
 /// - `Broadcast`: All threads read the same address. Hardware can broadcast
 ///   a single fetch to the entire wave (32-64 threads).
 ///
-/// When creating buffers with [`crate::Device::alloc_buffer_with_data`], the inferred
+/// When creating buffers with [`crate::RetainedPool::acquire_buffer_with_data`], the inferred
 /// element stride must match what the shader expects. Passing `&[u8]` (e.g. from
 /// `bytemuck::bytes_of`) sets stride to 1 byte; for structured data use a typed slice or
-/// [`crate::Device::alloc_buffer_with_bytes_stride`].
+/// [`crate::RetainedPool::acquire_buffer`] with an explicit element stride.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BufferKind {
     /// Any thread, any address, read/write. No coherence assumptions.
     ///
     /// Structured-buffer views use the buffer's recorded **element stride** (from
-    /// [`crate::Device::alloc_buffer_with_data`], [`crate::Device::alloc_buffer_with_bytes_stride`], etc.).
+    /// [`crate::RetainedPool::acquire_buffer_with_data`], [`crate::RetainedPool::acquire_buffer`], etc.).
     ///
     /// Maps to storage buffers (StructuredBuffer, RWStructuredBuffer in shaders).
     #[default]
