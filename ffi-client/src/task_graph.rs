@@ -54,6 +54,13 @@ impl TaskGraph {
         })
     }
 
+    /// Add a CPU→GPU write node for a retained buffer [`Parcel`].
+    pub fn write_parcel(&mut self, parcel: &Parcel, offset: u64, data: &[u8]) -> Result<()> {
+        check(unsafe {
+            sys::goldy_task_graph_write_parcel(self.ptr, parcel.as_ptr(), offset, data.as_ptr(), data.len())
+        })
+    }
+
     pub fn render_pass<'a>(&'a mut self, label: &'static str, target: &RenderTarget) -> RenderPassBuilder<'a> {
         let label = CString::new(label).expect("render pass label contains interior null byte");
         expect_ok(unsafe { sys::goldy_task_graph_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr()) });

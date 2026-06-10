@@ -150,6 +150,16 @@ impl PyTaskGraph {
         Ok(())
     }
 
+    /// Upload CPU bytes into a retained buffer parcel via the task graph.
+    fn write_parcel(&self, parcel: &PyParcel, offset: u64, data: &[u8]) -> PyResult<()> {
+        self.ensure_no_active_recorder()?;
+        self.inner
+            .borrow_mut()
+            .write_parcel(parcel.inner.as_ref(), offset, data.to_vec())
+            .into_py_result()?;
+        Ok(())
+    }
+
     /// Begin recording an offscreen render pass. Returns a context manager.
     fn render_pass(slf: Py<Self>, py: Python<'_>, label: String, target: &PyRenderTarget) -> PyResult<PyRenderPass> {
         {
