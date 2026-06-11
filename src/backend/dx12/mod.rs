@@ -36,6 +36,7 @@ mod diagnostic;
 mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
+mod frame_table;
 mod pipeline;
 mod pso_cache;
 mod render_commands;
@@ -330,6 +331,7 @@ impl Dx12Backend {
             free_dsv_offsets: Vec::new(),
             slang_compiler,
             device_removed: std::sync::atomic::AtomicBool::new(false),
+            frame_tables: HashMap::new(),
         };
 
         Ok(Self { state })

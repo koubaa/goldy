@@ -323,7 +323,12 @@ pub enum RenderCommand {
     ///
     /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
+    BindResourcesRaw {
+        indices: Vec<u32>,
+        user: Vec<u32>,
+        /// Offset within the frame-table row where this draw's indices live.
+        frame_table_base: u32,
+    },
     /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
     /// each handle's [`crate::types::ResourceCategory`]
     /// against the bound shader's reflection and emit the raw indices.
@@ -361,7 +366,12 @@ pub enum GpuCommand {
     ///
     /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
+    BindResourcesRaw {
+        indices: Vec<u32>,
+        user: Vec<u32>,
+        /// Offset within the frame-table row where this dispatch's indices live.
+        frame_table_base: u32,
+    },
     /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
     /// each handle's [`crate::types::ResourceCategory`]
     /// against the bound shader's reflection and emit the raw indices.
@@ -443,7 +453,9 @@ pub enum GpuCommand {
         arg_data: Arc<[u8]>,
         count: u32,
     },
-    /// Conservative global memory barrier (legacy command-list path).
+    /// Frame-table staging payload — written to the upload staging buffer and copied
+    /// to the device-local table by the prologue at the start of each submission.
+    FrameTableStaging { data: std::sync::Arc<[u32]> },
     ///
     /// Within a [`crate::task_graph::TaskGraph`] submission, prefer
     /// `ResourceBarrier` which is produced by the scheduler with precise

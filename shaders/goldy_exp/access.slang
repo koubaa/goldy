@@ -79,6 +79,29 @@ public typealias ByteAddressView = RWByteAddressBuffer;
 #endif
 
 // =============================================================================
+// Frame-table protocol (record/execute index routing)
+//
+// Two bindless slots are reserved at device init:
+//   GOLDY_FRAME_SELECTOR_SLOT — u32 row index for this submission
+//   GOLDY_FRAME_TABLE_SLOT    — device-local u32 table (row * STRIDE + slot)
+//
+// Push constant `_rs0` / PushLayout._reserved[0] carries the dispatch base
+// offset within the row.  Virtual-main preambles call goldy_frame_table_index.
+// =============================================================================
+
+static const uint GOLDY_FRAME_SELECTOR_SLOT = 0;
+static const uint GOLDY_FRAME_TABLE_SLOT = 1;
+static const uint GOLDY_FRAME_TABLE_ROW_STRIDE = 512;
+
+/// Resolve bindless index `slot_k` for dispatch table base `dispatch_base`.
+public uint goldy_frame_table_index(uint dispatch_base, uint slot_k)
+{
+    uint sel = goldy_scattered<uint>(GOLDY_FRAME_SELECTOR_SLOT)[0];
+    uint row_offset = sel * GOLDY_FRAME_TABLE_ROW_STRIDE + dispatch_base + slot_k;
+    return goldy_scattered<uint>(GOLDY_FRAME_TABLE_SLOT)[row_offset];
+}
+
+// =============================================================================
 // SPIRV Implementation
 // Uses Goldy's custom binding layout via getDescriptorFromHandle override
 // =============================================================================

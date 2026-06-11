@@ -159,6 +159,7 @@ impl RenderPassRecord {
         self.commands.push(RenderCommand::BindResourcesRaw {
             indices: indices.to_vec(),
             user: Vec::new(),
+            frame_table_base: 0,
         });
         self
     }

@@ -106,6 +106,20 @@ pub fn fill_raw(layout: &mut PushLayout, indices: &[u32], user: &[u32]) {
     }
 }
 
+/// Fill push layout for frame-table routing: indices live in the staging/table;
+/// `_reserved[0]` carries the dispatch base offset within the row.
+#[inline]
+pub fn fill_frame_table_dispatch(
+    layout: &mut PushLayout,
+    dispatch_base: u32,
+    user: &[u32],
+) {
+    layout._reserved[crate::frame_table::dispatch_table_base_word_index()] = dispatch_base;
+    for (i, &val) in user.iter().enumerate().take(MAX_USER_SLOTS) {
+        layout.user[i] = val;
+    }
+}
+
 /// Fill region A of `layout` from an iterator of typed [`ResourceHandle`]s.
 ///
 /// Handles beyond [`MAX_BINDLESS_SLOTS`] are silently dropped.
@@ -184,12 +198,18 @@ impl SlotAllocator {
     }
 
     /// The next fresh slot that would be minted if the free list were empty.
-    ///
-    /// See [`Self::free_count`].
     #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
     #[inline]
     pub fn next_fresh(&self) -> u32 {
         self.next
+    }
+
+    /// Ensure the next allocated slot is at least `min` (reserves low indices).
+    #[inline]
+    pub fn ensure_minimum_next(&mut self, min: u32) {
+        if self.next < min {
+            self.next = min;
+        }
     }
 }
 

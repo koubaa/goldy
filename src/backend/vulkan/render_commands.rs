@@ -99,6 +99,7 @@ pub(super) fn record(
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
+                frame_table_base: _,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     let mut layout = PushLayout::default();

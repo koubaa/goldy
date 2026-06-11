@@ -829,6 +829,7 @@ pub(super) fn submit(
         // Process commands (same logic as dispatch)
         for command in commands {
             match command {
+                GpuCommand::FrameTableStaging { .. } => {}
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
                     if let Some(pipeline_state) = compute_pipelines.get(handle) {
@@ -845,6 +846,7 @@ pub(super) fn submit(
                 GpuCommand::BindResourcesRaw {
                     indices: raw_indices,
                     user: raw_user,
+                    ..
                 } => {
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         crate::backend::validate_raw_binding_strides(
@@ -1687,6 +1689,7 @@ fn submit_graph_impl(
     for graph_cmd in commands {
         match graph_cmd {
             GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
+                GpuCommand::FrameTableStaging { .. } => {}
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
                     if let Some(pipeline_state) = compute_pipelines.get(handle) {
@@ -1703,6 +1706,7 @@ fn submit_graph_impl(
                 GpuCommand::BindResourcesRaw {
                     indices: raw_indices,
                     user: raw_user,
+                    ..
                 } => {
                     if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         crate::backend::validate_raw_binding_strides(

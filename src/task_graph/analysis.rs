@@ -34,12 +34,21 @@ use super::ir::NodeAccess;
 use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
+use crate::frame_table::FrameTableStaging;
 
-fn push_compute_resource_bind(commands: &mut Vec<GpuCommand>, slots: &[u32], user_slots: &[u32]) {
+fn push_compute_resource_bind(
+    commands: &mut Vec<GpuCommand>,
+    staging: &mut FrameTableStaging,
+    slots: &[u32],
+    user_slots: &[u32],
+) {
     if !slots.is_empty() || !user_slots.is_empty() {
+        let frame_table_base = staging.alloc_dispatch(slots.len() as u32);
+        staging.write_dispatch_indices(frame_table_base, slots);
         commands.push(GpuCommand::BindResourcesRaw {
             indices: slots.to_vec(),
             user: user_slots.to_vec(),
+            frame_table_base,
         });
     }
 }
@@ -546,6 +555,7 @@ fn compute_barriers(
 /// [`emit_graph_commands`] for graphs that include render passes.
 pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
     let mut commands = Vec::new();
+    let mut frame_table = FrameTableStaging::new();
 
     for wave in waves {
         if !wave.barriers_before.is_empty() {
@@ -710,7 +720,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                             None => resource_slots.clone(),
                         };
                         commands.push(GpuCommand::SetPipeline(*pipeline));
-                        push_compute_resource_bind(&mut commands, &slots, user_slots);
+                        push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
                         commands.push(GpuCommand::DispatchIndirect {
                             label: Some(node.label),
                             buffer: *buffer,
@@ -730,8 +740,15 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 if run.len() > 1 {
                     let mut arg_data: Vec<u8> = Vec::with_capacity(run.len() * DISPATCH_BATCH_STRIDE);
                     for d in run {
+                        let slots = d.resource_slots.as_slice();
+                        let frame_table_base = frame_table.alloc_dispatch(slots.len() as u32);
+                        frame_table.write_dispatch_indices(frame_table_base, slots);
                         let mut layout = crate::backend::shared::PushLayout::default();
-                        crate::backend::shared::fill_raw(&mut layout, d.resource_slots.as_slice(), d.user_slots);
+                        crate::backend::shared::fill_frame_table_dispatch(
+                            &mut layout,
+                            frame_table_base,
+                            d.user_slots,
+                        );
                         arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
                         arg_data.extend_from_slice(&d.x.to_ne_bytes());
                         arg_data.extend_from_slice(&d.y.to_ne_bytes());
@@ -747,7 +764,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let d = &run[0];
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
                     let slots = d.resource_slots.as_slice();
-                    push_compute_resource_bind(&mut commands, slots, d.user_slots);
+                    push_compute_resource_bind(&mut commands, &mut frame_table, slots, d.user_slots);
                     commands.push(GpuCommand::Dispatch {
                         label: Some(d.label),
                         workgroups_x: d.x,
@@ -769,6 +786,17 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 );
             }
         }
+    }
+
+    // Only insert the staging prefix when at least one dispatch wrote bind data.
+    // Pure copy/write/barrier streams must not bump the submission counter.
+    if !commands.is_empty() && frame_table.has_bindings() {
+        commands.insert(
+            0,
+            GpuCommand::FrameTableStaging {
+                data: frame_table.as_arc(),
+            },
+        );
     }
 
     commands
@@ -888,6 +916,7 @@ pub(crate) fn emit_graph_commands_for_waves(
     resolver: Option<&SlotResolver>,
 ) -> Vec<GraphCommand> {
     let mut commands = Vec::new();
+    let mut frame_table = FrameTableStaging::new();
 
     for wave in waves {
         if !wave.barriers_before.is_empty() {
@@ -985,7 +1014,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
                     let mut bind_cmds = Vec::new();
-                    push_compute_resource_bind(&mut bind_cmds, &slots, user_slots);
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
                     for cmd in bind_cmds {
                         commands.push(GraphCommand::Compute(cmd));
                     }
@@ -1011,14 +1040,25 @@ pub(crate) fn emit_graph_commands_for_waves(
                     target,
                     commands: render_cmds,
                 } => {
+                    let lowered =
+                        crate::frame_table::lower_render_pass_commands(&mut frame_table, render_cmds);
                     commands.push(GraphCommand::Render {
                         target: *target,
-                        commands: render_cmds.clone(),
+                        commands: lowered,
                     });
                 }
                 _ => {}
             }
         }
+    }
+
+    if !commands.is_empty() && frame_table.has_bindings() {
+        commands.insert(
+            0,
+            GraphCommand::Compute(GpuCommand::FrameTableStaging {
+                data: frame_table.as_arc(),
+            }),
+        );
     }
 
     commands
@@ -1063,6 +1103,25 @@ mod tests {
     /// Short alias used by the bulk of tests.
     fn node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
         dispatch_node(label, pipeline, bindings, wg)
+    }
+
+    /// Like `node` but includes a dummy resource slot so the dispatch contributes
+    /// frame-table bindings.  Use when a test needs to assert FrameTableStaging
+    /// is emitted (the staging prefix is only inserted when bindings exist).
+    fn node_bound(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: bindings
+                .into_iter()
+                .map(|(resource, access)| ResourceBinding { resource, access })
+                .collect(),
+            kind: NodeKind::Dispatch {
+                pipeline,
+                resource_slots: vec![pipeline as u32 + 100], // non-empty → alloc_dispatch called
+                user_slots: Vec::new(),
+                dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
+            },
+        }
     }
 
     /// Build a `ClearBuffer` `TaskNode`.
@@ -1184,6 +1243,7 @@ mod tests {
         };
 
         let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
+        // Bind-free copy must NOT receive a FrameTableStaging prefix.
         assert!(matches!(
             commands.as_slice(),
             [GpuCommand::CopyRenderTarget { src: 5, dst: 42 }]
@@ -1221,10 +1281,56 @@ mod tests {
         };
 
         let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
+        // A bind-free copy must NOT receive a FrameTableStaging prefix.
+        // Inserting one bumps the submission counter and silently overwrites
+        // the selector with zeros, corrupting every in-flight frame (goldy-doom bug).
         assert!(matches!(
             commands.as_slice(),
             [GpuCommand::CopyTexture { src: 1, dst: 99 }]
-        ));
+        ), "bind-free CopyTexture must not get a FrameTableStaging prefix; got {commands:?}");
+    }
+
+    /// A graph consisting only of WriteBuffer nodes (uploads) must not generate a
+    /// FrameTableStaging prefix — these are bind-free and must not bump the counter.
+    #[test]
+    fn write_only_graph_no_staging_prefix() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("upload_a", buf(0), 0),
+                write_node("upload_b", buf(1), 1),
+            ],
+        };
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
+        let has_staging = cmds.iter().any(|c| matches!(c, GpuCommand::FrameTableStaging { .. }));
+        assert!(!has_staging, "write-only graph must not produce FrameTableStaging; got {cmds:?}");
+    }
+
+    /// A graph whose dispatch node has actual resource_slots MUST receive a
+    /// FrameTableStaging prefix so the prologue populates the device table.
+    #[test]
+    fn dispatch_graph_gets_staging_prefix() {
+        let ir = GraphIR {
+            nodes: vec![TaskNode {
+                label: "A",
+                bindings: vec![ResourceBinding {
+                    resource: buf(0),
+                    access: NodeAccess::Write,
+                }],
+                kind: NodeKind::Dispatch {
+                    pipeline: 1,
+                    resource_slots: vec![42u32], // non-empty → alloc_dispatch is called
+                    user_slots: Vec::new(),
+                    dispatch: DispatchDim::Direct { x: 4, y: 1, z: 1 },
+                },
+            }],
+        };
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
+        assert!(
+            matches!(cmds.first(), Some(GpuCommand::FrameTableStaging { .. })),
+            "dispatch with resource_slots must start with FrameTableStaging; got {cmds:?}"
+        );
     }
 
     #[test]
@@ -1393,6 +1499,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let cmds = emit_commands(&ir, &schedule, None);
 
+        // No staging (test nodes have no resource_slots → no bindings).
         // Wave 0: SetPipeline(10), Dispatch(8,1,1)
         // ResourceBarrier([0])
         // Wave 1: SetPipeline(20), Dispatch(4,1,1)
@@ -1430,8 +1537,9 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let cmds = emit_commands(&ir, &schedule, None);
 
-        // Single wave, no barriers
+        // Single wave, no barriers, no staging (test nodes have no resource_slots).
         assert_eq!(cmds.len(), 4);
+        assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::FrameTableStaging { .. })));
         assert!(!cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })));
     }
 
@@ -1456,11 +1564,12 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let cmds = emit_commands(&ir, &schedule, None);
 
-        assert_eq!(cmds.len(), 3);
-        assert!(matches!(cmds[0], GpuCommand::SetPipeline(10)));
-        assert!(matches!(cmds[1], GpuCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7]));
+        assert_eq!(cmds.len(), 4);
+        assert!(matches!(cmds[0], GpuCommand::FrameTableStaging { .. }));
+        assert!(matches!(cmds[1], GpuCommand::SetPipeline(10)));
+        assert!(matches!(cmds[2], GpuCommand::BindResourcesRaw { ref indices, .. } if indices == &[42, 7]));
         assert!(matches!(
-            cmds[2],
+            cmds[3],
             GpuCommand::Dispatch {
                 workgroups_x: 1,
                 label: Some("A"),
@@ -1483,6 +1592,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let cmds = emit_commands(&ir, &schedule, None);
 
+        // No staging: bind-free node must not trigger a prologue.
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
     }
@@ -1496,6 +1606,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let cmds = emit_commands(&ir, &schedule, None);
 
+        // No staging: bind-free upload must not trigger a prologue.
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
     }
@@ -1517,6 +1628,7 @@ mod tests {
 
         let cmds = emit_commands(&ir, &schedule, None);
         // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
+        // No staging: dispatch has no resource_slots → no alloc_dispatch → no prologue.
         assert_eq!(cmds.len(), 4);
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
         assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
@@ -1561,6 +1673,7 @@ mod tests {
         assert_eq!(schedule.waves.len(), 2);
 
         let cmds = emit_commands(&ir, &schedule, None);
+        // No staging (dispatch has no resource_slots).
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
     }
@@ -1593,6 +1706,7 @@ mod tests {
         let schedule = schedule_waves(&ir, &edges);
         let cmds = emit_commands(&ir, &schedule, None);
 
+        // No staging: bind-free upload must not trigger a prologue.
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
     }
@@ -1612,6 +1726,7 @@ mod tests {
         assert_eq!(schedule.waves.len(), 2);
 
         let cmds = emit_commands(&ir, &schedule, None);
+        // No staging (dispatch has no resource_slots).
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
         assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
     }
@@ -2376,31 +2491,42 @@ mod tests {
     fn partition_three_wave_diamond_splits() {
         // Diamond: A→(B,C)→D produces 3 waves.  Wave 1 has barrier for buf0,
         // wave 2 has barriers for buf1 and buf2 → wave 2 has the larger cost.
+        // node_bound ensures resource_slots are non-empty so FrameTableStaging is emitted.
         let ir = GraphIR {
             nodes: vec![
-                node("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
-                node("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
-                node("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
-                node("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
+                node_bound("A", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                node_bound("B", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                node_bound("C", 3, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                node_bound("D", 4, vec![(buf(1), NodeAccess::Read), (buf(2), NodeAccess::Read)], 1),
             ],
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 2, "3-wave diamond must produce two partitions");
 
-        // Partition 0 must contain no leading ResourceBarrier.
+        // Partition 0 starts with frame-table staging (not a barrier).
+        assert!(matches!(parts[0].first(), Some(GpuCommand::FrameTableStaging { .. })));
+        // Partition 1 starts with staging then barrier before its dispatches.
+        assert!(matches!(parts[1].first(), Some(GpuCommand::FrameTableStaging { .. })));
         assert!(
-            !matches!(parts[0].first(), Some(GpuCommand::ResourceBarrier { .. })),
-            "first partition must not start with a barrier"
-        );
-        // Partition 1 must start with a ResourceBarrier.
-        assert!(
-            matches!(parts[1].first(), Some(GpuCommand::ResourceBarrier { .. })),
-            "second partition must start with a barrier"
+            parts[1]
+                .iter()
+                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            "second partition must include a barrier"
         );
 
-        // Flattened output must equal the flat emission.
+        // Structural commands (pipelines, dispatches, barriers, uploads) must match
+        // flat emission order. Frame-table commands (staging prefix, bind-raw bases)
+        // are per-partition-local and intentionally differ from the flat stream.
+        fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
+            cmds.iter()
+                .filter(|c| !matches!(c, GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }))
+                .collect()
+        }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
-        assert_eq!(flat, flat_commands(&ir));
+        assert_eq!(
+            strip_frame_table(&flat),
+            strip_frame_table(&flat_commands(&ir))
+        );
     }
 
     #[test]
@@ -2421,22 +2547,23 @@ mod tests {
         // The largest barrier is a tie between wave 2 and wave 4 (cost 2).
         // max_by_key returns the last maximum in iteration order, so split = 4.
         // The test verifies two partitions and the flatten invariant.
+        // node_bound ensures resource_slots are non-empty so FrameTableStaging is emitted.
         let ir = GraphIR {
             nodes: vec![
                 write_node("upload", buf(0), 0),
-                node(
+                node_bound(
                     "coarse_a",
                     10,
                     vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
                     1,
                 ),
-                node(
+                node_bound(
                     "coarse_b",
                     11,
                     vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
                     1,
                 ),
-                node(
+                node_bound(
                     "coarse_c",
                     12,
                     vec![
@@ -2446,19 +2573,19 @@ mod tests {
                     ],
                     1,
                 ),
-                node(
+                node_bound(
                     "fine_a",
                     20,
                     vec![(buf(3), NodeAccess::Read), (buf(4), NodeAccess::Write)],
                     1,
                 ),
-                node(
+                node_bound(
                     "fine_b",
                     21,
                     vec![(buf(3), NodeAccess::Read), (buf(5), NodeAccess::Write)],
                     1,
                 ),
-                node(
+                node_bound(
                     "composite",
                     22,
                     vec![
@@ -2473,15 +2600,25 @@ mod tests {
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 2, "coarse/fine graph must produce two partitions");
 
-        // Second partition must begin with a ResourceBarrier.
+        // Late partition includes a barrier after its frame-table staging prefix.
+        assert!(matches!(parts[1].first(), Some(GpuCommand::FrameTableStaging { .. })));
         assert!(
-            matches!(parts[1].first(), Some(GpuCommand::ResourceBarrier { .. })),
-            "late partition must start with a barrier"
+            parts[1]
+                .iter()
+                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            "late partition must include a barrier"
         );
 
-        // Flatten invariant.
+        fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
+            cmds.iter()
+                .filter(|c| !matches!(c, GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }))
+                .collect()
+        }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
-        assert_eq!(flat, flat_commands(&ir));
+        assert_eq!(
+            strip_frame_table(&flat),
+            strip_frame_table(&flat_commands(&ir))
+        );
     }
 
     #[test]
@@ -2515,8 +2652,16 @@ mod tests {
         };
         let parts = partitions(&ir);
         assert_eq!(parts.len(), 2);
+        fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
+            cmds.iter()
+                .filter(|c| !matches!(c, GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }))
+                .collect()
+        }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
-        assert_eq!(flat, flat_commands(&ir));
+        assert_eq!(
+            strip_frame_table(&flat),
+            strip_frame_table(&flat_commands(&ir))
+        );
     }
 
     #[test]

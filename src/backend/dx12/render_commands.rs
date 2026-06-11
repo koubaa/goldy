@@ -103,6 +103,7 @@ pub(super) fn record(
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
+                frame_table_base,
             } => {
                 if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
                     crate::backend::validate_bindless_slot_kinds(
@@ -113,7 +114,7 @@ pub(super) fn record(
                     )?;
                 }
                 let mut layout = types::PushLayout::default();
-                shared::fill_raw(&mut layout, raw_indices, raw_user);
+                shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
@@ -138,16 +139,10 @@ pub(super) fn record(
                         &pipeline.shader_debug_name,
                     )?;
                 }
-                let mut layout = types::PushLayout::default();
-                shared::fill_typed(&mut layout, typed_handles.iter().copied());
-                unsafe {
-                    cmd.SetGraphicsRoot32BitConstants(
-                        0,
-                        (types::TOTAL_PUSH_BYTES / 4) as u32,
-                        &layout as *const _ as *const _,
-                        0,
-                    );
-                }
+                anyhow::bail!(
+                    "RenderCommand::BindResourcesTyped must be lowered before DX12 record; \
+                     use frame_table::lower_render_pass_commands or prepare_render_commands"
+                );
             }
             RenderCommand::Draw {
                 vertex_count,

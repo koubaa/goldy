@@ -1109,13 +1109,7 @@ impl WrapperBuilder {
             ParamKind::Resource => {
                 let k = *bindless_idx;
                 *bindless_idx += 1;
-                // Extract u16 from the appropriate bindless word: _bw{k/2}, low or high half.
-                let word = k / 2;
-                let extract = if k.is_multiple_of(2) {
-                    format!("_bw{} & 0xFFFFu", word)
-                } else {
-                    format!("(_bw{} >> 16u) & 0xFFFFu", word)
-                };
+                let extract = format!("goldy_frame_table_index(_rs0, {}u)", k);
                 let init_expr = resource_init_expr(&param.ty, &extract);
                 self.push_body_stmt(&format!("    {} {} = {};", param.ty, param.name, init_expr));
                 self.push_call(&param.name);
@@ -1130,12 +1124,7 @@ impl WrapperBuilder {
             ParamKind::Broadcast => {
                 let k = *bindless_idx;
                 *bindless_idx += 1;
-                let word = k / 2;
-                let extract = if k.is_multiple_of(2) {
-                    format!("_bw{} & 0xFFFFu", word)
-                } else {
-                    format!("(_bw{} >> 16u) & 0xFFFFu", word)
-                };
+                let extract = format!("goldy_frame_table_index(_rs0, {}u)", k);
                 self.push_body_stmt(&format!(
                     "    {} {} = goldy_broadcast<{}>({});",
                     param.ty, param.name, param.ty, extract
@@ -1287,14 +1276,16 @@ fn emit_wrapper(entry: &EntryDef) -> String {
     let mut pt_idx = 0u32;
     let mut wb = WrapperBuilder::new();
 
-    // Always emit all 8 bindless words (_bw0.._bw7) and 8 user words (_uw0.._uw7)
-    // so that push constant offsets are fixed regardless of how many params are used.
+    // Always emit all 8 bindless words (_bw0.._bw7), 8 user words (_uw0.._uw7),
+    // and frame-table dispatch base (_rs0 = PushLayout._reserved[0]) so that
+    // push constant offsets are fixed regardless of how many params are used.
     for i in 0..8u32 {
         wb.push_sig(&format!("uniform uint _bw{}", i));
     }
     for i in 0..8u32 {
         wb.push_sig(&format!("uniform uint _uw{}", i));
     }
+    wb.push_sig("uniform uint _rs0");
 
     for item in &entry.params {
         match item {
@@ -1775,11 +1766,11 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         assert!(result.contains("[numthreads(64, 1, 1)]"), "Missing [numthreads]");
         // Fixed bindless/user words in signature.
         assert!(result.contains("uniform uint _bw0"), "Missing _bw0");
+        assert!(result.contains("uniform uint _rs0"), "Missing _rs0");
         assert!(result.contains("uniform uint _uw0"), "Missing _uw0");
         assert!(result.contains("SV_DispatchThreadID"), "Missing SV_DispatchThreadID");
-        // Resource extracted from low half of _bw0.
         assert!(
-            result.contains("goldy_scattered<uint>(_bw0 & 0xFFFFu)"),
+            result.contains("goldy_scattered<uint>(goldy_frame_table_index(_rs0, 0u))"),
             "Missing scattered init"
         );
         assert!(result.contains("ThreadId id = ThreadId(_sv0)"), "Missing SV init");
@@ -1801,10 +1792,10 @@ void cs_main(Scattered<uint> data, ThreadId id, uint base) {
 }
 "#;
         let result = transform_virtual_main(src);
-        // Bindless region: _bw0 for Scattered.
+        // Bindless region: slot 0 via frame table.
         assert!(
-            result.contains("goldy_scattered<uint>(_bw0 & 0xFFFFu)"),
-            "Missing scattered from _bw0"
+            result.contains("goldy_scattered<uint>(goldy_frame_table_index(_rs0, 0u))"),
+            "Missing scattered from frame table slot 0"
         );
         // User region: _uw0 for uint base.
         assert!(result.contains("uint base = _uw0"), "Missing scalar user param");
@@ -1996,12 +1987,12 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
         assert!(result.contains("[shader(\"compute\")]"), "Missing compute attr");
         // cfg at bindless[0] → _bw0 low half.
         assert!(
-            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(_bw0 & 0xFFFFu)"),
+            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u))"),
             "Missing broadcast init"
         );
         // data at bindless[1] → _bw0 high half.
         assert!(
-            result.contains("Scattered<uint> data = goldy_scattered<uint>((_bw0 >> 16u) & 0xFFFFu)"),
+            result.contains("Scattered<uint> data = goldy_scattered<uint>(goldy_frame_table_index(_rs0, 1u))"),
             "Missing resource init"
         );
     }
@@ -2020,7 +2011,7 @@ float4 fs_main(TimeUniforms cfg, FullscreenVarying input) : SV_Target {
         let result = transform_virtual_main(src);
         // cfg becomes broadcast (bindless slot 0).
         assert!(
-            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(_bw0 & 0xFFFFu)"),
+            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u))"),
             "Missing broadcast init"
         );
         // input is the stage varying (PassThrough) — no bindless slot for it.
@@ -2041,7 +2032,7 @@ VSOutput vs_main(TimeUniforms cfg, VIn input) {
         let result = transform_virtual_main(src);
         // cfg → broadcast at bindless[0].
         assert!(
-            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(_bw0 & 0xFFFFu)"),
+            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u))"),
             "Missing broadcast init"
         );
         // VIn input → passthrough (vertex attribute struct).
@@ -2062,21 +2053,18 @@ void cs_main(Interpolated<float4> src_tex, Filter samp, Scattered<float4> dst, T
 }
 "#;
         let result = transform_virtual_main(src);
-        // All three resource params use bindless region.
-        assert!(result.contains("uniform uint _bw0"), "Missing _bw0");
-        // src_tex at bindless[0] → _bw0 low.
+        // All three resource params use frame-table slots.
+        assert!(result.contains("uniform uint _rs0"), "Missing _rs0");
         assert!(
-            result.contains("goldy_interpolated<float4>(_bw0 & 0xFFFFu)"),
+            result.contains("goldy_interpolated<float4>(goldy_frame_table_index(_rs0, 0u))"),
             "Missing src_tex init"
         );
-        // samp at bindless[1] → _bw0 high.
         assert!(
-            result.contains("goldy_filter((_bw0 >> 16u) & 0xFFFFu)"),
+            result.contains("goldy_filter(goldy_frame_table_index(_rs0, 1u))"),
             "Missing samp init"
         );
-        // dst at bindless[2] → _bw1 low.
         assert!(
-            result.contains("goldy_scattered<float4>(_bw1 & 0xFFFFu)"),
+            result.contains("goldy_scattered<float4>(goldy_frame_table_index(_rs0, 2u))"),
             "Missing dst init"
         );
         // SV param keeps its SV semantic.

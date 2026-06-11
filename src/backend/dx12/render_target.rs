@@ -225,7 +225,8 @@ pub(super) fn record_render_pass_to_list(
     target: RenderTargetHandle,
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
-) -> Result<()> {
+    frame_table_prologue_already_recorded: bool,
+) -> Result<bool> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let render_target = state
@@ -338,7 +339,21 @@ pub(super) fn record_render_pass_to_list(
         ]);
     }
 
-    render_commands::record(cmd_list, commands, device_handle, state)?;
+    let (staging_data, lowered, has_bindings) =
+        super::frame_table::prepare_render_commands(state, commands)?;
+    if has_bindings {
+        if frame_table_prologue_already_recorded {
+            // Graph submit already ran FrameTableStaging prologue in this command list;
+            // refresh the active row without advancing the selector.
+            super::frame_table::sync_table_row_to_device(state, device_handle, cmd_list, &staging_data)?;
+        } else {
+            // Legacy BindResources is lowered here (not at emit time), or this is a
+            // standalone render pass — record the full prologue (bump + copy + selector).
+            super::frame_table::record_prologue(state, device_handle, cmd_list, &staging_data)?;
+        }
+    }
+
+    render_commands::record(cmd_list, &lowered, device_handle, state)?;
 
     // RENDER_TARGET -> COPY_SOURCE for potential readback
     let to_copy = barriers::texture_barrier_full(
@@ -352,7 +367,7 @@ pub(super) fn record_render_pass_to_list(
     );
     unsafe { barriers::barrier_textures(cmd_list, &[to_copy]) };
 
-    Ok(())
+    Ok(has_bindings)
 }
 
 /// Render commands to a render target.
@@ -387,7 +402,7 @@ pub(super) fn render(
 
     unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }.context("Failed to reset command list")?;
 
-    record_render_pass_to_list(state, device_handle, target, commands, cmd)?;
+    let _ = record_render_pass_to_list(state, device_handle, target, commands, cmd, false)?;
 
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;

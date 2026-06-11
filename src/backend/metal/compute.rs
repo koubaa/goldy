@@ -378,6 +378,7 @@ pub(super) fn record_commands_to_buffer(
 
     for cmd in commands {
         match cmd {
+            GpuCommand::FrameTableStaging { .. } => {}
             GpuCommand::ClearBuffer { buffer, offset, size } => {
                 let buf_state = state
                     .buffers
@@ -564,6 +565,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
+                frame_table_base: _,
             } => {
                 ensure_compute!();
                 if let Some(pipeline) = current_pipeline {

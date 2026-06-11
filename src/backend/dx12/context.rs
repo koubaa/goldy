@@ -113,6 +113,11 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
 
     if let Some(old) = sc.retained_graph.take() {
+        if let Some(row) = old.frame_table_row {
+            if let Some(ft) = state.frame_tables.get(&device) {
+                super::frame_table::unpin_row(ft, row);
+            }
+        }
         if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
             slot.retained = false;
         }

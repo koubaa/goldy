@@ -690,6 +690,9 @@ fn record_gpu_command(
     let cl = ctx.command_list;
     let cl7 = ctx.command_list7;
     match cmd {
+        GpuCommand::FrameTableStaging { data } => {
+            super::frame_table::record_prologue(state, device_handle, cl7, data)?;
+        }
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
 
@@ -720,6 +723,7 @@ fn record_gpu_command(
         GpuCommand::BindResourcesRaw {
             indices: raw_indices,
             user: raw_user,
+            frame_table_base,
         } => {
             if let Some(pipeline) = ctx
                 .current_compute_pipeline
@@ -740,7 +744,7 @@ fn record_gpu_command(
                 )?;
             }
             let mut layout = types::PushLayout::default();
-            shared::fill_raw(&mut layout, raw_indices, raw_user);
+            shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
             unsafe {
                 cl.SetComputeRoot32BitConstants(
                     0,
@@ -768,16 +772,10 @@ fn record_gpu_command(
                     &pipeline.shader_debug_name,
                 )?;
             }
-            let mut layout = types::PushLayout::default();
-            shared::fill_typed(&mut layout, typed_handles.iter().copied());
-            unsafe {
-                cl.SetComputeRoot32BitConstants(
-                    0,
-                    (types::TOTAL_PUSH_BYTES / 4) as u32,
-                    &layout as *const _ as *const std::ffi::c_void,
-                    0,
-                );
-            }
+            anyhow::bail!(
+                "GpuCommand::BindResourcesTyped must be lowered to BindResourcesRaw before DX12 record; \
+                 call frame_table::lower_gpu_commands first"
+            );
         }
         GpuCommand::Dispatch {
             label: _,
@@ -1369,6 +1367,7 @@ struct SubmitFinish {
     slot_idx: usize,
     retain_key: Option<u64>,
     used_slots: Vec<DeferredSlot>,
+    frame_table_staging: Option<std::sync::Arc<[u32]>>,
 }
 
 struct StagingFinish {
@@ -1414,6 +1413,7 @@ fn execute_signal_and_finish(
         slot_idx,
         retain_key,
         used_slots,
+        frame_table_staging,
     } = submit;
     let StagingFinish {
         texture_uploads: staged_texture_uploads,
@@ -1473,9 +1473,23 @@ fn execute_signal_and_finish(
         }
         if let Some(key) = retain_key {
             if let Some(old) = sc.retained_graph.take() {
+                if let Some(row) = old.frame_table_row {
+                    if let Some(ft) = state.frame_tables.get(&device_handle) {
+                        super::frame_table::unpin_row(ft, row);
+                    }
+                }
                 if let Some(old_slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                     old_slot.retained = false;
                 }
+            }
+            let frame_table_row = frame_table_staging.as_ref().and_then(|_| {
+                state
+                    .frame_tables
+                    .get(&device_handle)
+                    .and_then(super::frame_table::last_prologue_row)
+            });
+            if let (Some(ft), Some(row)) = (state.frame_tables.get(&device_handle), frame_table_row) {
+                super::frame_table::pin_row(ft, row)?;
             }
             if let Some(cl) = sc
                 .compute_allocator_pool
@@ -1488,6 +1502,8 @@ fn execute_signal_and_finish(
                     command_list: cl,
                     slot_idx,
                     used_slots,
+                    frame_table_staging,
+                    frame_table_row,
                 });
             }
         }
@@ -1542,6 +1558,9 @@ fn execute_signal_and_finish(
 
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
 pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<TimelineValue> {
+    let mut commands = commands.to_vec();
+    crate::frame_table::lower_gpu_commands(&mut commands);
+    let frame_table_staging = super::frame_table::extract_staging_from_commands(&commands);
     let device_handle = state
         .contexts
         .get(&ctx)
@@ -1594,7 +1613,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
         };
 
         let _tz_prepass = tracy_zone!("dx12.submit.upload_prepass");
-        for command in commands {
+        for command in &commands {
             match command {
                 GpuCommand::WriteBuffer {
                     buffer: buf_handle,
@@ -1632,7 +1651,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
                         &state.textures,
                         &mut pool,
                         *texture,
-                        data,
+                        data.as_ref(),
                         *width,
                         *height,
                     )?);
@@ -1655,7 +1674,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
                             y: *y,
                             width: *width,
                             height: *height,
-                            data,
+                            data: data.as_ref(),
                         },
                     )?);
                 }
@@ -1671,7 +1690,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
     let mut dx_gpu_profile = {
         let _tz_gp = tracy_zone!("dx12.submit.gpu_profile_setup");
         let logical_device_ref = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let (dispatch_count, dispatch_labels) = dx12_collect_dispatch_labels(commands);
+        let (dispatch_count, dispatch_labels) = dx12_collect_dispatch_labels(&commands);
         let prof = match dx12_try_create_gpu_profile(&logical_device_ref.device, dispatch_count, dispatch_labels) {
             Ok(p) => p,
             Err(e) => {
@@ -1705,7 +1724,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
             dispatch_idx: 0,
             current_compute_pipeline: None,
         };
-        for cmd in commands {
+        for cmd in &commands {
             record_gpu_command(state, device_handle, ctx, &mut cmd_ctx, cmd)?;
         }
         debug_assert_eq!(
@@ -1739,7 +1758,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
         }
     }
 
-    let used_slots = collect_bindless_slots_from_gpu_commands(commands, &state.buffers);
+    let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &state.buffers);
     execute_signal_and_finish(
         state,
         &command_list,
@@ -1751,6 +1770,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
             slot_idx,
             retain_key: None,
             used_slots,
+            frame_table_staging,
         },
         StagingFinish {
             texture_uploads: staged_texture_uploads,
@@ -1775,6 +1795,7 @@ pub(super) fn submit_graph(
     commands: &[GraphCommand],
     retain_key: Option<u64>,
 ) -> Result<TimelineValue> {
+    let frame_table_staging = super::frame_table::extract_staging_from_graph(commands);
     let device_handle = state
         .contexts
         .get(&ctx)
@@ -1943,9 +1964,13 @@ pub(super) fn submit_graph(
             current_compute_pipeline: None,
         };
 
+        let mut frame_table_prologue_in_cb = false;
         for graph_cmd in commands {
             match graph_cmd {
                 GraphCommand::Compute(gpu_cmd) => {
+                    if matches!(gpu_cmd, GpuCommand::FrameTableStaging { .. }) {
+                        frame_table_prologue_in_cb = true;
+                    }
                     record_gpu_command(state, device_handle, ctx, &mut cmd_ctx, gpu_cmd)?;
                 }
                 GraphCommand::Render {
@@ -1974,13 +1999,15 @@ pub(super) fn submit_graph(
                     };
                     unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[compute_to_render]) };
 
-                    super::render_target::record_render_pass_to_list(
+                    let touched = super::render_target::record_render_pass_to_list(
                         state,
                         device_handle,
                         *target,
                         render_cmds,
                         &command_list7,
+                        frame_table_prologue_in_cb,
                     )?;
+                    frame_table_prologue_in_cb |= touched;
                     // Color is already COPY_SOURCE after record_render_pass_to_list.
                     // Global render→compute barriers cannot express texture layout
                     // transitions and trip the debug layer before swapchain copy.
@@ -2047,6 +2074,7 @@ pub(super) fn submit_graph(
             slot_idx,
             retain_key,
             used_slots,
+            frame_table_staging,
         },
         StagingFinish {
             texture_uploads: staged_texture_uploads,
@@ -2085,14 +2113,22 @@ pub(super) fn try_resubmit_retained(
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
         let sc = sc_arc.lock().unwrap();
         match sc.retained_graph.as_ref() {
-            Some(r) if r.fingerprint == key => Some((r.command_list.clone(), r.slot_idx, r.used_slots.clone())),
+            Some(r) if r.fingerprint == key => Some((
+                r.command_list.clone(),
+                r.slot_idx,
+                r.used_slots.clone(),
+                r.frame_table_staging.clone(),
+            )),
             _ => None,
         }
     };
 
-    let Some((command_list, slot_idx, used_slots)) = retained else {
+    let Some((command_list, slot_idx, used_slots, _frame_table_staging)) = retained else {
         return Ok(None);
     };
+
+    // Prologue copy offsets are baked into the retained CB; do not bump the counter or
+    // rewrite staging — the CB re-copies from the pinned row at execute time.
 
     let fence_value = state
         .devices
@@ -2166,6 +2202,12 @@ pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_graph.take() {
+            if let Some(row) = old.frame_table_row {
+                let device_handle = sc.device;
+                if let Some(ft) = state.frame_tables.get(&device_handle) {
+                    super::frame_table::unpin_row(ft, row);
+                }
+            }
             if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;
             }

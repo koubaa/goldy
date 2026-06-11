@@ -424,6 +424,9 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         }),
     );
 
+    let ld = state.devices.get(&handle).unwrap().clone();
+    super::frame_table::init_device(state, handle, &ld)?;
+
     tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
     Ok(handle)
 }

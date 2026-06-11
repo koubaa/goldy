@@ -127,6 +127,11 @@ impl ResourceRegistry {
         offset
     }
 
+    /// Reserve the low bindless indices for runtime protocol (frame table).
+    pub fn ensure_cbv_start(&mut self, start: u32) {
+        self.cbv_srv_uav.ensure_minimum_next(start);
+    }
+
     /// Get the SRV offset for a buffer (for read-only access to storage buffers)
     pub fn get_buffer_srv_offset(&self, handle: BufferHandle) -> Option<u32> {
         self.buffer_srv_offsets.get(&handle).copied()
@@ -492,6 +497,10 @@ pub(crate) struct RetainedGraph {
     pub slot_idx: usize,
     /// Bindless heap indices baked into this command list (for slot retirement on resubmit).
     pub used_slots: Vec<DeferredSlot>,
+    /// Snapshot of staging at record time (prologue copy offsets are baked into the CB).
+    pub frame_table_staging: Option<std::sync::Arc<[u32]>>,
+    /// Row index baked into this CB's prologue copies; pinned until evict.
+    pub frame_table_row: Option<u32>,
 }
 
 /// Resource pending deferred deletion.
@@ -1137,4 +1146,7 @@ pub(super) struct Dx12State {
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_removed: std::sync::atomic::AtomicBool,
+    /// Per-device frame-table GPU resources (reserved bindless slots 0/1).
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    pub frame_tables: HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
 }

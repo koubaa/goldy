@@ -87,6 +87,7 @@ pub(super) fn record(
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
+                frame_table_base: _,
             } => {
                 let mut layout = PushLayout::default();
                 shared::fill_raw(&mut layout, raw_indices, raw_user);
