@@ -1063,9 +1063,24 @@ impl TaskGraph {
 
     /// Reset the graph to empty while retaining all heap allocations for reuse.
     ///
-    /// Equivalent to `*self = TaskGraph::new()` but avoids freeing and
-    /// re-allocating the internal `Vec` buffers. Call this after submitting the
-    /// graph to reuse its capacity for the next frame's recording pass.
+    /// ## DEPRECATION PLANNED (retained-scheme design §2) — and a misnomer
+    ///
+    /// This is **not** a collection clear. A caller of `clear()` on "a data structure
+    /// containing nodes" expects it to resize to zero nodes; this method additionally
+    /// performs an end-of-frame *ritual*: it snapshots transient shapes for telemetry,
+    /// resets the slot-identity counters (the `TransientId(N)` = "N-th declaration"
+    /// contract below), drops parcel stamp targets, and invalidates the retention key.
+    /// None of that is predictable from the name, and its existence teaches the
+    /// `clear()`+rebuild-per-frame anti-pattern that defeats retained submission
+    /// (every frame pays full record cost; nothing can resubmit).
+    ///
+    /// The `#[deprecated]` attribute lands once `Scheme` exists as the migration
+    /// target (deprecating with no alternative would strand clients). `Scheme` has no
+    /// equivalent: structural change is a re-record tier, per-submission data enters
+    /// via `goldy::write_to_parcel` / upload windows, and a fresh graph is a fresh
+    /// object. Call sites to migrate: ekrano's frame loop, examples,
+    /// `FrameOrchestrator::flush`. See
+    /// `docu/development/projects/diwan/in-progress/retained-scheme/design.md`.
     ///
     /// ## Slot identity reset
     ///
@@ -3171,6 +3186,7 @@ mod tests {
             .dispatch(1, 1, 1);
         let tv1 = graph.submit(&ctx).unwrap();
 
+        // TODO(retained-graph): clear()+rebuild identical nodes — anti-pattern; see `TaskGraph::clear`.
         graph.clear();
         graph
             .node("work", &pipeline)

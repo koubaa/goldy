@@ -219,6 +219,7 @@ impl RenderState {
         let now = std::time::Instant::now();
         let should_update = now.duration_since(self.last_update).as_millis() > 33;
 
+        // TODO(retained-graph): per-frame clear()+rebuild — see `TaskGraph::clear` docs.
         self.frame_graph.clear();
 
         if should_update {

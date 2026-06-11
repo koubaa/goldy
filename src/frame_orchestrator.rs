@@ -164,6 +164,7 @@ impl<T> FrameOrchestrator<T> {
         }
         let tv = self.submit_with_retention(graph)?;
         *last_timeline = Some(tv);
+        // TODO(retained-graph): clear()+rebuild each flush — see `TaskGraph::clear` docs.
         graph.clear();
         Ok(())
     }
