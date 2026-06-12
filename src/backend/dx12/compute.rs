@@ -1379,7 +1379,7 @@ struct StagingFinish {
 /// Close the command list, execute, signal, update the pool slot, and finish staging.
 ///
 /// `retain_key`: when `Some(k)`, stores the closed command list in
-/// `Dx12SubmissionContext::retained_graph` for zero-cost re-execution via
+/// `Dx12SubmissionContext::retained_graphs` for zero-cost re-execution via
 /// [`try_resubmit_retained`].
 ///
 /// # Abandoned optimizations
@@ -1472,7 +1472,7 @@ fn execute_signal_and_finish(
             slot.fence_value = fence_value;
         }
         if let Some(key) = retain_key {
-            if let Some(old) = sc.retained_graph.take() {
+            if let Some(old) = sc.retained_graphs.remove(&key) {
                 if let Some(row) = old.frame_table_row {
                     if let Some(ft) = state.frame_tables.get(&device_handle) {
                         super::frame_table::unpin_row(ft, row);
@@ -1497,14 +1497,16 @@ fn execute_signal_and_finish(
                 .and_then(|s| s.command_list.clone())
             {
                 sc.compute_allocator_pool[slot_idx].retained = true;
-                sc.retained_graph = Some(types::RetainedGraph {
-                    fingerprint: key,
-                    command_list: cl,
-                    slot_idx,
-                    used_slots,
-                    frame_table_staging,
-                    frame_table_row,
-                });
+                sc.retained_graphs.insert(
+                    key,
+                    types::RetainedGraph {
+                        command_list: cl,
+                        slot_idx,
+                        used_slots,
+                        frame_table_staging,
+                        frame_table_row,
+                    },
+                );
             }
         }
         sc.last_submitted_seq = fence_value;
@@ -1787,8 +1789,8 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
 /// `ExecuteCommandLists` + `Signal(fence)` at the end.
 ///
 /// When `retain_key` is `Some(k)`, the closed command list is stored in
-/// `Dx12SubmissionContext::retained_graph` keyed by `k` for future zero-cost re-execution
-/// via [`try_resubmit_retained`].  Any previously retained graph is evicted first.
+/// `Dx12SubmissionContext::retained_graphs` keyed by `k` for future zero-cost re-execution
+/// via [`try_resubmit_retained`].  Any previously retained graph for the same key is evicted first.
 pub(super) fn submit_graph(
     state: &mut Dx12State,
     ctx: ContextHandle,
@@ -2112,14 +2114,14 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
         let sc = sc_arc.lock().unwrap();
-        match sc.retained_graph.as_ref() {
-            Some(r) if r.fingerprint == key => Some((
+        match sc.retained_graphs.get(&key) {
+            Some(r) => Some((
                 r.command_list.clone(),
                 r.slot_idx,
                 r.used_slots.clone(),
                 r.frame_table_staging.clone(),
             )),
-            _ => None,
+            None => None,
         }
     };
 
@@ -2198,10 +2200,10 @@ pub(super) fn try_resubmit_retained(
 }
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.
-pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
+pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle, key: u64) {
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_graph.take() {
+        if let Some(old) = sc.retained_graphs.remove(&key) {
             if let Some(row) = old.frame_table_row {
                 let device_handle = sc.device;
                 if let Some(ft) = state.frame_tables.get(&device_handle) {

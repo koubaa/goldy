@@ -470,8 +470,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
     /// Pool of command allocators for non-blocking compute submission on this context.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
-    /// A single retained command list for zero-recording-cost re-submission.
-    pub retained_graph: Option<RetainedGraph>,
+    /// Retained command lists keyed by scheme fingerprint for zero-recording-cost re-submission.
+    pub retained_graphs: HashMap<u64, RetainedGraph>,
     /// Upload belt for `GpuCommand::WriteBuffer` on this context.
     pub staging_belt: super::staging::StagingBelt,
     /// Pool that recycles texture-upload staging buffers across frames on this context.
@@ -488,8 +488,6 @@ pub(crate) struct Dx12SubmissionContext {
 /// without calling `Reset`, as long as the backing allocator is not reset first.
 /// This enables zero-recording-cost re-submission for static scenes.
 pub(crate) struct RetainedGraph {
-    /// Scene fingerprint that uniquely identifies this command list's content.
-    pub fingerprint: u64,
     /// The closed (but not reset) command list.  Cloned from the pool slot so both
     /// the pool and this struct hold a reference-counted pointer to the same COM object.
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,

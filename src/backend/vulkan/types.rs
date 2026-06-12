@@ -591,7 +591,8 @@ pub(crate) struct SubmissionContext {
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
     pub command_pool: vk::CommandPool,
     pub free_cmd_buffers: Vec<vk::CommandBuffer>,
-    pub retained_compute_cb: Option<RetainedVkCb>,
+    /// Retained dispatch CBs keyed by scheme fingerprint for zero-recording-cost re-submission.
+    pub retained_compute_cbs: HashMap<u64, RetainedVkCb>,
     /// Command buffers to free once this context's timeline reaches the key.
     pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
     /// Per-context staging belt for DEVICE_LOCAL WriteBuffer uploads.
@@ -699,8 +700,6 @@ pub(crate) struct LogicalDevice {
 
 /// A Vulkan command buffer retained for resubmission.
 pub(crate) struct RetainedVkCb {
-    /// Opaque key used to detect staleness (binding fingerprint).
-    pub fingerprint: u64,
     /// The retained `VkCommandBuffer` (in executable state when GPU has completed).
     pub command_buffer: vk::CommandBuffer,
     /// Bindless slots baked into this command buffer (for slot retirement on resubmit).

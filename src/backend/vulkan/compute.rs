@@ -1447,7 +1447,7 @@ pub(super) fn submit_graph(
 ///
 /// When `retain_key` is `Some(key)`:
 /// - the CB is recorded without `ONE_TIME_SUBMIT` (driver keeps it executable)
-/// - after a successful submit the CB is stored in `LogicalDevice::retained_compute_cb`
+/// - after a successful submit the CB is stored in `SubmissionContext::retained_compute_cbs`
 ///   rather than `timeline_cmd_buffers` (so it is not freed by the normal reap cycle)
 /// - any WriteBuffer / WriteTexture commands cause a fallback to normal (non-retained) submit
 ///
@@ -2310,12 +2310,14 @@ fn submit_graph_impl(
         let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         if let Some((key, frame_table_row)) = retain_plan {
-            sc.retained_compute_cb = Some(super::types::RetainedVkCb {
-                fingerprint: key,
-                command_buffer: cmd,
-                used_slots,
-                frame_table_row,
-            });
+            sc.retained_compute_cbs.insert(
+                key,
+                super::types::RetainedVkCb {
+                    command_buffer: cmd,
+                    used_slots,
+                    frame_table_row,
+                },
+            );
         } else {
             sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
         }
@@ -2387,7 +2389,7 @@ fn submit_graph_impl(
 /// Record, submit, and retain a dispatch command buffer keyed by `key`.
 ///
 /// The CB is recorded without `ONE_TIME_SUBMIT` (driver keeps it executable after GPU
-/// completion) and stored in `LogicalDevice::retained_compute_cb` rather than
+/// completion) and stored in `SubmissionContext::retained_compute_cbs` rather than
 /// `timeline_cmd_buffers`, so it survives the normal reap cycle.
 /// On subsequent frames call [`try_resubmit_retained`] to re-execute without re-recording.
 /// If commands contain any WriteBuffer/WriteTexture nodes the call falls back to a normal
@@ -2423,9 +2425,9 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
         let sc = sc_arc.lock().unwrap();
-        match sc.retained_compute_cb.as_ref() {
-            Some(r) if r.fingerprint == key => Some((r.command_buffer, r.used_slots.clone())),
-            _ => None,
+        match sc.retained_compute_cbs.get(&key) {
+            Some(r) => Some((r.command_buffer, r.used_slots.clone())),
+            None => None,
         }
     };
 
@@ -2495,12 +2497,11 @@ pub(super) fn try_resubmit_retained(
     Ok(Some(signal_value))
 }
 
-/// Evict the retained dispatch CB for `key` (or any retained CB if `key` doesn't match),
-/// returning the `VkCommandBuffer` to `free_cmd_buffers` for pool reuse.
-pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, _key: u64) {
+/// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
+pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_compute_cb.take() {
+        if let Some(old) = sc.retained_compute_cbs.remove(&key) {
             if let Some(row) = old.frame_table_row {
                 let device = sc.device;
                 if let Some(ft) = state.frame_tables.get(&device) {

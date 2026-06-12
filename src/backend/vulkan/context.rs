@@ -84,7 +84,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             fence_thread,
             command_pool,
             free_cmd_buffers: Vec::new(),
-            retained_compute_cb: None,
+            retained_compute_cbs: std::collections::HashMap::new(),
             timeline_cmd_buffers: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
@@ -147,9 +147,14 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         for cb in sc.free_cmd_buffers.drain(..) {
             ld.device.free_command_buffers(command_pool, &[cb]);
         }
-        if let Some(retained) = sc.retained_compute_cb.take() {
+        for (_, retained) in sc.retained_compute_cbs.drain() {
+            if let Some(row) = retained.frame_table_row {
+                if let Some(ft) = state.frame_tables.get(&device) {
+                    super::frame_table::unpin_row(ft, row);
+                }
+            }
             ld.device
-                .free_command_buffers(sc.command_pool, &[retained.command_buffer]);
+                .free_command_buffers(command_pool, &[retained.command_buffer]);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);
