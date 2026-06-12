@@ -4,7 +4,7 @@
 
 use super::types::{LogicalDevice, RenderTargetState};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk};
-use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
+use super::{BufferHandle, DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, TextureFormat};
 use anyhow::{Context, Result};
@@ -545,6 +545,8 @@ where
 
 pub(super) fn render_to<F>(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
+    frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    buffers: &HashMap<BufferHandle, super::types::BufferState>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -556,6 +558,9 @@ where
 {
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
+    let (staging_data, lowered, has_bindings) =
+        super::frame_table::prepare_render_commands(buffers, commands)?;
+
     let cmd = render_targets
         .get(&target)
         .context("Invalid render target handle")?
@@ -565,12 +570,23 @@ where
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
 
+    if has_bindings {
+        super::frame_table::record_prologue_for_tables(
+            frame_tables,
+            buffers,
+            device_handle,
+            logical_device,
+            cmd,
+            &staging_data,
+        )?;
+    }
+
     record_render_pass_to_buffer(
         devices,
         render_targets,
         device_handle,
         target,
-        commands,
+        &lowered,
         cmd,
         record_commands_fn,
     )?;

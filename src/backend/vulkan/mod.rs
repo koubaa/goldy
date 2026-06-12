@@ -15,6 +15,7 @@ mod buffer;
 mod compute;
 mod context;
 mod device;
+mod frame_table;
 mod pipeline;
 mod render_commands;
 mod render_target;
@@ -265,6 +266,7 @@ impl VulkanBackend {
             slang_compiler,
             compute_fence_pool: Mutex::new(HashMap::new()),
             device_lost: std::sync::atomic::AtomicBool::new(false),
+            frame_tables: HashMap::new(),
         };
 
         Ok(Self { state })
@@ -661,8 +663,14 @@ impl GpuBackend for VulkanBackend {
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()> {
+        let pipelines = &self.state.pipelines;
+        let buffers = &self.state.buffers;
+        let devices = &self.state.devices;
+        let frame_tables = &self.state.frame_tables;
         render_target::render_to(
-            &self.state.devices,
+            devices,
+            frame_tables,
+            buffers,
             &mut self.state.render_targets,
             device_handle,
             target,
@@ -672,8 +680,8 @@ impl GpuBackend for VulkanBackend {
                     cmd,
                     cmds,
                     logical_device,
-                    &self.state.pipelines,
-                    &self.state.buffers,
+                    pipelines,
+                    buffers,
                     current_pipeline,
                 )
             },
@@ -750,8 +758,14 @@ impl GpuBackend for VulkanBackend {
             .lock()
             .unwrap()
             .timeline_semaphore;
+        let pipelines = &self.state.pipelines;
+        let buffers = &self.state.buffers;
+        let devices = &self.state.devices;
+        let frame_tables = &self.state.frame_tables;
         surface::render(
-            &self.state.devices,
+            devices,
+            frame_tables,
+            buffers,
             &mut self.state.surfaces,
             frame.surface,
             frame.image,
@@ -762,8 +776,8 @@ impl GpuBackend for VulkanBackend {
                     cmd,
                     cmds,
                     logical_device,
-                    &self.state.pipelines,
-                    &self.state.buffers,
+                    pipelines,
+                    buffers,
                     current_pipeline,
                 )
             },
