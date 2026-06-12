@@ -18,7 +18,7 @@ use crate::retained_pool::StampedParcel;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::task_graph::IrSubmitState;
 use crate::timeline::TimelineValue;
-use crate::types::{TextureFlags, TextureFormat, TextureKind};
+use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use std::marker::PhantomData;
 
 /// Stable index of a scheme-held lease declaration.
@@ -123,6 +123,11 @@ impl Scheme {
             id,
             _marker: PhantomData,
         })
+    }
+
+    /// Typed resource descriptor handle for a scheme-held lease, for use in `bind_resources_typed`.
+    pub fn lease_handle(&self, lease: &Lease<LeaseTexture>, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.leases[lease.id.0 as usize].handle(access)
     }
 
     /// Declare a compute dispatch node, returning a builder for access declarations.
@@ -426,6 +431,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
         #[cfg(feature = "metal")]
         assert_eq!(scheme.replay_stats().records, 2);
+    }
+
+    #[test]
+    fn is_settled_true_before_first_reference() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = retained_buffer_parcel(&mut pool);
+        assert!(parcel.is_settled(&ctx), "never-referenced parcel is settled");
     }
 
     #[test]

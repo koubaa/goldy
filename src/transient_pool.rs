@@ -1,14 +1,16 @@
 //! Epoch-gated transient parcel pool — recycled GPU memory without a client-visible clock.
 //!
-//! There is one transient pool per context (design §4); this type is the engine. Phase 1
-//! exposes it as a standalone object for unit tests; phase 1.6 internalizes it on
-//! [`crate::Context`] so programs never name the pool — leases and [`crate::RetainedPool::release`]
-//! route into it automatically.
+//! There is one transient pool per context; this type is the engine.
 //!
 //! Relinquished parcels enter as [`StampedParcel`]s and are handed out again by lease
 //! realization **only once every stamped epoch has retired**. Clients never compare
 //! timeline values; the pool consumes `ready_after` internally through
 //! [`crate::Context::parcel_ready`].
+//!
+//! **Observability** pool internals — recycle bins, pending counts, epoch tables — are never
+//! public API. Clients assert parcel currency via [`Parcel::is_settled`] and attribute aggregate
+//! leased bytes via [`Context::transient_outstanding_bytes`]. Do not add public wrappers for
+//! `pending_count`, `pending_bytes`, or similar pool mechanism.
 
 use crate::context::Context;
 use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping};
@@ -38,11 +40,11 @@ struct PendingEntry {
 
 /// Epoch-gated recycling pool for transient parcels.
 ///
-/// Two byte populations are tracked separately:
+/// Two populations are tracked separately:
 ///
 /// - **pending** — parked in the pool, awaiting reuse ([`Self::pending_bytes`]);
 /// - **outstanding** — handed out to clients and not yet returned
-///   ([`Self::outstanding_bytes`]).
+///   ([`Self::outstanding_bytes`]); aggregate totals surface on [`Context`].
 pub struct TransientPool {
     /// Bytes parked in recycle bins.
     pending: Arc<PoolBookkeeping>,

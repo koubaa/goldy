@@ -8,6 +8,8 @@
 //!   and resubmits as pure retention hits.
 //! - **Retention recovery**: clean submissions resubmit without re-record.
 //! - **Selector advance**: submission order itself carries per-submission information.
+//! - **Lease N=1**: scheme-held texture leases retain across resubmit; backing returns to
+//!   the transient pool on scheme drop.
 //!
 //! Anti-pattern policy (reviewed June 2026): no `gpu_progress()`, no
 //! `clear()`+rebuild, no raw bindless indices (goldy#210), no untimed parcel
@@ -19,7 +21,8 @@ mod submission;
 
 use goldy::{
     types::ResourceAccess, write_to_parcel, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
-    NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -136,7 +139,9 @@ fn clean_scheme_resubmits_without_rerecord() {
         .dispatch(1, 1, 1);
 
     scheme.submit().expect("submit 0");
-    scheme.submit().expect("submit 1");
+    let tv = scheme.submit().expect("submit 1");
+    ctx.wait_until(tv).expect("wait");
+    assert!(output.is_settled(&ctx), "completed work must leave parcel settled");
 
     assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
     #[cfg(not(feature = "metal"))]
@@ -258,4 +263,111 @@ fn two_schemes_on_one_context_do_not_collide() {
 
     assert_eq!(scheme_a.replay_stats().records, 1, "scheme_a records once");
     assert_eq!(scheme_b.replay_stats().records, 1, "scheme_b records once");
+}
+
+/// Write a solid color into a scheme-held texture lease.
+const LEASE_TEXTURE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(DirectSpatial<float4> dst, ThreadId id) {
+    if (id.x == 0 && id.y == 0) {
+        dst[uint2(0, 0)] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#;
+
+/// Scheme-held texture lease: recorded once, then pure retention hits on resubmit.
+#[test]
+fn lease_texture_scheme_resubmits_without_rerecord() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, LEASE_TEXTURE_SHADER).expect("compile texture shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let mut scheme = Scheme::new(&ctx);
+    let lease = scheme
+        .lease_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::DirectInterpolated,
+            TextureFlags::empty(),
+        )
+        .expect("lease texture");
+    let handle = scheme
+        .lease_handle(&lease, ResourceAccess::Write)
+        .expect("lease handle");
+    scheme
+        .node("write_tex", &pipeline)
+        .writes_lease(&lease)
+        .bind_resources_typed(&[handle])
+        .dispatch(1, 1, 1);
+
+    scheme.submit().expect("submit 0");
+    scheme.submit().expect("submit 1");
+    scheme.submit().expect("submit 2");
+
+    assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        2,
+        "remaining submits are retention hits",
+    );
+}
+
+/// Dropping a scheme returns leased texture backing to the context transient pool.
+#[test]
+fn lease_backing_pool_hygiene() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let outstanding_before = ctx.transient_outstanding_bytes().texture;
+    let create_count_before = ctx.transient_texture_create_count();
+
+    {
+        let mut scheme = Scheme::new(&ctx);
+        let _lease = scheme
+            .lease_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("lease texture");
+        assert!(
+            ctx.transient_outstanding_bytes().texture > outstanding_before,
+            "leased backing counts as pool outstanding"
+        );
+    }
+
+    assert_eq!(
+        ctx.transient_outstanding_bytes().texture,
+        outstanding_before,
+        "outstanding drops when scheme releases lease backings"
+    );
+
+    let mut scheme2 = Scheme::new(&ctx);
+    let _lease2 = scheme2
+        .lease_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::DirectInterpolated,
+            TextureFlags::empty(),
+        )
+        .expect("re-lease texture");
+    assert_eq!(
+        ctx.transient_texture_create_count(),
+        create_count_before,
+        "re-lease reused parked backing instead of allocating"
+    );
+    assert!(
+        ctx.transient_outstanding_bytes().texture > outstanding_before,
+        "re-leased backing is outstanding again"
+    );
 }

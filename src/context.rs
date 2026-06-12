@@ -6,6 +6,7 @@
 use crate::backend::ContextHandle;
 use crate::device::Device;
 use crate::error::GoldyError;
+use crate::parcel::BytesByKind;
 use crate::task_graph::TaskGraph;
 use crate::timeline::{is_ready, ReferenceTable, TimelineValue};
 use crate::transient_pool::TransientPool;
@@ -106,6 +107,15 @@ impl Context {
     {
         let mut pool = self.inner.transient_pool.lock().unwrap();
         f(&mut *pool)
+    }
+
+    /// Bytes held outside this context's transient pool (leased or otherwise acquired).
+    ///
+    /// Aggregate memory telemetry for debug checking and tracing
+    /// Not a synchronization primitive — use [`crate::Parcel::is_settled`] for parcel currency.
+    /// The pool's internal recycle bins and pending counts are never exposed.
+    pub fn transient_outstanding_bytes(&self) -> BytesByKind {
+        self.with_transient_pool(|pool| pool.outstanding_bytes())
     }
 
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
@@ -337,7 +347,9 @@ impl Context {
     }
 
     /// True when every context in `refs` has retired the stamped timeline values.
-    pub fn parcel_ready(&self, refs: &ReferenceTable) -> bool {
+    ///
+    /// Prefer [`crate::Parcel::is_settled`] when checking a single parcel the caller holds.
+    pub(crate) fn parcel_ready(&self, refs: &ReferenceTable) -> bool {
         if refs.is_empty() {
             return true;
         }

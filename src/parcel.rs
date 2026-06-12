@@ -5,6 +5,7 @@
 //! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
 use crate::backend::{BufferHandle, ContextHandle};
+use crate::context::Context;
 use crate::buffer::{Buffer, BufferPool, BufferSource, BufferView};
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
@@ -234,6 +235,14 @@ impl Parcel {
     /// Last referencing timeline for a single context, if any.
     pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
         self.stamp.references.lock().unwrap().get(&ctx).copied()
+    }
+
+    /// True when no in-flight GPU work on `ctx` still references this parcel.
+    ///
+    /// A settled parcel is immediately reusable. No epoch or timeline value is exposed;
+    /// prefer this over [`Self::last_referenced`] for currency checks. See design §4.1.
+    pub fn is_settled(&self, ctx: &Context) -> bool {
+        ctx.parcel_ready(&self.last_referenced())
     }
 
     /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
