@@ -371,7 +371,7 @@ pub(super) fn render(
     let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
     let (staging_data, lowered_commands, has_bindings) =
-        super::frame_table::prepare_render_commands(&state.buffers, commands)?;
+        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, commands)?;
 
     let completed = super::context::device_retired(state, device_handle);
     let prologue_row = if has_bindings {
@@ -430,7 +430,6 @@ pub(super) fn render(
     }
     {
         let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.selector_buffer(), mtl::MTLResourceUsage::Read, render_stages);
         encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
     }
 
@@ -463,6 +462,17 @@ pub(super) fn render(
 
     encoder.end_encoding();
     command_buffer.commit();
+
+    // When the frame table was used we must wait for the GPU to finish reading
+    // the ring row before we can allow it to be overwritten.  Surface renders
+    // don't carry a context-level timeline signal, so we block here.  For frames
+    // without any frame-table bindings (prologue_row == None) we remain async.
+    if let Some(row) = prologue_row {
+        command_buffer.wait_until_completed();
+        if let Some(ld) = state.devices.get(&device_handle) {
+            super::frame_table::record_submission_for_device(ld, row, completed);
+        }
+    }
 
     Ok(())
 }

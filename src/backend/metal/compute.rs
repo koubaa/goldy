@@ -235,14 +235,13 @@ pub(super) fn begin_compute_encoder<'a>(
         encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
     }
 
-    // Frame-table selector + device table (not in state.buffers).
+    // Frame-table device table (not in state.buffers).  Selector is intentionally
+    // omitted: Metal shaders use absolute offsets via `_reserved[0]`, not the selector.
     {
         let ft = logical_device.frame_table.lock().unwrap();
-        let sel_ref: &mtl::BufferRef = ft.selector_buffer();
         let tbl_ref: &mtl::BufferRef = ft.table_buffer();
-        let sel_res = unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(sel_ref) };
         let tbl_res = unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(tbl_ref) };
-        encoder.use_resources(&[sel_res, tbl_res], mtl::MTLResourceUsage::Read);
+        encoder.use_resources(&[tbl_res], mtl::MTLResourceUsage::Read);
     }
 
     encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
@@ -654,29 +653,26 @@ pub(super) fn record_commands_to_buffer(
                         height: pipeline.workgroup_size[1] as u64,
                         depth: pipeline.workgroup_size[2] as u64,
                     };
-                    let row_offset = prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE;
+                    let row_offset = prologue_row.map_or(0, |r| r * crate::frame_table::FRAME_TABLE_ROW_STRIDE);
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
                     for i in 0..entry_count {
                         let base = i * stride;
                         let layout_slice = &arg_data[base..base + push_size];
-                        let layout_bytes: &[u8] = if row_offset != 0 {
-                            // Patch _reserved[0] to carry the absolute table offset.
-                            let mut patched: PushLayout = *bytemuck::from_bytes(layout_slice);
+                        if prologue_row.is_some() {
+                            // Patch _reserved[0] to carry the absolute table row offset.
+                            let mut patched = PushLayout::default();
+                            bytemuck::bytes_of_mut(&mut patched).copy_from_slice(layout_slice);
                             patched._reserved[0] = patched._reserved[0].wrapping_add(row_offset);
                             enc.set_bytes(
                                 RESOURCE_SLOT_BUFFER,
                                 std::mem::size_of::<PushLayout>() as u64,
                                 &patched as *const PushLayout as *const _,
                             );
-                            &[]
                         } else {
-                            layout_slice
-                        };
-                        if !layout_bytes.is_empty() {
                             enc.set_bytes(
                                 RESOURCE_SLOT_BUFFER,
-                                layout_bytes.len() as u64,
-                                layout_bytes.as_ptr() as *const _,
+                                layout_slice.len() as u64,
+                                layout_slice.as_ptr() as *const _,
                             );
                         }
                         let wg_off = base + push_size;
@@ -1261,7 +1257,11 @@ pub(super) fn submit_graph(
                     }
 
                     let (render_staging, lowered_render, has_render_bindings) =
-                        super::frame_table::prepare_render_commands(&state.buffers, render_cmds)?;
+                        super::frame_table::prepare_render_commands(
+                            &state.buffers,
+                            &state.pipelines,
+                            render_cmds,
+                        )?;
                     if has_render_bindings {
                         if let Some(row) = prologue_row {
                             let graph_staging = super::frame_table::extract_staging_from_graph(commands)
@@ -1471,7 +1471,6 @@ fn record_render_pass_to_buffer(
     }
     {
         let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.selector_buffer(), mtl::MTLResourceUsage::Read, render_stages);
         encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
     }
 

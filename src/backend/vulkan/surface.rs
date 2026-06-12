@@ -844,6 +844,7 @@ pub(super) fn render<F>(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
     buffers: &HashMap<super::BufferHandle, types::BufferState>,
+    pipelines: &HashMap<super::PipelineHandle, types::PipelineState>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
@@ -916,7 +917,8 @@ where
         })
         .unwrap_or(1.0);
 
-    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(buffers, commands)?;
+    let (staging_data, lowered, has_bindings) =
+        super::frame_table::prepare_render_commands(buffers, pipelines, commands)?;
 
     {
         let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;

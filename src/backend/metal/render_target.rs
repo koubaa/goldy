@@ -91,7 +91,7 @@ pub(super) fn render_to(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let (staging_data, lowered_commands, has_bindings) =
-        super::frame_table::prepare_render_commands(&state.buffers, commands)?;
+        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, commands)?;
 
     let completed = super::context::device_retired(state, device_handle);
     let prologue_row = if has_bindings {
@@ -150,7 +150,6 @@ pub(super) fn render_to(
     }
     {
         let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.selector_buffer(), mtl::MTLResourceUsage::Read, render_stages);
         encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
     }
 
@@ -183,6 +182,15 @@ pub(super) fn render_to(
     encoder.end_encoding();
     command_buffer.commit();
     command_buffer.wait_until_completed();
+
+    // GPU is done — record the ring row as retired so the ring guard knows it is
+    // safe to reuse.  We record `completed` (the timeline value at prologue time);
+    // future `wait_required` checks will see tok <= device_retired() and not stall.
+    if let Some(row) = prologue_row {
+        if let Some(ld) = state.devices.get(&device_handle) {
+            super::frame_table::record_submission_for_device(ld, row, completed);
+        }
+    }
 
     if let Some(rt) = state.render_targets.get_mut(&target) {
         rt.has_rendered = true;

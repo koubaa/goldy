@@ -401,10 +401,21 @@ pub(crate) fn sync_table_row_to_device(
 /// Lower render commands and build staging for standalone render passes (not graph submit).
 pub(crate) fn prepare_render_commands(
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    pipelines: &std::collections::HashMap<super::PipelineHandle, super::types::PipelineState>,
     commands: &[crate::backend::RenderCommand],
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
     use crate::backend::RenderCommand;
     use crate::frame_table::FrameTableStaging;
+
+    crate::backend::validate_render_pass_bind_resources(
+        commands,
+        |h| {
+            pipelines.get(&h).map(|p| {
+                (p.binding_element_strides.clone(), p.shader_debug_name.clone())
+            })
+        },
+        |h| buffers.get(&h).and_then(|b| b.element_stride),
+    )?;
 
     let mut staging = FrameTableStaging::new();
     let lowered = commands

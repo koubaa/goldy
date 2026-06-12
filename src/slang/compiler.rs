@@ -768,13 +768,23 @@ impl SlangCompiler {
         type_name: &str,
         category: Option<ResourceCategory>,
     ) -> Option<u32> {
+        // Broadcast (constant-buffer) params: use struct_storage_stride which sums
+        // field extents without std140 tail-padding.  reflect_type_size_with_category
+        // with Uniform returns the cbuffer-padded whole-struct size (e.g. 16 for a
+        // single-float struct), which does not match the buffer's element_stride set
+        // at allocation time.
+        if matches!(category, Some(ResourceCategory::Broadcast)) {
+            return self
+                .reflect_struct_storage_stride(request, type_name, SlangParameterCategory::Uniform);
+        }
+
         let layout_cat = match category {
-            Some(ResourceCategory::Broadcast) => SlangParameterCategory::Uniform,
             Some(ResourceCategory::StorageImage) => SlangParameterCategory::UnorderedAccess,
             Some(ResourceCategory::Scattered)
             | Some(ResourceCategory::Texture)
             | Some(ResourceCategory::Sampler)
             | None => SlangParameterCategory::ShaderResource,
+            Some(ResourceCategory::Broadcast) => unreachable!("handled above"),
         };
         self.reflect_type_size_with_category(request, type_name, layout_cat)
             .or_else(|| {
@@ -1646,10 +1656,12 @@ mod struct_layout_validate_tests {
         let strides = &result.reflection.binding_element_strides;
         assert_eq!(strides.len(), 2, "expected 2 binding slots: {strides:?}");
 
+        // Broadcast params use reflect_struct_storage_stride: field extent without
+        // std140 tail-padding.  Params { float x; float y } = 2 × 4 = 8 bytes.
         assert_eq!(
             strides[0],
-            Some(16),
-            "Params {{float x; float y}} under uniform (std140) rules = 16: {strides:?}"
+            Some(8),
+            "Broadcast Params {{float x; float y}} natural stride should be 8 (not cbuffer 16): {strides:?}"
         );
         assert_eq!(
             strides[1],
@@ -1704,6 +1716,135 @@ mod struct_layout_validate_tests {
             Some(8),
             "Scattered<Pair> element stride should be 8: {strides:?}"
         );
+    }
+
+    /// Regression: Broadcast params (plain struct without Scattered<>) must use
+    /// struct_storage_stride (natural field extent) — NOT the std140-padded
+    /// cbuffer size.  Before the fix, `reflect_type_size_with_category(Uniform)`
+    /// returned 16 for a single-float struct (cbuffer alignment), causing
+    /// validate_binding_strides to reject a correctly-created buffer with
+    /// element_stride = 4.
+    #[test]
+    fn broadcast_param_stride_matches_natural_struct_size_not_cbuffer_padded() {
+        use super::{ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable; skipping");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("shaders").to_string_lossy().into_owned();
+
+        // SimParams { float deltaTime; } — natural size 4, cbuffer-padded size 16.
+        let source = r#"
+            import goldy_exp;
+
+            struct SimParams { float deltaTime; };
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Scattered<uint> data, SimParams params, ThreadId id) {
+                data[id.x] = uint(params.deltaTime);
+            }
+        "#;
+
+        let result = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("__SPIRV__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("compilation failed");
+
+        let strides = &result.reflection.binding_element_strides;
+        assert_eq!(strides.len(), 2, "expected 2 binding slots: {strides:?}");
+        assert_eq!(
+            strides[0],
+            Some(4),
+            "Scattered<uint> element stride should be 4: {strides:?}"
+        );
+        // This was the bug: cbuffer-padded layout returned 16 here, causing
+        // validate_binding_strides to fail for a correctly-created buffer.
+        assert_eq!(
+            strides[1],
+            Some(4),
+            "Broadcast SimParams{{float deltaTime}} natural stride should be 4, not cbuffer 16: {strides:?}"
+        );
+    }
+
+    /// Multi-field Broadcast struct: stride must be the sum of fields, not
+    /// the std140 whole-struct size.  `Params { float x; float y; }` = 8 bytes
+    /// naturally; std140 would pad to 16.
+    #[test]
+    fn broadcast_two_float_struct_stride_is_eight_not_sixteen() {
+        use super::{ShaderTarget, SlangCompiler, SlangStage};
+        use crate::types::OptimizationLevel;
+
+        let compiler = SlangCompiler::new().expect("Slang compiler unavailable; skipping");
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = manifest_dir.join("shaders").to_string_lossy().into_owned();
+
+        let source = r#"
+            import goldy_exp;
+
+            struct Params { float x; float y; };
+
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(Params cfg, Scattered<uint> data, ThreadId id) {
+                data[id.x] = uint(cfg.x + cfg.y);
+            }
+        "#;
+
+        let result = compiler
+            .compile_with_reflection(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[("__SPIRV__", "1")],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("compilation failed");
+
+        let strides = &result.reflection.binding_element_strides;
+        assert_eq!(strides.len(), 2, "expected 2 binding slots: {strides:?}");
+        assert_eq!(
+            strides[0],
+            Some(8),
+            "Broadcast Params{{float x; float y}} natural stride = 8: {strides:?}"
+        );
+        assert_eq!(
+            strides[1],
+            Some(4),
+            "Scattered<uint> = 4: {strides:?}"
+        );
+    }
+
+    /// Validate that `validate_binding_strides` correctly catches a stride
+    /// mismatch (expected vs actual) and passes when they agree.
+    #[test]
+    fn validate_binding_strides_passes_and_fails_correctly() {
+        use crate::backend::validate_binding_strides;
+
+        // Matching strides — must pass.
+        let actual = vec![Some(16u32), Some(4u32)];
+        let expected = vec![Some(16u32), Some(4u32)];
+        assert!(validate_binding_strides(&actual, &expected, "test").is_ok());
+
+        // Slot 1 mismatch: 16 expected, 4 actual — must fail with the slot number.
+        let actual_bad = vec![Some(16u32), Some(4u32)];
+        let expected_bad = vec![Some(16u32), Some(16u32)];
+        let err = validate_binding_strides(&actual_bad, &expected_bad, "myshader")
+            .expect_err("should fail on mismatch");
+        let msg = err.to_string();
+        assert!(msg.contains("slot 1"), "error should name the slot: {msg}");
+        assert!(msg.contains("myshader"), "error should name the shader: {msg}");
     }
 }
 

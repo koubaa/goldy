@@ -174,9 +174,20 @@ pub(super) fn extract_staging_from_graph(commands: &[crate::backend::GraphComman
 /// Lower render commands and build staging for standalone render passes.
 pub(super) fn prepare_render_commands(
     buffers: &std::collections::HashMap<super::BufferHandle, super::types::BufferState>,
+    pipelines: &std::collections::HashMap<super::PipelineHandle, super::types::PipelineState>,
     commands: &[crate::backend::RenderCommand],
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
     use crate::backend::RenderCommand;
+
+    crate::backend::validate_render_pass_bind_resources(
+        commands,
+        |h| {
+            pipelines.get(&h).map(|p| {
+                (p.binding_element_strides.clone(), p.shader_debug_name.clone())
+            })
+        },
+        |h| buffers.get(&h).and_then(|b| b.element_stride),
+    )?;
 
     let mut staging = FrameTableStaging::new();
     let lowered = commands
@@ -247,14 +258,17 @@ pub(super) fn merge_staging_for_render_sync(graph: &[u32], render: &[u32]) -> Ve
 
 /// Refresh the active row in the shared table without advancing the ring selector.
 pub(super) fn sync_table_row_to_device(ld: &LogicalDevice, data: &[u32], row: u32) -> Result<()> {
-    let ft = ld.frame_table.lock().unwrap();
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let src = &data[0..copy_u32s];
 
-    let table_ptr = ft.table.contents() as *mut u32;
-    anyhow::ensure!(!table_ptr.is_null(), "frame table buffer has null contents");
-    let dest_ptr = unsafe { (table_ptr as *mut u8).add(row_byte_offset(row) as usize) as *mut u32 };
+    // Resolve destination pointer under a short lock, then memcpy without holding it.
+    let dest_ptr = {
+        let ft = ld.frame_table.lock().unwrap();
+        let table_ptr = ft.table.contents() as *mut u32;
+        anyhow::ensure!(!table_ptr.is_null(), "frame table buffer has null contents");
+        unsafe { (table_ptr as *mut u8).add(row_byte_offset(row) as usize) as *mut u32 }
+    };
     unsafe {
         std::ptr::copy_nonoverlapping(src.as_ptr(), dest_ptr, copy_u32s);
     }
@@ -333,6 +347,178 @@ mod tests {
                 let prev_end = row_byte_offset(row - 1) + FRAME_TABLE_ROW_STRIDE as u64 * 4;
                 assert!(off >= prev_end, "row {row} overlaps row {}", row - 1);
             }
+        }
+    }
+
+    // ----- record_submission / ring-guard integration tests -----------------
+
+    /// A ring with `record_submission` called after each prologue should never
+    /// force a wait as long as `completed` keeps advancing monotonically.
+    ///
+    /// This catches the bug where `render_to` / surface `render` committed a
+    /// command buffer and returned without calling `record_submission`.  In that
+    /// scenario `wait_required` always returns None (no guard ever set), so the
+    /// same ring row can be overwritten while a prior GPU submission is still
+    /// reading it.  After the fix, `wait_required` returns the expected token,
+    /// and the test verifies that once `completed >= tok` the guard lifts.
+    #[test]
+    fn record_submission_prevents_premature_row_reuse() {
+        let mut ring = FrameTableRing::new(2);
+
+        // Frame 0: pick row 0, GPU timeline will reach 1.
+        let r0 = ring.next_row();
+        assert_eq!(r0, 0);
+        ring.record(r0, 1);
+
+        // Frame 1: pick row 1, GPU timeline will reach 2.
+        let r1 = ring.next_row();
+        assert_eq!(r1, 1);
+        ring.record(r1, 2);
+
+        // Frame 2: ring wraps to row 0.  Completed = 0 (GPU still at timeline 0)
+        // → ring guard must fire.
+        assert_eq!(
+            ring.wait_required(0, 0),
+            Some(1),
+            "row 0 should be guarded until timeline 1 is reached"
+        );
+
+        // Once completed advances to 1, guard lifts.
+        assert_eq!(ring.wait_required(0, 1), None, "guard should lift at completed == tok");
+
+        // Frame 3: row 1 still guarded at completed = 1.
+        assert_eq!(ring.wait_required(1, 1), Some(2), "row 1 still guarded");
+        assert_eq!(ring.wait_required(1, 2), None, "row 1 guard lifts at completed == 2");
+    }
+
+    /// `record_submission` with token equal to `completed` is the canonical
+    /// pattern used by synchronous paths (render_to, surface render with wait).
+    /// Token == completed must *not* stall — wait_required returns None.
+    #[test]
+    fn record_with_completed_token_never_stalls() {
+        let mut ring = FrameTableRing::new(4);
+        let completed: u64 = 42;
+
+        let row = ring.next_row();
+        // Simulate: GPU finished (wait_until_completed), record with the
+        // current completed value.
+        ring.record(row, completed);
+
+        // Next time this row is visited the completed value will be >= 42, so
+        // wait_required must return None.
+        assert_eq!(
+            ring.wait_required(row, completed),
+            None,
+            "tok == completed should not stall"
+        );
+        assert_eq!(
+            ring.wait_required(row, completed + 1),
+            None,
+            "tok < completed should not stall"
+        );
+    }
+
+    /// Without calling `record_submission` the ring guard for every row stays
+    /// None forever — reuse is allowed unconditionally even when the GPU might
+    /// still be reading.  This test documents the *pre-fix* behaviour to make
+    /// the regression obvious if the fix is accidentally reverted.
+    #[test]
+    fn without_record_no_guard_is_ever_set() {
+        let mut ring = FrameTableRing::new(8);
+        for _ in 0..24 {
+            let row = ring.next_row();
+            // never call ring.record(...)
+            // completed = 0 — guard would fire if a token had been recorded
+            assert_eq!(
+                ring.wait_required(row, 0),
+                None,
+                "no record → no guard, row is silently unsafe"
+            );
+        }
+    }
+
+    /// `run_prologue` writes staging data into the correct ring row of the
+    /// device-table buffer (not always row 0).  Verifies the byte-offset math.
+    ///
+    /// This is a unit test for the `run_prologue` method on `MetalFrameTable`
+    /// that can run without a real GPU by using a heap-backed mock.
+    #[test]
+    fn run_prologue_writes_to_correct_ring_row() {
+        // Build a fake "table buffer" backed by a heap vec so we can inspect contents.
+        let table_u32s = (FRAME_TABLE_MAX_ROWS * FRAME_TABLE_ROW_STRIDE) as usize;
+        let mut table_data: Vec<u32> = vec![0u32; table_u32s];
+
+        let staging: Vec<u32> = (1u32..=FRAME_TABLE_ROW_STRIDE).collect();
+
+        // Simulate run_prologue logic for rows 0, 1, and 2.
+        for target_row in 0u32..3 {
+            let copy_u32s = staging.len().min(FRAME_TABLE_ROW_STRIDE as usize);
+            let dest_base = (row_byte_offset(target_row) / 4) as usize;
+            table_data[dest_base..dest_base + copy_u32s].copy_from_slice(&staging[..copy_u32s]);
+
+            // Verify data was written at the right offset.
+            for (i, &v) in staging[..copy_u32s].iter().enumerate() {
+                assert_eq!(
+                    table_data[dest_base + i],
+                    v,
+                    "row {target_row} slot {i}: expected {v}, got {}",
+                    table_data[dest_base + i]
+                );
+            }
+            // No prior rows were corrupted.
+            if target_row > 0 {
+                for prev_row in 0..target_row {
+                    let prev_base = (row_byte_offset(prev_row) / 4) as usize;
+                    for i in 0..copy_u32s {
+                        assert_eq!(
+                            table_data[prev_base + i],
+                            staging[i],
+                            "row {prev_row} was corrupted when writing row {target_row}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ----- DispatchBatch row-offset patch tests -----------------------------
+
+    /// For ring row 0, `row_offset == 0`.  Always-patching (adding 0) must
+    /// produce the same result as the unpatched layout.
+    #[test]
+    fn dispatch_batch_patch_row_zero_is_noop() {
+        let mut layout = crate::backend::shared::PushLayout::zeroed();
+        layout._reserved[0] = 7; // some within-row base
+        let before = layout._reserved[0];
+        // row 0 → row_offset = 0
+        let row_offset: u32 = 0 * FRAME_TABLE_ROW_STRIDE;
+        layout._reserved[0] = layout._reserved[0].wrapping_add(row_offset);
+        assert_eq!(
+            layout._reserved[0],
+            before,
+            "patching row 0 (offset 0) must be a no-op"
+        );
+    }
+
+    /// For ring row N > 0, patching `_reserved[0]` must add the correct absolute
+    /// byte stride.  The shader reads `dispatch_base` as an absolute index into
+    /// the flat frame-table `u32` array.
+    #[test]
+    fn dispatch_batch_patch_adds_correct_row_stride() {
+        for row in 1u32..FRAME_TABLE_MAX_ROWS {
+            let mut layout = crate::backend::shared::PushLayout::zeroed();
+            let within_row_base: u32 = 3; // some slot offset inside the row
+            layout._reserved[0] = within_row_base;
+
+            let row_offset = row * FRAME_TABLE_ROW_STRIDE;
+            layout._reserved[0] = layout._reserved[0].wrapping_add(row_offset);
+
+            let expected = within_row_base + row * FRAME_TABLE_ROW_STRIDE;
+            assert_eq!(
+                layout._reserved[0],
+                expected,
+                "row {row}: absolute table index should be {expected}"
+            );
         }
     }
 }

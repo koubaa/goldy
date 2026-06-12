@@ -547,6 +547,7 @@ pub(super) fn render_to<F>(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
     buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    pipelines: &HashMap<super::PipelineHandle, super::types::PipelineState>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -558,7 +559,8 @@ where
 {
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
-    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(buffers, commands)?;
+    let (staging_data, lowered, has_bindings) =
+        super::frame_table::prepare_render_commands(buffers, pipelines, commands)?;
 
     let cmd = render_targets
         .get(&target)
