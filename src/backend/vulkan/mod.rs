@@ -667,11 +667,14 @@ impl GpuBackend for VulkanBackend {
         let buffers = &self.state.buffers;
         let devices = &self.state.devices;
         let frame_tables = &self.state.frame_tables;
-        render_target::render_to(
+        let render_resources = render_target::RenderToResources {
             devices,
             frame_tables,
             buffers,
             pipelines,
+        };
+        render_target::render_to(
+            render_resources,
             &mut self.state.render_targets,
             device_handle,
             target,

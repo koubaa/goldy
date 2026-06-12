@@ -1257,11 +1257,7 @@ pub(super) fn submit_graph(
                     }
 
                     let (render_staging, lowered_render, has_render_bindings) =
-                        super::frame_table::prepare_render_commands(
-                            &state.buffers,
-                            &state.pipelines,
-                            render_cmds,
-                        )?;
+                        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, render_cmds)?;
                     if has_render_bindings {
                         if let Some(row) = prologue_row {
                             let graph_staging = super::frame_table::extract_staging_from_graph(commands)

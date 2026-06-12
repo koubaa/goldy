@@ -2128,11 +2128,7 @@ fn submit_graph_impl(
                 }
 
                 let (staging_data, lowered, has_render_bindings) =
-                    super::frame_table::prepare_render_commands(
-                        buffers,
-                        &state.pipelines,
-                        render_cmds,
-                    )?;
+                    super::frame_table::prepare_render_commands(buffers, &state.pipelines, render_cmds)?;
                 if has_render_bindings {
                     if frame_table_prologue_in_cb {
                         let graph_staging = super::frame_table::extract_staging_from_graph(commands)

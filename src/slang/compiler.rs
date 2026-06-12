@@ -774,8 +774,7 @@ impl SlangCompiler {
         // single-float struct), which does not match the buffer's element_stride set
         // at allocation time.
         if matches!(category, Some(ResourceCategory::Broadcast)) {
-            return self
-                .reflect_struct_storage_stride(request, type_name, SlangParameterCategory::Uniform);
+            return self.reflect_struct_storage_stride(request, type_name, SlangParameterCategory::Uniform);
         }
 
         let layout_cat = match category {
@@ -1819,11 +1818,7 @@ mod struct_layout_validate_tests {
             Some(8),
             "Broadcast Params{{float x; float y}} natural stride = 8: {strides:?}"
         );
-        assert_eq!(
-            strides[1],
-            Some(4),
-            "Scattered<uint> = 4: {strides:?}"
-        );
+        assert_eq!(strides[1], Some(4), "Scattered<uint> = 4: {strides:?}");
     }
 
     /// Validate that `validate_binding_strides` correctly catches a stride
@@ -1840,8 +1835,8 @@ mod struct_layout_validate_tests {
         // Slot 1 mismatch: 16 expected, 4 actual — must fail with the slot number.
         let actual_bad = vec![Some(16u32), Some(4u32)];
         let expected_bad = vec![Some(16u32), Some(16u32)];
-        let err = validate_binding_strides(&actual_bad, &expected_bad, "myshader")
-            .expect_err("should fail on mismatch");
+        let err =
+            validate_binding_strides(&actual_bad, &expected_bad, "myshader").expect_err("should fail on mismatch");
         let msg = err.to_string();
         assert!(msg.contains("slot 1"), "error should name the slot: {msg}");
         assert!(msg.contains("myshader"), "error should name the shader: {msg}");

@@ -182,9 +182,9 @@ pub(super) fn prepare_render_commands(
     crate::backend::validate_render_pass_bind_resources(
         commands,
         |h| {
-            pipelines.get(&h).map(|p| {
-                (p.binding_element_strides.clone(), p.shader_debug_name.clone())
-            })
+            pipelines
+                .get(&h)
+                .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
         },
         |h| buffers.get(&h).and_then(|b| b.element_stride),
     )?;
@@ -493,11 +493,7 @@ mod tests {
         // row 0 → row_offset = 0
         let row_offset: u32 = 0 * FRAME_TABLE_ROW_STRIDE;
         layout._reserved[0] = layout._reserved[0].wrapping_add(row_offset);
-        assert_eq!(
-            layout._reserved[0],
-            before,
-            "patching row 0 (offset 0) must be a no-op"
-        );
+        assert_eq!(layout._reserved[0], before, "patching row 0 (offset 0) must be a no-op");
     }
 
     /// For ring row N > 0, patching `_reserved[0]` must add the correct absolute
@@ -515,8 +511,7 @@ mod tests {
 
             let expected = within_row_base + row * FRAME_TABLE_ROW_STRIDE;
             assert_eq!(
-                layout._reserved[0],
-                expected,
+                layout._reserved[0], expected,
                 "row {row}: absolute table index should be {expected}"
             );
         }

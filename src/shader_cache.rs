@@ -689,7 +689,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
             h = fnv_mix(h, &[stage_tag(SlangStage::Fragment)]);
             h = fnv_mix(h, &0u64.to_le_bytes()); // 0 defines
             h = fnv_mix(h, &0u64.to_le_bytes()); // 0 layout checks
-            h = hash_string(h, extra);           // schema or exp_hash
+            h = hash_string(h, extra); // schema or exp_hash
             h = fnv_mix(h, &[OptimizationLevel::Default as u8]);
             h
         }
@@ -720,10 +720,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
     /// Sanity-check: GOLDY_EXP_HASH is present and non-empty at build time.
     #[test]
     fn goldy_exp_hash_is_non_empty() {
-        assert!(
-            !GOLDY_EXP_HASH.is_empty(),
-            "GOLDY_EXP_HASH must be emitted by build.rs"
-        );
+        assert!(!GOLDY_EXP_HASH.is_empty(), "GOLDY_EXP_HASH must be emitted by build.rs");
         // 16 hex chars = 64-bit hash.
         assert_eq!(
             GOLDY_EXP_HASH.len(),
@@ -755,8 +752,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
 
         let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
         let computed = hash_goldy_exp_sources(&refs);
-        let built = u64::from_str_radix(GOLDY_EXP_HASH, 16)
-            .expect("GOLDY_EXP_HASH must be valid hex");
+        let built = u64::from_str_radix(GOLDY_EXP_HASH, 16).expect("GOLDY_EXP_HASH must be valid hex");
         assert_eq!(
             computed, built,
             "runtime goldy_exp hash must match build.rs output; if you changed the hash \
@@ -776,8 +772,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
     #[test]
     fn reflection_stride_schema_is_v3() {
         assert_eq!(
-            REFLECTION_STRIDE_SCHEMA,
-            "bind-stride-v3",
+            REFLECTION_STRIDE_SCHEMA, "bind-stride-v3",
             "schema must be v3 after the Broadcast-stride fix"
         );
     }

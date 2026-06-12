@@ -543,11 +543,15 @@ where
     Ok(())
 }
 
+pub(super) struct RenderToResources<'a> {
+    pub(super) devices: &'a HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
+    pub(super) frame_tables: &'a HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    pub(super) buffers: &'a HashMap<BufferHandle, super::types::BufferState>,
+    pub(super) pipelines: &'a HashMap<super::PipelineHandle, super::types::PipelineState>,
+}
+
 pub(super) fn render_to<F>(
-    devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
-    buffers: &HashMap<BufferHandle, super::types::BufferState>,
-    pipelines: &HashMap<super::PipelineHandle, super::types::PipelineState>,
+    resources: RenderToResources<'_>,
     render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
@@ -557,10 +561,10 @@ pub(super) fn render_to<F>(
 where
     F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>) -> Result<()>,
 {
-    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
+    let logical_device = resources.devices.get(&device_handle).context("Invalid device handle")?;
 
     let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands(buffers, pipelines, commands)?;
+        super::frame_table::prepare_render_commands(resources.buffers, resources.pipelines, commands)?;
 
     let cmd = render_targets
         .get(&target)
@@ -573,8 +577,8 @@ where
 
     if has_bindings {
         super::frame_table::record_prologue_for_tables(
-            frame_tables,
-            buffers,
+            resources.frame_tables,
+            resources.buffers,
             device_handle,
             logical_device,
             cmd,
@@ -583,7 +587,7 @@ where
     }
 
     record_render_pass_to_buffer(
-        devices,
+        resources.devices,
         render_targets,
         device_handle,
         target,
@@ -592,7 +596,7 @@ where
         record_commands_fn,
     )?;
 
-    let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
+    let logical_device = resources.devices.get(&device_handle).context("Invalid device handle")?;
 
     unsafe { logical_device.device.end_command_buffer(cmd) }.context("Failed to end command buffer")?;
 

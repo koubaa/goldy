@@ -1927,11 +1927,7 @@ fn stride_validation_broadcast_single_float_natural_stride_passes() {
     }
     impl goldy::StructuredBufferElement for SimParams {}
 
-    let params_buf = test_alloc_buffer_with_data(
-        &device,
-        &[SimParams { delta_time: 0.016 }],
-        BufferKind::Broadcast,
-    );
+    let params_buf = test_alloc_buffer_with_data(&device, &[SimParams { delta_time: 0.016 }], BufferKind::Broadcast);
 
     let mut graph = TaskGraph::new();
     graph

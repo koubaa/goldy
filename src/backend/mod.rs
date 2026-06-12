@@ -63,7 +63,12 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
 }
 
-#[cfg(any(test, feature = "vulkan", all(feature = "metal", target_os = "macos"),))]
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
 use crate::types::ResourceCategory;
 
 #[cfg(all(feature = "dx12", target_os = "windows"))]
@@ -276,6 +281,12 @@ pub(crate) fn validate_raw_binding_strides(
 /// Call from `prepare_render_commands` while buffer handles are still available.
 /// Legacy bind commands bail at record time; this is the only place stride checks run
 /// for standalone render passes when `GOLDY_VALIDATION=layout|all`.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
 pub(crate) fn validate_render_pass_bind_resources<F, G>(
     commands: &[RenderCommand],
     mut pipeline_strides: F,
@@ -1408,7 +1419,9 @@ mod binding_stride_validation_tests {
     fn hint_message_mentions_both_scattered_and_broadcast() {
         let actual = vec![Some(4)];
         let expected = vec![Some(16)];
-        let err = validate_binding_strides(&actual, &expected, "cs").unwrap_err().to_string();
+        let err = validate_binding_strides(&actual, &expected, "cs")
+            .unwrap_err()
+            .to_string();
         assert!(
             err.to_lowercase().contains("scattered") || err.to_lowercase().contains("broadcast"),
             "hint must mention both buffer kinds: {err}"
@@ -1450,10 +1463,7 @@ mod binding_stride_validation_tests {
         if crate::slang::layout_validation_enabled() {
             let msg = err.unwrap_err().to_string();
             assert!(msg.contains("slot"), "error must name missing slot: {msg}");
-            assert!(
-                msg.contains("my_compute_shader"),
-                "error must name the shader: {msg}"
-            );
+            assert!(msg.contains("my_compute_shader"), "error must name the shader: {msg}");
             assert!(msg.contains('1'), "error must mention slot index 1: {msg}");
         } else {
             // Validation disabled: passes silently.
@@ -1469,10 +1479,7 @@ mod binding_stride_validation_tests {
         use crate::types::ResourceCategory;
 
         let indices = vec![0u32, 1u32];
-        let categories = vec![
-            Some(ResourceCategory::Scattered),
-            Some(ResourceCategory::Broadcast),
-        ];
+        let categories = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
         let expected = vec![Some(16u32), Some(4u32)];
 
         validate_raw_binding_strides(
@@ -1501,9 +1508,7 @@ mod binding_stride_validation_tests {
         let buf: BufferHandle = 1;
         let commands = vec![
             RenderCommand::SetPipeline(pipeline),
-            RenderCommand::BindResources {
-                buffers: vec![buf],
-            },
+            RenderCommand::BindResources { buffers: vec![buf] },
         ];
 
         let err = validate_render_pass_bind_resources(
