@@ -2,7 +2,7 @@
 mod buffer_alloc_tests {
     use crate::device::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::types::{BufferFlags, ResourceAccess};
-    use crate::{BackendType, BufferKind, BufferPool, ComputePipeline, DeviceType, ShaderModule, TaskGraph};
+    use crate::{BufferKind, BufferPool, DeviceType};
 
     fn make_device() -> Device {
         let inst = Instance::new().expect("instance");
@@ -219,6 +219,7 @@ mod buffer_alloc_tests {
     #[test]
     fn dx12_reserved_buffer_resize_compute_smoke() {
         use crate::types::BufferResizeCost;
+        use crate::{BackendType, ComputePipeline, ShaderModule, TaskGraph};
         const SMOKY_SHADER: &str = r#"
     import goldy_exp;
 

@@ -1150,8 +1150,6 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
-    /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.

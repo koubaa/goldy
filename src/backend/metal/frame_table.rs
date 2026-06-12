@@ -69,7 +69,9 @@ pub(super) fn row_byte_offset(row: u32) -> u64 {
 
 /// Per-device frame-table GPU resources (stable arg-buffer descriptors + ring).
 pub(super) struct MetalFrameTable {
-    pub selector: mtl::Buffer,
+    /// Kept alive for arg-buffer slot 0 encoding; not read at runtime on Metal.
+    #[allow(dead_code)]
+    selector: mtl::Buffer,
     pub table: mtl::Buffer,
     ring: FrameTableRing,
 }
@@ -97,10 +99,6 @@ impl MetalFrameTable {
             table,
             ring: FrameTableRing::new(FRAME_TABLE_MAX_ROWS),
         }
-    }
-
-    pub(super) fn selector_buffer(&self) -> &mtl::BufferRef {
-        &self.selector
     }
 
     pub(super) fn table_buffer(&self) -> &mtl::BufferRef {
@@ -487,7 +485,7 @@ mod tests {
     /// produce the same result as the unpatched layout.
     #[test]
     fn dispatch_batch_patch_row_zero_is_noop() {
-        let mut layout = crate::backend::shared::PushLayout::zeroed();
+        let mut layout = crate::backend::shared::PushLayout::default();
         layout._reserved[0] = 7; // some within-row base
         let before = layout._reserved[0];
         // row 0 → row_offset = 0
@@ -502,7 +500,7 @@ mod tests {
     #[test]
     fn dispatch_batch_patch_adds_correct_row_stride() {
         for row in 1u32..FRAME_TABLE_MAX_ROWS {
-            let mut layout = crate::backend::shared::PushLayout::zeroed();
+            let mut layout = crate::backend::shared::PushLayout::default();
             let within_row_base: u32 = 3; // some slot offset inside the row
             layout._reserved[0] = within_row_base;
 
