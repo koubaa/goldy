@@ -90,6 +90,22 @@ pub(super) fn render_to(
 ) -> Result<()> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
+    let (staging_data, lowered_commands, has_bindings) =
+        super::frame_table::prepare_render_commands(&state.buffers, commands)?;
+
+    let completed = super::context::device_retired(state, device_handle);
+    let prologue_row = if has_bindings {
+        Some(super::frame_table::run_prologue_for_device(
+            state,
+            device_handle,
+            logical_device,
+            &staging_data,
+            completed,
+        )?)
+    } else {
+        None
+    };
+
     let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
     let mut clear_color = None;
@@ -132,6 +148,11 @@ pub(super) fn render_to(
             );
         }
     }
+    {
+        let ft = logical_device.frame_table.lock().unwrap();
+        encoder.use_resource_at(ft.selector_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+    }
 
     encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
@@ -151,7 +172,7 @@ pub(super) fn render_to(
         height: render_target.height as u64,
     });
 
-    record(encoder, commands, &state.pipelines, &state.buffers)?;
+    record(encoder, &lowered_commands, &state.pipelines, &state.buffers, prologue_row)?;
 
     encoder.end_encoding();
     command_buffer.commit();

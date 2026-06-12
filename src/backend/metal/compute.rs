@@ -235,6 +235,18 @@ pub(super) fn begin_compute_encoder<'a>(
         encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
     }
 
+    // Frame-table selector + device table (not in state.buffers).
+    {
+        let ft = logical_device.frame_table.lock().unwrap();
+        let sel_ref: &mtl::BufferRef = ft.selector_buffer();
+        let tbl_ref: &mtl::BufferRef = ft.table_buffer();
+        let sel_res =
+            unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(sel_ref) };
+        let tbl_res =
+            unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(tbl_ref) };
+        encoder.use_resources(&[sel_res, tbl_res], mtl::MTLResourceUsage::Read);
+    }
+
     encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder
 }
@@ -287,6 +299,7 @@ pub(super) fn record_commands_to_buffer(
     belt_idx: &mut usize,
     tex_idx: &mut usize,
     gpu_idle: bool,
+    prologue_row: Option<u32>,
 ) -> Result<()> {
     let mut guard = EncoderGuard {
         compute: None,
@@ -565,7 +578,7 @@ pub(super) fn record_commands_to_buffer(
             GpuCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
-                frame_table_base: _,
+                frame_table_base,
             } => {
                 ensure_compute!();
                 if let Some(pipeline) = current_pipeline {
@@ -577,8 +590,11 @@ pub(super) fn record_commands_to_buffer(
                         &pipeline.shader_debug_name,
                     )?;
                 }
+                let absolute_base = prologue_row.unwrap_or(0)
+                    * crate::frame_table::FRAME_TABLE_ROW_STRIDE
+                    + frame_table_base;
                 let mut layout = PushLayout::default();
-                shared::fill_raw(&mut layout, raw_indices, raw_user);
+                shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
                 let layout_bytes = layout.as_bytes();
                 guard
                     .compute
@@ -589,26 +605,10 @@ pub(super) fn record_commands_to_buffer(
                         layout_bytes.as_ptr() as *const _,
                     );
             }
-            GpuCommand::BindResourcesTyped { handles } => {
-                ensure_compute!();
-                if let Some(pipeline) = current_pipeline {
-                    crate::backend::validate_typed_push_constants(
-                        handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                }
-                let mut layout = PushLayout::default();
-                shared::fill_typed(&mut layout, handles.iter().copied());
-                let layout_bytes = layout.as_bytes();
-                guard
-                    .compute
-                    .expect("encoder must be set after ensure_compute!()")
-                    .set_bytes(
-                        RESOURCE_SLOT_BUFFER,
-                        layout_bytes.len() as u64,
-                        layout_bytes.as_ptr() as *const _,
-                    );
+            GpuCommand::BindResourcesTyped { .. } => {
+                anyhow::bail!(
+                    "BindResourcesTyped in frame-table path: call frame_table::lower_gpu_commands first"
+                );
             }
             GpuCommand::Dispatch {
                 label: _,
@@ -659,15 +659,34 @@ pub(super) fn record_commands_to_buffer(
                         height: pipeline.workgroup_size[1] as u64,
                         depth: pipeline.workgroup_size[2] as u64,
                     };
+                    let row_offset =
+                        prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE;
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
                     for i in 0..entry_count {
                         let base = i * stride;
                         let layout_slice = &arg_data[base..base + push_size];
-                        enc.set_bytes(
-                            RESOURCE_SLOT_BUFFER,
-                            layout_slice.len() as u64,
-                            layout_slice.as_ptr() as *const _,
-                        );
+                        let layout_bytes: &[u8] = if row_offset != 0 {
+                            // Patch _reserved[0] to carry the absolute table offset.
+                            let mut patched: PushLayout =
+                                *bytemuck::from_bytes(layout_slice);
+                            patched._reserved[0] =
+                                patched._reserved[0].wrapping_add(row_offset);
+                            enc.set_bytes(
+                                RESOURCE_SLOT_BUFFER,
+                                std::mem::size_of::<PushLayout>() as u64,
+                                &patched as *const PushLayout as *const _,
+                            );
+                            &[]
+                        } else {
+                            layout_slice
+                        };
+                        if !layout_bytes.is_empty() {
+                            enc.set_bytes(
+                                RESOURCE_SLOT_BUFFER,
+                                layout_bytes.len() as u64,
+                                layout_bytes.as_ptr() as *const _,
+                            );
+                        }
                         let wg_off = base + push_size;
                         let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into()?);
                         let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into()?);
@@ -939,6 +958,7 @@ fn stage_uploads(
             | GpuCommand::DispatchIndirect { .. } => {
                 would_have_gpu_work = true;
             }
+            GpuCommand::FrameTableStaging { .. } => {}
             GpuCommand::Barrier | GpuCommand::ResourceBarrier { .. } => {}
         }
     }
@@ -953,6 +973,10 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
     }
 
+    let mut owned_commands = commands.to_vec();
+    crate::frame_table::lower_gpu_commands(&mut owned_commands);
+    let commands = owned_commands.as_slice();
+
     if tracing::enabled!(target: "goldy::diag::submit", tracing::Level::INFO) {
         let (dispatch_count, pipeline_names) = summarise_commands(commands.iter());
         tracing::info!(
@@ -964,6 +988,25 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
     }
 
     let device_handle = super::context::context_device(state, ctx);
+
+    let completed = state
+        .contexts
+        .get(&ctx)
+        .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
+        .unwrap_or(0);
+
+    let prologue_row = if let Some(data) = super::frame_table::extract_staging_from_commands(commands) {
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        Some(super::frame_table::run_prologue_for_device(
+            state,
+            device_handle,
+            ld,
+            &data,
+            completed,
+        )?)
+    } else {
+        None
+    };
 
     let owned_command_buffer = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -989,6 +1032,7 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
             &mut belt_idx,
             &mut tex_idx,
             gpu_idle,
+            prologue_row,
         )?;
     }
 
@@ -1077,6 +1121,11 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
+    if let Some(row) = prologue_row {
+        if let Some(ld) = state.devices.get(&device_handle) {
+            super::frame_table::record_submission_for_device(ld, row, signal_value);
+        }
+    }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1138,6 +1187,25 @@ pub(super) fn submit_graph(
 
     let device_handle = super::context::context_device(state, ctx);
 
+    let completed = state
+        .contexts
+        .get(&ctx)
+        .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
+        .unwrap_or(0);
+
+    let mut prologue_row = if let Some(data) = super::frame_table::extract_staging_from_graph(commands) {
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        Some(super::frame_table::run_prologue_for_device(
+            state,
+            device_handle,
+            ld,
+            &data,
+            completed,
+        )?)
+    } else {
+        None
+    };
+
     let owned_command_buffer = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.command_queue.new_command_buffer().to_owned()
@@ -1195,12 +1263,43 @@ pub(super) fn submit_graph(
                             &mut belt_idx,
                             &mut tex_idx,
                             gpu_idle,
+                            prologue_row,
                         )?;
                         compute_batch.clear();
                     }
 
-                    // Record the render pass into the same command buffer.
-                    record_render_pass_to_buffer(state, command_buffer_ref, ld, device_handle, *target, render_cmds)?;
+                    let (render_staging, lowered_render, has_render_bindings) =
+                        super::frame_table::prepare_render_commands(&state.buffers, render_cmds)?;
+                    if has_render_bindings {
+                        if let Some(row) = prologue_row {
+                            let graph_staging = super::frame_table::extract_staging_from_graph(commands)
+                                .map(|data| data.to_vec())
+                                .unwrap_or_else(|| vec![0u32; crate::frame_table::FRAME_TABLE_TABLE_U32S]);
+                            let sync_data = super::frame_table::merge_staging_for_render_sync(
+                                &graph_staging,
+                                &render_staging,
+                            );
+                            super::frame_table::sync_table_row_to_device(ld, &sync_data, row)?;
+                        } else {
+                            prologue_row = Some(super::frame_table::run_prologue_for_device(
+                                state,
+                                device_handle,
+                                ld,
+                                &render_staging,
+                                completed,
+                            )?);
+                        }
+                    }
+
+                    record_render_pass_to_buffer(
+                        state,
+                        command_buffer_ref,
+                        ld,
+                        device_handle,
+                        *target,
+                        &lowered_render,
+                        prologue_row,
+                    )?;
                 }
             }
         }
@@ -1218,6 +1317,7 @@ pub(super) fn submit_graph(
                 &mut belt_idx,
                 &mut tex_idx,
                 gpu_idle,
+                prologue_row,
             )?;
         }
     }
@@ -1296,6 +1396,11 @@ pub(super) fn submit_graph(
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
+    if let Some(row) = prologue_row {
+        if let Some(ld) = state.devices.get(&device_handle) {
+            super::frame_table::record_submission_for_device(ld, row, signal_value);
+        }
+    }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1331,6 +1436,7 @@ fn record_render_pass_to_buffer(
     device_handle: DeviceHandle,
     target: super::super::RenderTargetHandle,
     commands: &[super::super::RenderCommand],
+    prologue_row: Option<u32>,
 ) -> Result<()> {
     let render_target = state.render_targets.get(&target).context("Invalid render target")?;
 
@@ -1373,6 +1479,11 @@ fn record_render_pass_to_buffer(
             );
         }
     }
+    {
+        let ft = logical_device.frame_table.lock().unwrap();
+        encoder.use_resource_at(ft.selector_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+    }
 
     encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
     encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
@@ -1392,7 +1503,7 @@ fn record_render_pass_to_buffer(
         height: render_target.height as u64,
     });
 
-    super::render_commands::record(encoder, commands, &state.pipelines, &state.buffers)?;
+    super::render_commands::record(encoder, commands, &state.pipelines, &state.buffers, prologue_row)?;
 
     encoder.end_encoding();
     Ok(())

@@ -94,11 +94,23 @@ static const uint GOLDY_FRAME_TABLE_SLOT = 1;
 static const uint GOLDY_FRAME_TABLE_ROW_STRIDE = 512;
 
 /// Resolve bindless index `slot_k` for dispatch table base `dispatch_base`.
+///
+/// On DX12/Vulkan, `dispatch_base` is the within-row offset and a selector cell
+/// (written by the GPU prologue copy) provides the current row.
+///
+/// On Metal, the CPU prologue encodes the absolute table offset directly into
+/// `dispatch_base` (= row * ROW_STRIDE + within-row offset), so no selector
+/// read is needed.  This avoids the shared-mutable-selector race that would
+/// occur when multiple command buffers are in flight simultaneously.
 public uint goldy_frame_table_index(uint dispatch_base, uint slot_k)
 {
+#if defined(__METAL__)
+    return goldy_scattered<uint>(GOLDY_FRAME_TABLE_SLOT)[dispatch_base + slot_k];
+#else
     uint sel = goldy_scattered<uint>(GOLDY_FRAME_SELECTOR_SLOT)[0];
     uint row_offset = sel * GOLDY_FRAME_TABLE_ROW_STRIDE + dispatch_base + slot_k;
     return goldy_scattered<uint>(GOLDY_FRAME_TABLE_SLOT)[row_offset];
+#endif
 }
 
 // =============================================================================

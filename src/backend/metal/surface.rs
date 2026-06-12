@@ -367,10 +367,27 @@ pub(super) fn render(
         .context("No drawable acquired — call surface_acquire first")?;
     let drawable = drawable_ptr as id;
 
+    let device_handle = surface_state.device_handle;
     let logical_device = state
         .devices
-        .get(&surface_state.device_handle)
+        .get(&device_handle)
         .context("Device no longer valid")?;
+
+    let (staging_data, lowered_commands, has_bindings) =
+        super::frame_table::prepare_render_commands(&state.buffers, commands)?;
+
+    let completed = super::context::device_retired(state, device_handle);
+    let prologue_row = if has_bindings {
+        Some(super::frame_table::run_prologue_for_device(
+            state,
+            device_handle,
+            logical_device,
+            &staging_data,
+            completed,
+        )?)
+    } else {
+        None
+    };
 
     let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
@@ -406,13 +423,18 @@ pub(super) fn render(
         .unwrap()
         .use_heaps_for_render(encoder, render_stages);
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == surface_state.device_handle {
+        if buf_state.device_handle == device_handle {
             encoder.use_resource_at(
                 &buf_state.buffer,
                 mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
                 render_stages,
             );
         }
+    }
+    {
+        let ft = logical_device.frame_table.lock().unwrap();
+        encoder.use_resource_at(ft.selector_buffer(), mtl::MTLResourceUsage::Read, render_stages);
+        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
     }
 
     encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
@@ -434,7 +456,7 @@ pub(super) fn render(
         height: surface_state.height as u64,
     });
 
-    record(encoder, commands, &state.pipelines, &state.buffers)?;
+    record(encoder, &lowered_commands, &state.pipelines, &state.buffers, prologue_row)?;
 
     encoder.end_encoding();
     command_buffer.commit();
