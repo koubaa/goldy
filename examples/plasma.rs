@@ -24,6 +24,7 @@ mod common;
 struct Uniforms {
     time: f32,
 }
+impl goldy::StructuredBufferElement for Uniforms {}
 
 struct App {
     instance: Instance,

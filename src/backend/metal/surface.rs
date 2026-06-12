@@ -368,10 +368,7 @@ pub(super) fn render(
     let drawable = drawable_ptr as id;
 
     let device_handle = surface_state.device_handle;
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("Device no longer valid")?;
+    let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
     let (staging_data, lowered_commands, has_bindings) =
         super::frame_table::prepare_render_commands(&state.buffers, commands)?;
@@ -456,7 +453,13 @@ pub(super) fn render(
         height: surface_state.height as u64,
     });
 
-    record(encoder, &lowered_commands, &state.pipelines, &state.buffers, prologue_row)?;
+    record(
+        encoder,
+        &lowered_commands,
+        &state.pipelines,
+        &state.buffers,
+        prologue_row,
+    )?;
 
     encoder.end_encoding();
     command_buffer.commit();

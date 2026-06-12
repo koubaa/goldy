@@ -626,8 +626,7 @@ pub(super) fn render(
         ]);
     }
 
-    let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands(state, commands)?;
+    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(state, commands)?;
     if has_bindings {
         super::frame_table::record_prologue(state, device_handle, cmd, &staging_data)?;
     }

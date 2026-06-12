@@ -33,14 +33,8 @@ pub(crate) fn init_device(
     device_handle: super::DeviceHandle,
     ld: &LogicalDevice,
 ) -> Result<()> {
-    let selector = create_scattered_u32_buffer_at_slot(
-        state,
-        instance,
-        device_handle,
-        ld,
-        FRAME_TABLE_SELECTOR_SLOT,
-        1,
-    )?;
+    let selector =
+        create_scattered_u32_buffer_at_slot(state, instance, device_handle, ld, FRAME_TABLE_SELECTOR_SLOT, 1)?;
     let device_table = create_scattered_u32_buffer_at_slot(
         state,
         instance,
@@ -101,8 +95,7 @@ fn create_upload_table_buffer(
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }
-        .context("frame table staging create_buffer")?;
+    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }.context("frame table staging create_buffer")?;
 
     let mem_requirements = unsafe { ld.device.get_buffer_memory_requirements(buffer) };
     let memory_type = find_memory_type(
@@ -117,14 +110,12 @@ fn create_upload_table_buffer(
         .allocation_size(mem_requirements.size)
         .memory_type_index(memory_type);
 
-    let memory = unsafe { ld.device.allocate_memory(&alloc_info, None) }
-        .context("frame table staging allocate_memory")?;
+    let memory =
+        unsafe { ld.device.allocate_memory(&alloc_info, None) }.context("frame table staging allocate_memory")?;
 
-    unsafe { ld.device.bind_buffer_memory(buffer, memory, 0) }
-        .context("frame table staging bind_buffer_memory")?;
+    unsafe { ld.device.bind_buffer_memory(buffer, memory, 0) }.context("frame table staging bind_buffer_memory")?;
 
-    let mapped = unsafe { ld.map_memory2(memory, 0, size) }
-        .context("frame table staging map_memory2")?;
+    let mapped = unsafe { ld.map_memory2(memory, 0, size) }.context("frame table staging map_memory2")?;
     let ptr = mapped as *mut u8;
     if ptr.is_null() {
         anyhow::bail!("frame table staging map returned null");
@@ -144,17 +135,15 @@ fn create_scattered_u32_buffer_at_slot(
     let logical_size = (num_u32s as u64) * 4;
     let allocation_size = logical_size.max(256);
 
-    let vk_usage = vk::BufferUsageFlags::STORAGE_BUFFER
-        | vk::BufferUsageFlags::TRANSFER_SRC
-        | vk::BufferUsageFlags::TRANSFER_DST;
+    let vk_usage =
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
 
     let buffer_info = vk::BufferCreateInfo::default()
         .size(allocation_size)
         .usage(vk_usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }
-        .context("frame table buffer create_buffer")?;
+    let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }.context("frame table buffer create_buffer")?;
 
     let mem_requirements = unsafe { ld.device.get_buffer_memory_requirements(buffer) };
     let memory_type = find_memory_type(
@@ -169,11 +158,10 @@ fn create_scattered_u32_buffer_at_slot(
         .allocation_size(mem_requirements.size)
         .memory_type_index(memory_type);
 
-    let memory = unsafe { ld.device.allocate_memory(&alloc_info, None) }
-        .context("frame table buffer allocate_memory")?;
+    let memory =
+        unsafe { ld.device.allocate_memory(&alloc_info, None) }.context("frame table buffer allocate_memory")?;
 
-    unsafe { ld.device.bind_buffer_memory(buffer, memory, 0) }
-        .context("frame table buffer bind_buffer_memory")?;
+    unsafe { ld.device.bind_buffer_memory(buffer, memory, 0) }.context("frame table buffer bind_buffer_memory")?;
 
     if let Some(descriptor_set) = ld.bindless_descriptor_set {
         let buffer_info = vk::DescriptorBufferInfo::default()
@@ -189,8 +177,7 @@ fn create_scattered_u32_buffer_at_slot(
             .buffer_info(std::slice::from_ref(&buffer_info));
 
         unsafe {
-            ld.device
-                .update_descriptor_sets(std::slice::from_ref(&write), &[]);
+            ld.device.update_descriptor_sets(std::slice::from_ref(&write), &[]);
         }
     }
 
@@ -349,9 +336,8 @@ fn write_staging_for_submission_on(ft: &FrameTableDevice, data: &[u32]) -> Resul
     assert_row_available(ft, sub, row)?;
     ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     unsafe {
-        let payload_dst = staging_ptr.add(
-            crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s,
-        );
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
@@ -402,15 +388,10 @@ pub(crate) fn sync_table_row_to_device(
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
-    let row = ft
-        .submission_counter
-        .load(Ordering::Relaxed)
-        .saturating_sub(1)
-        % FRAME_TABLE_MAX_ROWS;
+    let row = ft.submission_counter.load(Ordering::Relaxed).saturating_sub(1) % FRAME_TABLE_MAX_ROWS;
     unsafe {
-        let payload_dst = staging_ptr.add(
-            crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s,
-        );
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
@@ -436,9 +417,7 @@ pub(crate) fn prepare_render_commands(
                         buffers
                             .get(h)
                             .and_then(|b| b.bindless_index)
-                            .with_context(|| {
-                                format!("BindResources: buffer handle {h:?} has no bindless index")
-                            })
+                            .with_context(|| format!("BindResources: buffer handle {h:?} has no bindless index"))
                     })
                     .collect::<Result<_>>()?;
                 let frame_table_base = staging.alloc_dispatch(indices.len() as u32);
@@ -489,9 +468,7 @@ mod tests {
     }
 }
 
-pub(crate) fn extract_staging_from_graph(
-    commands: &[crate::backend::GraphCommand],
-) -> Option<std::sync::Arc<[u32]>> {
+pub(crate) fn extract_staging_from_graph(commands: &[crate::backend::GraphCommand]) -> Option<std::sync::Arc<[u32]>> {
     commands.iter().find_map(|c| match c {
         crate::backend::GraphCommand::Compute(GpuCommand::FrameTableStaging { data }) => {
             Some(std::sync::Arc::clone(data))

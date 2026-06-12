@@ -94,11 +94,8 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
 
     let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) = create_argument_encoders(&device);
 
-    let frame_table = super::frame_table::MetalFrameTable::init(
-        device.as_ref(),
-        argument_buffer.as_ref(),
-        argument_encoder.as_ref(),
-    );
+    let frame_table =
+        super::frame_table::MetalFrameTable::init(device.as_ref(), argument_buffer.as_ref(), argument_encoder.as_ref());
 
     let handle = state.next_device_handle;
     state.next_device_handle += 1;

@@ -19,8 +19,7 @@ pub const FRAME_TABLE_ROW_STRIDE: u32 = 512;
 pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
 
 /// Total `u32` elements in staging and device-local table buffers.
-pub const FRAME_TABLE_TABLE_U32S: usize =
-    FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;
+pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;
 
 /// Byte size of one device-local table buffer.
 pub const FRAME_TABLE_TABLE_BYTES: u64 = (FRAME_TABLE_TABLE_U32S * 4) as u64;
@@ -311,7 +310,7 @@ mod tests {
         // Write to the last few slots of the row.
         let last_base = FRAME_TABLE_ROW_STRIDE - 4;
         s.write_dispatch_indices(last_base, &[1, 2, 3, 4, 5, 6]); // 6 > 4 remaining
-        // Slots within row 0 must be written.
+                                                                  // Slots within row 0 must be written.
         for k in 0..4usize {
             assert_eq!(s.data[last_base as usize + k], k as u32 + 1);
         }
@@ -364,8 +363,7 @@ mod tests {
                 "row {row} payload overflows staging buffer"
             );
             if row > 0 {
-                let prev_payload_end = staging_row_payload_byte_offset(row - 1)
-                    + FRAME_TABLE_ROW_STRIDE as u64 * 4;
+                let prev_payload_end = staging_row_payload_byte_offset(row - 1) + FRAME_TABLE_ROW_STRIDE as u64 * 4;
                 assert!(
                     payload >= prev_payload_end,
                     "row {row} payload overlaps row {}",
@@ -393,6 +391,6 @@ mod tests {
         assert_eq!(s.data[4], 14);
         assert_eq!(s.data[5], 20); // base_b
         assert_eq!(s.data[7], 22);
-        assert_eq!(s.data[8], 0);  // base_c region untouched
+        assert_eq!(s.data[8], 0); // base_c region untouched
     }
 }

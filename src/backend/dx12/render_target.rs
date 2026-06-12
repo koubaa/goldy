@@ -339,8 +339,7 @@ pub(super) fn record_render_pass_to_list(
         ]);
     }
 
-    let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands(state, commands)?;
+    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(state, commands)?;
     if has_bindings {
         if frame_table_prologue_already_recorded {
             // Graph submit already ran FrameTableStaging prologue in this command list;

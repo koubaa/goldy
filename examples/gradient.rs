@@ -30,6 +30,7 @@ mod common;
 struct TimeUniforms {
     time: f32,
 }
+impl goldy::StructuredBufferElement for TimeUniforms {}
 
 struct App {
     instance: Instance,

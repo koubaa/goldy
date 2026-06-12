@@ -7,8 +7,8 @@
 use super::types::{LogicalDevice, ARGUMENT_BUFFER_SIZE};
 use crate::backend::GpuCommand;
 use crate::frame_table::{
-    FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_TABLE_BYTES, FRAME_TABLE_TABLE_U32S,
-    FRAME_TABLE_USER_SLOT_BASE, FrameTableStaging,
+    FrameTableStaging, FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_TABLE_BYTES, FRAME_TABLE_TABLE_U32S,
+    FRAME_TABLE_USER_SLOT_BASE,
 };
 use crate::timeline::TimelineValue;
 use ::metal as mtl;
@@ -132,10 +132,7 @@ impl MetalFrameTable {
 
         let table_ptr = self.table.contents() as *mut u32;
         anyhow::ensure!(!table_ptr.is_null(), "frame table buffer has null contents");
-        let dest_ptr = unsafe {
-            (table_ptr as *mut u8)
-                .add(row_byte_offset(row) as usize) as *mut u32
-        };
+        let dest_ptr = unsafe { (table_ptr as *mut u8).add(row_byte_offset(row) as usize) as *mut u32 };
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dest_ptr, copy_u32s);
         }
@@ -165,9 +162,7 @@ pub(super) fn extract_staging_from_commands(commands: &[GpuCommand]) -> Option<s
     })
 }
 
-pub(super) fn extract_staging_from_graph(
-    commands: &[crate::backend::GraphCommand],
-) -> Option<std::sync::Arc<[u32]>> {
+pub(super) fn extract_staging_from_graph(commands: &[crate::backend::GraphCommand]) -> Option<std::sync::Arc<[u32]>> {
     commands.iter().find_map(|c| match c {
         crate::backend::GraphCommand::Compute(GpuCommand::FrameTableStaging { data }) => {
             Some(std::sync::Arc::clone(data))
@@ -259,10 +254,7 @@ pub(super) fn sync_table_row_to_device(ld: &LogicalDevice, data: &[u32], row: u3
 
     let table_ptr = ft.table.contents() as *mut u32;
     anyhow::ensure!(!table_ptr.is_null(), "frame table buffer has null contents");
-    let dest_ptr = unsafe {
-        (table_ptr as *mut u8)
-            .add(row_byte_offset(row) as usize) as *mut u32
-    };
+    let dest_ptr = unsafe { (table_ptr as *mut u8).add(row_byte_offset(row) as usize) as *mut u32 };
     unsafe {
         std::ptr::copy_nonoverlapping(src.as_ptr(), dest_ptr, copy_u32s);
     }

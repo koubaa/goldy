@@ -558,8 +558,7 @@ where
 {
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
-    let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands(buffers, commands)?;
+    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(buffers, commands)?;
 
     let cmd = render_targets
         .get(&target)

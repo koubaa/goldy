@@ -38,6 +38,7 @@ impl goldy::StructuredBufferElement for Particle {}
 struct SimParams {
     delta_time: f32,
 }
+impl goldy::StructuredBufferElement for SimParams {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()

@@ -2144,13 +2144,7 @@ fn submit_graph_impl(
                             &sync_data,
                         )?;
                     } else {
-                        super::frame_table::record_prologue(
-                            state,
-                            device_handle,
-                            logical_device,
-                            cmd,
-                            &staging_data,
-                        )?;
+                        super::frame_table::record_prologue(state, device_handle, logical_device, cmd, &staging_data)?;
                     }
                 }
 
@@ -2162,9 +2156,7 @@ fn submit_graph_impl(
                     *target,
                     &lowered,
                     cmd,
-                    |cb, cmds, ld, cur_pipe| {
-                        super::render_commands::record(cb, cmds, ld, pipelines, buffers, cur_pipe)
-                    },
+                    |cb, cmds, ld, cur_pipe| super::render_commands::record(cb, cmds, ld, pipelines, buffers, cur_pipe),
                 )?;
 
                 rendered_targets.push(*target);

@@ -217,7 +217,12 @@ fn create_scattered_u32_buffer_at_slot(
     Ok(handle)
 }
 
-fn transition_buffer(cl: &ID3D12GraphicsCommandList7, resource: &ID3D12Resource, before: D3D12_RESOURCE_STATES, after: D3D12_RESOURCE_STATES) {
+fn transition_buffer(
+    cl: &ID3D12GraphicsCommandList7,
+    resource: &ID3D12Resource,
+    before: D3D12_RESOURCE_STATES,
+    after: D3D12_RESOURCE_STATES,
+) {
     if before == after {
         return;
     }
@@ -304,9 +309,8 @@ pub(crate) fn write_staging_for_submission(
     ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     // Staging selector word `row` always holds the value `row` (matches baked copy offset).
     unsafe {
-        let payload_dst = staging_ptr.add(
-            crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s,
-        );
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
@@ -328,15 +332,10 @@ pub(crate) fn sync_table_row_to_device(
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
-    let row = ft
-        .submission_counter
-        .load(Ordering::Relaxed)
-        .saturating_sub(1)
-        % FRAME_TABLE_MAX_ROWS;
+    let row = ft.submission_counter.load(Ordering::Relaxed).saturating_sub(1) % FRAME_TABLE_MAX_ROWS;
     unsafe {
-        let payload_dst = staging_ptr.add(
-            crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s,
-        );
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
@@ -490,9 +489,7 @@ pub(crate) fn prepare_render_commands(
                             .buffers
                             .get(h)
                             .and_then(|b| b.bindless_offset)
-                            .with_context(|| {
-                                format!("BindResources: buffer handle {h:?} has no bindless offset")
-                            })
+                            .with_context(|| format!("BindResources: buffer handle {h:?} has no bindless offset"))
                     })
                     .collect::<Result<_>>()?;
                 let frame_table_base = staging.alloc_dispatch(indices.len() as u32);

@@ -240,10 +240,8 @@ pub(super) fn begin_compute_encoder<'a>(
         let ft = logical_device.frame_table.lock().unwrap();
         let sel_ref: &mtl::BufferRef = ft.selector_buffer();
         let tbl_ref: &mtl::BufferRef = ft.table_buffer();
-        let sel_res =
-            unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(sel_ref) };
-        let tbl_res =
-            unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(tbl_ref) };
+        let sel_res = unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(sel_ref) };
+        let tbl_res = unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(tbl_ref) };
         encoder.use_resources(&[sel_res, tbl_res], mtl::MTLResourceUsage::Read);
     }
 
@@ -590,9 +588,8 @@ pub(super) fn record_commands_to_buffer(
                         &pipeline.shader_debug_name,
                     )?;
                 }
-                let absolute_base = prologue_row.unwrap_or(0)
-                    * crate::frame_table::FRAME_TABLE_ROW_STRIDE
-                    + frame_table_base;
+                let absolute_base =
+                    prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
                 let mut layout = PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
                 let layout_bytes = layout.as_bytes();
@@ -606,9 +603,7 @@ pub(super) fn record_commands_to_buffer(
                     );
             }
             GpuCommand::BindResourcesTyped { .. } => {
-                anyhow::bail!(
-                    "BindResourcesTyped in frame-table path: call frame_table::lower_gpu_commands first"
-                );
+                anyhow::bail!("BindResourcesTyped in frame-table path: call frame_table::lower_gpu_commands first");
             }
             GpuCommand::Dispatch {
                 label: _,
@@ -659,18 +654,15 @@ pub(super) fn record_commands_to_buffer(
                         height: pipeline.workgroup_size[1] as u64,
                         depth: pipeline.workgroup_size[2] as u64,
                     };
-                    let row_offset =
-                        prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE;
+                    let row_offset = prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE;
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
                     for i in 0..entry_count {
                         let base = i * stride;
                         let layout_slice = &arg_data[base..base + push_size];
                         let layout_bytes: &[u8] = if row_offset != 0 {
                             // Patch _reserved[0] to carry the absolute table offset.
-                            let mut patched: PushLayout =
-                                *bytemuck::from_bytes(layout_slice);
-                            patched._reserved[0] =
-                                patched._reserved[0].wrapping_add(row_offset);
+                            let mut patched: PushLayout = *bytemuck::from_bytes(layout_slice);
+                            patched._reserved[0] = patched._reserved[0].wrapping_add(row_offset);
                             enc.set_bytes(
                                 RESOURCE_SLOT_BUFFER,
                                 std::mem::size_of::<PushLayout>() as u64,
@@ -1275,10 +1267,8 @@ pub(super) fn submit_graph(
                             let graph_staging = super::frame_table::extract_staging_from_graph(commands)
                                 .map(|data| data.to_vec())
                                 .unwrap_or_else(|| vec![0u32; crate::frame_table::FRAME_TABLE_TABLE_U32S]);
-                            let sync_data = super::frame_table::merge_staging_for_render_sync(
-                                &graph_staging,
-                                &render_staging,
-                            );
+                            let sync_data =
+                                super::frame_table::merge_staging_for_render_sync(&graph_staging, &render_staging);
                             super::frame_table::sync_table_row_to_device(ld, &sync_data, row)?;
                         } else {
                             prologue_row = Some(super::frame_table::run_prologue_for_device(

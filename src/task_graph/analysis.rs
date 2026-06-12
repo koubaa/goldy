@@ -744,11 +744,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         let frame_table_base = frame_table.alloc_dispatch(slots.len() as u32);
                         frame_table.write_dispatch_indices(frame_table_base, slots);
                         let mut layout = crate::backend::shared::PushLayout::default();
-                        crate::backend::shared::fill_frame_table_dispatch(
-                            &mut layout,
-                            frame_table_base,
-                            d.user_slots,
-                        );
+                        crate::backend::shared::fill_frame_table_dispatch(&mut layout, frame_table_base, d.user_slots);
                         arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
                         arg_data.extend_from_slice(&d.x.to_ne_bytes());
                         arg_data.extend_from_slice(&d.y.to_ne_bytes());
@@ -1040,8 +1036,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     target,
                     commands: render_cmds,
                 } => {
-                    let lowered =
-                        crate::frame_table::lower_render_pass_commands(&mut frame_table, render_cmds);
+                    let lowered = crate::frame_table::lower_render_pass_commands(&mut frame_table, render_cmds);
                     commands.push(GraphCommand::Render {
                         target: *target,
                         commands: lowered,
@@ -1284,10 +1279,10 @@ mod tests {
         // A bind-free copy must NOT receive a FrameTableStaging prefix.
         // Inserting one bumps the submission counter and silently overwrites
         // the selector with zeros, corrupting every in-flight frame (goldy-doom bug).
-        assert!(matches!(
-            commands.as_slice(),
-            [GpuCommand::CopyTexture { src: 1, dst: 99 }]
-        ), "bind-free CopyTexture must not get a FrameTableStaging prefix; got {commands:?}");
+        assert!(
+            matches!(commands.as_slice(), [GpuCommand::CopyTexture { src: 1, dst: 99 }]),
+            "bind-free CopyTexture must not get a FrameTableStaging prefix; got {commands:?}"
+        );
     }
 
     /// A graph consisting only of WriteBuffer nodes (uploads) must not generate a
@@ -1295,15 +1290,15 @@ mod tests {
     #[test]
     fn write_only_graph_no_staging_prefix() {
         let ir = GraphIR {
-            nodes: vec![
-                write_node("upload_a", buf(0), 0),
-                write_node("upload_b", buf(1), 1),
-            ],
+            nodes: vec![write_node("upload_a", buf(0), 0), write_node("upload_b", buf(1), 1)],
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
         let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
         let has_staging = cmds.iter().any(|c| matches!(c, GpuCommand::FrameTableStaging { .. }));
-        assert!(!has_staging, "write-only graph must not produce FrameTableStaging; got {cmds:?}");
+        assert!(
+            !has_staging,
+            "write-only graph must not produce FrameTableStaging; got {cmds:?}"
+        );
     }
 
     /// A graph whose dispatch node has actual resource_slots MUST receive a
@@ -2508,9 +2503,7 @@ mod tests {
         // Partition 1 starts with staging then barrier before its dispatches.
         assert!(matches!(parts[1].first(), Some(GpuCommand::FrameTableStaging { .. })));
         assert!(
-            parts[1]
-                .iter()
-                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            parts[1].iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "second partition must include a barrier"
         );
 
@@ -2519,14 +2512,16 @@ mod tests {
         // are per-partition-local and intentionally differ from the flat stream.
         fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
             cmds.iter()
-                .filter(|c| !matches!(c, GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }))
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }
+                    )
+                })
                 .collect()
         }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
-        assert_eq!(
-            strip_frame_table(&flat),
-            strip_frame_table(&flat_commands(&ir))
-        );
+        assert_eq!(strip_frame_table(&flat), strip_frame_table(&flat_commands(&ir)));
     }
 
     #[test]
@@ -2603,22 +2598,22 @@ mod tests {
         // Late partition includes a barrier after its frame-table staging prefix.
         assert!(matches!(parts[1].first(), Some(GpuCommand::FrameTableStaging { .. })));
         assert!(
-            parts[1]
-                .iter()
-                .any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
+            parts[1].iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
             "late partition must include a barrier"
         );
 
         fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
             cmds.iter()
-                .filter(|c| !matches!(c, GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }))
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }
+                    )
+                })
                 .collect()
         }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
-        assert_eq!(
-            strip_frame_table(&flat),
-            strip_frame_table(&flat_commands(&ir))
-        );
+        assert_eq!(strip_frame_table(&flat), strip_frame_table(&flat_commands(&ir)));
     }
 
     #[test]
@@ -2654,14 +2649,16 @@ mod tests {
         assert_eq!(parts.len(), 2);
         fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
             cmds.iter()
-                .filter(|c| !matches!(c, GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }))
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }
+                    )
+                })
                 .collect()
         }
         let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
-        assert_eq!(
-            strip_frame_table(&flat),
-            strip_frame_table(&flat_commands(&ir))
-        );
+        assert_eq!(strip_frame_table(&flat), strip_frame_table(&flat_commands(&ir)));
     }
 
     #[test]

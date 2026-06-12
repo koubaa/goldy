@@ -96,9 +96,8 @@ pub(super) fn record(
                          use frame_table::prepare_render_commands or lower_render_pass_commands"
                     );
                 }
-                let absolute_base = prologue_row.unwrap_or(0)
-                    * crate::frame_table::FRAME_TABLE_ROW_STRIDE
-                    + frame_table_base;
+                let absolute_base =
+                    prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
                 let mut layout = PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
                 let layout_bytes = layout.as_bytes();

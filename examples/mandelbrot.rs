@@ -25,6 +25,7 @@ struct Uniforms {
     zoom: f32,
     _padding: f32, // Align to 16 bytes
 }
+impl goldy::StructuredBufferElement for Uniforms {}
 
 struct App {
     instance: Instance,

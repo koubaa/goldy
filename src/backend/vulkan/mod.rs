@@ -676,14 +676,7 @@ impl GpuBackend for VulkanBackend {
             target,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
-                render_commands::record(
-                    cmd,
-                    cmds,
-                    logical_device,
-                    pipelines,
-                    buffers,
-                    current_pipeline,
-                )
+                render_commands::record(cmd, cmds, logical_device, pipelines, buffers, current_pipeline)
             },
         )
     }
@@ -772,14 +765,7 @@ impl GpuBackend for VulkanBackend {
             timeline_sem,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
-                render_commands::record(
-                    cmd,
-                    cmds,
-                    logical_device,
-                    pipelines,
-                    buffers,
-                    current_pipeline,
-                )
+                render_commands::record(cmd, cmds, logical_device, pipelines, buffers, current_pipeline)
             },
         )?;
         if let Some(tv) = self
