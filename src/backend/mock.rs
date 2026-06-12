@@ -52,6 +52,10 @@ pub struct MockBackend {
     pub samplers_created: usize,
     /// Count of compute dispatches performed
     pub compute_dispatch_count: usize,
+    /// Retained command lists keyed by `(ctx, retention_key)`.
+    retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
+    /// Count of zero-record resubmits served from `retained_graphs`.
+    pub retained_resubmit_count: usize,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
     pub wait_until_count: usize,
     /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
@@ -191,6 +195,8 @@ impl MockBackend {
             textures_created: 0,
             samplers_created: 0,
             compute_dispatch_count: 0,
+            retained_graphs: HashMap::new(),
+            retained_resubmit_count: 0,
             wait_until_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
@@ -1194,6 +1200,30 @@ impl GpuBackend for MockBackend {
             last_tv = self.submit_standalone(ctx, &batch)?;
         }
         Ok(last_tv)
+    }
+
+    fn submit_graph_and_retain(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+    ) -> Result<crate::timeline::TimelineValue> {
+        // One retained list per context: evict any prior entry for this context.
+        self.retained_graphs.retain(|(c, _), _| *c != ctx);
+        self.retained_graphs.insert((ctx, key), commands.to_vec());
+        self.submit_graph(ctx, commands)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        ctx: ContextHandle,
+        key: u64,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        let Some(commands) = self.retained_graphs.get(&(ctx, key)).cloned() else {
+            return Ok(None);
+        };
+        self.retained_resubmit_count += 1;
+        self.submit_graph(ctx, &commands).map(Some)
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {

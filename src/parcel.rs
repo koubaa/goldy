@@ -298,6 +298,32 @@ impl Parcel {
         self.bookkeeping = None;
     }
 
+    /// Attach fresh pool bookkeeping (transient-pool reuse path).
+    ///
+    /// Replaces any existing guard; used when a recycled parcel is re-issued and
+    /// must track bytes against a fresh outstanding counter.
+    pub(crate) fn attach_bookkeeping(&mut self, guard: BookkeepingGuard) {
+        self.bookkeeping = Some(guard);
+    }
+
+    /// Texture allocation descriptor, if this parcel holds a texture.
+    ///
+    /// Used by [`crate::transient_pool::TransientPool`] to key recycle bins.
+    pub(crate) fn texture_descriptor(
+        &self,
+    ) -> Option<(
+        u32,
+        u32,
+        crate::types::TextureFormat,
+        crate::types::TextureKind,
+        crate::types::TextureFlags,
+    )> {
+        match &self.storage {
+            ParcelStorage::Texture(t) => Some((t.width(), t.height(), t.format(), t.access(), t.flags())),
+            _ => None,
+        }
+    }
+
     /// Extract the backing buffer from a non-mosaic buffer parcel.
     ///
     /// Consumes the parcel and releases retained-pool bookkeeping. The returned

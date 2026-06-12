@@ -194,6 +194,214 @@ pub(crate) fn apply_stamp_targets(
     }
 }
 
+// ---- Free functions over GraphIR -------------------------------------------
+//
+// These are pure algorithms: they take GraphIR + backend data and produce a
+// result. They carry no TaskGraph dependency and are the actual logic shared
+// with Scheme via IrSubmitState.
+
+/// Compile a `GraphIR` to backend `GraphCommand`s.
+pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
+    let edges = analysis::build_edges(ir);
+    let schedule = analysis::schedule_waves(ir, &edges);
+    analysis::emit_graph_commands(ir, &schedule, None)
+}
+
+/// Fingerprint of the graph's *binding structure* (node count + per-node resource-access pairs).
+/// Suitable for schedule caching only — not for CB retention (does not cover pipeline/slots/dims).
+pub(crate) fn binding_fingerprint(ir: &GraphIR) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    ir.nodes.len().hash(&mut h);
+    for node in &ir.nodes {
+        node.bindings.len().hash(&mut h);
+        for b in &node.bindings {
+            b.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Fingerprint of all state that affects the *recorded* command buffer.
+///
+/// Hashes everything `binding_fingerprint` covers plus per-`Dispatch` node:
+/// pipeline handle, `resource_slots`, `user_slots`, and dispatch dimensions.
+/// Upload/copy nodes are excluded — graphs containing them fall back to a
+/// plain submit (their data is staged on every submission, not retained).
+pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    ir.nodes.len().hash(&mut h);
+    for node in &ir.nodes {
+        node.bindings.len().hash(&mut h);
+        for b in &node.bindings {
+            b.hash(&mut h);
+        }
+        match &node.kind {
+            NodeKind::Dispatch {
+                pipeline,
+                resource_slots,
+                user_slots,
+                dispatch,
+            } => {
+                0u8.hash(&mut h);
+                pipeline.hash(&mut h);
+                resource_slots.hash(&mut h);
+                user_slots.hash(&mut h);
+                match dispatch {
+                    DispatchDim::Direct { x, y, z } => {
+                        0u8.hash(&mut h);
+                        x.hash(&mut h);
+                        y.hash(&mut h);
+                        z.hash(&mut h);
+                    }
+                    DispatchDim::Indirect { buffer, offset } => {
+                        1u8.hash(&mut h);
+                        buffer.hash(&mut h);
+                        offset.hash(&mut h);
+                    }
+                }
+            }
+            NodeKind::ClearBuffer { buffer, offset, size } => {
+                1u8.hash(&mut h);
+                buffer.hash(&mut h);
+                offset.hash(&mut h);
+                size.hash(&mut h);
+            }
+            _ => {
+                2u8.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Submit `ir`, partitioned into wave groups.
+pub(crate) fn submit_resolved_ir(
+    cache: &mut Option<CompiledCacheEntry>,
+    context: &crate::Context,
+    backend: &mut dyn GpuBackend,
+    ir: &GraphIR,
+) -> Result<TimelineValue> {
+    let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
+
+    if has_render {
+        let g = compile_graph_commands_for_ir(ir);
+        return backend.submit_graph(context.backend_handle(), &g);
+    }
+
+    let fp = binding_fingerprint(ir);
+    let partitions = TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+    let mut last_tv = backend.gpu_progress(context.backend_handle());
+    for partition in partitions {
+        let _tz = crate::tracy_zone!("goldy.submit_partition");
+        last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
+    }
+    Ok(last_tv)
+}
+
+/// Submit `ir` to the backend and retain the closed command list for future resubmission.
+///
+/// The retention key is always derived from `retention_fingerprint` so it
+/// reflects every field that affects the recorded command buffer. Render-pass graphs
+/// and graphs containing upload nodes fall back to a plain submit (no retention).
+pub(crate) fn submit_resolved_ir_and_retain(
+    cache: &mut Option<CompiledCacheEntry>,
+    context: &crate::Context,
+    backend: &mut dyn GpuBackend,
+    ir: &GraphIR,
+) -> Result<TimelineValue> {
+    let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
+
+    if has_render {
+        let g = compile_graph_commands_for_ir(ir);
+        return backend.submit_graph(context.backend_handle(), &g);
+    }
+
+    let has_upload = ir.nodes.iter().any(|n| {
+        matches!(
+            n.kind,
+            NodeKind::WriteBuffer { .. }
+                | NodeKind::WriteTexture { .. }
+                | NodeKind::WriteTextureRegion { .. }
+                | NodeKind::CopyTexture { .. }
+                | NodeKind::CopyRenderTarget { .. }
+        )
+    });
+    let fp = binding_fingerprint(ir);
+    if has_upload {
+        let cmds = TaskGraph::get_or_build_compute_commands(cache, ir, fp);
+        return backend.submit_standalone(context.backend_handle(), cmds);
+    }
+
+    let key = retention_fingerprint(ir);
+    let cmds = TaskGraph::get_or_build_compute_commands(cache, ir, fp);
+    let graph_cmds: Vec<GraphCommand> = cmds.iter().cloned().map(GraphCommand::Compute).collect();
+    backend.submit_graph_and_retain(context.backend_handle(), &graph_cmds, key)
+}
+
+/// Schedule cache + parcel stamp targets for a retained [`GraphIR`] submission.
+///
+/// Shared by [`crate::Scheme`]; [`TaskGraph`] carries an equivalent bundle inline.
+pub(crate) struct IrSubmitState {
+    schedule_cache: Option<CompiledCacheEntry>,
+    stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
+}
+
+impl IrSubmitState {
+    pub fn new() -> Self {
+        Self {
+            schedule_cache: None,
+            stamp_targets: Vec::new(),
+        }
+    }
+
+    pub fn register_parcel_stamp(&mut self, parcel: &crate::Parcel) {
+        self.stamp_targets.push(parcel.stamp_handle());
+    }
+
+    pub fn apply_reference_stamps(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        submit_device: &std::sync::Arc<crate::device::DeviceInner>,
+        tv: TimelineValue,
+    ) {
+        apply_stamp_targets(&self.stamp_targets, ctx, submit_device, tv);
+    }
+
+    /// Record and retain the command list for `ir` on `ctx`.
+    pub fn submit_pipelined_and_retain(
+        &mut self,
+        ctx: &crate::Context,
+        ir: &GraphIR,
+    ) -> Result<TimelineValue> {
+        let mut backend = ctx.device().inner.backend.lock().unwrap();
+        submit_resolved_ir_and_retain(&mut self.schedule_cache, ctx, backend.as_mut(), ir)
+    }
+
+    /// Fingerprint of all state that affects the recorded command buffer.
+    pub fn retention_fingerprint(ir: &GraphIR) -> u64 {
+        retention_fingerprint(ir)
+    }
+
+    /// True when the backend can retain and resubmit `ir` without re-recording.
+    pub fn ir_can_retain(ir: &GraphIR) -> bool {
+        if ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. })) {
+            return false;
+        }
+        !ir.nodes.iter().any(|n| {
+            matches!(
+                n.kind,
+                NodeKind::WriteBuffer { .. }
+                    | NodeKind::WriteTexture { .. }
+                    | NodeKind::WriteTextureRegion { .. }
+                    | NodeKind::CopyTexture { .. }
+                    | NodeKind::CopyRenderTarget { .. }
+            )
+        })
+    }
+}
+
 /// Cache entry holding both the wave schedule and the emitted compute command stream.
 pub(crate) struct CompiledCacheEntry {
     fp: u64,
@@ -357,82 +565,11 @@ impl TaskGraph {
             "submit_with_backend: transient resources must go through submit_ir_with_resolver"
         );
 
-        let tv = Self::submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir)?;
+        let tv = submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir)?;
         if wait_for_transient_completion && self.needs_transient_gpu_wait() {
             backend.wait_until(context.backend_handle(), tv)?;
         }
         Ok(tv)
-    }
-
-    fn submit_resolved_ir(
-        cache: &mut Option<CompiledCacheEntry>,
-        context: &crate::Context,
-        backend: &mut dyn GpuBackend,
-        ir: &GraphIR,
-    ) -> Result<TimelineValue> {
-        let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
-
-        if has_render {
-            // Render-pass graphs: single submission (mixed compute+render CBs).
-            let g = Self::compile_graph_commands_for_ir(ir);
-            return backend.submit_graph(context.backend_handle(), &g);
-        }
-
-        // Compute-only: partition the wave schedule and submit each group.
-        // Early partitions are submitted immediately so the GPU can start
-        // executing coarse work while the CPU records the next partition.
-        // The last partition's timeline value is returned to the caller.
-        let fp = Self::binding_fingerprint(ir);
-        let partitions = Self::get_or_build_partitioned_commands(cache, ir, fp);
-        let mut last_tv = backend.gpu_progress(context.backend_handle());
-        for partition in partitions {
-            let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
-        }
-        Ok(last_tv)
-    }
-
-    /// Submit `ir` to the backend and retain the closed command list for future resubmission.
-    ///
-    /// The retention key is always derived from [`Self::retention_fingerprint`] so it
-    /// reflects every field that affects the recorded command buffer.  Render-pass graphs
-    /// and graphs containing upload nodes fall back to a plain submit (no retention).
-    fn submit_resolved_ir_and_retain(
-        cache: &mut Option<CompiledCacheEntry>,
-        context: &crate::Context,
-        backend: &mut dyn GpuBackend,
-        ir: &GraphIR,
-    ) -> Result<TimelineValue> {
-        let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
-
-        if has_render {
-            // Render-pass graphs cannot be retained (mixed command lists); fall back.
-            let g = Self::compile_graph_commands_for_ir(ir);
-            return backend.submit_graph(context.backend_handle(), &g);
-        }
-
-        let has_upload = ir.nodes.iter().any(|n| {
-            matches!(
-                n.kind,
-                NodeKind::WriteBuffer { .. }
-                    | NodeKind::WriteTexture { .. }
-                    | NodeKind::WriteTextureRegion { .. }
-                    | NodeKind::CopyTexture { .. }
-                    | NodeKind::CopyRenderTarget { .. }
-            )
-        });
-        let fp = Self::binding_fingerprint(ir);
-        if has_upload {
-            // Upload commands use staging memory that is not re-encodable; fall back.
-            let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
-            return backend.submit_standalone(context.backend_handle(), cmds);
-        }
-
-        // Derive the retention key from full CB content so it is always correct.
-        let key = Self::retention_fingerprint(ir);
-        let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
-        let graph_cmds: Vec<GraphCommand> = cmds.iter().cloned().map(GraphCommand::Compute).collect();
-        backend.submit_graph_and_retain(context.backend_handle(), &graph_cmds, key)
     }
 
     /// Like [`Self::submit_with_backend`] but retains the closed command list keyed by
@@ -448,9 +585,9 @@ impl TaskGraph {
     ) -> Result<TimelineValue> {
         // Only retain pure compute graphs (no transients, no render passes, no uploads).
         if self.has_transient_resources() {
-            return Self::submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir);
+            return submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir);
         }
-        Self::submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir)
+        submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -721,12 +858,6 @@ impl TaskGraph {
             .nodes
             .iter()
             .any(|n| n.bindings.iter().any(|b| b.resource == ResourceId::SwapchainOutput))
-    }
-
-    pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
-        let edges = analysis::build_edges(ir);
-        let schedule = analysis::schedule_waves(ir, &edges);
-        analysis::emit_graph_commands(ir, &schedule, None)
     }
 
     fn has_render_passes_in_ir(ir: &GraphIR) -> bool {
@@ -1152,16 +1283,7 @@ impl TaskGraph {
     /// bytes, dispatch dimensions) are intentionally excluded — the schedule depends
     /// only on which resources are read/written, not what values they carry.
     fn binding_fingerprint(ir: &GraphIR) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut h = DefaultHasher::new();
-        ir.nodes.len().hash(&mut h);
-        for node in &ir.nodes {
-            node.bindings.len().hash(&mut h);
-            for b in &node.bindings {
-                b.hash(&mut h);
-            }
-        }
-        h.finish()
+        binding_fingerprint(ir)
     }
 
     /// Compute a fingerprint of the transient spec set (buffers + textures).
@@ -1198,54 +1320,8 @@ impl TaskGraph {
         Self::retention_fingerprint(&self.ir)
     }
 
-    fn retention_fingerprint(ir: &GraphIR) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut h = DefaultHasher::new();
-        ir.nodes.len().hash(&mut h);
-        for node in &ir.nodes {
-            node.bindings.len().hash(&mut h);
-            for b in &node.bindings {
-                b.hash(&mut h);
-            }
-            match &node.kind {
-                NodeKind::Dispatch {
-                    pipeline,
-                    resource_slots,
-                    user_slots,
-                    dispatch,
-                } => {
-                    0u8.hash(&mut h);
-                    pipeline.hash(&mut h);
-                    resource_slots.hash(&mut h);
-                    user_slots.hash(&mut h);
-                    match dispatch {
-                        DispatchDim::Direct { x, y, z } => {
-                            0u8.hash(&mut h);
-                            x.hash(&mut h);
-                            y.hash(&mut h);
-                            z.hash(&mut h);
-                        }
-                        DispatchDim::Indirect { buffer, offset } => {
-                            1u8.hash(&mut h);
-                            buffer.hash(&mut h);
-                            offset.hash(&mut h);
-                        }
-                    }
-                }
-                NodeKind::ClearBuffer { buffer, offset, size } => {
-                    1u8.hash(&mut h);
-                    buffer.hash(&mut h);
-                    offset.hash(&mut h);
-                    size.hash(&mut h);
-                }
-                // Upload / copy nodes: excluded intentionally (data varies per frame;
-                // graphs containing these nodes are not eligible for retention).
-                _ => {
-                    2u8.hash(&mut h);
-                }
-            }
-        }
-        h.finish()
+    pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
+        retention_fingerprint(ir)
     }
 
     /// Return a reference to the compiled schedule for `ir`, using the cache when possible.

@@ -91,7 +91,7 @@ impl Context {
         self.inner.handle
     }
 
-    fn classify(&self, e: anyhow::Error) -> GoldyError {
+    pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
         if self.device().is_device_lost() {
             return GoldyError::DeviceLost;
         }

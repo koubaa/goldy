@@ -55,6 +55,8 @@ mod heap_tests;
 pub mod parcel;
 pub mod placement_heap;
 pub mod retained_pool;
+pub mod scheme;
+pub mod transient_pool;
 pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
@@ -65,6 +67,8 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
+pub use scheme::{ReplayStats, Scheme};
+pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
 
 // Re-export main types
