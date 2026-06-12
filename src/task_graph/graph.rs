@@ -360,6 +360,10 @@ impl IrSubmitState {
         self.stamp_targets.push(parcel.stamp_handle());
     }
 
+    pub fn register_stamp(&mut self, stamp: Arc<crate::parcel::ParcelStamp>) {
+        self.stamp_targets.push(stamp);
+    }
+
     pub fn apply_reference_stamps(
         &self,
         ctx: crate::backend::ContextHandle,

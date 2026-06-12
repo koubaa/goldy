@@ -8,6 +8,7 @@ use crate::device::Device;
 use crate::error::GoldyError;
 use crate::task_graph::TaskGraph;
 use crate::timeline::{is_ready, ReferenceTable, TimelineValue};
+use crate::transient_pool::TransientPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,8 @@ pub(crate) struct ContextInner {
     /// `BufferView`/`Texture` handles. Sharing a device-global heap across contexts
     /// caused GPU-level write-write races on the cached transient textures.
     pub(crate) placement_heap: Mutex<Option<crate::placement_heap::PlacementHeap>>,
+    /// Epoch-gated transient parcel pool backing scheme-held leases.
+    transient_pool: Mutex<TransientPool>,
 }
 
 impl Clone for Context {
@@ -57,6 +60,10 @@ impl Drop for ContextInner {
         if let Ok(mut heap_guard) = self.placement_heap.lock() {
             *heap_guard = None;
         }
+        // Drop the transient pool (and its parked parcels) while the device is alive.
+        if let Ok(mut pool_guard) = self.transient_pool.lock() {
+            *pool_guard = TransientPool::new();
+        }
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         let mut backend = self.device.inner.backend.lock().unwrap();
@@ -78,6 +85,7 @@ impl Context {
                 handle,
                 high_water_timeline: AtomicU64::new(0),
                 placement_heap: Mutex::new(None),
+                transient_pool: Mutex::new(TransientPool::new()),
             }),
         })
     }
@@ -89,6 +97,15 @@ impl Context {
 
     pub(crate) fn backend_handle(&self) -> ContextHandle {
         self.inner.handle
+    }
+
+    /// Run `f` with exclusive access to this context's transient parcel pool.
+    pub(crate) fn with_transient_pool<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut TransientPool) -> R,
+    {
+        let mut pool = self.inner.transient_pool.lock().unwrap();
+        f(&mut *pool)
     }
 
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
@@ -201,6 +218,16 @@ impl Context {
             backend.set_reclamation_context(self.inner.handle, Some(epoch));
             drop(backend);
             self.device().vram_allocator().boundary_crossed(retired);
+        }
+        {
+            let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
+            // `RetainedPool::release` parks parcels here for epoch-gated reuse (leases,
+            // future scheme-held transients). Until ekrano migrates off its own VRAM
+            // machinery (`ResourcePool`, `DeferredPayload` returns, pipeline cache) and
+            // acquires through the transient pool, those parked buffers are not re-issued
+            // — only dropped once `ready_after` retires. Without this drain at every frame
+            // boundary, `release` leaks GPU heap (velato: Metal buffer heaps exhausted).
+            self.with_transient_pool(|pool| pool.drain_ready(self));
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_post");

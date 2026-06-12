@@ -57,6 +57,7 @@ pub mod placement_heap;
 pub mod retained_pool;
 pub mod scheme;
 pub mod transient_pool;
+pub mod write_to_parcel;
 pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
@@ -67,8 +68,9 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
-pub use scheme::{ReplayStats, Scheme};
+pub use scheme::{Lease, LeaseTexture, ReplayStats, Scheme};
 pub use transient_pool::TransientPool;
+pub use write_to_parcel::{write_to_parcel, WriteToken};
 pub use vram_allocator::{DeferredPayload, ParcelType};
 
 // Re-export main types

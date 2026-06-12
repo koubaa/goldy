@@ -9,15 +9,33 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 //!
-//! Internally a scheme owns a [`GraphIR`] plus the replay engine (phase-1 item 1.1 of
-//! `docu/.../retained-scheme/project.md`). Estate handles (`Deed`, `Lease`, `Easement`) and
-//! `goldy::write_to_parcel` are phase-1 items 1.4–1.5, deferred.
+//! CPU uploads over deed parcels use [`crate::write_to_parcel`].
 
 use crate::context::Context;
 use crate::error::GoldyError;
+use crate::parcel::Parcel;
+use crate::retained_pool::StampedParcel;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::task_graph::IrSubmitState;
 use crate::timeline::TimelineValue;
+use crate::types::{TextureFlags, TextureFormat, TextureKind};
+use std::marker::PhantomData;
+
+/// Stable index of a scheme-held lease declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LeaseId(pub(crate) u32);
+
+/// Marker type for texture leases acquired via [`Scheme::lease_texture`].
+pub struct LeaseTexture;
+
+/// One-submission tenancy of pool property held by a [`Scheme`].
+///
+/// Leases have no cross-scheme identity; the scheme owns the N=1 backing parcel
+/// for the declaration's lifetime.
+pub struct Lease<T> {
+    pub(crate) id: LeaseId,
+    _marker: PhantomData<T>,
+}
 
 /// Outcome counters for [`Scheme::submit`] (retention-recovery assertions and telemetry).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,15 +52,14 @@ pub struct ReplayStats {
 ///
 /// Build the scheme's nodes once via [`Self::node`]; call [`Self::submit`] every frame.
 /// While clean, `submit` pays neither recording nor fingerprint-hashing cost.
-///
-/// **Estate API** (`Deed`, `Lease`, `Easement`) is phase-1.4 and not yet present; for now
-/// nodes declare parcel access via [`SchemeNodeBuilder::bind_parcel`].
 pub struct Scheme {
     ir: GraphIR,
     submit_state: IrSubmitState,
     /// Context this scheme submits on. Fixed at construction; many schemes per context,
     /// exactly one context per scheme.
     ctx: Context,
+    /// N=1 backing parcels for [`Lease`] declarations, indexed by [`LeaseId`].
+    leases: Vec<Parcel>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
     /// Retention key stored at record time. `None` when the backend cannot retain `ir`.
@@ -66,6 +83,7 @@ impl Scheme {
             ir: GraphIR::default(),
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
+            leases: Vec::new(),
             dirty: true,
             retention_key: None,
             last_submitted_tv: None,
@@ -81,6 +99,30 @@ impl Scheme {
     /// Submission outcome counters.
     pub fn replay_stats(&self) -> ReplayStats {
         self.stats
+    }
+
+    /// Declare a transient texture lease backed by the context's transient pool (N=1).
+    ///
+    /// The backing parcel is held until the scheme is dropped. Structural mutation.
+    pub fn lease_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<Lease<LeaseTexture>, GoldyError> {
+        self.dirty = true;
+        let backing = self
+            .ctx
+            .with_transient_pool(|pool| pool.acquire_texture(&self.ctx, width, height, format, access, flags))
+            .map_err(|e| self.ctx.classify(e))?;
+        let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
+        self.leases.push(backing);
+        Ok(Lease {
+            id,
+            _marker: PhantomData,
+        })
     }
 
     /// Declare a compute dispatch node, returning a builder for access declarations.
@@ -124,7 +166,8 @@ impl Scheme {
                     {
                         self.stats.resubmit_hits += 1;
                     }
-                    return Ok(tv);                }
+                    return Ok(tv);
+                }
             }
         }
 
@@ -151,6 +194,19 @@ impl Scheme {
     }
 }
 
+impl Drop for Scheme {
+    fn drop(&mut self) {
+        let ctx = self.ctx.clone();
+        for mut parcel in self.leases.drain(..) {
+            let ready_after = parcel.last_referenced();
+            parcel.release_bookkeeping();
+            ctx.with_transient_pool(|pool| {
+                pool.adopt(StampedParcel { parcel, ready_after });
+            });
+        }
+    }
+}
+
 /// Builder for a single compute dispatch node within a [`Scheme`].
 pub struct SchemeNodeBuilder<'a> {
     scheme: &'a mut Scheme,
@@ -162,13 +218,33 @@ pub struct SchemeNodeBuilder<'a> {
 }
 
 impl<'a> SchemeNodeBuilder<'a> {
-    /// Declare that this node accesses a retained [`crate::Parcel`].
+    /// Declare that this node accesses a retained [`crate::Parcel`] deed.
     pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
         self.scheme.submit_state.register_parcel_stamp(parcel);
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
         });
+        self
+    }
+
+    /// Declare that this node reads a scheme-held [`Lease`].
+    pub fn reads_lease(self, lease: &Lease<LeaseTexture>) -> Self {
+        self.bind_lease(lease, NodeAccess::Read)
+    }
+
+    /// Declare that this node writes a scheme-held [`Lease`].
+    pub fn writes_lease(self, lease: &Lease<LeaseTexture>) -> Self {
+        self.bind_lease(lease, NodeAccess::Write)
+    }
+
+    fn bind_lease(mut self, lease: &Lease<LeaseTexture>, access: NodeAccess) -> Self {
+        let idx = lease.id.0 as usize;
+        let backing = &self.scheme.leases[idx];
+        let resource = backing.resource_id();
+        let stamp = backing.stamp_handle();
+        self.scheme.submit_state.register_stamp(stamp);
+        self.bindings.push(ResourceBinding { resource, access });
         self
     }
 
@@ -199,10 +275,10 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::compute::ComputePipeline;
     use crate::device::Device;
-    use crate::parcel::Parcel;
     use crate::retained_pool::RetainedPool;
     use crate::shader::ShaderModule;
     use crate::task_graph::NodeAccess;
+    use crate::types::ResourceAccess;
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -220,6 +296,23 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
 "#,
         )
         .expect("compile shader")
+    }
+
+    fn mock_texture_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(
+            device,
+            r#"
+import goldy_exp;
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(DirectSpatial<float4> dst, ThreadId id) {
+    if (id.x == 0 && id.y == 0) {
+        dst[uint2(0, 0)] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#,
+        )
+        .expect("compile texture shader")
     }
 
     fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
@@ -253,6 +346,33 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
         #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
         scheme
+    }
+
+    fn leased_texture_scheme(device: &Arc<Device>) -> (Scheme, Lease<LeaseTexture>) {
+        let ctx = device.create_context().unwrap();
+        let shader = mock_texture_shader(device);
+        let pipeline = mock_pipeline(device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+        let lease = scheme
+            .lease_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::DirectInterpolated,
+                TextureFlags::empty(),
+            )
+            .expect("lease texture");
+        let handle = scheme.leases[0]
+            .handle(ResourceAccess::Write)
+            .expect("lease handle");
+        scheme
+            .node("write_tex", &pipeline)
+            .writes_lease(&lease)
+            .bind_resources_typed(&[handle])
+            .dispatch(1, 1, 1);
+
+        (scheme, lease)
     }
 
     #[test]
@@ -329,6 +449,75 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
             parcel.last_referenced_on(ctx.backend_handle()),
             Some(tv2),
             "resubmit path must also stamp parcel references"
+        );
+    }
+
+    #[test]
+    fn lease_texture_records_once_resubmits_clean() {
+        let device = mock_device();
+        let (mut scheme, _lease) = leased_texture_scheme(&device);
+
+        scheme.submit().expect("first submit records");
+        scheme.submit().expect("second submit resubmits");
+        scheme.submit().expect("third submit resubmits");
+
+        assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(scheme.replay_stats().resubmit_hits, 2, "remaining submits are retention hits");
+    }
+
+    #[test]
+    fn lease_backing_stamped_per_submit() {
+        let device = mock_device();
+        let (mut scheme, _lease) = leased_texture_scheme(&device);
+        let ctx = scheme.ctx.clone();
+
+        let tv1 = scheme.submit().unwrap();
+        assert_eq!(scheme.leases[0].last_referenced_on(ctx.backend_handle()), Some(tv1));
+
+        let tv2 = scheme.submit().unwrap();
+        assert!(tv2 >= tv1);
+        assert_eq!(
+            scheme.leases[0].last_referenced_on(ctx.backend_handle()),
+            Some(tv2),
+            "lease backing must be stamped on resubmit"
+        );
+    }
+
+    #[test]
+    fn lease_backing_recycled_on_scheme_drop() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let outstanding_before = ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture);
+
+        {
+            let mut scheme = Scheme::new(&ctx);
+            let lease = scheme
+                .lease_texture(
+                    4,
+                    4,
+                    TextureFormat::Rgba8Unorm,
+                    TextureKind::Interpolated,
+                    TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
+                )
+                .expect("lease");
+            assert!(
+                ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture > outstanding_before),
+                "leased backing counts as pool outstanding"
+            );
+            drop(lease);
+            drop(scheme);
+        }
+
+        assert_eq!(
+            ctx.with_transient_pool(|pool| pool.outstanding_bytes().texture),
+            outstanding_before,
+            "outstanding drops when scheme releases lease backings"
+        );
+        assert_eq!(
+            ctx.with_transient_pool(|pool| pool.pending_count()),
+            1,
+            "dropped lease backing is parked in the pool"
         );
     }
 }

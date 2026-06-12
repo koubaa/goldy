@@ -18,8 +18,8 @@
 mod submission;
 
 use goldy::{
-    types::ResourceAccess, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TaskGraph,
+    types::ResourceAccess, write_to_parcel, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
+    NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -81,13 +81,9 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
 
     const FRAMES: u32 = 3;
     for frame in 1..=FRAMES {
-        // Separate upload submission per frame: the property-only-dispatch pattern
-        // that `goldy::write_to_parcel` will package.
-        let mut upload = TaskGraph::new();
-        upload
-            .write_parcel(&input, 0, bytemuck::cast_slice(&[frame; 8]).to_vec())
-            .expect("write_parcel");
-        ctx.submit_pipelined(&mut upload).expect("submit upload");
+        // Separate upload submission per frame via the property-only-dispatch API.
+        write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[frame; 8]))
+            .expect("write_to_parcel");
 
         let tv = worker.submit().expect("submit worker");
         ctx.wait_until(tv).expect("wait");

@@ -147,24 +147,13 @@ impl RetainedPool {
         }
     }
 
-    /// Release a held parcel. The runtime reclaims GPU memory when safe; callers
-    /// do not observe timeline tokens.
-    pub fn release(&mut self, ctx: &Context, parcel: Parcel) {
-        drop(self.transfer_out(ctx, parcel));
-    }
-
     /// Release a held parcel into the context transient pool for epoch-gated reuse.
-    ///
-    /// **Temporary seam:** callers pass an explicit pool because the pool is
-    /// not yet on [`Context`]. When leases land, this becomes
-    /// [`Self::release`](Self::release) routing into *the* pool automatically and
-    /// `release_into` is removed.
-    pub fn release_into(&mut self, ctx: &Context, parcel: Parcel, pool: &mut crate::transient_pool::TransientPool) {
+    pub fn release(&mut self, ctx: &Context, parcel: Parcel) {
         let stamped = self.transfer_out(ctx, parcel);
-        pool.adopt(stamped);
+        ctx.with_transient_pool(|pool| pool.adopt(stamped));
     }
 
-    /// Internal release path. Returns stamped metadata for the future transient seam;
+    /// Internal release path. Returns stamped metadata for the transient pool;
     /// public clients should call [`Self::release`] instead.
     pub(crate) fn transfer_out(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
         if let Some(home) = parcel.home_device().upgrade() {

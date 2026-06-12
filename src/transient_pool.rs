@@ -11,7 +11,6 @@
 //! [`crate::Context::parcel_ready`].
 
 use crate::context::Context;
-use crate::device::Device;
 use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping};
 use crate::retained_pool::StampedParcel;
 use crate::timeline::ReferenceTable;
@@ -45,7 +44,6 @@ struct PendingEntry {
 /// - **outstanding** — handed out to clients and not yet returned
 ///   ([`Self::outstanding_bytes`]).
 pub struct TransientPool {
-    device: Arc<Device>,
     /// Bytes parked in recycle bins.
     pending: Arc<PoolBookkeeping>,
     /// Bytes held by clients through this pool (guard-decremented on drop).
@@ -56,10 +54,9 @@ pub struct TransientPool {
 }
 
 impl TransientPool {
-    /// Create a pool tied to `device`.
-    pub fn new(device: Arc<Device>) -> Self {
+    /// Create an empty transient pool.
+    pub fn new() -> Self {
         Self {
-            device,
             pending: Arc::new(PoolBookkeeping::new()),
             outstanding: Arc::new(PoolBookkeeping::new()),
             texture_bins: HashMap::new(),
@@ -107,14 +104,14 @@ impl TransientPool {
             }
         }
 
-        let tex = self
-            .device
+        let tex = ctx
+            .device()
             .alloc_texture(width, height, format, access, flags)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let bytes = tex.byte_size() as u64;
         self.outstanding.add(ParcelType::Texture, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Texture, bytes);
-        Ok(Parcel::from_texture(tex, guard, Arc::downgrade(&self.device.inner)))
+        Ok(Parcel::from_texture(tex, guard, Arc::downgrade(&ctx.device().inner)))
     }
 
     /// Return a parcel acquired from this pool (crate-internal; superseded by leases).
@@ -212,6 +209,7 @@ impl TransientPool {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
+    use crate::device::Device;
     use crate::retained_pool::RetainedPool;
 
     fn test_device() -> Arc<Device> {
@@ -230,7 +228,7 @@ mod tests {
     fn acquire_allocates_fresh_when_empty() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = TransientPool::new(device);
+        let mut pool = TransientPool::new();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(&ctx, 32, 32, fmt, acc, flags).unwrap();
         assert_eq!(p.kind(), ParcelType::Texture);
@@ -243,7 +241,7 @@ mod tests {
     fn recycle_then_acquire_reuses_same_texture_when_ready() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = TransientPool::new(device);
+        let mut pool = TransientPool::new();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(&ctx, 16, 16, fmt, acc, flags).unwrap();
         let handle_before = p.texture_handle().unwrap();
@@ -269,7 +267,7 @@ mod tests {
     fn unretired_epoch_blocks_reuse() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = TransientPool::new(device);
+        let mut pool = TransientPool::new();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(&ctx, 16, 16, fmt, acc, flags).unwrap();
         let handle_before = p.texture_handle().unwrap();
@@ -295,7 +293,7 @@ mod tests {
     fn descriptor_mismatch_blocks_reuse() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = TransientPool::new(device);
+        let mut pool = TransientPool::new();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(&ctx, 16, 16, fmt, acc, flags).unwrap();
         let handle_before = p.texture_handle().unwrap();
@@ -312,20 +310,21 @@ mod tests {
         let device = test_device();
         let ctx = device.create_context().unwrap();
         let mut retained = RetainedPool::new(device.clone());
-        let mut transient = TransientPool::new(device);
         let (fmt, acc, flags) = rgba_interpolated();
         let p = retained.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
         let handle_before = p.texture_handle().unwrap();
 
-        retained.release_into(&ctx, p, &mut transient);
+        retained.release(&ctx, p);
         assert_eq!(
             retained.bytes_by_kind().texture,
             0,
             "retained accounting drops at handoff"
         );
-        assert_eq!(transient.pending_count(), 1);
+        assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1);
 
-        let p2 = transient.acquire_texture(&ctx, 8, 8, fmt, acc, flags).unwrap();
+        let p2 = ctx
+            .with_transient_pool(|transient| transient.acquire_texture(&ctx, 8, 8, fmt, acc, flags))
+            .unwrap();
         assert_eq!(p2.texture_handle(), Some(handle_before), "adopted parcel is reusable");
     }
 
@@ -334,7 +333,6 @@ mod tests {
         let device = test_device();
         let ctx = device.create_context().unwrap();
         let mut retained = RetainedPool::new(device.clone());
-        let mut transient = TransientPool::new(device);
         let p = retained
             .acquire_buffer(
                 64,
@@ -344,22 +342,22 @@ mod tests {
                 None,
             )
             .unwrap();
-        retained.release_into(&ctx, p, &mut transient);
-        assert_eq!(transient.pending_count(), 1);
-        assert!(transient.pending_bytes().buffer >= 64);
+        retained.release(&ctx, p);
+        assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1);
+        assert!(ctx.with_transient_pool(|t| t.pending_bytes().buffer >= 64));
 
         // Ready (unreferenced) → drain drops it.
-        let released = transient.drain_ready(&ctx);
+        let released = ctx.with_transient_pool(|t| t.drain_ready(&ctx));
         assert_eq!(released, 1);
-        assert_eq!(transient.pending_count(), 0);
-        assert_eq!(transient.pending_bytes().buffer, 0);
+        assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 0);
+        assert_eq!(ctx.with_transient_pool(|t| t.pending_bytes().buffer), 0);
     }
 
     #[test]
     fn drain_ready_keeps_unretired_entries() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = TransientPool::new(device);
+        let mut pool = TransientPool::new();
         let (fmt, acc, flags) = rgba_interpolated();
 
         let ready = pool.acquire_texture(&ctx, 16, 16, fmt, acc, flags).unwrap();
@@ -379,7 +377,7 @@ mod tests {
     fn dropping_outstanding_parcel_decrements_accounting() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
-        let mut pool = TransientPool::new(device);
+        let mut pool = TransientPool::new();
         let (fmt, acc, flags) = rgba_interpolated();
         let p = pool.acquire_texture(&ctx, 16, 16, fmt, acc, flags).unwrap();
         assert!(pool.outstanding_bytes().texture > 0);
