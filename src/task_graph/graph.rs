@@ -1063,9 +1063,24 @@ impl TaskGraph {
 
     /// Reset the graph to empty while retaining all heap allocations for reuse.
     ///
-    /// Equivalent to `*self = TaskGraph::new()` but avoids freeing and
-    /// re-allocating the internal `Vec` buffers. Call this after submitting the
-    /// graph to reuse its capacity for the next frame's recording pass.
+    /// ## DEPRECATION PLANNED (retained-scheme design §2) — and a misnomer
+    ///
+    /// This is **not** a collection clear. A caller of `clear()` on "a data structure
+    /// containing nodes" expects it to resize to zero nodes; this method additionally
+    /// performs an end-of-frame *ritual*: it snapshots transient shapes for telemetry,
+    /// resets the slot-identity counters (the `TransientId(N)` = "N-th declaration"
+    /// contract below), drops parcel stamp targets, and invalidates the retention key.
+    /// None of that is predictable from the name, and its existence teaches the
+    /// `clear()`+rebuild-per-frame anti-pattern that defeats retained submission
+    /// (every frame pays full record cost; nothing can resubmit).
+    ///
+    /// The `#[deprecated]` attribute lands once `Scheme` exists as the migration
+    /// target (deprecating with no alternative would strand clients). `Scheme` has no
+    /// equivalent: structural change is a re-record tier, per-submission data enters
+    /// via `goldy::write_to_parcel` / upload windows, and a fresh graph is a fresh
+    /// object. Call sites to migrate: ekrano's frame loop, examples,
+    /// `FrameOrchestrator::flush`. See
+    /// `docu/development/projects/diwan/in-progress/retained-scheme/design.md`.
     ///
     /// ## Slot identity reset
     ///
@@ -1839,6 +1854,7 @@ impl<'a> RenderPassBuilder<'a> {
         self.commands.push(RenderCommand::BindResourcesRaw {
             indices: indices.to_vec(),
             user: Vec::new(),
+            frame_table_base: 0,
         });
         self
     }
@@ -2057,8 +2073,8 @@ mod tests {
         assert!(
             render_cmds
                 .iter()
-                .any(|c| matches!(c, RenderCommand::BindResourcesTyped { .. })),
-            "set_pipeline should emit BindResourcesTyped from bind_shader_resources"
+                .any(|c| matches!(c, RenderCommand::BindResourcesRaw { .. })),
+            "set_pipeline should emit lowered BindResourcesRaw from bind_shader_resources"
         );
         let set_pipe = render_cmds
             .iter()
@@ -2066,9 +2082,9 @@ mod tests {
             .expect("SetPipeline");
         let bind = render_cmds
             .iter()
-            .position(|c| matches!(c, RenderCommand::BindResourcesTyped { .. }))
-            .expect("BindResourcesTyped");
-        assert!(set_pipe < bind, "D3D12 requires SetPipeline before BindResourcesTyped");
+            .position(|c| matches!(c, RenderCommand::BindResourcesRaw { .. }))
+            .expect("BindResourcesRaw");
+        assert!(set_pipe < bind, "D3D12 requires SetPipeline before BindResourcesRaw");
     }
 
     #[test]
@@ -2293,17 +2309,18 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
-        // Wave 0: SetPipeline, BindResourcesRaw, Dispatch
+        // FrameTableStaging + wave 0: SetPipeline, BindResourcesRaw, Dispatch
         // ResourceBarrier
         // Wave 1: SetPipeline, BindResourcesRaw, Dispatch
-        assert_eq!(cmds.len(), 7);
-        assert!(matches!(cmds[0], GpuCommand::SetPipeline(_)));
-        assert!(matches!(cmds[1], GpuCommand::BindResourcesRaw { .. }));
-        assert!(matches!(cmds[2], GpuCommand::Dispatch { workgroups_x: 8, .. }));
-        assert!(matches!(cmds[3], GpuCommand::ResourceBarrier { .. }));
-        assert!(matches!(cmds[4], GpuCommand::SetPipeline(_)));
-        assert!(matches!(cmds[5], GpuCommand::BindResourcesRaw { .. }));
-        assert!(matches!(cmds[6], GpuCommand::Dispatch { workgroups_x: 4, .. }));
+        assert_eq!(cmds.len(), 8);
+        assert!(matches!(cmds[0], GpuCommand::FrameTableStaging { .. }));
+        assert!(matches!(cmds[1], GpuCommand::SetPipeline(_)));
+        assert!(matches!(cmds[2], GpuCommand::BindResourcesRaw { .. }));
+        assert!(matches!(cmds[3], GpuCommand::Dispatch { workgroups_x: 8, .. }));
+        assert!(matches!(cmds[4], GpuCommand::ResourceBarrier { .. }));
+        assert!(matches!(cmds[5], GpuCommand::SetPipeline(_)));
+        assert!(matches!(cmds[6], GpuCommand::BindResourcesRaw { .. }));
+        assert!(matches!(cmds[7], GpuCommand::Dispatch { workgroups_x: 4, .. }));
     }
 
     #[test]
@@ -2456,6 +2473,7 @@ mod tests {
         let cmds = graph.compile_commands();
 
         // ClearBuffer, ResourceBarrier, SetPipeline, Dispatch
+        // No staging: dispatch has no bindless resource_slots (barrier-only bindings).
         assert_eq!(cmds.len(), 4);
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
         assert!(matches!(cmds[1], GpuCommand::ResourceBarrier { .. }));
@@ -2504,6 +2522,7 @@ mod tests {
 
         let cmds = graph.compile_commands();
 
+        // No staging (dispatch uses bind_buffer for barrier-tracking only, no bindless slots).
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(
             cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
@@ -2556,6 +2575,7 @@ mod tests {
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
+        // No staging (dispatch uses bind_texture for barrier-tracking only, no bindless slots).
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
         assert!(
             cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
@@ -2922,7 +2942,8 @@ mod tests {
             .count();
         assert_eq!(barrier_count, 1, "expected exactly one barrier (clear → views)");
 
-        // ClearBuffer is the first command
+        // ClearBuffer first, then dispatches with one barrier.
+        // No staging (dispatches use bind_buffer_view for barrier-tracking only).
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
 
         // Two dispatches present
@@ -2952,6 +2973,7 @@ mod tests {
                 .count(),
             1
         );
+        // No staging (dispatch uses bind_buffer_view for barrier-tracking only).
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
     }
 
@@ -3171,6 +3193,7 @@ mod tests {
             .dispatch(1, 1, 1);
         let tv1 = graph.submit(&ctx).unwrap();
 
+        // TODO(retained-graph): clear()+rebuild identical nodes — anti-pattern; see `TaskGraph::clear`.
         graph.clear();
         graph
             .node("work", &pipeline)

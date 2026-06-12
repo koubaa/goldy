@@ -83,36 +83,13 @@ impl PushLayout {
 // Push-layout fill helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Fill region A of `layout` from an iterator of raw bindless indices.
-///
-/// Indices beyond [`MAX_BINDLESS_SLOTS`] are silently dropped.
+/// Fill push layout for frame-table routing: indices live in the staging/table;
+/// `_reserved[0]` carries the dispatch base offset within the row.
 #[inline]
-pub fn fill_bindless(layout: &mut PushLayout, indices: impl IntoIterator<Item = u32>) {
-    for (i, idx) in indices.into_iter().enumerate().take(MAX_BINDLESS_SLOTS) {
-        layout.bindless[i] = idx as u16;
-    }
-}
-
-/// Fill regions A and B of `layout` from raw index and user-value slices.
-///
-/// Values beyond the respective slot counts are silently dropped.
-#[inline]
-pub fn fill_raw(layout: &mut PushLayout, indices: &[u32], user: &[u32]) {
-    for (i, &idx) in indices.iter().enumerate().take(MAX_BINDLESS_SLOTS) {
-        layout.bindless[i] = idx as u16;
-    }
+pub fn fill_frame_table_dispatch(layout: &mut PushLayout, dispatch_base: u32, user: &[u32]) {
+    layout._reserved[crate::frame_table::dispatch_table_base_word_index()] = dispatch_base;
     for (i, &val) in user.iter().enumerate().take(MAX_USER_SLOTS) {
         layout.user[i] = val;
-    }
-}
-
-/// Fill region A of `layout` from an iterator of typed [`ResourceHandle`]s.
-///
-/// Handles beyond [`MAX_BINDLESS_SLOTS`] are silently dropped.
-#[inline]
-pub fn fill_typed(layout: &mut PushLayout, handles: impl IntoIterator<Item = crate::types::ResourceHandle>) {
-    for (i, h) in handles.into_iter().enumerate().take(MAX_BINDLESS_SLOTS) {
-        layout.bindless[i] = h.index() as u16;
     }
 }
 
@@ -184,12 +161,18 @@ impl SlotAllocator {
     }
 
     /// The next fresh slot that would be minted if the free list were empty.
-    ///
-    /// See [`Self::free_count`].
     #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
     #[inline]
     pub fn next_fresh(&self) -> u32 {
         self.next
+    }
+
+    /// Ensure the next allocated slot is at least `min` (reserves low indices).
+    #[inline]
+    pub fn ensure_minimum_next(&mut self, min: u32) {
+        if self.next < min {
+            self.next = min;
+        }
     }
 }
 

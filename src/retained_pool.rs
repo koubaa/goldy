@@ -409,6 +409,8 @@ mod tests {
         assert_eq!(parcel.view(b).size(), 16);
     }
 
+    /// TODO(goldy#210): asserts via the public `resource_index`; move to the
+    /// crate-internal accessor when #210 lands.
     #[test]
     fn mosaic_emplace_uploads_and_reserve_leaves_space() {
         let mut pool = RetainedPool::new(test_device());
@@ -456,6 +458,8 @@ mod tests {
         assert_eq!(parcel.last_referenced_on(h), Some(20));
     }
 
+    /// `TaskGraph::write_parcel` is the runtime-internal realization of the planned
+    /// `parcel.write` (retained-graph proposal §3.6); these tests cover the mechanism.
     #[test]
     fn write_parcel_on_buffer_parcel_succeeds() {
         let device = test_device();
@@ -498,6 +502,8 @@ mod tests {
         assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
     }
 
+    /// TODO(goldy#210): exercises the *public* `resource_index`, which should be
+    /// internal. When #210 lands this test asserts the crate-internal accessor instead.
     #[test]
     fn resource_index_read_on_scattered_buffer_parcel() {
         let mut pool = RetainedPool::new(test_device());

@@ -35,12 +35,85 @@ fn emit_goldy_cache_version(slang_semver_label: Option<&str>) {
     println!("cargo:rustc-env=GOLDY_CACHE_VERSION=v{pkg}-slang{sl}");
 }
 
+/// FNV-1a 64-bit hash (mirrors the implementation in `shader_cache.rs`).
+///
+/// Kept as a free function in build.rs so it has no external dependencies.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 14695981039346656037;
+    const PRIME: u64 = 1099511628211;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// Hash all `*.slang` files under `shaders/goldy_exp/` (sorted by path for stability)
+/// and emit `GOLDY_EXP_HASH` as a 16-character lowercase hex string.
+///
+/// Algorithm must stay in sync with [`hash_goldy_exp_sources`] in `shader_cache.rs`
+/// (verified by `goldy_exp_hash_matches_built_constant`).
+///
+/// Each file path is also registered with `cargo:rerun-if-changed` so that any
+/// edit to a goldy_exp source triggers a rebuild and a new hash.
+fn emit_goldy_exp_hash(manifest_dir: &Path) {
+    let lib_dir = manifest_dir.join("shaders").join("goldy_exp");
+
+    // Collect and sort paths for a deterministic hash order.
+    let mut files: Vec<PathBuf> = match fs::read_dir(&lib_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("slang"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    files.sort();
+
+    let mut combined: u64 = fnv1a_64(b"goldy_exp_v1"); // schema seed
+    for path in &files {
+        // Register with cargo so any edit triggers a rebuild.
+        println!("cargo:rerun-if-changed={}", path.display());
+
+        let contents = match fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("cargo:warning=goldy_exp hash: cannot read {}: {e}", path.display());
+                continue;
+            }
+        };
+        // Mix in the filename (not the full path — only the filename is stable
+        // across machines / checkout locations) and then the file contents.
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        combined = fnv1a_64_mix(combined, name.as_bytes());
+        combined = fnv1a_64_mix(combined, &contents);
+    }
+
+    println!("cargo:rustc-env=GOLDY_EXP_HASH={combined:016x}");
+}
+
+/// Mix additional bytes into an existing FNV-1a state (chain hash).
+fn fnv1a_64_mix(mut h: u64, bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 1099511628211;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=GOLDY_SLANG_PATH");
     println!("cargo:rerun-if-changed=slang/manifest.json");
 
-    // Load manifest
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+
+    // Hash goldy_exp shader library sources so that edits to access.slang etc.
+    // invalidate per-entry shader cache keys (see compile_cache_key in shader_cache.rs).
+    emit_goldy_exp_hash(&manifest_dir);
+
+    // Load manifest
     let manifest_path = manifest_dir.join("slang").join("manifest.json");
 
     let manifest = match load_manifest(&manifest_path) {

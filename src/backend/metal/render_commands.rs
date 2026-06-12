@@ -18,16 +18,15 @@ pub(super) fn record(
     commands: &[RenderCommand],
     pipelines: &HashMap<PipelineHandle, PipelineState>,
     buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    prologue_row: Option<u32>,
 ) -> Result<()> {
     let mut current_index_buffer: Option<(BufferHandle, u64, IndexFormat)> = None;
     let mut current_primitive_type = MTLPrimitiveType::Triangle;
-    let mut current_pipeline_handle: Option<PipelineHandle> = None;
 
     for cmd in commands {
         match cmd {
             RenderCommand::Clear(_) | RenderCommand::ClearDepth(_) => {}
             RenderCommand::SetPipeline(pipeline_handle) => {
-                current_pipeline_handle = Some(*pipeline_handle);
                 if let Some(pipeline) = pipelines.get(pipeline_handle) {
                     encoder.set_render_pipeline_state(&pipeline.pipeline);
                     current_primitive_type = pipeline.primitive_type;
@@ -49,47 +48,27 @@ pub(super) fn record(
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 current_index_buffer = Some((*buffer, *offset, *format));
             }
-            RenderCommand::BindResources { buffers: buf_handles } => {
-                if crate::slang::layout_validation_enabled() {
-                    if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h)) {
-                        if !pipeline.binding_element_strides.is_empty() {
-                            let actual: Vec<Option<u32>> = buf_handles
-                                .iter()
-                                .map(|h| buffers.get(h).and_then(|b| b.element_stride))
-                                .collect();
-                            crate::backend::validate_binding_strides(
-                                &actual,
-                                &pipeline.binding_element_strides,
-                                &pipeline.shader_debug_name,
-                            )?;
-                        }
-                    }
-                }
-                let mut layout = PushLayout::default();
-                shared::fill_bindless(
-                    &mut layout,
-                    buf_handles
-                        .iter()
-                        .map(|h| buffers.get(h).map(|b| b.arg_buffer_index).unwrap_or(0)),
-                );
-                let layout_bytes = layout.as_bytes();
-                encoder.set_vertex_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
-                encoder.set_fragment_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
+            RenderCommand::BindResources { .. } => {
+                anyhow::bail!(
+                    "RenderCommand::BindResources must be lowered before Metal record; \
+                     use frame_table::prepare_render_commands or lower_render_pass_commands"
                 );
             }
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
+                frame_table_base,
             } => {
+                if !raw_indices.is_empty() {
+                    anyhow::bail!(
+                        "BindResourcesRaw with indices in frame-table path: \
+                         use frame_table::prepare_render_commands or lower_render_pass_commands"
+                    );
+                }
+                let absolute_base =
+                    prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
                 let mut layout = PushLayout::default();
-                shared::fill_raw(&mut layout, raw_indices, raw_user);
+                shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
                 let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
@@ -102,26 +81,10 @@ pub(super) fn record(
                     layout_bytes.as_ptr() as *const _,
                 );
             }
-            RenderCommand::BindResourcesTyped { handles: typed_handles } => {
-                if let Some(pipeline) = current_pipeline_handle.and_then(|h| pipelines.get(&h)) {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                }
-                let mut layout = PushLayout::default();
-                shared::fill_typed(&mut layout, typed_handles.iter().copied());
-                let layout_bytes = layout.as_bytes();
-                encoder.set_vertex_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
-                );
-                encoder.set_fragment_bytes(
-                    RESOURCE_SLOT_BUFFER,
-                    layout_bytes.len() as u64,
-                    layout_bytes.as_ptr() as *const _,
+            RenderCommand::BindResourcesTyped { .. } => {
+                anyhow::bail!(
+                    "BindResourcesTyped in frame-table path: \
+                     use frame_table::lower_render_pass_commands or prepare_render_commands"
                 );
             }
             RenderCommand::Draw {

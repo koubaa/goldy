@@ -1804,6 +1804,7 @@ mod tests {
             RenderCommand::BindResourcesRaw {
                 indices: vec![0, 1, 2, 3],
                 user: vec![],
+                frame_table_base: 0,
             },
         ];
 
@@ -1838,6 +1839,7 @@ mod tests {
             GpuCommand::BindResourcesRaw {
                 indices: vec![idx1, idx2],
                 user: Vec::new(),
+                frame_table_base: 0,
             },
             GpuCommand::Dispatch {
                 label: None,

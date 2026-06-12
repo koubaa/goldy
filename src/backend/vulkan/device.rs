@@ -461,6 +461,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     );
 
     tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
+    let ld = state.devices.get(&handle).unwrap().clone();
+    let instance = state.instance.clone();
+    super::frame_table::init_device(state, &instance, handle, &ld)?;
     Ok(handle)
 }
 
@@ -536,6 +539,8 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     sc.texture_staging_pool.destroy_all(&logical_device);
                 }
             }
+
+            super::frame_table::destroy_device(state, device_handle, &logical_device);
 
             // Destroy buffers owned by this device
             let buffer_handles: Vec<_> = state

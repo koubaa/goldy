@@ -9,6 +9,7 @@
 //! Both native (Vulkan) and web (WebGPU) examples import this shared code,
 //! ensuring identical rendering across platforms.
 
+use crate::buffer::StructuredBufferElement;
 use crate::types::{Color, VertexBufferLayout, VertexFormat};
 use bytemuck::{Pod, Zeroable};
 
@@ -47,6 +48,7 @@ pub struct ClockVertex {
     pub position: [f32; 2],
     pub color: [f32; 4],
 }
+impl StructuredBufferElement for ClockVertex {}
 
 impl ClockVertex {
     pub const fn new(x: f32, y: f32, color: Color) -> Self {

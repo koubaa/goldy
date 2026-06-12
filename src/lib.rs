@@ -21,6 +21,7 @@ pub mod device;
 pub mod error;
 pub mod examples;
 pub mod frame_orchestrator;
+pub mod frame_table;
 pub mod pipeline;
 pub mod render_target;
 pub mod sampler;

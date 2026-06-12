@@ -94,6 +94,9 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
 
     let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder) = create_argument_encoders(&device);
 
+    let frame_table =
+        super::frame_table::MetalFrameTable::init(device.as_ref(), argument_buffer.as_ref(), argument_encoder.as_ref());
+
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
@@ -104,26 +107,27 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         device.name(),
     );
 
-    state.devices.insert(
-        handle,
-        Arc::new(LogicalDevice {
-            device,
-            command_queue,
-            heap_allocator: Mutex::new(heap_allocator),
-            texture_heap: Mutex::new(texture_heap),
-            argument_buffer,
-            argument_encoder,
-            texture_encoder,
-            storage_image_encoder,
-            sampler_encoder,
-            ledger: Arc::new(Mutex::new(DeviceLedger::new())),
-            timeline_next: Arc::new(AtomicU64::new(1)),
-            timeline_scheduled_max: AtomicU64::new(0),
-            retired_floor: AtomicU64::new(0),
-            deletion_queue: Mutex::new(DeletionQueue::new()),
-            queue_lock: Arc::new(Mutex::new(())),
-        }),
-    );
+    let ld = Arc::new(LogicalDevice {
+        device,
+        command_queue,
+        heap_allocator: Mutex::new(heap_allocator),
+        texture_heap: Mutex::new(texture_heap),
+        argument_buffer,
+        argument_encoder,
+        texture_encoder,
+        storage_image_encoder,
+        sampler_encoder,
+        frame_table: Mutex::new(frame_table),
+        ledger: Arc::new(Mutex::new(DeviceLedger::new())),
+        timeline_next: Arc::new(AtomicU64::new(1)),
+        timeline_scheduled_max: AtomicU64::new(0),
+        retired_floor: AtomicU64::new(0),
+        deletion_queue: Mutex::new(DeletionQueue::new()),
+        queue_lock: Arc::new(Mutex::new(())),
+    });
+
+    super::frame_table::init_device(ld.as_ref());
+    state.devices.insert(handle, ld);
 
     Ok(handle)
 }

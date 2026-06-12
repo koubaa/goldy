@@ -693,6 +693,8 @@ pub(crate) struct LogicalDevice {
     /// Its `encoded_length()` is the authoritative per-slot stride for the sampler
     /// category; never hardcode 8 when encoding sampler offsets.
     pub sampler_encoder: ArgumentEncoder,
+    /// Frame-table selector + device table (arg slots 0–1) and N-frame ring guard.
+    pub frame_table: Mutex<super::frame_table::MetalFrameTable>,
     /// Registry tracking resource indices in the argument buffer
     pub ledger: Arc<Mutex<DeviceLedger>>,
     /// Device-global submission sequence (contexts signal their own shared events).
@@ -815,6 +817,11 @@ impl ResourceRegistry {
     /// `goldy_buf_ro<T>(slot)` would then read undefined / zero bytes
     /// from a wrong heap entry — observed in ekrano as binning's
     /// `config.lines_size == 0` and a spurious `STAGE_FLATTEN` overflow.
+    /// Reserve low storage-buffer slots (frame-table selector + device table).
+    pub fn ensure_storage_start(&mut self, min: u32) {
+        self.storage_buffer.ensure_minimum_next(min);
+    }
+
     /// Failing fast surfaces the leak instead of producing corrupt frames.
     pub fn register_storage_buffer(&mut self, handle: BufferHandle) -> u32 {
         assert!(
@@ -1143,8 +1150,6 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
-    /// Per push-constant slot category expectations from shader analysis.
-    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.

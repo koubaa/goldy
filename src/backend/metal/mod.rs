@@ -15,6 +15,7 @@ mod buffer;
 mod compute;
 mod context;
 mod device;
+mod frame_table;
 mod pipeline;
 mod render_commands;
 mod render_target;
@@ -1003,6 +1004,28 @@ mod tests {
              sampler stride={}",
             smp_enc.encoded_length()
         );
+    }
+
+    #[test]
+    fn test_frame_table_reserves_storage_slots_zero_and_one() {
+        let mut backend = MetalBackend::new().unwrap();
+        let device = backend.create_device(0).unwrap();
+        let buffer = backend
+            .create_buffer(
+                device,
+                64,
+                BufferKind::Scattered,
+                None,
+                crate::types::BufferFlags::empty(),
+            )
+            .unwrap();
+        assert_eq!(
+            backend.buffer_bindless_index(buffer),
+            Some(crate::frame_table::FRAME_TABLE_USER_SLOT_BASE),
+            "first user scattered buffer must start at slot 2 (selector+table reserved)"
+        );
+        backend.destroy_buffer(buffer);
+        backend.destroy_device(device);
     }
 
     #[test]

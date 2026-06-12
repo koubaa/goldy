@@ -65,44 +65,20 @@ pub(super) fn record(
                     }
                 }
             }
-            RenderCommand::BindResources { buffers: buf_handles } => {
-                if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
-                    if crate::slang::layout_validation_enabled() && !pipeline.binding_element_strides.is_empty() {
-                        let actual: Vec<Option<u32>> = buf_handles
-                            .iter()
-                            .map(|h| buffers.get(h).and_then(|b| b.element_stride))
-                            .collect();
-                        crate::backend::validate_binding_strides(
-                            &actual,
-                            &pipeline.binding_element_strides,
-                            &pipeline.shader_debug_name,
-                        )?;
-                    }
-                    let mut layout = PushLayout::default();
-                    shared::fill_bindless(
-                        &mut layout,
-                        buf_handles
-                            .iter()
-                            .map(|h| buffers.get(h).and_then(|b| b.bindless_index).unwrap_or(0)),
-                    );
-                    unsafe {
-                        logical_device.device.cmd_push_constants(
-                            cmd,
-                            pipeline.layout,
-                            vk::ShaderStageFlags::ALL,
-                            0,
-                            layout.as_bytes(),
-                        );
-                    }
-                }
+            RenderCommand::BindResources { .. } => {
+                anyhow::bail!(
+                    "RenderCommand::BindResources must be lowered before Vulkan record; \
+                     use frame_table::prepare_render_commands or lower_render_pass_commands"
+                );
             }
             RenderCommand::BindResourcesRaw {
-                indices: raw_indices,
+                indices: _raw_indices,
                 user: raw_user,
+                frame_table_base,
             } => {
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
-                    shared::fill_raw(&mut layout, raw_indices, raw_user);
+                    shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                     unsafe {
                         logical_device.device.cmd_push_constants(
                             cmd,
@@ -121,18 +97,11 @@ pub(super) fn record(
                         &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
                     )?;
-                    let mut layout = PushLayout::default();
-                    shared::fill_typed(&mut layout, typed_handles.iter().copied());
-                    unsafe {
-                        logical_device.device.cmd_push_constants(
-                            cmd,
-                            pipeline.layout,
-                            vk::ShaderStageFlags::ALL,
-                            0,
-                            layout.as_bytes(),
-                        );
-                    }
                 }
+                anyhow::bail!(
+                    "RenderCommand::BindResourcesTyped must be lowered before Vulkan record; \
+                     use frame_table::lower_render_pass_commands or prepare_render_commands"
+                );
             }
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
                 if let Some(buf_state) = buffers.get(buffer) {

@@ -547,6 +547,8 @@ pub(super) fn submit(
     ctx: super::ContextHandle,
     commands: &[GpuCommand],
 ) -> Result<TimelineValue> {
+    let mut commands = commands.to_vec();
+    crate::frame_table::lower_gpu_commands(&mut commands);
     let device_handle = state
         .contexts
         .get(&ctx)
@@ -602,7 +604,7 @@ pub(super) fn submit(
     // Pre-pass: stage CPU data for WriteBuffer commands (needs mutable belt
     // access before we borrow state immutably for the command loop).
     if has_write_buffer {
-        for command in commands {
+        for command in &commands {
             if let GpuCommand::WriteBuffer {
                 buffer: buf_handle,
                 offset,
@@ -698,7 +700,7 @@ pub(super) fn submit(
     let buffers = &state.buffers;
 
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
-    for command in commands {
+    for command in &commands {
         match command {
             GpuCommand::WriteTexture {
                 texture,
@@ -750,7 +752,7 @@ pub(super) fn submit(
         }
     }
 
-    let (dispatch_count, dispatch_labels) = collect_dispatch_labels_compute(commands);
+    let (dispatch_count, dispatch_labels) = collect_dispatch_labels_compute(&commands);
     let vk_gpu_profile = unsafe {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         create_vulkan_gpu_profile_pool(ld, false, dispatch_count, dispatch_labels)?
@@ -779,7 +781,11 @@ pub(super) fn submit(
         // memory visibility is not.
         unsafe {
             let acquire = vk::MemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER
+                        | vk::PipelineStageFlags2::TRANSFER
+                        | vk::PipelineStageFlags2::ALL_GRAPHICS,
+                )
                 .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
                 .dst_stage_mask(
                     vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -827,8 +833,11 @@ pub(super) fn submit(
         let mut texture_upload_idx = 0usize;
 
         // Process commands (same logic as dispatch)
-        for command in commands {
+        for command in &commands {
             match command {
+                GpuCommand::FrameTableStaging { data } => {
+                    super::frame_table::record_prologue(state, device_handle, logical_device, cmd, data)?;
+                }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
                     if let Some(pipeline_state) = compute_pipelines.get(handle) {
@@ -845,6 +854,7 @@ pub(super) fn submit(
                 GpuCommand::BindResourcesRaw {
                     indices: raw_indices,
                     user: raw_user,
+                    frame_table_base,
                 } => {
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         crate::backend::validate_raw_binding_strides(
@@ -855,7 +865,7 @@ pub(super) fn submit(
                             &pipeline.shader_debug_name,
                         )?;
                         let mut layout = PushLayout::default();
-                        shared::fill_raw(&mut layout, raw_indices, raw_user);
+                        shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,
@@ -874,18 +884,11 @@ pub(super) fn submit(
                             &pipeline.push_constant_categories,
                             &pipeline.shader_debug_name,
                         )?;
-                        let mut layout = PushLayout::default();
-                        shared::fill_typed(&mut layout, typed_handles.iter().copied());
-                        unsafe {
-                            logical_device.device.cmd_push_constants(
-                                cmd,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::ALL,
-                                0,
-                                layout.as_bytes(),
-                            );
-                        }
                     }
+                    anyhow::bail!(
+                        "GpuCommand::BindResourcesTyped must be lowered before Vulkan submit; \
+                         call frame_table::lower_gpu_commands first"
+                    );
                 }
                 GpuCommand::Dispatch {
                     label: _label,
@@ -1305,7 +1308,7 @@ pub(super) fn submit(
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
-    let used_slots = collect_slot_keys_from_gpu_commands(commands, &state.compute_pipelines, &state.buffers);
+    let used_slots = collect_slot_keys_from_gpu_commands(&commands, &state.compute_pipelines, &state.buffers);
     if let Some(ld) = state.devices.get(&device_handle) {
         ld.ledger
             .lock()
@@ -1634,7 +1637,11 @@ fn submit_graph_impl(
     // Cross-submission acquire: make prior submit's writes visible.
     unsafe {
         let acquire = vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+            .src_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER
+                    | vk::PipelineStageFlags2::TRANSFER
+                    | vk::PipelineStageFlags2::ALL_GRAPHICS,
+            )
             .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(
                 vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -1683,10 +1690,15 @@ fn submit_graph_impl(
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
+    let mut frame_table_prologue_in_cb = false;
 
     for graph_cmd in commands {
         match graph_cmd {
             GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
+                GpuCommand::FrameTableStaging { data } => {
+                    frame_table_prologue_in_cb = true;
+                    super::frame_table::record_prologue(state, device_handle, logical_device, cmd, data)?;
+                }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
                     if let Some(pipeline_state) = compute_pipelines.get(handle) {
@@ -1703,6 +1715,7 @@ fn submit_graph_impl(
                 GpuCommand::BindResourcesRaw {
                     indices: raw_indices,
                     user: raw_user,
+                    frame_table_base,
                 } => {
                     if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
                         crate::backend::validate_raw_binding_strides(
@@ -1713,7 +1726,7 @@ fn submit_graph_impl(
                             &pipeline.shader_debug_name,
                         )?;
                         let mut layout = PushLayout::default();
-                        shared::fill_raw(&mut layout, raw_indices, raw_user);
+                        shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,
@@ -1732,18 +1745,11 @@ fn submit_graph_impl(
                             &pipeline.push_constant_categories,
                             &pipeline.shader_debug_name,
                         )?;
-                        let mut layout = PushLayout::default();
-                        shared::fill_typed(&mut layout, typed_handles.iter().copied());
-                        unsafe {
-                            logical_device.device.cmd_push_constants(
-                                cmd,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::ALL,
-                                0,
-                                layout.as_bytes(),
-                            );
-                        }
                     }
+                    anyhow::bail!(
+                        "GpuCommand::BindResourcesTyped must be lowered before Vulkan graph submit; \
+                         call frame_table::lower_gpu_commands first"
+                    );
                 }
                 GpuCommand::Dispatch {
                     label: _label,
@@ -2121,18 +2127,36 @@ fn submit_graph_impl(
                     logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
                 }
 
+                let (staging_data, lowered, has_render_bindings) =
+                    super::frame_table::prepare_render_commands(buffers, &state.pipelines, render_cmds)?;
+                if has_render_bindings {
+                    if frame_table_prologue_in_cb {
+                        let graph_staging = super::frame_table::extract_staging_from_graph(commands)
+                            .map(|data| data.to_vec())
+                            .unwrap_or_else(|| vec![0u32; crate::frame_table::FRAME_TABLE_TABLE_U32S]);
+                        let sync_data =
+                            super::frame_table::merge_staging_for_render_sync(&graph_staging, &staging_data);
+                        super::frame_table::sync_table_row_to_device(
+                            state,
+                            device_handle,
+                            logical_device,
+                            cmd,
+                            &sync_data,
+                        )?;
+                    } else {
+                        super::frame_table::record_prologue(state, device_handle, logical_device, cmd, &staging_data)?;
+                    }
+                }
+
                 let pipelines = &state.pipelines;
-                let rt_buffers = &state.buffers;
                 super::render_target::record_render_pass_to_buffer(
                     &state.devices,
                     &state.render_targets,
                     device_handle,
                     *target,
-                    render_cmds,
+                    &lowered,
                     cmd,
-                    |cb, cmds, ld, cur_pipe| {
-                        super::render_commands::record(cb, cmds, ld, pipelines, rt_buffers, cur_pipe)
-                    },
+                    |cb, cmds, ld, cur_pipe| super::render_commands::record(cb, cmds, ld, pipelines, buffers, cur_pipe),
                 )?;
 
                 rendered_targets.push(*target);
@@ -2233,6 +2257,21 @@ fn submit_graph_impl(
         .command_buffer_infos(std::slice::from_ref(&cmd_info))
         .signal_semaphore_infos(std::slice::from_ref(&signal_info));
 
+    let retain_plan = if let Some(key) = retain_key {
+        let frame_table_row = super::frame_table::extract_staging_from_graph(commands).and_then(|_| {
+            state
+                .frame_tables
+                .get(&device_handle)
+                .and_then(super::frame_table::last_prologue_row)
+        });
+        if let (Some(ft), Some(row)) = (state.frame_tables.get(&device_handle), frame_table_row) {
+            super::frame_table::pin_row(ft, row)?;
+        }
+        Some((key, frame_table_row))
+    } else {
+        None
+    };
+
     let queue_submit_result = {
         let _tz = tracy_zone!("vk.queue_submit2");
         let _queue_guard = queue_lock.lock().unwrap();
@@ -2258,6 +2297,11 @@ fn submit_graph_impl(
                 submit_device.device.destroy_query_pool(prof.pool, None);
             }
         }
+        if let Some((_, Some(row))) = retain_plan {
+            if let Some(ft) = state.frame_tables.get(&device_handle) {
+                super::frame_table::unpin_row(ft, row);
+            }
+        }
         return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
 
@@ -2265,11 +2309,12 @@ fn submit_graph_impl(
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
-        if let Some(key) = retain_key {
+        if let Some((key, frame_table_row)) = retain_plan {
             sc.retained_compute_cb = Some(super::types::RetainedVkCb {
                 fingerprint: key,
                 command_buffer: cmd,
                 used_slots,
+                frame_table_row,
             });
         } else {
             sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
@@ -2456,6 +2501,12 @@ pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::Cont
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_compute_cb.take() {
+            if let Some(row) = old.frame_table_row {
+                let device = sc.device;
+                if let Some(ft) = state.frame_tables.get(&device) {
+                    super::frame_table::unpin_row(ft, row);
+                }
+            }
             sc.free_cmd_buffers.push(old.command_buffer);
         }
     }

@@ -842,6 +842,9 @@ pub(super) fn frame_texture(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render<F>(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    buffers: &HashMap<super::BufferHandle, types::BufferState>,
+    pipelines: &HashMap<super::PipelineHandle, types::PipelineState>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
@@ -914,6 +917,9 @@ where
         })
         .unwrap_or(1.0);
 
+    let (staging_data, lowered, has_bindings) =
+        super::frame_table::prepare_render_commands(buffers, pipelines, commands)?;
+
     {
         let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
 
@@ -945,6 +951,17 @@ where
                 .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ);
             let dep_info = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+        }
+
+        if has_bindings {
+            super::frame_table::record_prologue_for_tables(
+                frame_tables,
+                buffers,
+                device_handle,
+                logical_device,
+                cmd,
+                &staging_data,
+            )?;
         }
 
         // Transition image to color attachment. The image is in `GENERAL` layout at this
@@ -1070,7 +1087,7 @@ where
         let mut current_pipeline: Option<PipelineHandle> = None;
 
         // Execute render commands using provided callback
-        record_commands_fn(cmd, commands, logical_device, &mut current_pipeline)?;
+        record_commands_fn(cmd, &lowered, logical_device, &mut current_pipeline)?;
 
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };

@@ -1,11 +1,20 @@
 ## Compatibility
-Legacy compatibility is not relevant before the 0.2 release. Make
-breaking changes as required for clean code and update all clients
-locally in the workspace.
+
+Legacy compatibility is not relevant before the 0.2 release. Make breaking changes as required for clean code and update all clients locally in the workspace.
 
 ## Development
 
-After completing any task, run the /precommit command
+useful precommit commands:
+
+`cargo fmt --all -- --check`
+`cargo clippy -- -D warnings`
+`cargo clippy --no-default-features -- -D warnings`
+`cargo check`
+`RUSTDOCFLAGS='-D warnings' cargo doc --no-deps`
+
+## Running tests
+
+`GOLDY_VALIDATION=all cargo test`
 
 ## Running examples
 

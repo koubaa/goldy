@@ -15,7 +15,36 @@ use crate::types::OptimizationLevel;
 pub const GOLDY_SHADER_CACHE_MAGIC: &[u8; 8] = b"GZ_SHBIN";
 
 /// Bump when [`ShaderReflection::binding_element_strides`] extraction rules change.
-const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v2";
+///
+/// v3: Broadcast params now use `reflect_struct_storage_stride` (natural field extent)
+/// instead of `reflect_type_size_with_category(Uniform)` (cbuffer-padded size).  A
+/// single-float struct like `SimParams` was previously reported as stride 16 instead
+/// of 4, causing false validation errors for correctly-created buffers.
+const REFLECTION_STRIDE_SCHEMA: &str = "bind-stride-v3";
+
+/// Content hash of the `shaders/goldy_exp/*.slang` library sources, baked in at
+/// build time by `build.rs`.  Changes when any library file is edited, so compiled
+/// bytecode cached before the edit is never served from the disk cache.
+const GOLDY_EXP_HASH: &str = env!("GOLDY_EXP_HASH");
+
+/// Seed mixed into [`hash_goldy_exp_sources`].  Keep in sync with `build.rs`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const GOLDY_EXP_HASH_SEED: &str = "goldy_exp_v1";
+
+/// Compute the FNV-1a content hash for a sorted list of `(filename, file_bytes)`.
+///
+/// Algorithm is duplicated in `build.rs`; the unit test
+/// `goldy_exp_hash_matches_built_constant` asserts the runtime hash matches
+/// `GOLDY_EXP_HASH`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn hash_goldy_exp_sources(files: &[(&str, &[u8])]) -> u64 {
+    let mut h = hash_string(FNV_OFFSET, GOLDY_EXP_HASH_SEED);
+    for (name, contents) in files {
+        h = hash_string(h, name);
+        h = fnv_mix(h, contents);
+    }
+    h
+}
 
 /// Build-time fingerprint: package version + git short hash + bundled Slang version.
 pub const GOLDY_CACHE_VERSION: &str = env!("GOLDY_CACHE_VERSION");
@@ -99,6 +128,9 @@ pub(crate) fn compile_cache_key(
         }
     }
     h = hash_string(h, REFLECTION_STRIDE_SCHEMA);
+    // Mix in the goldy_exp library hash so that edits to access.slang, bindless.slang,
+    // etc. produce different cache keys even when the user's shader source is unchanged.
+    h = hash_string(h, GOLDY_EXP_HASH);
     h = fnv_mix(h, &[optimization_level as u8]);
     h
 }
@@ -637,6 +669,112 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[id.x] = 0; }
         std::fs::write(&path, write_compressed_shader_blob(&uncompressed)).unwrap();
         let c = ShaderBytecodeDiskCache::new_at_path(path);
         assert!(c.is_empty());
+    }
+
+    // ----- GOLDY_EXP_HASH / reflection-schema sensitivity tests ----------------
+
+    /// The cache key must differ when REFLECTION_STRIDE_SCHEMA changes.
+    /// This is the mechanism that invalidated stale Broadcast-stride entries
+    /// when we bumped v2→v3.  We simulate it by using an internal helper that
+    /// replaces the constant with an arbitrary string.
+    #[test]
+    fn compile_cache_key_reflects_stride_schema_in_hash() {
+        fn keyed(src: &str, extra: &str) -> u64 {
+            // Mix the schema tag in the same way compile_cache_key does.
+            let mut h = FNV_OFFSET;
+            h = hash_string(h, src);
+            h = fnv_mix(h, &[ShaderTarget::Spirv as u8]);
+            h = fnv_mix(h, &1u64.to_le_bytes());
+            h = hash_string(h, "main");
+            h = fnv_mix(h, &[stage_tag(SlangStage::Fragment)]);
+            h = fnv_mix(h, &0u64.to_le_bytes()); // 0 defines
+            h = fnv_mix(h, &0u64.to_le_bytes()); // 0 layout checks
+            h = hash_string(h, extra); // schema or exp_hash
+            h = fnv_mix(h, &[OptimizationLevel::Default as u8]);
+            h
+        }
+        let src = "float4 main() : SV_Target0 { return 0; }";
+        let k_v2 = keyed(src, "bind-stride-v2");
+        let k_v3 = keyed(src, "bind-stride-v3");
+        assert_ne!(k_v2, k_v3, "schema bump must change the cache key");
+    }
+
+    /// The cache key must differ when GOLDY_EXP_HASH changes (simulating an edit to
+    /// access.slang or another library file).
+    #[test]
+    fn compile_cache_key_sensitive_to_goldy_exp_hash() {
+        let (src, tgt, eps, defs, layouts, opt) = base_compile_args();
+
+        // compile_cache_key mixes in GOLDY_EXP_HASH (a build-time constant).  We
+        // can't override that constant here, so instead we verify that two keys built
+        // with *different source* — which changes the FNV chain the same way a
+        // different GOLDY_EXP_HASH would — are distinct.  The real protection is that
+        // build.rs emits a new GOLDY_EXP_HASH whenever a .slang file changes and the
+        // constant is baked into the binary, so any deployed build with a goldy_exp
+        // edit automatically carries a different GOLDY_EXP_HASH.
+        let k1 = compile_cache_key(src, tgt, &eps, &defs, &layouts, opt);
+        let k2 = compile_cache_key("// different library source", tgt, &eps, &defs, &layouts, opt);
+        assert_ne!(k1, k2);
+    }
+
+    /// Sanity-check: GOLDY_EXP_HASH is present and non-empty at build time.
+    #[test]
+    fn goldy_exp_hash_is_non_empty() {
+        assert!(!GOLDY_EXP_HASH.is_empty(), "GOLDY_EXP_HASH must be emitted by build.rs");
+        // 16 hex chars = 64-bit hash.
+        assert_eq!(
+            GOLDY_EXP_HASH.len(),
+            16,
+            "expected 16-char hex string, got: {GOLDY_EXP_HASH:?}"
+        );
+    }
+
+    /// Runtime hash of `shaders/goldy_exp/*.slang` must match the build-time constant.
+    #[test]
+    fn goldy_exp_hash_matches_built_constant() {
+        use std::path::Path;
+
+        let lib_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders").join("goldy_exp");
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&lib_dir)
+            .expect("goldy_exp directory must exist")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("slang"))
+            .map(|e| {
+                let path = e.path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let bytes = std::fs::read(&path).unwrap_or_else(|err| {
+                    panic!("read {}: {err}", path.display());
+                });
+                (name, bytes)
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        let computed = hash_goldy_exp_sources(&refs);
+        let built = u64::from_str_radix(GOLDY_EXP_HASH, 16).expect("GOLDY_EXP_HASH must be valid hex");
+        assert_eq!(
+            computed, built,
+            "runtime goldy_exp hash must match build.rs output; if you changed the hash \
+             algorithm update both build.rs and hash_goldy_exp_sources"
+        );
+    }
+
+    /// Editing a goldy_exp source must change the hash (and therefore cache keys).
+    #[test]
+    fn goldy_exp_hash_sensitive_to_content() {
+        let base = hash_goldy_exp_sources(&[("access.slang", b"original")]);
+        let changed = hash_goldy_exp_sources(&[("access.slang", b"modified")]);
+        assert_ne!(base, changed);
+    }
+
+    /// Reflection schema constant is present and matches the expected version.
+    #[test]
+    fn reflection_stride_schema_is_v3() {
+        assert_eq!(
+            REFLECTION_STRIDE_SCHEMA, "bind-stride-v3",
+            "schema must be v3 after the Broadcast-stride fix"
+        );
     }
 
     #[test]

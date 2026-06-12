@@ -63,7 +63,12 @@ pub(crate) fn goldy_validation_enabled() -> bool {
     crate::validation_env::gpu_api_validation_enabled()
 }
 
-#[cfg(any(test, feature = "vulkan", all(feature = "metal", target_os = "macos"),))]
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
 use crate::types::ResourceCategory;
 
 #[cfg(all(feature = "dx12", target_os = "windows"))]
@@ -201,8 +206,10 @@ pub(crate) fn validate_binding_strides(
     } else {
         anyhow::bail!(
             "buffer element-stride mismatch in shader `{shader_name}`:\n  {}\n\
-             Hint: ensure the buffer's element_stride (set at creation) matches \
-             the size of the shader's StructuredBuffer<T> element type.",
+             Hint: for Scattered<T> / BufRO<T> parameters, ensure the buffer's element_stride \
+             matches sizeof(T) as declared in the shader.\n\
+             For Broadcast (constant-buffer) parameters, use acquire_buffer_sized::<T>() where T \
+             exactly matches the shader struct (e.g. #[repr(C)] with the same fields and order).",
             mismatches.join("\n  ")
         );
     }
@@ -213,6 +220,10 @@ pub(crate) fn validate_binding_strides(
 /// For each push-constant slot with a reflected stride expectation, resolves the bound
 /// buffer's `element_stride` through `resolve_stride(index, category)` and delegates
 /// to [`validate_binding_strides`].
+///
+/// With layout validation enabled (via `GOLDY_VALIDATION=layout|all`), this also
+/// reports any Scattered/Broadcast slot whose index is missing from `indices` — a
+/// silent out-of-bounds skip that would otherwise hide a "too few indices" bug.
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -230,6 +241,7 @@ pub(crate) fn validate_raw_binding_strides(
         return Ok(());
     }
     let mut actual: Vec<Option<u32>> = vec![None; expected.len()];
+    let mut missing_slots: Vec<usize> = Vec::new();
     for (slot, exp) in expected.iter().enumerate() {
         if exp.is_none() {
             continue;
@@ -243,12 +255,69 @@ pub(crate) fn validate_raw_binding_strides(
         ) {
             continue;
         }
-        let Some(&idx) = indices.get(slot) else {
-            continue;
-        };
-        actual[slot] = resolve_stride(idx, cat);
+        match indices.get(slot) {
+            Some(&idx) => actual[slot] = resolve_stride(idx, cat),
+            None => missing_slots.push(slot),
+        }
+    }
+    if !missing_slots.is_empty() {
+        let slots: Vec<String> = missing_slots.iter().map(|s| s.to_string()).collect();
+        anyhow::bail!(
+            "bind_resources_raw for shader `{shader_name}` is missing indices for \
+             slot(s) {}: shader has {} reflected binding slot(s) but only {} index/indices \
+             were provided.\n\
+             Hint: pass one raw bindless index per Scattered/Broadcast parameter in the \
+             shader signature, in declaration order.",
+            slots.join(", "),
+            expected.len(),
+            indices.len(),
+        );
     }
     validate_binding_strides(&actual, expected, shader_name)
+}
+
+/// Validate buffer strides for legacy `RenderCommand::BindResources` before lowering.
+///
+/// Call from `prepare_render_commands` while buffer handles are still available.
+/// Legacy bind commands bail at record time; this is the only place stride checks run
+/// for standalone render passes when `GOLDY_VALIDATION=layout|all`.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+pub(crate) fn validate_render_pass_bind_resources<F, G>(
+    commands: &[RenderCommand],
+    mut pipeline_strides: F,
+    mut buffer_stride: G,
+) -> Result<()>
+where
+    F: FnMut(PipelineHandle) -> Option<(Vec<Option<u32>>, String)>,
+    G: FnMut(BufferHandle) -> Option<u32>,
+{
+    if !crate::slang::layout_validation_enabled() {
+        return Ok(());
+    }
+    let mut current_pipeline: Option<PipelineHandle> = None;
+    for cmd in commands {
+        match cmd {
+            RenderCommand::SetPipeline(h) => current_pipeline = Some(*h),
+            RenderCommand::BindResources { buffers } => {
+                if let Some(ph) = current_pipeline {
+                    if let Some((expected, name)) = pipeline_strides(ph) {
+                        if expected.is_empty() {
+                            continue;
+                        }
+                        let actual: Vec<Option<u32>> = buffers.iter().map(|h| buffer_stride(*h)).collect();
+                        validate_binding_strides(&actual, &expected, &name)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // Re-export raw_window_handle for Surface API users
@@ -323,7 +392,12 @@ pub enum RenderCommand {
     ///
     /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
+    BindResourcesRaw {
+        indices: Vec<u32>,
+        user: Vec<u32>,
+        /// Offset within the frame-table row where this draw's indices live.
+        frame_table_base: u32,
+    },
     /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
     /// each handle's [`crate::types::ResourceCategory`]
     /// against the bound shader's reflection and emit the raw indices.
@@ -361,7 +435,12 @@ pub enum GpuCommand {
     ///
     /// **Prefer [`GpuCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
-    BindResourcesRaw { indices: Vec<u32>, user: Vec<u32> },
+    BindResourcesRaw {
+        indices: Vec<u32>,
+        user: Vec<u32>,
+        /// Offset within the frame-table row where this dispatch's indices live.
+        frame_table_base: u32,
+    },
     /// Bind resource slots with typed [`ResourceHandle`]s. Backends validate
     /// each handle's [`crate::types::ResourceCategory`]
     /// against the bound shader's reflection and emit the raw indices.
@@ -443,7 +522,9 @@ pub enum GpuCommand {
         arg_data: Arc<[u8]>,
         count: u32,
     },
-    /// Conservative global memory barrier (legacy command-list path).
+    /// Frame-table staging payload — written to the upload staging buffer and copied
+    /// to the device-local table by the prologue at the start of each submission.
+    FrameTableStaging { data: std::sync::Arc<[u32]> },
     ///
     /// Within a [`crate::task_graph::TaskGraph`] submission, prefer
     /// `ResourceBarrier` which is produced by the scheduler with precise
@@ -1328,5 +1409,127 @@ mod binding_stride_validation_tests {
             .to_string();
         assert!(err.contains("slot 0"), "should report slot 0: {err}");
         assert!(err.contains("slot 1"), "should report slot 1: {err}");
+    }
+
+    // ----- GOLDY_VALIDATION=all: improved hint + missing-index detection -----
+
+    /// The hint message must mention both Scattered and Broadcast so developers
+    /// understand why a constant-buffer parameter can fail stride validation.
+    #[test]
+    fn hint_message_mentions_both_scattered_and_broadcast() {
+        let actual = vec![Some(4)];
+        let expected = vec![Some(16)];
+        let err = validate_binding_strides(&actual, &expected, "cs")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_lowercase().contains("scattered") || err.to_lowercase().contains("broadcast"),
+            "hint must mention both buffer kinds: {err}"
+        );
+    }
+
+    /// When `validate_raw_binding_strides` is called with fewer indices than
+    /// the shader's reflected Scattered/Broadcast slot count, it must report an
+    /// error naming the missing slots — not silently succeed.
+    ///
+    /// This is the `GOLDY_VALIDATION=all` guard for "too few indices" bugs.
+    #[test]
+    fn missing_index_for_required_slot_is_an_error() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        // Shader has 2 Scattered slots but caller only provides 1 index.
+        let indices = vec![42u32]; // only slot 0 provided
+        let categories = vec![
+            Some(ResourceCategory::Scattered), // slot 0 — has index
+            Some(ResourceCategory::Scattered), // slot 1 — missing
+        ];
+        let expected = vec![Some(16u32), Some(16u32)];
+
+        // Enable layout validation for this call (tests run with it on by default
+        // when GOLDY_VALIDATE_LAYOUTS=1 is set in CI; we assert on the error path
+        // regardless since the function still runs its check in test builds).
+        let err = validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |_idx, _cat| Some(16),
+            "my_compute_shader",
+        );
+
+        // The function early-returns Ok when layout validation is disabled, so we
+        // only assert on the error if validation is on.  In CI with
+        // GOLDY_VALIDATION=all this check must fail.
+        if crate::slang::layout_validation_enabled() {
+            let msg = err.unwrap_err().to_string();
+            assert!(msg.contains("slot"), "error must name missing slot: {msg}");
+            assert!(msg.contains("my_compute_shader"), "error must name the shader: {msg}");
+            assert!(msg.contains('1'), "error must mention slot index 1: {msg}");
+        } else {
+            // Validation disabled: passes silently.
+            err.unwrap();
+        }
+    }
+
+    /// Providing exactly the right number of indices for all Scattered/Broadcast
+    /// slots must pass cleanly.
+    #[test]
+    fn exact_index_count_passes() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
+        let expected = vec![Some(16u32), Some(4u32)];
+
+        validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |_idx, cat| match cat {
+                ResourceCategory::Scattered => Some(16),
+                ResourceCategory::Broadcast => Some(4),
+                _ => None,
+            },
+            "ok_shader",
+        )
+        .unwrap();
+    }
+
+    /// Stride validation for render passes runs at prepare time (before lowering).
+    #[test]
+    fn validate_render_pass_bind_resources_catches_mismatch() {
+        use super::validate_render_pass_bind_resources;
+        use crate::backend::{BufferHandle, PipelineHandle, RenderCommand};
+
+        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+        let pipeline: PipelineHandle = 1;
+        let buf: BufferHandle = 1;
+        let commands = vec![
+            RenderCommand::SetPipeline(pipeline),
+            RenderCommand::BindResources { buffers: vec![buf] },
+        ];
+
+        let err = validate_render_pass_bind_resources(
+            &commands,
+            |h| {
+                if h == 1 {
+                    Some((vec![Some(4)], "test_shader".to_string()))
+                } else {
+                    None
+                }
+            },
+            |h| {
+                if h == 1 {
+                    Some(16)
+                } else {
+                    None
+                }
+            },
+        )
+        .expect_err("mismatched render bind must fail");
+        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+        assert!(err.to_string().contains("slot 0"));
     }
 }

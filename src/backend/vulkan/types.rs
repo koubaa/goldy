@@ -255,6 +255,11 @@ impl ResourceRegistry {
         index
     }
 
+    /// Reserve storage-array indices `[0, min)` for frame-table protocol slots.
+    pub fn ensure_storage_start(&mut self, min: u32) {
+        self.storage_buffer.ensure_minimum_next(min);
+    }
+
     pub fn register_texture(&mut self, handle: TextureHandle, is_storage_image: bool) -> u32 {
         let index = if is_storage_image {
             self.storage_image.alloc()
@@ -700,6 +705,8 @@ pub(crate) struct RetainedVkCb {
     pub command_buffer: vk::CommandBuffer,
     /// Bindless slots baked into this command buffer (for slot retirement on resubmit).
     pub used_slots: Vec<SlotKey>,
+    /// Frame-table staging row pinned while this CB may re-copy from upload staging.
+    pub frame_table_row: Option<u32>,
 }
 
 impl LogicalDevice {
@@ -1328,4 +1335,6 @@ pub(super) struct VulkanState {
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::atomic::AtomicBool,
+    /// Per-device frame-table GPU resources (selector, device table, upload staging).
+    pub frame_tables: HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
 }

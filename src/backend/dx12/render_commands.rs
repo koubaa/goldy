@@ -60,49 +60,16 @@ pub(super) fn record(
                     unsafe { cmd.IASetIndexBuffer(Some(&view)) };
                 }
             }
-            RenderCommand::BindResources { buffers } => {
-                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
-                    if crate::slang::layout_validation_enabled() && !pipeline.binding_element_strides.is_empty() {
-                        let actual: Vec<Option<u32>> = buffers
-                            .iter()
-                            .map(|h| state.buffers.get(h).and_then(|b| b.element_stride))
-                            .collect();
-                        crate::backend::validate_binding_strides(
-                            &actual,
-                            &pipeline.binding_element_strides,
-                            &pipeline.shader_debug_name,
-                        )?;
-                    }
-                    let indices: Vec<u32> = buffers
-                        .iter()
-                        .map(|h| state.buffers.get(h).and_then(|b| b.bindless_offset).unwrap_or(0))
-                        .collect();
-                    crate::backend::validate_bindless_slot_kinds(
-                        &indices,
-                        &pipeline.push_constant_slot_kinds,
-                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                        &pipeline.shader_debug_name,
-                    )?;
-                }
-                let mut layout = types::PushLayout::default();
-                shared::fill_bindless(
-                    &mut layout,
-                    buffers
-                        .iter()
-                        .map(|h| state.buffers.get(h).and_then(|b| b.bindless_offset).unwrap_or(0)),
+            RenderCommand::BindResources { .. } => {
+                anyhow::bail!(
+                    "RenderCommand::BindResources must be lowered before DX12 record; \
+                     use frame_table::prepare_render_commands or lower_render_pass_commands"
                 );
-                unsafe {
-                    cmd.SetGraphicsRoot32BitConstants(
-                        0,
-                        (types::TOTAL_PUSH_BYTES / 4) as u32,
-                        &layout as *const _ as *const _,
-                        0,
-                    );
-                }
             }
             RenderCommand::BindResourcesRaw {
                 indices: raw_indices,
                 user: raw_user,
+                frame_table_base,
             } => {
                 if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
                     crate::backend::validate_bindless_slot_kinds(
@@ -113,7 +80,7 @@ pub(super) fn record(
                     )?;
                 }
                 let mut layout = types::PushLayout::default();
-                shared::fill_raw(&mut layout, raw_indices, raw_user);
+                shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,
@@ -138,16 +105,10 @@ pub(super) fn record(
                         &pipeline.shader_debug_name,
                     )?;
                 }
-                let mut layout = types::PushLayout::default();
-                shared::fill_typed(&mut layout, typed_handles.iter().copied());
-                unsafe {
-                    cmd.SetGraphicsRoot32BitConstants(
-                        0,
-                        (types::TOTAL_PUSH_BYTES / 4) as u32,
-                        &layout as *const _ as *const _,
-                        0,
-                    );
-                }
+                anyhow::bail!(
+                    "RenderCommand::BindResourcesTyped must be lowered before DX12 record; \
+                     use frame_table::lower_render_pass_commands or prepare_render_commands"
+                );
             }
             RenderCommand::Draw {
                 vertex_count,

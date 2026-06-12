@@ -1893,6 +1893,84 @@ fn stride_validation_multi_binding_all_correct_passes() {
     result.expect("dispatch with all-correct strides must succeed");
 }
 
+/// Regression for compute_particles: single-float Broadcast struct (`SimParams`) must
+/// validate against natural stride 4, not cbuffer-padded stride 16.
+const STRIDE_SIM_PARAMS_SHADER: &str = r#"
+import goldy_exp;
+
+struct SimParams { float deltaTime; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> particles, SimParams params, ThreadId id) {
+    particles[id.x] = uint(params.deltaTime * 1000.0);
+}
+"#;
+
+#[test]
+fn stride_validation_broadcast_single_float_natural_stride_passes() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
+    std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+    let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
+    let shader = ShaderModule::from_slang(&device, STRIDE_SIM_PARAMS_SHADER).expect("compile sim params shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let particles: Vec<u32> = (0..64).collect();
+    let particle_buf = test_alloc_buffer_with_data(&device, &particles, BufferKind::Scattered);
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SimParams {
+        delta_time: f32,
+    }
+    impl goldy::StructuredBufferElement for SimParams {}
+
+    let params_buf = test_alloc_buffer_with_data(&device, &[SimParams { delta_time: 0.016 }], BufferKind::Broadcast);
+
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&particle_buf, &params_buf])
+        .dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
+
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    result.expect("SimParams natural stride 4 must pass validation (not cbuffer 16)");
+}
+
+#[test]
+fn stride_validation_broadcast_single_float_cbuffer_stride_fails() {
+    let _lock = STRIDE_ENV_LOCK.lock().unwrap();
+    std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
+
+    let device = make_device_for_stride_tests();
+    let ctx = submission_context(&device);
+    let shader = ShaderModule::from_slang(&device, STRIDE_SIM_PARAMS_SHADER).expect("compile sim params shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let particles: Vec<u32> = (0..64).collect();
+    let particle_buf = test_alloc_buffer_with_data(&device, &particles, BufferKind::Scattered);
+
+    // Wrong: stride 16 mimics old cbuffer-padded expectation.
+    let params_data = vec![0u8; 16];
+    let params_buf = test_alloc_buffer_with_bytes_stride(&device, &params_data, BufferKind::Broadcast, 16);
+
+    let mut graph = TaskGraph::new();
+    graph
+        .node("n0", &pipeline)
+        .bind_resources(&[&particle_buf, &params_buf])
+        .dispatch(1, 1, 1);
+    let result = graph.dispatch(&ctx);
+
+    std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
+    let err = result.expect_err("stride-16 broadcast buffer must fail against natural stride 4");
+    let msg = err.to_string();
+    assert!(msg.contains("slot 1"), "params is slot 1: {msg}");
+    assert!(msg.contains("stride"), "error must mention stride: {msg}");
+}
+
 // ============================================================================
 // TransientAllocator integration tests
 //
