@@ -74,11 +74,31 @@ use crate::types::ResourceCategory;
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 use crate::types::BindlessSlotKind;
 
+/// Gate for dispatch paths: run `f` only when layout validation is enabled.
+///
+/// Pure validators ([`validate_raw_binding_strides`], etc.) contain the check logic
+/// and never read env vars. Unit tests call those directly; backends call them
+/// through this wrapper.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+#[inline]
+pub(crate) fn with_layout_validation<F>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if crate::slang::layout_validation_enabled() {
+        f()
+    } else {
+        Ok(())
+    }
+}
+
 /// Validate raw bindless indices against per-slot SRV/UAV expectations (DX12).
 ///
-/// Only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
-/// `GOLDY_VALIDATION=layout`). Skips slots where reflection or index resolution
-/// is ambiguous.
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub(crate) fn validate_bindless_slot_kinds(
     indices: &[u32],
@@ -86,7 +106,7 @@ pub(crate) fn validate_bindless_slot_kinds(
     mut resolve: impl FnMut(u32) -> Option<BindlessSlotKind>,
     shader_name: &str,
 ) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() || expectations.is_empty() {
+    if expectations.is_empty() {
         return Ok(());
     }
     let mut mismatches: Vec<String> = Vec::new();
@@ -174,8 +194,6 @@ pub(crate) fn validate_typed_push_constants(
 /// reflection).  `None` on either side means "unknown / not applicable" and
 /// is silently skipped.
 ///
-/// Only runs when layout validation is enabled; designed for the bind hot
-/// path — allocates only on the error path.
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -221,9 +239,8 @@ pub(crate) fn validate_binding_strides(
 /// buffer's `element_stride` through `resolve_stride(index, category)` and delegates
 /// to [`validate_binding_strides`].
 ///
-/// With layout validation enabled (via `GOLDY_VALIDATION=layout|all`), this also
-/// reports any Scattered/Broadcast slot whose index is missing from `indices` — a
-/// silent out-of-bounds skip that would otherwise hide a "too few indices" bug.
+/// Also reports any Scattered/Broadcast slot whose index is missing from `indices`.
+///
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -237,7 +254,7 @@ pub(crate) fn validate_raw_binding_strides(
     mut resolve_stride: impl FnMut(u32, crate::types::ResourceCategory) -> Option<u32>,
     shader_name: &str,
 ) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() || expected.is_empty() {
+    if expected.is_empty() {
         return Ok(());
     }
     let mut actual: Vec<Option<u32>> = vec![None; expected.len()];
@@ -280,7 +297,7 @@ pub(crate) fn validate_raw_binding_strides(
 ///
 /// Call from `prepare_render_commands` while buffer handles are still available.
 /// Legacy bind commands bail at record time; this is the only place stride checks run
-/// for standalone render passes when `GOLDY_VALIDATION=layout|all`.
+/// for standalone render passes.
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -296,9 +313,6 @@ where
     F: FnMut(PipelineHandle) -> Option<(Vec<Option<u32>>, String)>,
     G: FnMut(BufferHandle) -> Option<u32>,
 {
-    if !crate::slang::layout_validation_enabled() {
-        return Ok(());
-    }
     let mut current_pipeline: Option<PipelineHandle> = None;
     for cmd in commands {
         match cmd {
@@ -1339,7 +1353,6 @@ mod bindless_slot_validation_tests {
 
     #[test]
     fn srv_where_uav_expected_fails() {
-        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
         let expectations = vec![Some(BindlessSlotKind::StorageUav)];
         let err = validate_bindless_slot_kinds(
             &[5],
@@ -1349,7 +1362,6 @@ mod bindless_slot_validation_tests {
         )
         .unwrap_err()
         .to_string();
-        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
         assert!(err.contains("SRV/UAV mismatch"), "{err}");
         assert!(err.contains("slot 0"), "{err}");
         assert!(err.contains("storage UAV"), "{err}");
@@ -1446,29 +1458,19 @@ mod binding_stride_validation_tests {
         ];
         let expected = vec![Some(16u32), Some(16u32)];
 
-        // Enable layout validation for this call (tests run with it on by default
-        // when GOLDY_VALIDATE_LAYOUTS=1 is set in CI; we assert on the error path
-        // regardless since the function still runs its check in test builds).
         let err = validate_raw_binding_strides(
             &indices,
             &categories,
             &expected,
             |_idx, _cat| Some(16),
             "my_compute_shader",
-        );
+        )
+        .unwrap_err()
+        .to_string();
 
-        // The function early-returns Ok when layout validation is disabled, so we
-        // only assert on the error if validation is on.  In CI with
-        // GOLDY_VALIDATION=all this check must fail.
-        if crate::slang::layout_validation_enabled() {
-            let msg = err.unwrap_err().to_string();
-            assert!(msg.contains("slot"), "error must name missing slot: {msg}");
-            assert!(msg.contains("my_compute_shader"), "error must name the shader: {msg}");
-            assert!(msg.contains('1'), "error must mention slot index 1: {msg}");
-        } else {
-            // Validation disabled: passes silently.
-            err.unwrap();
-        }
+        assert!(err.contains("slot"), "error must name missing slot: {err}");
+        assert!(err.contains("my_compute_shader"), "error must name the shader: {err}");
+        assert!(err.contains('1'), "error must mention slot index 1: {err}");
     }
 
     /// Providing exactly the right number of indices for all Scattered/Broadcast
@@ -1502,8 +1504,6 @@ mod binding_stride_validation_tests {
         use super::validate_render_pass_bind_resources;
         use crate::backend::{BufferHandle, PipelineHandle, RenderCommand};
 
-        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
-
         let pipeline: PipelineHandle = 1;
         let buf: BufferHandle = 1;
         let commands = vec![
@@ -1529,7 +1529,6 @@ mod binding_stride_validation_tests {
             },
         )
         .expect_err("mismatched render bind must fail");
-        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
         assert!(err.to_string().contains("slot 0"));
     }
 }

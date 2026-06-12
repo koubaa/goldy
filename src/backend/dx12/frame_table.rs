@@ -477,16 +477,18 @@ pub(crate) fn prepare_render_commands(
     use crate::backend::RenderCommand;
     use crate::frame_table::FrameTableStaging;
 
-    crate::backend::validate_render_pass_bind_resources(
-        commands,
-        |h| {
-            state
-                .pipelines
-                .get(&h)
-                .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
-        },
-        |h| state.buffers.get(&h).and_then(|b| b.element_stride),
-    )?;
+    crate::backend::with_layout_validation(|| {
+        crate::backend::validate_render_pass_bind_resources(
+            commands,
+            |h| {
+                state
+                    .pipelines
+                    .get(&h)
+                    .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
+            },
+            |h| state.buffers.get(&h).and_then(|b| b.element_stride),
+        )
+    })?;
 
     let mut staging = FrameTableStaging::new();
     let lowered = commands

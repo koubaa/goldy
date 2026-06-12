@@ -597,13 +597,15 @@ pub(super) fn record_commands_to_buffer(
             } => {
                 ensure_compute!();
                 if let Some(pipeline) = current_pipeline {
-                    crate::backend::validate_raw_binding_strides(
-                        raw_indices,
-                        &pipeline.push_constant_categories,
-                        &pipeline.binding_element_strides,
-                        |idx, cat| buffer_stride_for_arg_index(state, idx, cat),
-                        &pipeline.shader_debug_name,
-                    )?;
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_raw_binding_strides(
+                            raw_indices,
+                            &pipeline.push_constant_categories,
+                            &pipeline.binding_element_strides,
+                            |idx, cat| buffer_stride_for_arg_index(state, idx, cat),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
                 }
                 let absolute_base =
                     prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;

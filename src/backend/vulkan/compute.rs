@@ -857,13 +857,15 @@ pub(super) fn submit(
                     frame_table_base,
                 } => {
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
-                            &pipeline.shader_debug_name,
-                        )?;
+                        crate::backend::with_layout_validation(|| {
+                            crate::backend::validate_raw_binding_strides(
+                                raw_indices,
+                                &pipeline.push_constant_categories,
+                                &pipeline.binding_element_strides,
+                                |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                                &pipeline.shader_debug_name,
+                            )
+                        })?;
                         let mut layout = PushLayout::default();
                         shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                         unsafe {
@@ -1718,13 +1720,15 @@ fn submit_graph_impl(
                     frame_table_base,
                 } => {
                     if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
-                            &pipeline.shader_debug_name,
-                        )?;
+                        crate::backend::with_layout_validation(|| {
+                            crate::backend::validate_raw_binding_strides(
+                                raw_indices,
+                                &pipeline.push_constant_categories,
+                                &pipeline.binding_element_strides,
+                                |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                                &pipeline.shader_debug_name,
+                            )
+                        })?;
                         let mut layout = PushLayout::default();
                         shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                         unsafe {
