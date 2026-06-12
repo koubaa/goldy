@@ -626,6 +626,7 @@ impl TimelineWaiter {
     }
 }
 
+
 /// Per-context async submission stream (timeline shared event, in-flight CBs, signals).
 pub(crate) struct MetalSubmissionContext {
     pub device: super::DeviceHandle,
@@ -651,6 +652,13 @@ pub(crate) struct MetalSubmissionContext {
     /// thread are routed here so they reclaim without blocking on any other context.
     /// See issue #190.
     pub deletion_queue: DeletionQueue,
+    /// Retained graph commands keyed by fingerprint, one entry per live [`Scheme`].
+    ///
+    /// Metal cannot re-execute a committed command buffer, so each entry stores the
+    /// original `GraphCommand` slice; resubmit re-records from it. The `Arc` makes
+    /// resubmit clones allocation-free. Multiple schemes can share one context without
+    /// evicting each other because each fingerprint is a distinct map key.
+    pub retained_graphs: std::collections::HashMap<u64, std::sync::Arc<[super::super::GraphCommand]>>,
 }
 
 /// A logical Metal device with associated resources.

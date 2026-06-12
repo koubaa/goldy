@@ -81,6 +81,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
+            retained_graphs: std::collections::HashMap::new(),
         })),
     );
     Ok(id)
@@ -96,6 +97,10 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
     if let Some(ld) = state.devices.get(&device) {
         ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
+
+    // Drop all retained graph snapshots first so Arc<[GraphCommand]> payloads are
+    // released before in-flight CBs are drained and the staging belt is torn down.
+    sc.retained_graphs.clear();
 
     sc.staging_belt.destroy_all();
     sc.texture_staging_pool.destroy_all();

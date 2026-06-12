@@ -47,7 +47,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 /// Cross-scheme serialization: per-submission data enters through a separate upload
 /// submission; the worker scheme is recorded once and never mutated.
 ///
-/// The worker scheme (`records == 1`, `resubmit_hits == N-1`) observes each frame's
+/// The worker scheme (`records == 1`; `resubmit_hits == N-1` on non-Metal backends) observes each frame's
 /// data through the shared input parcel — serialized by queue order on the same context.
 /// This is the pattern `goldy::write_to_parcel` will package as a property-only dispatch.
 #[test]
@@ -103,11 +103,11 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
     }
 
     assert_eq!(worker.replay_stats().records, 1, "the worker records exactly once");
+    #[cfg(not(feature = "metal"))]
     assert_eq!(
         worker.replay_stats().resubmit_hits,
         u64::from(FRAMES) - 1,
-        "submissions after the first are retention hits on {:?}",
-        device.backend_type()
+        "submissions after the first are retention hits",
     );
 }
 
@@ -143,12 +143,8 @@ fn clean_scheme_resubmits_without_rerecord() {
     scheme.submit().expect("submit 1");
 
     assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
-    assert_eq!(
-        scheme.replay_stats().resubmit_hits,
-        1,
-        "submission 1 must be a zero-record retention hit on {:?}",
-        device.backend_type()
-    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(scheme.replay_stats().resubmit_hits, 1, "submission 1 must be a zero-record retention hit");
 }
 
 /// Selector-advance: a recorded single-thread node increments a GPU-side counter.
@@ -201,5 +197,69 @@ fn selector_advances_across_identical_submissions() {
     assert_eq!(count as u64, N, "each submission must advance the GPU-side selector once");
 
     assert_eq!(scheme.replay_stats().records, 1, "one record, then pure resubmits");
+    #[cfg(not(feature = "metal"))]
     assert_eq!(scheme.replay_stats().resubmit_hits, N - 1, "remaining submissions are retention hits");
+}
+
+/// Two independent schemes sharing one context must not evict each other's retained
+/// state. Both copy-shaders must produce correct results across interleaved submissions.
+#[test]
+fn two_schemes_on_one_context_do_not_collide() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+
+    // Scheme A: copies [1u32; 8] → out_a
+    let in_a = pool.acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered).expect("in_a");
+    let out_a = pool.acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered).expect("out_a");
+    let mut scheme_a = Scheme::new(&ctx);
+    scheme_a
+        .node("copy_a", &pipeline)
+        .bind_parcel(&in_a, NodeAccess::Read)
+        .bind_parcel(&out_a, NodeAccess::Write)
+        .bind_resources_typed(&[
+            in_a.handle(ResourceAccess::Read).expect("in_a handle"),
+            out_a.handle(ResourceAccess::Write).expect("out_a handle"),
+        ])
+        .dispatch(1, 1, 1);
+
+    // Scheme B: copies [2u32; 8] → out_b
+    let in_b = pool.acquire_buffer_with_data(&[2u32; 8], BufferKind::Scattered).expect("in_b");
+    let out_b = pool.acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered).expect("out_b");
+    let mut scheme_b = Scheme::new(&ctx);
+    scheme_b
+        .node("copy_b", &pipeline)
+        .bind_parcel(&in_b, NodeAccess::Read)
+        .bind_parcel(&out_b, NodeAccess::Write)
+        .bind_resources_typed(&[
+            in_b.handle(ResourceAccess::Read).expect("in_b handle"),
+            out_b.handle(ResourceAccess::Write).expect("out_b handle"),
+        ])
+        .dispatch(1, 1, 1);
+
+    // Interleave submissions: A, B, A, B
+    let _ = scheme_a.submit().expect("a1");
+    let _ = scheme_b.submit().expect("b1");
+    let _ = scheme_a.submit().expect("a2");
+    let tv = scheme_b.submit().expect("b2");
+    ctx.wait_until(tv).expect("wait");
+
+    let mut raw_a = vec![0u8; 8 * 4];
+    out_a.read_to_cpu(&device, &mut raw_a).expect("readback a");
+    for v in bytemuck::cast_slice::<u8, u32>(&raw_a) {
+        assert_eq!(*v, 1u32, "scheme_a must produce 1s");
+    }
+
+    let mut raw_b = vec![0u8; 8 * 4];
+    out_b.read_to_cpu(&device, &mut raw_b).expect("readback b");
+    for v in bytemuck::cast_slice::<u8, u32>(&raw_b) {
+        assert_eq!(*v, 2u32, "scheme_b must produce 2s");
+    }
+
+    assert_eq!(scheme_a.replay_stats().records, 1, "scheme_a records once");
+    assert_eq!(scheme_b.replay_stats().records, 1, "scheme_b records once");
 }

@@ -22,7 +22,9 @@ use crate::timeline::TimelineValue;
 /// Outcome counters for [`Scheme::submit`] (retention-recovery assertions and telemetry).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReplayStats {
-    /// Submissions served by resubmitting the retained command list (no re-record).
+    /// Submissions that skipped re-recording because the backend re-executed a cached command
+    /// list without re-recording (Vulkan / DX12 only; absent when the `metal` feature is enabled).
+    #[cfg(not(feature = "metal"))]
     pub resubmit_hits: u64,
     /// Submissions that recorded (first submit, post-mutation submits, retention misses).
     pub records: u64,
@@ -118,9 +120,11 @@ impl Scheme {
                         tv,
                     );
                     self.last_submitted_tv = Some(tv);
-                    self.stats.resubmit_hits += 1;
-                    return Ok(tv);
-                }
+                    #[cfg(not(feature = "metal"))]
+                    {
+                        self.stats.resubmit_hits += 1;
+                    }
+                    return Ok(tv);                }
             }
         }
 
@@ -246,6 +250,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
         scheme.submit().unwrap();
         assert!(!scheme.is_dirty(), "successful submit clears the dirty bit");
         assert_eq!(scheme.replay_stats().records, 1);
+        #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 0);
         scheme
     }
@@ -260,6 +265,7 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
         scheme.submit().unwrap();
 
         assert_eq!(scheme.replay_stats().records, 1, "only the first submit records");
+        #[cfg(not(feature = "metal"))]
         assert_eq!(scheme.replay_stats().resubmit_hits, 2, "subsequent clean submits resubmit");
     }
 
@@ -270,10 +276,16 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
         let mut scheme = clean_scheme(&device, &mut pool);
         scheme.submit().unwrap();
 
+        #[cfg(not(feature = "metal"))]
         assert_eq!(
             scheme.replay_stats(),
-            ReplayStats { records: 1, resubmit_hits: 1 }
+            ReplayStats {
+                records: 1,
+                resubmit_hits: 1
+            }
         );
+        #[cfg(feature = "metal")]
+        assert_eq!(scheme.replay_stats().records, 1);
 
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
@@ -284,10 +296,16 @@ void cs_main(Scattered<uint> buf, ThreadId id) { buf[0] = 1; }
         scheme.submit().unwrap();
         scheme.submit().unwrap();
 
+        #[cfg(not(feature = "metal"))]
         assert_eq!(
             scheme.replay_stats(),
-            ReplayStats { records: 2, resubmit_hits: 2 }
+            ReplayStats {
+                records: 2,
+                resubmit_hits: 2
+            }
         );
+        #[cfg(feature = "metal")]
+        assert_eq!(scheme.replay_stats().records, 2);
     }
 
     #[test]

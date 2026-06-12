@@ -15,6 +15,23 @@ const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
 use crate::types::{BufferKind, ResourceCategory};
 
+/// True when this submission records GPU encoder work beyond CPU-only `WriteBuffer` nodes.
+///
+/// CPU-mapped `WriteBuffer` fast paths are only sound when a dispatch (or other GPU
+/// command) in the *same* command buffer follows the write. Upload-only submissions
+/// must use the blit slow path so a later submission on the queue observes the data.
+fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
+    commands.iter().any(|c| {
+        !matches!(
+            c,
+            GpuCommand::WriteBuffer { .. }
+                | GpuCommand::FrameTableStaging { .. }
+                | GpuCommand::Barrier
+                | GpuCommand::ResourceBarrier { .. }
+        )
+    })
+}
+
 fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCategory) -> Option<u32> {
     let expected_kind = match cat {
         ResourceCategory::Scattered => BufferKind::Scattered,
@@ -429,6 +446,7 @@ pub(super) fn record_commands_to_buffer(
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
                 if gpu_idle
                     && !has_recorded_gpu_work
+                    && submission_has_gpu_encoder_work(commands)
                     && !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
@@ -897,6 +915,7 @@ fn stage_uploads(
 
                 let fast_path = gpu_idle
                     && !would_have_gpu_work
+                    && submission_has_gpu_encoder_work(commands)
                     && !buf_flags.contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                     && !contents_null;
@@ -1143,6 +1162,7 @@ pub(super) fn submit_graph(
     state: &mut MetalState,
     ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
+    retain_key: Option<u64>,
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit_graph");
     use super::super::GraphCommand;
@@ -1411,7 +1431,59 @@ pub(super) fn submit_graph(
         }
     }
 
+    if let Some(key) = retain_key {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let arc: std::sync::Arc<[super::super::GraphCommand]> = commands.into();
+            sc_arc.lock().unwrap().retained_graphs.insert(key, arc);
+        }
+    }
+
     Ok(signal_value)
+}
+
+/// Record, submit, and retain graph commands keyed by `key` for future resubmission.
+pub(super) fn submit_graph_and_retain(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[super::super::GraphCommand],
+    key: u64,
+) -> Result<TimelineValue> {
+    // Evict only the slot for this key; other schemes' retained graphs are unaffected.
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().retained_graphs.remove(&key);
+    }
+    submit_graph(state, ctx, commands, Some(key)).inspect_err(|e| {
+        tracing::error!(
+            target: "goldy::diag::submit",
+            ctx = ?ctx,
+            key,
+            "submit_graph_and_retain: submit failed after evicting retained snapshot: {e:#}"
+        );
+    })
+}
+
+/// Re-record and submit a previously retained graph without rebuilding the IR.
+pub(super) fn try_resubmit_retained(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    key: u64,
+) -> Result<Option<TimelineValue>> {
+    let commands = {
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        sc_arc.lock().unwrap().retained_graphs.get(&key).cloned()
+    };
+    let Some(commands) = commands else {
+        return Ok(None);
+    };
+    let tv = submit_graph(state, ctx, &commands, None)?;
+    Ok(Some(tv))
+}
+
+/// Drop the retained graph entry for `key` on this context.
+pub(super) fn evict_retained(state: &mut MetalState, ctx: ContextHandle, key: u64) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().retained_graphs.remove(&key);
+    }
 }
 
 /// Record an offscreen render pass into an existing command buffer (no commit/wait).

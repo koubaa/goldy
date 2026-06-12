@@ -759,7 +759,28 @@ impl GpuBackend for MetalBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, ctx, commands)
+        compute::submit_graph(&mut self.state, ctx, commands, None)
+    }
+
+    fn submit_graph_and_retain(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit_graph_and_retain(&mut self.state, ctx, commands, key)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        ctx: ContextHandle,
+        key: u64,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        compute::try_resubmit_retained(&mut self.state, ctx, key)
+    }
+
+    fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
+        compute::evict_retained(&mut self.state, ctx, key);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
