@@ -97,18 +97,7 @@ class TestRetainedPool:
         parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
         assert parcel.byte_size == 12
 
-    def test_write_parcel_via_graph(self, device):
-        import goldy
-
-        pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(
-            np.zeros(64, dtype=np.uint32),
-            goldy.BufferKind.SCATTERED,
-        )
-        graph = goldy.TaskGraph()
-        graph.write_parcel(parcel, 0, np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
-
-    def test_write_parcel_via_scheme(self, device):
+    def test_write_parcel(self, device):
         import goldy
 
         pool = goldy.RetainedPool(device)
@@ -164,32 +153,7 @@ class TestComputePipeline:
         pipeline = goldy.ComputePipeline(device, shader)
         assert pipeline is not None
 
-    def test_dispatch_via_graph(self, device):
-        import goldy
-
-        source = '''
-        import goldy_exp;
-        [goldy_compute]
-        [numthreads(64, 1, 1)]
-        void cs_main(Scattered<uint> data, ThreadId id) {
-            data[id.x] = 42;
-        }
-        '''
-        pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
-        shader = goldy.ShaderModule.from_slang(device, source)
-        pipeline = goldy.ComputePipeline(device, shader)
-        idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
-
-        graph = goldy.TaskGraph()
-        with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
-            node.bind_parcel(parcel, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
-        graph.dispatch(device)
-
-        values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
-        assert np.all(values == 42)
-
-    def test_dispatch_via_scheme(self, device):
+    def test_dispatch(self, device):
         import goldy
 
         source = '''
