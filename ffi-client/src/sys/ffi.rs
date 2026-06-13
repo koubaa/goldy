@@ -10,6 +10,33 @@ pub type FnGoldyComputePipelineCreate =
     unsafe extern "C" fn(*const GoldyDevice, *const GoldyShaderModule) -> *mut GoldyComputePipeline;
 pub type FnGoldyComputePipelineDestroy = unsafe extern "C" fn(*mut GoldyComputePipeline);
 
+pub type FnGoldyContextCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyContext;
+pub type FnGoldyContextDestroy = unsafe extern "C" fn(*mut GoldyContext);
+
+pub type FnGoldySchemeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyScheme;
+pub type FnGoldySchemeDestroy = unsafe extern "C" fn(*mut GoldyScheme);
+pub type FnGoldySchemeLen = unsafe extern "C" fn(*const GoldyScheme) -> u32;
+pub type FnGoldySchemeIsDirty = unsafe extern "C" fn(*const GoldyScheme) -> bool;
+pub type FnGoldySchemeReplayStats =
+    unsafe extern "C" fn(*const GoldyScheme, *mut GoldyReplayStats) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeBegin =
+    unsafe extern "C" fn(*mut GoldyScheme, *const c_char, *const GoldyComputePipeline) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeDeclareParcel = unsafe extern "C" fn(
+    *mut GoldyScheme,
+    *const GoldyParcel,
+    GoldyNodeAccess,
+    GoldyResourceAccess,
+) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeDeclareParcelView = unsafe extern "C" fn(
+    *mut GoldyScheme,
+    *const GoldyParcel,
+    u32,
+    GoldyNodeAccess,
+    GoldyResourceAccess,
+) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeDispatch = unsafe extern "C" fn(*mut GoldyScheme, u32, u32, u32) -> GoldyResult;
+pub type FnGoldySchemeSubmit = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
+
 pub type FnGoldyDeviceAdapterId = unsafe extern "C" fn(*const GoldyDevice) -> u32;
 pub type FnGoldyDeviceDestroy = unsafe extern "C" fn(*mut GoldyDevice);
 pub type FnGoldyDeviceHasLibrary = unsafe extern "C" fn(*const GoldyDevice, *const c_char) -> bool;
@@ -116,7 +143,6 @@ pub type FnGoldyMosaicBuilderBuild =
     unsafe extern "C" fn(*mut GoldyMosaicBuilder, *mut GoldyRetainedPool) -> *mut GoldyParcel;
 pub type FnGoldyParcelByteSize = unsafe extern "C" fn(*const GoldyParcel) -> u64;
 pub type FnGoldyParcelDestroy = unsafe extern "C" fn(*mut GoldyParcel);
-pub type FnGoldyParcelResourceIndex = unsafe extern "C" fn(*const GoldyParcel, GoldyResourceAccess) -> u32;
 pub type FnGoldyParcelMosaicViewResourceIndex =
     unsafe extern "C" fn(*const GoldyParcel, u32, GoldyResourceAccess) -> u32;
 pub type FnGoldyParcelMosaicViewReadToCpu =

@@ -207,20 +207,6 @@ pub unsafe extern "C" fn goldy_parcel_read_to_cpu(
     }
 }
 
-/// Bindless resource slot index for shader binding.
-///
-/// Returns `u32::MAX` if the index is unavailable (e.g. mosaic parcels).
-///
-/// # Safety
-/// The parcel pointer must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_parcel_resource_index(parcel: *const GoldyParcel, access: GoldyResourceAccess) -> u32 {
-    if parcel.is_null() {
-        return u32::MAX;
-    }
-    (*parcel).inner.resource_index(access.into()).unwrap_or(u32::MAX)
-}
-
 /// Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
 #[no_mangle]
 pub unsafe extern "C" fn goldy_mosaic_builder_create() -> *mut GoldyMosaicBuilder {

@@ -240,6 +240,40 @@ impl ComputeNodeRecord {
         self
     }
 
+    /// Declare a retained parcel as a graph dependency and shader binding slot atomically.
+    ///
+    /// This is the preferred entry-point for language-binding consumers. It resolves the
+    /// bindless slot internally so callers never handle raw resource indices.
+    /// Returns `None` if the parcel has no slot registered for `resource_access`.
+    pub fn declare_parcel(
+        &mut self,
+        parcel: &crate::Parcel,
+        node_access: NodeAccess,
+        resource_access: crate::types::ResourceAccess,
+    ) -> Option<&mut Self> {
+        let idx = parcel.resource_index(resource_access)?;
+        self.bind_parcel(parcel, node_access);
+        self.resource_slots.push(idx);
+        Some(self)
+    }
+
+    /// Declare a mosaic sub-view as a graph dependency and shader binding slot atomically.
+    ///
+    /// Like [`Self::declare_parcel`] but for a single mosaic tile. Returns `None` if the
+    /// view has no slot for `resource_access`.
+    pub fn declare_parcel_view(
+        &mut self,
+        parcel: &crate::Parcel,
+        slot: crate::MosaicSlot,
+        node_access: NodeAccess,
+        resource_access: crate::types::ResourceAccess,
+    ) -> Option<&mut Self> {
+        let idx = parcel.mosaic_view_resource_index(slot, resource_access)?;
+        self.bind_buffer_view(parcel.view(slot), node_access);
+        self.resource_slots.push(idx);
+        Some(self)
+    }
+
     pub fn commit_dispatch(self, graph: &mut TaskGraph, x: u32, y: u32, z: u32) {
         graph.extend_stamp_targets(self.stamp_targets);
         graph.push_task_node(TaskNode {
@@ -252,5 +286,20 @@ impl ComputeNodeRecord {
                 dispatch: DispatchDim::Direct { x, y, z },
             },
         });
+    }
+
+    /// Commit this compute node into a retained [`crate::Scheme`].
+    pub fn commit_dispatch_scheme(self, scheme: &mut crate::Scheme, x: u32, y: u32, z: u32) {
+        scheme.apply_compute_stamps(&self.stamp_targets);
+        scheme.commit_compute_dispatch(
+            self.label,
+            self.pipeline,
+            self.bindings,
+            self.resource_slots,
+            self.user_slots,
+            x,
+            y,
+            z,
+        );
     }
 }

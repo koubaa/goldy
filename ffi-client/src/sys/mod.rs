@@ -24,6 +24,14 @@ pub unsafe fn goldy_compute_pipeline_destroy(pipeline: *mut GoldyComputePipeline
     (lib().goldy_compute_pipeline_destroy)(pipeline)
 }
 
+pub unsafe fn goldy_context_create(device: *const GoldyDevice) -> *mut GoldyContext {
+    (lib().goldy_context_create)(device)
+}
+
+pub unsafe fn goldy_context_destroy(ctx: *mut GoldyContext) {
+    (lib().goldy_context_destroy)(ctx)
+}
+
 pub unsafe fn goldy_device_adapter_id(device: *const GoldyDevice) -> u32 {
     (lib().goldy_device_adapter_id)(device)
 }
@@ -94,10 +102,6 @@ pub unsafe fn goldy_parcel_destroy(parcel: *mut GoldyParcel) {
 
 pub unsafe fn goldy_parcel_byte_size(parcel: *const GoldyParcel) -> u64 {
     (lib().goldy_parcel_byte_size)(parcel)
-}
-
-pub unsafe fn goldy_parcel_resource_index(parcel: *const GoldyParcel, access: GoldyResourceAccess) -> u32 {
-    (lib().goldy_parcel_resource_index)(parcel, access)
 }
 
 pub unsafe fn goldy_parcel_mosaic_view_resource_index(
@@ -488,4 +492,64 @@ pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
     parcel: *const GoldyParcel,
 ) -> GoldyResult {
     (lib().goldy_task_graph_render_pass_set_vertex_buffer_parcel)(graph, slot, parcel)
+}
+
+pub unsafe fn goldy_scheme_create(ctx: *const GoldyContext) -> *mut GoldyScheme {
+    (lib().goldy_scheme_create)(ctx)
+}
+
+pub unsafe fn goldy_scheme_destroy(scheme: *mut GoldyScheme) {
+    (lib().goldy_scheme_destroy)(scheme)
+}
+
+pub unsafe fn goldy_scheme_len(scheme: *const GoldyScheme) -> u32 {
+    (lib().goldy_scheme_len)(scheme)
+}
+
+pub unsafe fn goldy_scheme_is_dirty(scheme: *const GoldyScheme) -> bool {
+    (lib().goldy_scheme_is_dirty)(scheme)
+}
+
+pub unsafe fn goldy_scheme_replay_stats(scheme: *const GoldyScheme, out_stats: *mut GoldyReplayStats) -> GoldyResult {
+    (lib().goldy_scheme_replay_stats)(scheme, out_stats)
+}
+
+pub unsafe fn goldy_scheme_compute_node_begin(
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    pipeline: *const GoldyComputePipeline,
+) -> GoldyResult {
+    (lib().goldy_scheme_compute_node_begin)(scheme, label, pipeline)
+}
+
+pub unsafe fn goldy_scheme_compute_node_declare_parcel(
+    scheme: *mut GoldyScheme,
+    parcel: *const GoldyParcel,
+    node_access: GoldyNodeAccess,
+    resource_access: GoldyResourceAccess,
+) -> GoldyResult {
+    (lib().goldy_scheme_compute_node_declare_parcel)(scheme, parcel, node_access, resource_access)
+}
+
+pub unsafe fn goldy_scheme_compute_node_declare_parcel_view(
+    scheme: *mut GoldyScheme,
+    parcel: *const GoldyParcel,
+    slot: u32,
+    node_access: GoldyNodeAccess,
+    resource_access: GoldyResourceAccess,
+) -> GoldyResult {
+    (lib().goldy_scheme_compute_node_declare_parcel_view)(scheme, parcel, slot, node_access, resource_access)
+}
+
+pub unsafe fn goldy_scheme_compute_node_dispatch(
+    scheme: *mut GoldyScheme,
+    workgroups_x: u32,
+    workgroups_y: u32,
+    workgroups_z: u32,
+) -> GoldyResult {
+    (lib().goldy_scheme_compute_node_dispatch)(scheme, workgroups_x, workgroups_y, workgroups_z)
+}
+
+pub unsafe fn goldy_scheme_submit(scheme: *mut GoldyScheme) -> GoldyResult {
+    (lib().goldy_scheme_submit)(scheme)
 }

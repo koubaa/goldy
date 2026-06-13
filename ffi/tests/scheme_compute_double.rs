@@ -1,18 +1,17 @@
-//! Headless integration test: two-node compute pipeline via TaskGraph FFI.
+//! Headless integration test: two-node compute pipeline via Scheme FFI.
 //!
-//! Mirrors `goldy/tests/task_graph_integration.rs::graph_matches_encoder` (TaskGraph path).
+//! Mirrors `goldy/tests/scheme_compute_integration.rs` linear chain tests.
 
 mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu, goldy_parcel_resource_index,
-    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create,
-    goldy_shader_destroy, goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_parcel,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
-    goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess,
-    GoldyResult,
+    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
+    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu,
+    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
+    goldy_scheme_compute_node_declare_parcel, goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy,
+    goldy_scheme_len, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess,
+    GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -37,40 +36,29 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 "#;
 
 unsafe fn record_compute_node(
-    graph: *mut goldy_ffi::GoldyTaskGraph,
+    scheme: *mut goldy_ffi::GoldyScheme,
     label: &str,
     pipeline: *const goldy_ffi::GoldyComputePipeline,
-    parcel_bindings: &[(*const goldy_ffi::GoldyParcel, GoldyNodeAccess)],
-    resource_indices: &[u32],
+    parcel_bindings: &[(*const goldy_ffi::GoldyParcel, GoldyNodeAccess, GoldyResourceAccess)],
     workgroups: (u32, u32, u32),
 ) {
     let label = CString::new(label).unwrap();
     assert_eq!(
-        goldy_task_graph_compute_node_begin(graph, label.as_ptr(), pipeline),
+        goldy_scheme_compute_node_begin(scheme, label.as_ptr(), pipeline),
         GoldyResult::Ok,
         "{}",
         last_ffi_message()
     );
-    for &(parcel, access) in parcel_bindings {
+    for &(parcel, node_access, resource_access) in parcel_bindings {
         assert_eq!(
-            goldy_task_graph_compute_node_bind_parcel(graph, parcel, access),
+            goldy_scheme_compute_node_declare_parcel(scheme, parcel, node_access, resource_access),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
     }
     assert_eq!(
-        goldy_task_graph_compute_node_bind_resources_raw(
-            graph,
-            resource_indices.as_ptr(),
-            resource_indices.len() as u32
-        ),
-        GoldyResult::Ok,
-        "{}",
-        last_ffi_message()
-    );
-    assert_eq!(
-        goldy_task_graph_compute_node_dispatch(graph, workgroups.0, workgroups.1, workgroups.2),
+        goldy_scheme_compute_node_dispatch(scheme, workgroups.0, workgroups.1, workgroups.2),
         GoldyResult::Ok,
         "{}",
         last_ffi_message()
@@ -78,9 +66,12 @@ unsafe fn record_compute_node(
 }
 
 #[test]
-fn task_graph_compute_double_then_add_ten() {
+fn scheme_compute_double_then_add_ten() {
     unsafe {
         let (instance, device) = open_device();
+
+        let ctx = goldy_context_create(device);
+        assert!(!ctx.is_null(), "{}", last_ffi_message());
 
         let input: Vec<u32> = (0..64).collect();
         let input_bytes =
@@ -114,39 +105,30 @@ fn task_graph_compute_double_then_add_ten() {
         let add_pipeline = goldy_compute_pipeline_create(device, add_shader);
         assert!(!add_pipeline.is_null(), "{}", last_ffi_message());
 
-        // `DOUBLE_SHADER` reads `src` as `Scattered<uint>` (UAV on DX12).
-        let src_idx = goldy_parcel_resource_index(src, GoldyResourceAccess::ReadWrite);
-        let dst_idx = goldy_parcel_resource_index(dst, GoldyResourceAccess::Write);
-        assert_ne!(src_idx, u32::MAX);
-        assert_ne!(dst_idx, u32::MAX);
-
-        let graph = goldy_task_graph_create();
-        assert!(!graph.is_null());
+        let scheme = goldy_scheme_create(ctx);
+        assert!(!scheme.is_null());
 
         record_compute_node(
-            graph,
+            scheme,
             "double",
             double_pipeline,
-            &[(src, GoldyNodeAccess::Read), (dst, GoldyNodeAccess::Write)],
-            &[src_idx, dst_idx],
+            &[
+                (src, GoldyNodeAccess::Read, GoldyResourceAccess::ReadWrite),
+                (dst, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
+            ],
             (1, 1, 1),
         );
         record_compute_node(
-            graph,
+            scheme,
             "add_ten",
             add_pipeline,
-            &[(dst, GoldyNodeAccess::ReadWrite)],
-            &[dst_idx],
+            &[(dst, GoldyNodeAccess::ReadWrite, GoldyResourceAccess::ReadWrite)],
             (1, 1, 1),
         );
 
+        assert_eq!(goldy_scheme_len(scheme), 2, "scheme should contain two compute nodes");
         assert_eq!(
-            goldy_ffi::goldy_task_graph_len(graph),
-            2,
-            "graph should contain two compute nodes"
-        );
-        assert_eq!(
-            goldy_task_graph_dispatch(graph, device),
+            goldy_scheme_submit(scheme),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -169,7 +151,7 @@ fn task_graph_compute_double_then_add_ten() {
             assert_eq!(v, expected, "index {i}: expected {expected}, got {v}");
         }
 
-        goldy_task_graph_destroy(graph);
+        goldy_scheme_destroy(scheme);
         goldy_compute_pipeline_destroy(add_pipeline);
         goldy_shader_destroy(add_shader);
         goldy_compute_pipeline_destroy(double_pipeline);
@@ -177,6 +159,7 @@ fn task_graph_compute_double_then_add_ten() {
         goldy_parcel_destroy(dst);
         goldy_parcel_destroy(src);
         goldy_retained_pool_destroy(pool);
+        goldy_context_destroy(ctx);
         goldy_device_destroy(device);
         goldy_instance_destroy(instance);
     }

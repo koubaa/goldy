@@ -23,14 +23,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Graphics backend type.
-typedef enum GoldyBackendType {
-    GOLDY_BACKEND_TYPE_VULKAN = 0,
-    GOLDY_BACKEND_TYPE_METAL = 1,
-    GOLDY_BACKEND_TYPE_DX12 = 2,
-    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
-} GoldyBackendType;
-
 // Result codes for FFI functions.
 typedef enum GoldyResult {
     // Operation succeeded.
@@ -48,6 +40,14 @@ typedef enum GoldyResult {
     // Internal error.
     GOLDY_RESULT_INTERNAL_ERROR = 6,
 } GoldyResult;
+
+// Graphics backend type.
+typedef enum GoldyBackendType {
+    GOLDY_BACKEND_TYPE_VULKAN = 0,
+    GOLDY_BACKEND_TYPE_METAL = 1,
+    GOLDY_BACKEND_TYPE_DX12 = 2,
+    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
+} GoldyBackendType;
 
 // GPU device type.
 typedef enum GoldyDeviceType {
@@ -172,6 +172,9 @@ typedef enum GoldyIndexFormat {
 // Opaque handle to a Goldy ComputePipeline.
 typedef struct GoldyComputePipeline GoldyComputePipeline;
 
+// Opaque handle to a Goldy submission context.
+typedef struct GoldyContext GoldyContext;
+
 // Opaque handle to a Goldy Device.
 typedef struct GoldyDevice GoldyDevice;
 
@@ -195,6 +198,9 @@ typedef struct GoldyRetainedPool GoldyRetainedPool;
 
 // Opaque handle to a Goldy Sampler.
 typedef struct GoldySampler GoldySampler;
+
+// Opaque handle to a retained Goldy scheme.
+typedef struct GoldyScheme GoldyScheme;
 
 // Opaque handle to a Goldy ShaderModule.
 typedef struct GoldyShaderModule GoldyShaderModule;
@@ -270,6 +276,12 @@ typedef struct GoldySamplerDesc {
     float lod_max_clamp;
 } GoldySamplerDesc;
 
+// Outcome counters for [`goldy_scheme_replay_stats`].
+typedef struct GoldyReplayStats {
+    uint64_t records;
+    uint64_t resubmit_hits;
+} GoldyReplayStats;
+
 // Opaque token returned by [`goldy_task_graph_declare_swapchain_output`].
 //
 // Carries no data; exists for type safety at the C ABI boundary.
@@ -306,6 +318,27 @@ struct GoldyComputePipeline *goldy_compute_pipeline_create(const struct GoldyDev
 // # Safety
 // The pointer must be valid and not used after this call.
 void goldy_compute_pipeline_destroy(struct GoldyComputePipeline *pipeline);
+
+// Create a context bound to `device`.
+//
+// A context is the submission lifetime anchor for retained [`crate::scheme::GoldyScheme`]
+// instances on the same device.
+//
+// # Safety
+// `device` must be valid.
+struct GoldyContext *goldy_context_create(const struct GoldyDevice *device);
+
+// Destroy a context.
+//
+// # Safety
+// `ctx` must be valid and not used after this call.
+void goldy_context_destroy(struct GoldyContext *ctx);
+
+// Smoke-test helper: returns [`GoldyResult::Ok`] when `ctx` is non-null.
+//
+// # Safety
+// `ctx` must be valid when non-null.
+enum GoldyResult goldy_context_is_valid(const struct GoldyContext *ctx);
 
 // Get the adapter ID this device was created on.
 //
@@ -462,15 +495,6 @@ enum GoldyResult goldy_parcel_read_to_cpu(const struct GoldyParcel *parcel,
                                           uint8_t *output,
                                           size_t output_size);
 
-// Bindless resource slot index for shader binding.
-//
-// Returns `u32::MAX` if the index is unavailable (e.g. mosaic parcels).
-//
-// # Safety
-// The parcel pointer must be valid.
-uint32_t goldy_parcel_resource_index(const struct GoldyParcel *parcel,
-                                     enum GoldyResourceAccess access);
-
 // Create a new render pipeline.
 //
 // Returns a pointer to the pipeline, or null on failure.
@@ -623,6 +647,85 @@ struct GoldySampler *goldy_sampler_create_default(const struct GoldyDevice *devi
 // # Safety
 // The pointer must be valid and not used after this call.
 void goldy_sampler_destroy(struct GoldySampler *sampler);
+
+// Begin recording a compute dispatch node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_begin(struct GoldyScheme *scheme,
+                                                 const char *label,
+                                                 const struct GoldyComputePipeline *pipeline);
+
+// Declare a retained parcel for the active compute node.
+//
+// Registers both the graph dependency and the bindless shader slot internally —
+// callers never pass resource indices.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_declare_parcel(struct GoldyScheme *scheme,
+                                                          const struct GoldyParcel *parcel,
+                                                          enum GoldyNodeAccess node_access,
+                                                          enum GoldyResourceAccess resource_access);
+
+// Declare a mosaic sub-view for the active compute node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_declare_parcel_view(struct GoldyScheme *scheme,
+                                                               const struct GoldyParcel *parcel,
+                                                               uint32_t slot,
+                                                               enum GoldyNodeAccess node_access,
+                                                               enum GoldyResourceAccess resource_access);
+
+// Finalize the active compute node with a direct dispatch.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_compute_node_dispatch(struct GoldyScheme *scheme,
+                                                    uint32_t workgroups_x,
+                                                    uint32_t workgroups_y,
+                                                    uint32_t workgroups_z);
+
+// Create a scheme bound to `ctx`.
+//
+// # Safety
+// `ctx` must be valid.
+struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
+
+// Destroy a scheme.
+//
+// # Safety
+// `scheme` must be valid and not used after this call.
+void goldy_scheme_destroy(struct GoldyScheme *scheme);
+
+// True when the next submit must re-record.
+//
+// # Safety
+// `scheme` must be valid.
+bool goldy_scheme_is_dirty(const struct GoldyScheme *scheme);
+
+// Number of nodes recorded in the scheme IR.
+//
+// # Safety
+// `scheme` must be valid.
+uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
+
+// Submission outcome counters.
+//
+// # Safety
+// `scheme` and `out_stats` must be valid.
+enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
+                                           struct GoldyReplayStats *out_stats);
+
+// Submit the scheme and block until GPU completion.
+//
+// TODO: remove blocking when readback IR node exists; callers should manage sync via
+// an explicit readback node instead of implicit wait-after-submit.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_submit(struct GoldyScheme *scheme);
 
 // Get the built-in vertex color 2D shader source.
 //

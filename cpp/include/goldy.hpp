@@ -62,6 +62,7 @@ public:
 
 class Instance;
 class Device;
+class Context;
 class Adapter;
 class RetainedPool;
 class Parcel;
@@ -71,6 +72,7 @@ class RenderPipeline;
 class RenderTarget;
 class Surface;
 class TaskGraph;
+class Scheme;
 class ComputePipeline;
 class Sampler;
 
@@ -214,6 +216,10 @@ struct DeviceDeleter {
     void operator()(GoldyDevice* p) const { if (p) goldy_device_destroy(p); }
 };
 
+struct ContextDeleter {
+    void operator()(GoldyContext* p) const { if (p) goldy_context_destroy(p); }
+};
+
 struct RetainedPoolDeleter {
     void operator()(GoldyRetainedPool* p) const { if (p) goldy_retained_pool_destroy(p); }
 };
@@ -244,6 +250,10 @@ struct SurfaceDeleter {
 
 struct TaskGraphDeleter {
     void operator()(GoldyTaskGraph* p) const { if (p) goldy_task_graph_destroy(p); }
+};
+
+struct SchemeDeleter {
+    void operator()(GoldyScheme* p) const { if (p) goldy_scheme_destroy(p); }
 };
 
 struct ComputePipelineDeleter {
@@ -401,6 +411,34 @@ inline Device Instance::create_device_for_adapter(uint32_t adapter_id) {
     }
     return Device(ptr);
 }
+
+// =============================================================================
+// Context
+// =============================================================================
+
+/**
+ * @brief Submission context for retained Scheme instances.
+ */
+class Context {
+public:
+    explicit Context(const Device& device) {
+        GoldyContext* ptr = goldy_context_create(device.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    Context(const Context&) = delete;
+    Context& operator=(const Context&) = delete;
+    Context(Context&&) = default;
+    Context& operator=(Context&&) = default;
+
+    GoldyContext* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyContext, detail::ContextDeleter> ptr_;
+};
 
 // =============================================================================
 // Adapter
@@ -569,14 +607,6 @@ public:
     Parcel& operator=(Parcel&&) = default;
 
     uint64_t byte_size() const { return goldy_parcel_byte_size(ptr_.get()); }
-
-    uint32_t resource_index(ResourceAccess access) const {
-        uint32_t idx = goldy_parcel_resource_index(ptr_.get(), static_cast<GoldyResourceAccess>(access));
-        if (idx == UINT32_MAX) {
-            throw Exception::from_last_error();
-        }
-        return idx;
-    }
 
     std::vector<uint8_t> read_to_cpu(const Device& device) const {
         std::vector<uint8_t> output(byte_size());
@@ -1267,6 +1297,108 @@ public:
 private:
     std::unique_ptr<GoldyComputePipeline, detail::ComputePipelineDeleter> ptr_;
 };
+
+// =============================================================================
+// Scheme
+// =============================================================================
+
+/**
+ * @brief Retained compute scheme bound to one Context.
+ */
+class Scheme {
+public:
+    class ComputeNode;
+
+    explicit Scheme(const Context& ctx) {
+        GoldyScheme* ptr = goldy_scheme_create(ctx.get());
+        if (!ptr) {
+            throw Exception::from_last_error();
+        }
+        ptr_.reset(ptr);
+    }
+
+    Scheme(const Scheme&) = delete;
+    Scheme& operator=(const Scheme&) = delete;
+    Scheme(Scheme&&) = default;
+    Scheme& operator=(Scheme&&) = default;
+
+    uint32_t len() const { return goldy_scheme_len(ptr_.get()); }
+
+    bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
+
+    void submit() {
+        detail::throw_on_result(goldy_scheme_submit(ptr_.get()));
+    }
+
+    [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);
+
+    GoldyScheme* get() const { return ptr_.get(); }
+
+private:
+    friend class ComputeNode;
+    std::unique_ptr<GoldyScheme, detail::SchemeDeleter> ptr_;
+};
+
+/**
+ * @brief RAII scope for recording one compute dispatch node on a scheme.
+ */
+class Scheme::ComputeNode {
+public:
+    ComputeNode(Scheme& scheme, const char* label, const ComputePipeline& pipeline,
+                uint32_t wg_x = 1, uint32_t wg_y = 1, uint32_t wg_z = 1)
+        : scheme_(scheme), wg_x_(wg_x), wg_y_(wg_y), wg_z_(wg_z) {
+        detail::throw_on_result(goldy_scheme_compute_node_begin(
+            scheme_.ptr_.get(), label, pipeline.get()));
+        active_ = true;
+    }
+
+    ~ComputeNode() noexcept {
+        if (active_) {
+            goldy_scheme_compute_node_dispatch(scheme_.ptr_.get(), wg_x_, wg_y_, wg_z_);
+            active_ = false;
+        }
+    }
+
+    ComputeNode(const ComputeNode&) = delete;
+    ComputeNode& operator=(const ComputeNode&) = delete;
+    ComputeNode(ComputeNode&&) = delete;
+    ComputeNode& operator=(ComputeNode&&) = delete;
+
+    ComputeNode& declare_parcel(const Parcel& parcel, NodeAccess node_access, ResourceAccess resource_access) {
+        detail::throw_on_result(goldy_scheme_compute_node_declare_parcel(
+            scheme_.ptr_.get(), parcel.get(),
+            static_cast<GoldyNodeAccess>(node_access),
+            static_cast<GoldyResourceAccess>(resource_access)));
+        return *this;
+    }
+
+    ComputeNode& declare_parcel_view(const Parcel& parcel, uint32_t slot,
+                                     NodeAccess node_access, ResourceAccess resource_access) {
+        detail::throw_on_result(goldy_scheme_compute_node_declare_parcel_view(
+            scheme_.ptr_.get(), parcel.get(), slot,
+            static_cast<GoldyNodeAccess>(node_access),
+            static_cast<GoldyResourceAccess>(resource_access)));
+        return *this;
+    }
+
+    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
+        if (!active_) return;
+        detail::throw_on_result(goldy_scheme_compute_node_dispatch(
+            scheme_.ptr_.get(), x, y, z));
+        active_ = false;
+    }
+
+private:
+    Scheme& scheme_;
+    uint32_t wg_x_;
+    uint32_t wg_y_;
+    uint32_t wg_z_;
+    bool active_ = false;
+};
+
+inline Scheme::ComputeNode Scheme::compute_node(const char* label, const ComputePipeline& pipeline) {
+    return ComputeNode(*this, label, pipeline);
+}
 
 /**
  * @brief RAII scope for recording one compute dispatch node on a task graph.

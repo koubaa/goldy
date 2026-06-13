@@ -101,6 +101,49 @@ impl Scheme {
         self.stats
     }
 
+    /// Register stamp targets collected during compute-node recording.
+    pub(crate) fn apply_compute_stamps(&mut self, stamps: &[std::sync::Arc<crate::parcel::ParcelStamp>]) {
+        for stamp in stamps {
+            self.submit_state.register_stamp(stamp.clone());
+        }
+    }
+
+    /// Append a compute dispatch node to the scheme IR.
+    pub(crate) fn commit_compute_dispatch(
+        &mut self,
+        label: &'static str,
+        pipeline: crate::backend::ComputePipelineHandle,
+        bindings: Vec<ResourceBinding>,
+        resource_slots: Vec<u32>,
+        user_slots: Vec<u32>,
+        x: u32,
+        y: u32,
+        z: u32,
+    ) {
+        self.dirty = true;
+        self.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::Dispatch {
+                pipeline,
+                resource_slots,
+                user_slots,
+                dispatch: DispatchDim::Direct { x, y, z },
+            },
+        });
+    }
+
+    /// Submit and block until GPU completion.
+    ///
+    /// **Temporary.** This will be removed once `NodeKind::ReadbackBuffer` exists in the IR so
+    /// callers can express CPU readback as an explicit graph node and manage synchronisation
+    /// without implicit blocking. See project docs (FFI sync §).
+    #[doc(hidden)]
+    pub fn submit_blocking(&mut self) -> Result<(), GoldyError> {
+        let tv = self.submit()?;
+        self.ctx.wait_until(tv)
+    }
+
     /// Declare a transient texture lease backed by the context's transient pool (N=1).
     ///
     /// The backing parcel is held until the scheme is dropped. Structural mutation.
@@ -196,6 +239,26 @@ impl Scheme {
         self.last_submitted_tv = Some(tv);
         self.stats.records += 1;
         Ok(tv)
+    }
+}
+
+/// Read-only diagnostic view of a [`Scheme`].
+///
+/// Intended for tests and debug tooling only. Do **not** use node counts for synchronisation;
+/// the scheme IR is an internal implementation detail and its shape may change without notice.
+pub struct SchemeDiagnostics<'a>(&'a Scheme);
+
+impl Scheme {
+    /// Borrow a diagnostic view of this scheme.
+    pub fn diagnostics(&self) -> SchemeDiagnostics<'_> {
+        SchemeDiagnostics(self)
+    }
+}
+
+impl SchemeDiagnostics<'_> {
+    /// Number of IR nodes recorded in the scheme.
+    pub fn ir_node_count(&self) -> usize {
+        self.0.ir.nodes.len()
     }
 }
 

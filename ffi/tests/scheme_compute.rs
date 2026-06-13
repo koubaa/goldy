@@ -1,17 +1,17 @@
-//! Headless integration test: fill-42 compute node via TaskGraph FFI.
+//! Headless integration test: fill-42 compute node via Scheme FFI.
 //!
-//! Mirrors `goldy/tests/task_graph_integration.rs::graph_nonblocking_submit` (FILL_42_SHADER).
+//! Mirrors `goldy/tests/scheme_compute_integration.rs::scheme_graph_fill_readback`.
 
 mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu, goldy_parcel_resource_index,
-    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create,
-    goldy_shader_destroy, goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_parcel,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
-    goldy_task_graph_destroy, goldy_task_graph_dispatch, GoldyBufferKind, GoldyResourceAccess, GoldyResult,
+    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
+    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu,
+    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
+    goldy_scheme_compute_node_declare_parcel, goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy,
+    goldy_scheme_len, goldy_scheme_replay_stats, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
+    GoldyBufferKind, GoldyNodeAccess, GoldyReplayStats, GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -26,25 +26,22 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 "#;
 
 #[test]
-fn task_graph_compute_node_fills_buffer_with_42() {
+fn scheme_compute_node_fills_buffer_with_42() {
     unsafe {
         let (instance, device) = open_device();
 
-        let initial: Vec<u32> = (0..64).collect();
-        let bytes = std::slice::from_raw_parts(
-            initial.as_ptr() as *const u8,
-            initial.len() * std::mem::size_of::<u32>(),
-        );
+        let ctx = goldy_context_create(device);
+        assert!(!ctx.is_null(), "{}", last_ffi_message());
 
         let pool = goldy_retained_pool_create(device);
         assert!(!pool.is_null(), "{}", last_ffi_message());
         let buffer = goldy_retained_pool_acquire_buffer(
             pool,
-            bytes.len() as u64,
+            64 * 4,
             GoldyBufferKind::Scattered,
-            std::mem::size_of::<u32>() as u32,
-            bytes.as_ptr(),
-            bytes.len(),
+            0,
+            std::ptr::null(),
+            0,
         );
         assert!(!buffer.is_null(), "{}", last_ffi_message());
 
@@ -55,44 +52,36 @@ fn task_graph_compute_node_fills_buffer_with_42() {
         let pipeline = goldy_compute_pipeline_create(device, shader);
         assert!(!pipeline.is_null(), "{}", last_ffi_message());
 
-        let graph = goldy_task_graph_create();
-        assert!(!graph.is_null());
+        let scheme = goldy_scheme_create(ctx);
+        assert!(!scheme.is_null());
 
         let label = CString::new("fill").unwrap();
         assert_eq!(
-            goldy_task_graph_compute_node_begin(graph, label.as_ptr(), pipeline),
+            goldy_scheme_compute_node_begin(scheme, label.as_ptr(), pipeline),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_bind_parcel(graph, buffer, goldy_ffi::GoldyNodeAccess::Write),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
-
-        let idx = goldy_parcel_resource_index(buffer, GoldyResourceAccess::Write);
-        assert_ne!(idx, u32::MAX);
-        assert_eq!(
-            goldy_task_graph_compute_node_bind_resources_raw(graph, &idx as *const u32, 1),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
-        assert_eq!(
-            goldy_task_graph_compute_node_dispatch(graph, 1, 1, 1),
+            goldy_scheme_compute_node_declare_parcel(
+                scheme,
+                buffer,
+                GoldyNodeAccess::Write,
+                GoldyResourceAccess::Write
+            ),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_ffi::goldy_task_graph_len(graph),
-            1,
-            "graph should contain one compute node"
+            goldy_scheme_compute_node_dispatch(scheme, 1, 1, 1),
+            GoldyResult::Ok,
+            "{}",
+            last_ffi_message()
         );
+        assert_eq!(goldy_scheme_len(scheme), 1, "scheme should contain one compute node");
         assert_eq!(
-            goldy_task_graph_dispatch(graph, device),
+            goldy_scheme_submit(scheme),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -114,11 +103,27 @@ fn task_graph_compute_node_fills_buffer_with_42() {
             assert_eq!(v, 42, "index {i}: got {v}");
         }
 
-        goldy_task_graph_destroy(graph);
+        assert_eq!(
+            goldy_scheme_submit(scheme),
+            GoldyResult::Ok,
+            "{}",
+            last_ffi_message()
+        );
+        let mut stats = GoldyReplayStats::default();
+        assert_eq!(
+            goldy_scheme_replay_stats(scheme, &mut stats),
+            GoldyResult::Ok,
+            "{}",
+            last_ffi_message()
+        );
+        assert_eq!(stats.records, 1, "only the first submit should record");
+
+        goldy_scheme_destroy(scheme);
         goldy_compute_pipeline_destroy(pipeline);
         goldy_shader_destroy(shader);
         goldy_parcel_destroy(buffer);
         goldy_retained_pool_destroy(pool);
+        goldy_context_destroy(ctx);
         goldy_device_destroy(device);
         goldy_instance_destroy(instance);
     }

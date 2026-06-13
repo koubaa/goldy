@@ -6,11 +6,13 @@ pub enum GoldyMosaicBuilder {}
 pub enum GoldyParcel {}
 pub enum GoldyRetainedPool {}
 pub enum GoldyComputePipeline {}
+pub enum GoldyContext {}
 pub enum GoldyDevice {}
 pub enum GoldyInstance {}
 pub enum GoldyRenderPipeline {}
 pub enum GoldyRenderTarget {}
 pub enum GoldySampler {}
+pub enum GoldyScheme {}
 pub enum GoldyShaderModule {}
 pub enum GoldySurface {}
 pub enum GoldySurfaceFrame {}
@@ -221,4 +223,11 @@ pub struct GoldyColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GoldyTextureFlags {
     pub _0: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GoldyReplayStats {
+    pub records: u64,
+    pub resubmit_hits: u64,
 }

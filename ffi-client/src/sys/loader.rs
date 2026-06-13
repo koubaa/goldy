@@ -23,6 +23,8 @@ pub(crate) struct GoldyFfi {
     pub goldy_clear_error: FnGoldyClearError,
     pub goldy_compute_pipeline_create: FnGoldyComputePipelineCreate,
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
+    pub goldy_context_create: FnGoldyContextCreate,
+    pub goldy_context_destroy: FnGoldyContextDestroy,
     pub goldy_device_adapter_id: FnGoldyDeviceAdapterId,
     pub goldy_device_destroy: FnGoldyDeviceDestroy,
     pub goldy_device_has_library: FnGoldyDeviceHasLibrary,
@@ -97,13 +99,22 @@ pub(crate) struct GoldyFfi {
     pub goldy_mosaic_builder_build: FnGoldyMosaicBuilderBuild,
     pub goldy_parcel_byte_size: FnGoldyParcelByteSize,
     pub goldy_parcel_destroy: FnGoldyParcelDestroy,
-    pub goldy_parcel_resource_index: FnGoldyParcelResourceIndex,
     pub goldy_parcel_mosaic_view_resource_index: FnGoldyParcelMosaicViewResourceIndex,
     pub goldy_parcel_mosaic_view_read_to_cpu: FnGoldyParcelMosaicViewReadToCpu,
     pub goldy_parcel_mosaic_view_size: FnGoldyParcelMosaicViewSize,
     pub goldy_parcel_read_to_cpu: FnGoldyParcelReadToCpu,
     pub goldy_task_graph_compute_node_bind_parcel_view: FnGoldyTaskGraphComputeNodeBindParcelView,
     pub goldy_task_graph_render_pass_bind_parcel_view: FnGoldyTaskGraphRenderPassBindParcelView,
+    pub goldy_scheme_create: FnGoldySchemeCreate,
+    pub goldy_scheme_destroy: FnGoldySchemeDestroy,
+    pub goldy_scheme_len: FnGoldySchemeLen,
+    pub goldy_scheme_is_dirty: FnGoldySchemeIsDirty,
+    pub goldy_scheme_replay_stats: FnGoldySchemeReplayStats,
+    pub goldy_scheme_compute_node_begin: FnGoldySchemeComputeNodeBegin,
+    pub goldy_scheme_compute_node_declare_parcel: FnGoldySchemeComputeNodeDeclareParcel,
+    pub goldy_scheme_compute_node_declare_parcel_view: FnGoldySchemeComputeNodeDeclareParcelView,
+    pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
+    pub goldy_scheme_submit: FnGoldySchemeSubmit,
 }
 
 impl GoldyFfi {
@@ -130,6 +141,8 @@ impl GoldyFfi {
             goldy_clear_error: sym!("goldy_clear_error", FnGoldyClearError),
             goldy_compute_pipeline_create: sym!("goldy_compute_pipeline_create", FnGoldyComputePipelineCreate),
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
+            goldy_context_create: sym!("goldy_context_create", FnGoldyContextCreate),
+            goldy_context_destroy: sym!("goldy_context_destroy", FnGoldyContextDestroy),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),
             goldy_device_destroy: sym!("goldy_device_destroy", FnGoldyDeviceDestroy),
             goldy_device_has_library: sym!("goldy_device_has_library", FnGoldyDeviceHasLibrary),
@@ -276,7 +289,6 @@ impl GoldyFfi {
             goldy_mosaic_builder_build: sym!("goldy_mosaic_builder_build", FnGoldyMosaicBuilderBuild),
             goldy_parcel_byte_size: sym!("goldy_parcel_byte_size", FnGoldyParcelByteSize),
             goldy_parcel_destroy: sym!("goldy_parcel_destroy", FnGoldyParcelDestroy),
-            goldy_parcel_resource_index: sym!("goldy_parcel_resource_index", FnGoldyParcelResourceIndex),
             goldy_parcel_mosaic_view_resource_index: sym!(
                 "goldy_parcel_mosaic_view_resource_index",
                 FnGoldyParcelMosaicViewResourceIndex
@@ -295,6 +307,25 @@ impl GoldyFfi {
                 "goldy_task_graph_render_pass_bind_parcel_view",
                 FnGoldyTaskGraphRenderPassBindParcelView
             ),
+            goldy_scheme_create: sym!("goldy_scheme_create", FnGoldySchemeCreate),
+            goldy_scheme_destroy: sym!("goldy_scheme_destroy", FnGoldySchemeDestroy),
+            goldy_scheme_len: sym!("goldy_scheme_len", FnGoldySchemeLen),
+            goldy_scheme_is_dirty: sym!("goldy_scheme_is_dirty", FnGoldySchemeIsDirty),
+            goldy_scheme_replay_stats: sym!("goldy_scheme_replay_stats", FnGoldySchemeReplayStats),
+            goldy_scheme_compute_node_begin: sym!("goldy_scheme_compute_node_begin", FnGoldySchemeComputeNodeBegin),
+            goldy_scheme_compute_node_declare_parcel: sym!(
+                "goldy_scheme_compute_node_declare_parcel",
+                FnGoldySchemeComputeNodeDeclareParcel
+            ),
+            goldy_scheme_compute_node_declare_parcel_view: sym!(
+                "goldy_scheme_compute_node_declare_parcel_view",
+                FnGoldySchemeComputeNodeDeclareParcelView
+            ),
+            goldy_scheme_compute_node_dispatch: sym!(
+                "goldy_scheme_compute_node_dispatch",
+                FnGoldySchemeComputeNodeDispatch
+            ),
+            goldy_scheme_submit: sym!("goldy_scheme_submit", FnGoldySchemeSubmit),
             _library: library,
         })
     }

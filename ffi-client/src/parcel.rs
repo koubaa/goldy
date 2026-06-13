@@ -17,16 +17,6 @@ impl Parcel {
         unsafe { sys::goldy_parcel_byte_size(self.ptr) }
     }
 
-    pub fn resource_index(&self, access: ResourceAccess) -> Result<u32> {
-        let idx = unsafe { sys::goldy_parcel_resource_index(self.ptr, access.into()) };
-        if idx == u32::MAX {
-            return Err(crate::error::GoldyError::from_message(
-                "parcel resource index unavailable for requested access",
-            ));
-        }
-        Ok(idx)
-    }
-
     pub fn read_to_cpu(&self, device: &Device) -> Result<Vec<u8>> {
         let mut output = vec![0u8; self.byte_size() as usize];
         check(unsafe { sys::goldy_parcel_read_to_cpu(self.ptr, device.as_ptr(), output.as_mut_ptr(), output.len()) })?;

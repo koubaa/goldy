@@ -7,6 +7,7 @@
 
 mod adapter;
 mod compute;
+mod context;
 mod device;
 mod error;
 mod instance;
@@ -14,6 +15,7 @@ mod parcel;
 mod pipeline;
 mod render_target;
 mod retained_pool;
+mod scheme;
 mod shader_module;
 mod surface;
 mod sys;
@@ -22,6 +24,7 @@ mod types;
 
 pub use adapter::Adapter;
 pub use compute::ComputePipeline;
+pub use context::Context;
 pub use device::Device;
 pub use error::{GoldyError, Result};
 pub use instance::{AdapterInfo, Instance};
@@ -29,6 +32,7 @@ pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use render_target::RenderTarget;
 pub use retained_pool::{MosaicBuilder, MosaicSlot, RetainedPool};
+pub use scheme::{ComputeNodeBuilder as SchemeComputeNodeBuilder, ReplayStats, Scheme};
 pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
 pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};
