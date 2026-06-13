@@ -207,7 +207,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .push_next(&mut pipeline_robustness_features);
 
     if supports_compute_derivative_quads {
-        let _ = features2.push_next(&mut compute_derivatives_features);
+        features2 = features2.push_next(&mut compute_derivatives_features);
     }
 
     // Create logical device with swapchain extension
