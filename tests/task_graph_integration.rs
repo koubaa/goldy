@@ -149,6 +149,7 @@ fn readback_u32(device: &goldy::Device, buffer: &Buffer, count: usize) -> Vec<u3
 
 /// Linear chain: double then add 10. Exercises RAW dependency.
 /// Expected: out[i] = i * 2 + 10
+// Scheme migration: see scheme_graph_linear_chain
 #[test]
 fn graph_linear_chain() {
     let device = make_device();
@@ -193,6 +194,7 @@ fn graph_linear_chain() {
 
 /// Two independent dispatches writing to separate buffers.
 /// Exercises the no-barrier path (both should land in wave 0).
+// Scheme migration: see scheme_graph_independent_dispatches
 #[test]
 fn graph_independent_dispatches() {
     let device = make_device();
@@ -245,6 +247,7 @@ fn graph_independent_dispatches() {
 ///       D    (sum Y+Z into out)
 ///
 /// Expected: out[i] = i*2 + i*2 = i*4
+// Scheme migration: see scheme_graph_diamond_dependency
 #[test]
 fn graph_diamond_dependency() {
     let device = make_device();
@@ -324,6 +327,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 
 /// Two-pass chained compute through TaskGraph (double then add ten).
+// Scheme migration: see scheme_graph_linear_chain
 #[test]
 fn graph_two_pass_chained_compute() {
     let device = make_device();
@@ -362,6 +366,7 @@ fn graph_two_pass_chained_compute() {
 }
 
 /// Non-blocking submit via TaskGraph.
+// Scheme migration: see scheme_graph_fill_readback
 #[test]
 fn graph_nonblocking_submit() {
     let device = make_device();
@@ -406,6 +411,7 @@ fn graph_nonblocking_submit() {
 /// `D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW`, which is distinct from
 /// `D3D12_BARRIER_SYNC_COMPUTE_SHADING`. The TaskGraph refactor promotes the
 /// clear to a first-class node so the analyzer emits the required barrier.
+// Scheme migration: see scheme_zeros_then_dispatch_reads_zeros
 #[test]
 fn clear_then_dispatch_reads_zeros() {
     let device = make_device();
@@ -450,6 +456,7 @@ fn clear_then_dispatch_reads_zeros() {
 /// The CPU data must be visible to the GPU dispatch. The TaskGraph analyzer
 /// inserts a barrier between the write node and the read dispatch, ensuring
 /// the upload completes before the shader accesses the buffer on all backends.
+// Scheme migration: see scheme_write_then_dispatch_reads_uploaded_data
 #[test]
 fn write_then_dispatch_reads_uploaded_data() {
     let device = make_device();
@@ -495,6 +502,7 @@ fn write_then_dispatch_reads_uploaded_data() {
 ///
 /// Mirrors [`write_then_dispatch_reads_uploaded_data`] but uses the opaque parcel
 /// path that goldy-doom will use for per-frame uniform uploads.
+// Scheme migration: see scheme_write_then_dispatch_reads_uploaded_data
 #[test]
 fn write_parcel_then_dispatch_reads_uploaded_data() {
     let device = make_device();
@@ -559,6 +567,7 @@ fn write_parcel_then_dispatch_reads_uploaded_data() {
 /// This is the minimal repro shape for the `ClearBuffer → compute dispatch`
 /// barrier path. If the post-clear barrier is missing, some workgroups may read
 /// stale (nonzero) data.
+// Scheme migration: see scheme_stress_zeros_then_dispatch_large
 #[test]
 fn stress_clear_then_dispatch_large() {
     let device = make_device();
@@ -605,6 +614,7 @@ fn stress_clear_then_dispatch_large() {
 /// Mimics Ekrano's pattern of clearing multiple pool buffers then dispatching
 /// shaders that read them all. If any clear → dispatch barrier is missing,
 /// some dispatches may read stale data.
+// Scheme migration: see scheme_stress_many_zero_writes_many_dispatches
 #[test]
 fn stress_many_clears_many_dispatches() {
     let device = make_device();
@@ -662,6 +672,7 @@ fn stress_many_clears_many_dispatches() {
 /// Buffer is first filled with nonzero data, then cleared to zero, then
 /// overwritten with known data via write_buffer, then a dispatch copies it out.
 /// Exercises Clear→Write (WAW) and Write→Dispatch (RAW) barrier insertion.
+// Scheme migration: see scheme_stress_write_then_dispatch_chain
 #[test]
 fn stress_clear_write_dispatch_chain() {
     let device = make_device();
@@ -712,6 +723,7 @@ fn stress_clear_write_dispatch_chain() {
 /// Tests inter-submission synchronization (tail barrier correctness).
 /// Mimics Ekrano's coarse→fine two-phase rendering where the backend may
 /// split a single graph into multiple command buffers internally.
+// Scheme migration: see scheme_stress_two_phase_submission
 #[test]
 fn stress_two_phase_submission() {
     let device = make_device();
@@ -773,6 +785,7 @@ fn stress_two_phase_submission() {
 /// Submit N graphs in quick succession, each depending on the previous one's
 /// output, using only `submit` (non-blocking). Wait only at the end.
 /// This stresses the queue fence synchronization path.
+// Scheme migration: see scheme_stress_rapid_submissions
 #[test]
 fn stress_rapid_submissions() {
     let device = make_device();

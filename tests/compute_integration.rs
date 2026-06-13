@@ -87,6 +87,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 
 #[test]
+// Scheme migration: see scheme_compute_dispatch_empty
 fn test_compute_dispatch_empty() {
     // Test dispatching a compute shader with no resources
     const MINIMAL_SHADER: &str = r#"
@@ -111,6 +112,7 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 
 #[test]
+// Scheme migration: see scheme_compute_with_uav_parcel
 fn test_compute_with_uav_buffer() {
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
@@ -137,6 +139,7 @@ fn test_compute_with_uav_buffer() {
 }
 
 #[test]
+// Scheme migration: see scheme_compute_with_srv_and_uav_parcels
 fn test_compute_with_srv_and_uav() {
     let instance = Instance::new().expect("Failed to create instance");
     let device = request_default_device(&instance);
@@ -320,6 +323,7 @@ fn vk_api_validation_two_device_teardown() {
 
 /// Write data via a compute shader then read it back, verifying correctness
 /// of the full GPU staging round-trip (write → dispatch → readback).
+// Scheme migration: see scheme_compute_write_and_readback
 #[test]
 fn test_compute_write_and_readback() {
     let device = make_device();
@@ -348,6 +352,7 @@ fn test_compute_write_and_readback() {
 }
 
 /// `Buffer::clear` (standalone, immediate) zeros the whole buffer.
+// Scheme migration: see scheme_parcel_write_zeros_full
 #[test]
 fn test_buffer_clear_standalone() {
     let device = make_device();
@@ -367,6 +372,7 @@ fn test_buffer_clear_standalone() {
 }
 
 /// `Buffer::clear` with an explicit range zeros only that slice.
+// Scheme migration: see scheme_parcel_write_zeros_partial
 #[test]
 fn test_buffer_clear_partial() {
     let device = make_device();
@@ -389,6 +395,7 @@ fn test_buffer_clear_partial() {
 }
 
 /// `Buffer::clear` with `size = 0` clears from offset to end of buffer.
+// Scheme migration: see scheme_parcel_write_zeros_to_end
 #[test]
 fn test_buffer_clear_to_end() {
     let device = make_device();
@@ -414,6 +421,7 @@ fn test_buffer_clear_to_end() {
 
 /// `TaskGraph::clear_buffer` records a clear node in the graph.
 /// Clears input before the copy dispatch; output should be all zeros.
+// Scheme migration: see scheme_zeros_before_copy_dispatch
 #[test]
 fn test_compute_batched_clear_before_dispatch() {
     let device = make_device();
@@ -449,6 +457,7 @@ fn test_compute_batched_clear_before_dispatch() {
 
 /// GPU ordering: Dispatch A writes values → ClearBuffer → Dispatch B increments.
 /// Correct result is 1 (0 + 1). An ordering bug would give 43 (42 + 1 without the clear).
+// Scheme migration: see scheme_write_to_parcel_zeros_between_submissions
 #[test]
 fn test_compute_clear_between_dispatches() {
     let device = make_device();
@@ -555,6 +564,7 @@ fn test_dispatch_indirect_invalid_buffer() {
 
 /// Shader using 6 bindless slots (0–5). Before the 16-slot expansion, slots 4+
 /// were mapped to garbage indices and this test would produce wrong results.
+// Scheme migration: see scheme_compute_many_resource_slots
 #[test]
 fn test_compute_many_resource_slots() {
     let device = make_device();
@@ -2250,6 +2260,7 @@ fn test_transient_buffer_write_then_copy() {
 /// Control test: same dispatches but with a regular buffer instead of transient.
 /// If this passes but the transient version fails, the issue is in the
 /// graph-colored infrastructure.
+// Scheme migration: see scheme_regular_buffer_write_then_copy
 #[test]
 fn test_regular_buffer_write_then_copy() {
     use goldy::{NodeAccess, TaskGraph};
