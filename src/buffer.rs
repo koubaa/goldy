@@ -438,6 +438,20 @@ impl Buffer {
         backend.read_buffer_to_cpu(device.inner.handle, self.handle, output)
     }
 
+    /// Capture the read path for [`crate::parcel::ReadbackSink`] / [`crate::scheme::ReadGrant`].
+    ///
+    /// The returned target shares an [`Arc`] with the live buffer so read grants
+    /// remain valid after the source [`crate::Parcel`] is dropped.
+    pub(crate) fn readback_target(buffer: &Arc<Self>) -> BufferReadbackTarget {
+        BufferReadbackTarget {
+            buffer: Arc::clone(buffer),
+        }
+    }
+
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// Clear the buffer (fill with zeros) from offset for size bytes.
     pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
@@ -507,6 +521,21 @@ impl BufferSource for Buffer {
     }
     fn source_offset(&self) -> u64 {
         0
+    }
+}
+
+/// Captured buffer read state for grant readback — holds an [`Arc`] keepalive.
+pub(crate) struct BufferReadbackTarget {
+    buffer: Arc<Buffer>,
+}
+
+impl BufferReadbackTarget {
+    pub(crate) fn read_to_cpu(&self, output: &mut [u8]) -> Result<()> {
+        self.buffer.read_to_cpu(self.buffer.device(), output)
+    }
+
+    pub(crate) fn byte_size(&self) -> u64 {
+        self.buffer.byte_size()
     }
 }
 

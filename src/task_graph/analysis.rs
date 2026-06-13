@@ -420,6 +420,10 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
+        // GrantRead participates in ordering edges but emits no GPU work in v1.
+        // Barriers involving grant nodes intentionally have an empty dst usage
+        // until Unit 3 inserts device→host transition at the grant site.
+        NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
     }
 }
 
@@ -635,7 +639,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
             }
         }
 
@@ -990,7 +994,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } => {}
+                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
             }
         }
 

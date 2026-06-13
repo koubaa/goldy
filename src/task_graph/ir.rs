@@ -201,6 +201,13 @@ pub enum NodeKind {
         target: RenderTargetHandle,
         commands: Vec<crate::backend::RenderCommand>,
     },
+    /// Read easement grant — recorded once, replayed with the scheme.
+    ///
+    /// Emits no GPU commands in v1; exists so the analyzer can eventually
+    /// choose host-visible backing vs an inserted device→host blit per backend.
+    GrantRead {
+        grant_id: u32,
+    },
 }
 
 /// A single node in the task graph.

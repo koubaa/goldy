@@ -14,8 +14,9 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess, Parcel, RequestAdapterOptions,
-    RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, Parcel,
+    ReadGrant, RequestAdapterOptions, RetainedPool, Sampler, Scheme, SchemeFrame, ShaderModule,
+    StructuredBufferElement,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -47,6 +48,12 @@ fn readback_parcel_u32(device: &Device, parcel: &Parcel, count: usize) -> Vec<u3
     let mut output = vec![0u8; count * 4];
     parcel.read_to_cpu(device, &mut output).expect("readback");
     bytemuck::cast_slice(&output).to_vec()
+}
+
+fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
+    let bytes = grant.read(frame).expect("grant read");
+    assert_eq!(bytes.len(), count * 4, "grant readback size");
+    bytemuck::cast_slice(&bytes).to_vec()
 }
 
 fn write_zeros_to_parcel(ctx: &goldy::Context, parcel: &Parcel, byte_len: usize) {
@@ -356,11 +363,10 @@ fn scheme_graph_fill_readback() {
         .bind_parcel(&buf, NodeAccess::Write)
         .bind_resources_typed(&[buf.handle(ResourceAccess::Write).unwrap()])
         .dispatch(1, 1, 1);
-
+    let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    for &v in &readback_parcel_u32(&device, &buf, 64) {
+    for &v in &read_grant_u32(&grant, &frame, 64) {
         assert_eq!(v, 42);
     }
 }

@@ -268,6 +268,10 @@ pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
                 offset.hash(&mut h);
                 size.hash(&mut h);
             }
+            NodeKind::GrantRead { grant_id } => {
+                3u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
             _ => {
                 2u8.hash(&mut h);
             }

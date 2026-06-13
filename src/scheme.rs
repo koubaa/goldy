@@ -11,7 +11,7 @@
 
 use crate::context::Context;
 use crate::error::GoldyError;
-use crate::parcel::Parcel;
+use crate::parcel::{Parcel, ReadbackSink};
 use crate::retained_pool::StampedParcel;
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
@@ -21,6 +21,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Per-submission identity returned by [`Scheme::submit`].
+///
+/// Submission identity for a retained scheme — not [`crate::surface::Frame`]
+/// (the present/acquire token). Re-exported at the crate root as [`SchemeFrame`](crate::SchemeFrame).
 ///
 /// A lightweight token with no resources attached. The timeline value identifies
 /// which submission this frame represents; use [`Self::wait`] to block until that
@@ -45,6 +48,66 @@ impl Frame {
 impl From<Frame> for TimelineValue {
     fn from(frame: Frame) -> Self {
         frame.timeline
+    }
+}
+
+/// Stable index of a read-easement grant recorded in the scheme IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GrantId(pub(crate) u32);
+
+/// Marker type for buffer read grants (v1: deed buffer parcels only).
+pub struct GrantBuffer;
+
+/// A read easement over a scheme parcel — recorded once via [`Scheme::grant_read`].
+///
+/// Obtain readable bytes for a submission by coordinating this handle with a
+/// [`Frame`] from [`Scheme::submit`]: `grant.read(&frame)`.
+pub struct ReadGrant<T> {
+    _id: GrantId,
+    sink: Arc<ReadbackSink>,
+    _marker: PhantomData<T>,
+}
+
+impl<T> ReadGrant<T> {
+    /// Readable bytes for `frame`'s submission (full logical buffer size).
+    ///
+    /// Returns the entire backing buffer from offset 0 through its logical
+    /// [`Buffer::size`]. Slice the returned [`Vec`] when only a prefix matters.
+    ///
+    /// **v1 (N = 1):** the grant shares one backing with all submissions. A
+    /// newer [`Frame`] from [`Scheme::submit`] may stamp the parcel before this
+    /// read completes; if so, this returns [`GoldyError::Backend`] with a stale-
+    /// frame message. Read each [`Frame`] before submitting again, or wait for
+    /// Unit 3 N-backing where `(grant × frame)` resolves per-submission cells.
+    ///
+    /// v1 uses the legacy buffer readback path after [`Frame::wait`]. On DX12,
+    /// `Buffer::read_to_cpu` may signal the device fence outside context timeline
+    /// accounting; waiting on the frame first is conservative. Unit 3 replaces
+    /// this with grant-node staging that respects context accounting.
+    pub fn read(&self, frame: &Frame) -> Result<Vec<u8>, GoldyError> {
+        frame.wait(self.sink.ctx())?;
+        if self
+            .sink
+            .stamp()
+            .references
+            .lock()
+            .unwrap()
+            .get(&self.sink.ctx().backend_handle())
+            .copied()
+            .is_some_and(|latest| latest > frame.timeline_value())
+        {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "stale SchemeFrame: a newer submission overwrote the grant backing (v1 N=1); \
+                 read before the next submit, or wait for Unit 3 N-backing"
+            )));
+        }
+        let byte_size = usize::try_from(self.sink.byte_size())
+            .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
+        let mut output = vec![0u8; byte_size];
+        self.sink
+            .read_to_cpu(&mut output)
+            .map_err(|e| self.sink.ctx().classify(e))?;
+        Ok(output)
     }
 }
 
@@ -101,6 +164,7 @@ pub struct Scheme {
     /// `last_submitted_tv` is the correctness stopgap.
     last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
+    next_grant_id: u32,
 }
 
 impl Scheme {
@@ -115,6 +179,7 @@ impl Scheme {
             retention_key: None,
             last_submitted_tv: None,
             stats: ReplayStats::default(),
+            next_grant_id: 0,
         }
     }
 
@@ -296,6 +361,41 @@ impl Drop for Scheme {
     }
 }
 
+impl Scheme {
+    /// Record a read easement grant over a buffer deed parcel.
+    ///
+    /// Returns a stable [`ReadGrant`] handle; call [`ReadGrant::read`] with a
+    /// [`Frame`] from [`Self::submit`] to obtain that submission's bytes.
+    /// Record after the producing dispatch node(s).
+    pub fn grant_read(&mut self, parcel: &Parcel) -> Result<ReadGrant<GrantBuffer>, GoldyError> {
+        self.dirty = true;
+        self.submit_state.register_parcel_stamp(parcel);
+        let sink = Arc::new(
+            parcel
+                .readback_sink(&self.ctx)
+                .map_err(|e| self.ctx.classify(e))?,
+        );
+        let grant_id = GrantId(self.next_grant_id);
+        self.next_grant_id += 1;
+        let resource = parcel.resource_id();
+        self.ir.nodes.push(TaskNode {
+            label: "grant_read",
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::GrantRead {
+                grant_id: grant_id.0,
+            },
+        });
+        Ok(ReadGrant {
+            _id: grant_id,
+            sink,
+            _marker: PhantomData,
+        })
+    }
+}
+
 /// Builder for a single compute dispatch node within a [`Scheme`].
 pub struct SchemeNodeBuilder<'a> {
     scheme: &'a mut Scheme,
@@ -367,6 +467,7 @@ mod tests {
     use crate::retained_pool::RetainedPool;
     use crate::shader::ShaderModule;
     use crate::task_graph::NodeAccess;
+    use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
     use std::sync::Arc;
 
@@ -419,7 +520,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("alloc buffer parcel")
     }
 
-    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> Scheme {
+    fn recording_scheme_with_parcel(
+        device: &Arc<Device>,
+        pool: &mut RetainedPool,
+        ctx: &Context,
+    ) -> (Scheme, Parcel) {
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
         let parcel = retained_buffer_parcel(pool);
@@ -429,7 +534,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .node("a", &pipeline)
             .bind_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        scheme
+        (scheme, parcel)
+    }
+
+    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> Scheme {
+        recording_scheme_with_parcel(device, pool, ctx).0
     }
 
     fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> Scheme {
@@ -694,5 +803,113 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             1,
             "dropped lease backing is parked in the pool"
         );
+    }
+
+    #[test]
+    fn grant_read_appends_ir_node() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        assert_eq!(scheme.ir_node_count(), 1);
+
+        let _grant = scheme.grant_read(&parcel).expect("grant_read");
+        assert_eq!(scheme.ir_node_count(), 2);
+        assert!(scheme.is_dirty(), "grant_read is structural");
+
+        match &scheme.ir.nodes[1].kind {
+            NodeKind::GrantRead { grant_id: 0 } => {}
+            other => panic!("expected GrantRead node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grant_read_orders_after_writer() {
+        use crate::task_graph::analysis;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let _grant = scheme.grant_read(&parcel).expect("grant_read");
+
+        let edges = analysis::build_edges(&scheme.ir);
+        assert!(
+            edges.contains(&(0, 1)),
+            "dispatch (0) must precede grant_read (1); edges: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn scheme_with_grant_retains() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let _grant = scheme.grant_read(&parcel).expect("grant_read");
+
+        scheme.submit().expect("first submit records");
+        scheme.submit().expect("second submit resubmits");
+        scheme.submit().expect("third submit resubmits");
+
+        assert_eq!(scheme.replay_stats().records, 1, "exactly one record with grant node");
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            2,
+            "remaining submits are retention hits"
+        );
+    }
+
+    #[test]
+    fn grant_read_survives_parcel_drop() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let grant = scheme.grant_read(&parcel).expect("grant_read");
+        let frame = scheme.submit().expect("submit");
+        drop(parcel);
+        drop(pool);
+
+        let bytes = grant.read(&frame).expect("read after parcel drop");
+        assert_eq!(bytes.len(), 32, "reads full logical buffer size");
+    }
+
+    #[test]
+    fn grant_read_rejects_stale_frame_at_n1() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let grant = scheme.grant_read(&parcel).expect("grant_read");
+        let frame1 = scheme.submit().expect("first submit");
+        let _frame2 = scheme.submit().expect("second submit");
+
+        let err = grant.read(&frame1).expect_err("stale frame must fail at N=1");
+        assert!(
+            err.to_string().contains("stale SchemeFrame"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_read_rejects_foreign_device_parcel() {
+        let device_a = mock_device();
+        let device_b = mock_device();
+        let mut pool = RetainedPool::new(device_a.clone());
+        let ctx_a = device_a.create_context().unwrap();
+        let ctx_b = device_b.create_context().unwrap();
+        let parcel = retained_buffer_parcel(&mut pool);
+        let mut scheme = Scheme::new(&ctx_b);
+        let err = match scheme.grant_read(&parcel) {
+            Ok(_) => panic!("cross-device grant must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("home device"),
+            "unexpected error: {err}"
+        );
+        drop(ctx_a);
     }
 }
