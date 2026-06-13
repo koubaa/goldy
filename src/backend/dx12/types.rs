@@ -921,6 +921,8 @@ pub(crate) struct BufferState {
     pub is_reserved: bool,
     pub tile_byte_size: u32,
     pub reserved_tiles: Vec<Option<(Direct3D12::ID3D12Heap, u64)>>,
+    /// Grant-read staging buffer (READBACK heap, persistently mapped; no bindless slot).
+    pub is_grant_readback: bool,
 }
 
 /// Shader module state with cached compiled bytecode.

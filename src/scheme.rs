@@ -9,45 +9,54 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
+use crate::backend::{BufferHandle, GpuCommand};
 use crate::context::Context;
 use crate::error::GoldyError;
-use crate::parcel::{Parcel, ReadbackSink};
+use crate::parcel::Parcel;
 use crate::retained_pool::StampedParcel;
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::timeline::TimelineValue;
 use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug)]
+struct FrameData {
+    timeline: TimelineValue,
+    /// Per-grant staging buffer for this submission; taken by [`ReadGrant::read`].
+    cells: Vec<Mutex<Option<BufferHandle>>>,
+}
 
 /// Per-submission identity returned by [`Scheme::submit`].
 ///
 /// Submission identity for a retained scheme — not [`crate::surface::Frame`]
 /// (the present/acquire token). Re-exported at the crate root as [`SchemeFrame`](crate::SchemeFrame).
 ///
-/// A lightweight token with no resources attached. The timeline value identifies
-/// which submission this frame represents; use [`Self::wait`] to block until that
-/// submission's GPU work completes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A lightweight token. The timeline value identifies which submission this frame
+/// represents; use [`Self::wait`] to block until that submission's GPU work completes
+/// (including grant-read staging copies when grants are recorded).
+#[derive(Debug, Clone)]
 pub struct Frame {
-    timeline: TimelineValue,
+    data: Arc<FrameData>,
 }
 
 impl Frame {
     /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
-    pub fn timeline_value(self) -> TimelineValue {
-        self.timeline
+    pub fn timeline_value(&self) -> TimelineValue {
+        self.data.timeline
     }
 
     /// Block until this submission's GPU work has completed.
-    pub fn wait(self, ctx: &Context) -> Result<(), GoldyError> {
-        ctx.wait_until(self.timeline)
+    pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
+        ctx.wait_until(self.data.timeline)
     }
 }
 
 impl From<Frame> for TimelineValue {
     fn from(frame: Frame) -> Self {
-        frame.timeline
+        frame.timeline_value()
     }
 }
 
@@ -58,56 +67,94 @@ pub struct GrantId(pub(crate) u32);
 /// Marker type for buffer read grants (v1: deed buffer parcels only).
 pub struct GrantBuffer;
 
+struct GrantInfo {
+    source: BufferHandle,
+    byte_size: u64,
+    staging_pool: Arc<Mutex<Vec<BufferHandle>>>,
+}
+
+/// Readable bytes for one `(grant × frame)` cell — returned by [`ReadGrant::read`].
+///
+/// Dropping the loan returns the staging buffer to the grant's reuse pool.
+pub struct Loan<T> {
+    bytes: Vec<u8>,
+    handle: BufferHandle,
+    return_pool: Arc<Mutex<Vec<BufferHandle>>>,
+    _marker: PhantomData<T>,
+}
+
+impl<T> Deref for Loan<T> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl<T> Drop for Loan<T> {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = self.return_pool.lock() {
+            pool.push(self.handle);
+        }
+    }
+}
+
 /// A read easement over a scheme parcel — recorded once via [`Scheme::grant_read`].
 ///
 /// Obtain readable bytes for a submission by coordinating this handle with a
 /// [`Frame`] from [`Scheme::submit`]: `grant.read(&frame)`.
 pub struct ReadGrant<T> {
-    _id: GrantId,
-    sink: Arc<ReadbackSink>,
+    grant_id: GrantId,
+    ctx: Context,
+    byte_size: u64,
+    return_pool: Arc<Mutex<Vec<BufferHandle>>>,
     _marker: PhantomData<T>,
 }
 
 impl<T> ReadGrant<T> {
     /// Readable bytes for `frame`'s submission (full logical buffer size).
     ///
-    /// Returns the entire backing buffer from offset 0 through its logical
-    /// [`Buffer::size`]. Slice the returned [`Vec`] when only a prefix matters.
-    ///
-    /// **v1 (N = 1):** the grant shares one backing with all submissions. A
-    /// newer [`Frame`] from [`Scheme::submit`] may stamp the parcel before this
-    /// read completes; if so, this returns [`GoldyError::Backend`] with a stale-
-    /// frame message. Read each [`Frame`] before submitting again, or wait for
-    /// Unit 3 N-backing where `(grant × frame)` resolves per-submission cells.
-    ///
-    /// v1 uses the legacy buffer readback path after [`Frame::wait`]. On DX12,
-    /// `Buffer::read_to_cpu` may signal the device fence outside context timeline
-    /// accounting; waiting on the frame first is conservative. Unit 3 replaces
-    /// this with grant-node staging that respects context accounting.
-    pub fn read(&self, frame: &Frame) -> Result<Vec<u8>, GoldyError> {
-        frame.wait(self.sink.ctx())?;
-        if self
-            .sink
-            .stamp()
-            .references
+    /// Blocks until this frame's GPU work (dispatch + grant staging copy) completes,
+    /// then reads from that submission's dedicated staging buffer. Each frame may be
+    /// read at most once per grant.
+    pub fn read(&self, frame: &Frame) -> Result<Loan<T>, GoldyError> {
+        frame.wait(&self.ctx)?;
+        let idx = self.grant_id.0 as usize;
+        let handle = frame
+            .data
+            .cells
+            .get(idx)
+            .ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "grant index {} out of range for frame ({} grants)",
+                    idx,
+                    frame.data.cells.len()
+                ))
+            })?
             .lock()
             .unwrap()
-            .get(&self.sink.ctx().backend_handle())
-            .copied()
-            .is_some_and(|latest| latest > frame.timeline_value())
+            .take()
+            .ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "grant already consumed for this SchemeFrame"
+                ))
+            })?;
+        let byte_size = usize::try_from(self.byte_size).map_err(|_| {
+            GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space"))
+        })?;
+        let mut bytes = vec![0u8; byte_size];
         {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "stale SchemeFrame: a newer submission overwrote the grant backing (v1 N=1); \
-                 read before the next submit, or wait for Unit 3 N-backing"
-            )));
+            let backend = self.ctx.device().inner.backend.lock().unwrap();
+            backend
+                .read_readback_buffer(handle, &mut bytes)
+                .map_err(|e| self.ctx.classify(e))?;
         }
-        let byte_size = usize::try_from(self.sink.byte_size())
-            .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
-        let mut output = vec![0u8; byte_size];
-        self.sink
-            .read_to_cpu(&mut output)
-            .map_err(|e| self.sink.ctx().classify(e))?;
-        Ok(output)
+        Ok(Loan {
+            bytes,
+            handle,
+            return_pool: Arc::clone(&self.return_pool),
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -165,6 +212,8 @@ pub struct Scheme {
     last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
     next_grant_id: u32,
+    /// Read-easement grants: N-backed staging per submission.
+    grants: Vec<GrantInfo>,
 }
 
 impl Scheme {
@@ -180,6 +229,7 @@ impl Scheme {
             last_submitted_tv: None,
             stats: ReplayStats::default(),
             next_grant_id: 0,
+            grants: Vec::new(),
         }
     }
 
@@ -300,7 +350,7 @@ impl Scheme {
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
     pub fn submit(&mut self) -> Result<Frame, GoldyError> {
-        if !self.dirty {
+        let tv_dispatch = if !self.dirty {
             if let Some(key) = self.retention_key {
                 if let Some(prev_tv) = self.last_submitted_tv {
                     self.ctx.wait_until(prev_tv)?;
@@ -313,11 +363,21 @@ impl Scheme {
                     {
                         self.stats.resubmit_hits += 1;
                     }
-                    return Ok(Frame { timeline: tv });
+                    tv
+                } else {
+                    self.record_and_retain()?
                 }
+            } else {
+                self.record_and_retain()?
             }
-        }
+        } else {
+            self.record_and_retain()?
+        };
 
+        self.finish_submit_frame(tv_dispatch)
+    }
+
+    fn record_and_retain(&mut self) -> Result<TimelineValue, GoldyError> {
         let tv = self
             .submit_state
             .submit_pipelined_and_retain(&self.ctx, &self.ir)
@@ -334,7 +394,59 @@ impl Scheme {
         self.dirty = false;
         self.last_submitted_tv = Some(tv);
         self.stats.records += 1;
-        Ok(Frame { timeline: tv })
+        Ok(tv)
+    }
+
+    fn finish_submit_frame(&mut self, tv_dispatch: TimelineValue) -> Result<Frame, GoldyError> {
+        if self.grants.is_empty() {
+            return Ok(Frame {
+                data: Arc::new(FrameData {
+                    timeline: tv_dispatch,
+                    cells: Vec::new(),
+                }),
+            });
+        }
+
+        let device = self.ctx.device().inner.handle;
+        let mut copy_cmds = Vec::with_capacity(self.grants.len());
+        let mut cells = Vec::with_capacity(self.grants.len());
+
+        {
+            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+            for grant in &self.grants {
+                let staging = {
+                    let mut pool = grant.staging_pool.lock().unwrap();
+                    if let Some(handle) = pool.pop() {
+                        handle
+                    } else {
+                        backend
+                            .alloc_readback_buffer(device, grant.byte_size)
+                            .map_err(|e| self.ctx.classify(e))?
+                    }
+                };
+                copy_cmds.push(GpuCommand::CopyBuffer {
+                    src: grant.source,
+                    dst: staging,
+                    size: grant.byte_size,
+                });
+                cells.push(Mutex::new(Some(staging)));
+            }
+        }
+
+        let tv_copy = {
+            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+            backend
+                .submit_standalone(self.ctx.backend_handle(), &copy_cmds)
+                .map_err(|e| self.ctx.classify(e))?
+        };
+        self.ctx.advance_high_water_timeline(tv_copy);
+
+        Ok(Frame {
+            data: Arc::new(FrameData {
+                timeline: tv_copy,
+                cells,
+            }),
+        })
     }
 }
 
@@ -350,6 +462,18 @@ impl Scheme {
 
 impl Drop for Scheme {
     fn drop(&mut self) {
+        let device = self.ctx.device().inner.handle;
+        {
+            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+            for grant in &self.grants {
+                if let Ok(pool) = grant.staging_pool.lock() {
+                    for &handle in pool.iter() {
+                        backend.free_readback_buffer(handle);
+                    }
+                }
+            }
+        }
+
         let ctx = self.ctx.clone();
         for mut parcel in self.leases.drain(..) {
             let ready_after = parcel.last_referenced();
@@ -358,6 +482,7 @@ impl Drop for Scheme {
                 pool.adopt(StampedParcel { parcel, ready_after });
             });
         }
+        let _ = device;
     }
 }
 
@@ -370,13 +495,23 @@ impl Scheme {
     pub fn grant_read(&mut self, parcel: &Parcel) -> Result<ReadGrant<GrantBuffer>, GoldyError> {
         self.dirty = true;
         self.submit_state.register_parcel_stamp(parcel);
-        let sink = Arc::new(
-            parcel
-                .readback_sink(&self.ctx)
-                .map_err(|e| self.ctx.classify(e))?,
-        );
+        if !parcel.is_homed_on(&self.ctx) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "parcel home device does not match scheme context"
+            )));
+        }
+        let source = parcel
+            .buffer_handle()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read requires buffer parcel")))?;
+        let byte_size = parcel.byte_size();
         let grant_id = GrantId(self.next_grant_id);
         self.next_grant_id += 1;
+        let staging_pool = Arc::new(Mutex::new(Vec::new()));
+        self.grants.push(GrantInfo {
+            source,
+            byte_size,
+            staging_pool: Arc::clone(&staging_pool),
+        });
         let resource = parcel.resource_id();
         self.ir.nodes.push(TaskNode {
             label: "grant_read",
@@ -389,8 +524,10 @@ impl Scheme {
             },
         });
         Ok(ReadGrant {
-            _id: grant_id,
-            sink,
+            grant_id,
+            ctx: self.ctx.clone(),
+            byte_size,
+            return_pool: staging_pool,
             _marker: PhantomData,
         })
     }
@@ -469,6 +606,7 @@ mod tests {
     use crate::task_graph::NodeAccess;
     use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
+    use crate::BufferKind;
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -667,7 +805,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame = scheme.submit().unwrap();
         let tv = frame.timeline_value();
         assert!(tv > 0);
-        assert_eq!(TimelineValue::from(frame), tv);
+        assert_eq!(TimelineValue::from(frame.clone()), tv);
         assert_eq!(frame.timeline_value(), tv);
     }
 
@@ -872,25 +1010,70 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         drop(parcel);
         drop(pool);
 
-        let bytes = grant.read(&frame).expect("read after parcel drop");
-        assert_eq!(bytes.len(), 32, "reads full logical buffer size");
+        let loan = grant.read(&frame).expect("read after parcel drop");
+        assert_eq!(loan.len(), 32, "reads full logical buffer size");
     }
 
     #[test]
-    fn grant_read_rejects_stale_frame_at_n1() {
+    fn grant_read_concurrent_frames_succeed() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = pool
+            .acquire_buffer_with_data(&[7u32; 8], BufferKind::Scattered)
+            .expect("parcel");
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read(&parcel).expect("grant_read");
+        let frame1 = scheme.submit().expect("first submit");
+        let frame2 = scheme.submit().expect("second submit without waiting on frame1");
+
+        let loan1 = grant.read(&frame1).expect("read frame1");
+        let loan2 = grant.read(&frame2).expect("read frame2");
+        assert_eq!(loan1.len(), 32);
+        assert_eq!(loan2.len(), 32);
+        for chunk in loan1.chunks_exact(4) {
+            assert_eq!(u32::from_le_bytes(chunk.try_into().unwrap()), 7);
+        }
+    }
+
+    #[test]
+    fn grant_read_double_read_same_frame_errors() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
         let grant = scheme.grant_read(&parcel).expect("grant_read");
-        let frame1 = scheme.submit().expect("first submit");
-        let _frame2 = scheme.submit().expect("second submit");
-
-        let err = grant.read(&frame1).expect_err("stale frame must fail at N=1");
+        let frame = scheme.submit().expect("submit");
+        let _loan = grant.read(&frame).expect("first read");
+        let err = match grant.read(&frame) {
+            Ok(_) => panic!("second read must fail"),
+            Err(e) => e,
+        };
         assert!(
-            err.to_string().contains("stale SchemeFrame"),
+            err.to_string().contains("already consumed"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn grant_staging_pool_recycled_on_loan_drop() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = pool
+            .acquire_buffer_with_data(&[3u32; 8], BufferKind::Scattered)
+            .expect("parcel");
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read(&parcel).expect("grant_read");
+
+        let frame1 = scheme.submit().expect("submit 1");
+        {
+            let loan = grant.read(&frame1).expect("read frame1");
+            assert_eq!(loan.len(), 32);
+        }
+        let frame2 = scheme.submit().expect("submit 2 after loan drop");
+        let loan2 = grant.read(&frame2).expect("read frame2 after pool recycle");
+        assert_eq!(loan2.len(), 32);
     }
 
     #[test]

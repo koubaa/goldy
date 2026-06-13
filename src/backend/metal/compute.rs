@@ -752,6 +752,22 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
+            GpuCommand::CopyBuffer { src, dst, size } => {
+                ensure_blit_buf!(*src);
+                ensure_blit_buf!(*dst);
+                let (src_mtl, dst_mtl) = {
+                    let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
+                    let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                    if *size > src_state.size || *size > dst_state.size {
+                        anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
+                    }
+                    (src_state.buffer.clone(), dst_state.buffer.clone())
+                };
+                guard
+                    .blit
+                    .unwrap()
+                    .copy_from_buffer(&src_mtl, 0, &dst_mtl, 0, *size);
+            }
             GpuCommand::CopyRenderTarget { src, dst } => {
                 ensure_blit_tex!(*dst);
                 let src_state = state
@@ -957,6 +973,7 @@ fn stage_uploads(
             }
             // Commands that open an encoder set would_have_gpu_work.
             GpuCommand::ClearBuffer { .. }
+            | GpuCommand::CopyBuffer { .. }
             | GpuCommand::CopyTexture { .. }
             | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)

@@ -769,6 +769,8 @@ pub(crate) struct BufferState {
     pub sparse_block_size: u64,
     /// Per sparse page: physical backing from the page pool (`None` = unbound tile).
     pub sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>>,
+    /// Grant-read staging buffer (host-visible, persistently mapped; no bindless slot).
+    pub is_grant_readback: bool,
 }
 
 /// Shader module state with cached compiled stages.

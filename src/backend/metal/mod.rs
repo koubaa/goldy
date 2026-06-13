@@ -324,6 +324,18 @@ impl GpuBackend for MetalBackend {
         buffer::read_to_cpu(&self.state, device, buffer, output)
     }
 
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        buffer::alloc_readback_buffer(&mut self.state, device, size)
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        buffer::read_readback_buffer(&self.state, buffer, output)
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        buffer::destroy(&mut self.state, buffer);
+    }
+
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         buffer::clear(&self.state, device, buffer, offset, size)
     }

@@ -181,6 +181,7 @@ fn insert_buffer_common(
             parent_for_view,
             access,
             view_byte_offset,
+            is_grant_readback: false,
         },
     );
 
@@ -407,6 +408,7 @@ pub(super) fn create_view(
             parent_for_view: Some(parent_handle),
             access: BufferKind::Scattered,
             view_byte_offset: Some(offset),
+            is_grant_readback: false,
         },
     );
 
@@ -513,6 +515,7 @@ pub(super) fn resize(
         parent_for_view: None,
         access: old_state.access,
         view_byte_offset: None,
+        is_grant_readback: false,
     };
 
     let new_mtl = state.buffers.get(&buffer_handle).unwrap().buffer.clone();
@@ -769,5 +772,55 @@ pub(super) fn clear(
     blit.end_encoding();
     command_buffer.commit();
 
+    Ok(())
+}
+
+/// Allocate a shared-storage staging buffer for grant readback (no argument-buffer slot).
+pub(super) fn alloc_readback_buffer(state: &mut MetalState, device_handle: DeviceHandle, size: u64) -> Result<BufferHandle> {
+    use metal as mtl;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let buffer = logical_device.device.new_buffer(
+        size,
+        mtl::MTLResourceOptions::StorageModeShared | mtl::MTLResourceOptions::CPUCacheModeDefaultCache,
+    );
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            buffer,
+            size,
+            allocation_size: size,
+            is_device_allocated: true,
+            arg_buffer_index: 0,
+            flags: BufferFlags::empty(),
+            element_stride: None,
+            parent_for_view: None,
+            access: BufferKind::Scattered,
+            view_byte_offset: None,
+            is_grant_readback: true,
+        },
+    );
+    Ok(handle)
+}
+
+/// Read bytes from a grant readback staging buffer.
+pub(super) fn read_readback_buffer(
+    state: &MetalState,
+    buffer_handle: BufferHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    }
+    if output.len() as u64 > buffer.size {
+        anyhow::bail!("read_readback_buffer would exceed buffer bounds");
+    }
+    unsafe {
+        let ptr = buffer.buffer.contents() as *const u8;
+        std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
+    }
     Ok(())
 }

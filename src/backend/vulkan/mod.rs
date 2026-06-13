@@ -532,6 +532,29 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        buffer::alloc_readback_buffer(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            device,
+            size,
+        )
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        buffer::read_readback_buffer(&self.state.buffers, buffer, output)
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        buffer::destroy(
+            &self.state.devices,
+            &mut self.state.buffers,
+            buffer,
+        );
+    }
+
     fn clear_buffer(
         &mut self,
         device_handle: DeviceHandle,

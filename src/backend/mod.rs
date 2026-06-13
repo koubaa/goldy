@@ -521,6 +521,12 @@ pub enum GpuCommand {
         src: RenderTargetHandle,
         dst: TextureHandle,
     },
+    /// Copy bytes from `src` buffer into `dst` buffer (grant-read staging path).
+    CopyBuffer {
+        src: BufferHandle,
+        dst: BufferHandle,
+        size: u64,
+    },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
     /// Each entry packs `[PushLayout bytes | wg_x u32 | wg_y u32 | wg_z u32]` into
@@ -639,6 +645,12 @@ pub trait GpuBackend: Send + Sync {
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
     /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
     fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
+    /// Allocate a persistently mapped READBACK staging buffer for grant readback (no bindless slot).
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle>;
+    /// Read bytes from a buffer created by [`Self::alloc_readback_buffer`].
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
+    /// Release a grant-readback staging buffer.
+    fn free_readback_buffer(&mut self, buffer: BufferHandle);
     /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let _ = device;

@@ -1278,6 +1278,39 @@ fn record_gpu_command(
                 ts.last_layout = dst_post_state.1;
             }
         }
+        GpuCommand::CopyBuffer { src, dst, size } => {
+            let _tz = tracy_zone!("dx12.copy_buffer");
+            let (src_resource, dst_resource) = {
+                let src_buf = state.buffers.get(src).context("CopyBuffer: invalid src")?;
+                let dst_buf = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                if *size > src_buf.size || *size > dst_buf.size {
+                    anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
+                }
+                (src_buf.resource.clone(), dst_buf.resource.clone())
+            };
+            if ctx.use_global_buffer_barriers {
+                let pre = D3D12_GLOBAL_BARRIER {
+                    SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                    SyncAfter: D3D12_BARRIER_SYNC_COPY,
+                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                };
+                unsafe { barriers::barrier_globals(cl7, &[pre]) };
+            } else {
+                let mut b_to_copy = [barriers::buffer_barrier_full(
+                    &src_resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                )];
+                unsafe {
+                    barriers::barrier_buffers(cl7, &b_to_copy);
+                    barriers::drop_buffer_barriers(&mut b_to_copy);
+                }
+            }
+            unsafe { cl.CopyBufferRegion(&dst_resource, 0, &src_resource, 0, *size) };
+        }
         GpuCommand::CopyRenderTarget { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_render_target");
             let src_res = {

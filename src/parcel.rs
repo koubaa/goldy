@@ -296,9 +296,7 @@ impl Parcel {
         }
     }
 
-    /// Backend buffer handle (runtime only; for tests and transfer identity checks).
-    #[cfg(test)]
-    #[allow(dead_code)]
+    /// Backend buffer handle for grant-read staging copies.
     pub(crate) fn buffer_handle(&self) -> Option<crate::backend::BufferHandle> {
         match &self.storage {
             ParcelStorage::Buffer(b) => Some(b.gpu_buffer_handle()),

@@ -58,6 +58,8 @@ pub struct MockBackend {
     pub retained_resubmit_count: usize,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
     pub wait_until_count: usize,
+    /// Count of grant readback staging buffer allocations
+    pub readback_alloc_count: usize,
     /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
@@ -94,6 +96,8 @@ struct MockBuffer {
     data: Vec<u8>,
     bindless_index: u32,
     flags: BufferFlags,
+    /// Grant-read staging buffer (persistently CPU-readable; no bindless slot).
+    is_grant_readback: bool,
 }
 
 #[allow(dead_code)]
@@ -198,6 +202,7 @@ impl MockBackend {
             retained_graphs: HashMap::new(),
             retained_resubmit_count: 0,
             wait_until_count: 0,
+            readback_alloc_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
@@ -270,6 +275,29 @@ impl MockBackend {
         self.compute_dispatch_count = 0;
         self.wait_until_count = 0;
         self.buffer_view_create_count = 0;
+    }
+
+    fn execute_copy_buffer(&mut self, src: BufferHandle, dst: BufferHandle, size: u64) -> Result<()> {
+        let copy_len = size as usize;
+        let src_data = {
+            let src_buf = self
+                .buffers
+                .get(&src)
+                .ok_or_else(|| anyhow::anyhow!("CopyBuffer: invalid src"))?;
+            if copy_len as u64 > src_buf.size {
+                anyhow::bail!("CopyBuffer: size exceeds src bounds");
+            }
+            src_buf.data[..copy_len].to_vec()
+        };
+        let dst_buf = self
+            .buffers
+            .get_mut(&dst)
+            .ok_or_else(|| anyhow::anyhow!("CopyBuffer: invalid dst"))?;
+        if copy_len as u64 > dst_buf.size {
+            anyhow::bail!("CopyBuffer: size exceeds dst bounds");
+        }
+        dst_buf.data[..copy_len].copy_from_slice(&src_data);
+        Ok(())
     }
 }
 
@@ -393,6 +421,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; size as usize],
                 bindless_index,
                 flags,
+                is_grant_readback: false,
             },
         );
 
@@ -428,6 +457,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; cap as usize],
                 bindless_index,
                 flags,
+                is_grant_readback: false,
             },
         );
 
@@ -519,6 +549,7 @@ impl GpuBackend for MockBackend {
                 data: vec![0; size as usize],
                 bindless_index: index,
                 flags: BufferFlags::empty(),
+                is_grant_readback: false,
             },
         );
 
@@ -563,6 +594,45 @@ impl GpuBackend for MockBackend {
         let len = len_u64 as usize;
         output[..len].copy_from_slice(&buf.data[..len]);
         Ok(())
+    }
+
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+        self.readback_alloc_count += 1;
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle: device,
+                size,
+                alloc_size: size,
+                data: vec![0u8; size as usize],
+                bindless_index: 0,
+                flags: BufferFlags::empty(),
+                is_grant_readback: true,
+            },
+        );
+        Ok(handle)
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if !buf.is_grant_readback {
+            anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+        }
+        let len = output.len().min(buf.data.len());
+        output[..len].copy_from_slice(&buf.data[..len]);
+        Ok(())
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        self.buffers.remove(&buffer);
     }
 
     fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
@@ -1153,6 +1223,12 @@ impl GpuBackend for MockBackend {
 
         self.recorded_compute_commands.push(commands.to_vec());
         self.compute_dispatch_count += 1;
+
+        for cmd in commands {
+            if let GpuCommand::CopyBuffer { src, dst, size } = cmd {
+                self.execute_copy_buffer(*src, *dst, *size)?;
+            }
+        }
 
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;

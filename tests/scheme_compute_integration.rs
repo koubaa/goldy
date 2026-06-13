@@ -50,11 +50,11 @@ fn readback_parcel_u32(device: &Device, parcel: &Parcel, count: usize) -> Vec<u3
     bytemuck::cast_slice(&output).to_vec()
 }
 
-fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
-    let bytes = grant.read(frame).expect("grant read");
-    assert_eq!(bytes.len(), count * 4, "grant readback size");
-    bytemuck::cast_slice(&bytes).to_vec()
-}
+    fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
+        let loan = grant.read(frame).expect("grant read");
+        assert_eq!(loan.len(), count * 4, "grant readback size");
+        bytemuck::cast_slice(&loan).to_vec()
+    }
 
 fn write_zeros_to_parcel(ctx: &goldy::Context, parcel: &Parcel, byte_len: usize) {
     // Upload micro-scheme: separate from worker Scheme.

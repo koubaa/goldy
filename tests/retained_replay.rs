@@ -22,8 +22,9 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::ResourceAccess, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat, TextureKind,
+    types::{BufferFlags, ResourceAccess},
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -389,5 +390,60 @@ fn lease_backing_pool_hygiene() {
     assert!(
         ctx.transient_outstanding_bytes().texture > outstanding_before,
         "re-leased backing is outstanding again"
+    );
+}
+
+const FILL_42_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> buf, ThreadId id) {
+    buf[id.x] = 42;
+}
+"#;
+
+/// Grant readback with N-backing: submit K and K+1 without waiting; both frames read correctly.
+#[test]
+fn grant_read_concurrent_frames_distinct_backings() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, FILL_42_SHADER).expect("compile fill shader"),
+    )
+    .expect("create pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("fill", &pipe)
+        .bind_parcel(&buf, NodeAccess::Write)
+        .bind_resources_typed(&[buf.handle(ResourceAccess::Write).expect("handle")])
+        .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+
+    let frame1 = scheme.submit().expect("submit K");
+    let frame2 = scheme.submit().expect("submit K+1 without waiting on K");
+
+    for frame in [&frame1, &frame2] {
+        let loan = grant.read(frame).expect("grant read");
+        assert_eq!(loan.len(), 64 * 4);
+        for chunk in loan.chunks_exact(4) {
+            assert_eq!(u32::from_le_bytes(chunk.try_into().unwrap()), 42);
+        }
+    }
+
+    assert_eq!(scheme.replay_stats().records, 1, "dispatch records once");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "second dispatch submit is a retention hit"
     );
 }

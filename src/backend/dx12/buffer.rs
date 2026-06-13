@@ -534,6 +534,7 @@ pub(super) fn resize(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
         },
     );
 
@@ -872,6 +873,7 @@ pub(super) fn create(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
         },
     );
 
@@ -1013,6 +1015,7 @@ pub(super) fn create_reserved_with_capacity(
             is_reserved: true,
             tile_byte_size: tiles::BUFFER_TILE_BYTES,
             reserved_tiles,
+            is_grant_readback: false,
         },
     );
 
@@ -1389,6 +1392,7 @@ pub(super) fn create_view(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
         },
     );
 
@@ -2025,5 +2029,104 @@ pub(super) fn clear(
         unsafe { buffer.resource.Unmap(0, Some(&written)) };
     }
 
+    Ok(())
+}
+
+/// Allocate a persistently mapped READBACK staging buffer for grant readback.
+pub(super) fn alloc_readback_buffer(state: &mut Dx12State, device_handle: DeviceHandle, size: u64) -> Result<BufferHandle> {
+    use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+
+    let device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let readback_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let readback_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut resource: Option<ID3D12Resource> = None;
+    unsafe {
+        device.device.CreateCommittedResource(
+            &readback_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &readback_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut resource,
+        )
+    }
+    .context("Failed to create grant readback buffer")?;
+    let resource = resource.context("CreateCommittedResource readback returned null")?;
+    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+        .context("Failed to map grant readback buffer")?;
+    let mapped_addr = mapped as usize;
+    if mapped.is_null() {
+        anyhow::bail!("Map returned null for grant readback buffer");
+    }
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            resource,
+            size,
+            allocation_size: size,
+            bindless_offset: None,
+            bindless_srv_offset: None,
+            is_storage: false,
+            upload_buffer: None,
+            element_stride: None,
+            is_view: false,
+            coherent_readback: None,
+            coherent_readback_mapped: Some(mapped_addr),
+            flags: BufferFlags::empty(),
+            transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
+            is_grant_readback: true,
+        },
+    );
+    Ok(handle)
+}
+
+/// Read bytes from a grant readback staging buffer.
+pub(super) fn read_readback_buffer(
+    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    }
+    let base = buffer
+        .coherent_readback_mapped
+        .context("grant readback buffer not mapped")?;
+    if output.len() as u64 > buffer.size {
+        anyhow::bail!("read_readback_buffer would exceed buffer bounds");
+    }
+    let p = base as *const u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(p, output.as_mut_ptr(), output.len());
+    }
     Ok(())
 }

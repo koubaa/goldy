@@ -67,7 +67,7 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
-pub use scheme::{Frame as SchemeFrame, GrantBuffer, Lease, LeaseTexture, ReadGrant, ReplayStats, Scheme};
+pub use scheme::{Frame as SchemeFrame, GrantBuffer, Lease, LeaseTexture, Loan, ReadGrant, ReplayStats, Scheme};
 pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
 

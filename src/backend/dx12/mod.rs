@@ -628,6 +628,18 @@ impl GpuBackend for Dx12Backend {
         buffer::read_to_cpu(&mut self.state, device, buffer, output)
     }
 
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        buffer::alloc_readback_buffer(&mut self.state, device, size)
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        buffer::read_readback_buffer(&self.state.buffers, buffer, output)
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        buffer::destroy(&mut self.state, buffer);
+    }
+
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let adapter_id = self.state.devices.get(&device).map(|d| d.adapter_id).unwrap_or(0);
         self.adapter_capabilities(adapter_id)
