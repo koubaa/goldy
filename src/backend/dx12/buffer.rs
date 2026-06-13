@@ -1158,8 +1158,11 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
                 return;
             }
             if buffer.coherent_readback_mapped.is_some() {
-                if let Some(ref rb) = buffer.coherent_readback {
-                    let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                if buffer.is_grant_readback {
+                    // Grant readback maps the primary READBACK resource directly.
+                    unsafe { buffer.resource.Unmap(0, Some(&no_write)) };
+                } else if let Some(ref rb) = buffer.coherent_readback {
                     unsafe { rb.Unmap(0, Some(&no_write)) };
                 }
             }
@@ -2074,9 +2077,6 @@ pub(super) fn alloc_readback_buffer(state: &mut Dx12State, device_handle: Device
     unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
         .context("Failed to map grant readback buffer")?;
     let mapped_addr = mapped as usize;
-    if mapped.is_null() {
-        anyhow::bail!("Map returned null for grant readback buffer");
-    }
 
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;

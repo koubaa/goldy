@@ -1301,7 +1301,7 @@ fn record_gpu_command(
                     &src_resource,
                     D3D12_BARRIER_SYNC_ALL,
                     D3D12_BARRIER_SYNC_COPY,
-                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
                 )];
                 unsafe {

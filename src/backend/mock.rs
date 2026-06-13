@@ -60,6 +60,8 @@ pub struct MockBackend {
     pub wait_until_count: usize,
     /// Count of grant readback staging buffer allocations
     pub readback_alloc_count: usize,
+    /// Grant readback buffers freed via [`GpuBackend::free_readback_buffer`].
+    pub readback_free_count: usize,
     /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
@@ -203,6 +205,7 @@ impl MockBackend {
             retained_resubmit_count: 0,
             wait_until_count: 0,
             readback_alloc_count: 0,
+            readback_free_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
@@ -633,6 +636,17 @@ impl GpuBackend for MockBackend {
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
         self.buffers.remove(&buffer);
+        self.readback_free_count += 1;
+    }
+
+    #[cfg(test)]
+    fn test_readback_alloc_count(&self) -> usize {
+        self.readback_alloc_count
+    }
+
+    #[cfg(test)]
+    fn test_readback_free_count(&self) -> usize {
+        self.readback_free_count
     }
 
     fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {

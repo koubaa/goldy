@@ -651,6 +651,23 @@ pub trait GpuBackend: Send + Sync {
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
     /// Release a grant-readback staging buffer.
     fn free_readback_buffer(&mut self, buffer: BufferHandle);
+
+    /// Mock-backend grant readback allocation counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_readback_alloc_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
+    /// Mock-backend grant readback free counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_readback_free_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
     /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let _ = device;

@@ -10,6 +10,7 @@
 //! when clean.
 
 use crate::backend::{BufferHandle, GpuCommand};
+use crate::buffer::Buffer;
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
@@ -18,15 +19,113 @@ use crate::task_graph::IrSubmitState;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::timeline::TimelineValue;
 use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
+use crate::validation_env;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Per-grant staging buffer pool with scheme-lifetime ownership.
+/// TODO: this is an implementation detail of schemes for now, but eventually
+/// it makes more sense to have device-scoped, size-bucketed pools for this.
+/// That would back single schemes and multiple submissions and the reverse.
+struct GrantStagingPool {
+    handles: Mutex<Vec<BufferHandle>>,
+    ctx: Context,
+    scheme_alive: AtomicBool,
+}
+
+impl GrantStagingPool {
+    fn new(ctx: &Context) -> Arc<Self> {
+        Arc::new(Self {
+            handles: Mutex::new(Vec::new()),
+            ctx: ctx.clone(),
+            scheme_alive: AtomicBool::new(true),
+        })
+    }
+
+    fn take_or_alloc(
+        &self,
+        backend: &mut dyn crate::backend::GpuBackend,
+        device: crate::backend::DeviceHandle,
+        byte_size: u64,
+    ) -> Result<BufferHandle, GoldyError> {
+        let handle = {
+            let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+            pool.pop()
+        };
+        if let Some(handle) = handle {
+            if validation_env::scheme_validation_enabled() {
+                let cap = backend.buffer_size(handle);
+                if cap < byte_size {
+                    return Err(GoldyError::Backend(anyhow::anyhow!(
+                        "recycled grant staging buffer capacity {cap} is smaller than grant byte size {byte_size}"
+                    )));
+                }
+            }
+            Ok(handle)
+        } else {
+            backend
+                .alloc_readback_buffer(device, byte_size)
+                .map_err(|e| self.ctx.classify(e))
+        }
+    }
+
+    fn return_handle(&self, handle: BufferHandle) {
+        if self.scheme_alive.load(Ordering::Acquire) {
+            self.handles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(handle);
+        } else {
+            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+            backend.free_readback_buffer(handle);
+        }
+    }
+
+    fn mark_scheme_dropped_and_drain(&self) {
+        self.scheme_alive.store(false, Ordering::Release);
+        let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+        let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        for handle in pool.drain(..) {
+            backend.free_readback_buffer(handle);
+        }
+    }
+}
+
+impl fmt::Debug for GrantStagingPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GrantStagingPool")
+            .field("scheme_alive", &self.scheme_alive.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug)]
 struct FrameData {
+    scheme_id: u64,
     timeline: TimelineValue,
     /// Per-grant staging buffer for this submission; taken by [`ReadGrant::read`].
     cells: Vec<Mutex<Option<BufferHandle>>>,
+    /// Per-grant pools; used to recycle or free unconsumed cells on drop.
+    staging_pools: Vec<Arc<GrantStagingPool>>,
+}
+
+impl Drop for FrameData {
+    fn drop(&mut self) {
+        for (cell, pool) in self.cells.iter().zip(self.staging_pools.iter()) {
+            if let Some(handle) = cell
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                pool.return_handle(handle);
+            }
+        }
+    }
 }
 
 /// Per-submission identity returned by [`Scheme::submit`].
@@ -69,18 +168,31 @@ pub struct GrantBuffer;
 
 struct GrantInfo {
     source: BufferHandle,
+    /// Keeps the deed buffer alive after the parcel is dropped.
+    #[allow(dead_code)]
+    source_backing: Arc<Buffer>,
     byte_size: u64,
-    staging_pool: Arc<Mutex<Vec<BufferHandle>>>,
+    staging_pool: Arc<GrantStagingPool>,
 }
 
 /// Readable bytes for one `(grant × frame)` cell — returned by [`ReadGrant::read`].
 ///
-/// Dropping the loan returns the staging buffer to the grant's reuse pool.
+/// Dropping the loan returns the staging buffer to the grant's reuse pool while the
+/// owning [`Scheme`] is alive; otherwise the buffer is freed immediately.
 pub struct Loan<T> {
     bytes: Vec<u8>,
     handle: BufferHandle,
-    return_pool: Arc<Mutex<Vec<BufferHandle>>>,
+    return_pool: Arc<GrantStagingPool>,
     _marker: PhantomData<T>,
+}
+
+impl<T> fmt::Debug for Loan<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Loan")
+            .field("len", &self.bytes.len())
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> Deref for Loan<T> {
@@ -93,33 +205,46 @@ impl<T> Deref for Loan<T> {
 
 impl<T> Drop for Loan<T> {
     fn drop(&mut self) {
-        if let Ok(mut pool) = self.return_pool.lock() {
-            pool.push(self.handle);
-        }
+        self.return_pool.return_handle(self.handle);
     }
 }
 
 /// A read easement over a scheme parcel — recorded once via [`Scheme::grant_read`].
 ///
 /// Obtain readable bytes for a submission by coordinating this handle with a
-/// [`Frame`] from [`Scheme::submit`]: `grant.read(&frame)`.
+/// [`Frame`] from the **same** [`Scheme`]: `grant.read(&frame)`.
 pub struct ReadGrant<T> {
     grant_id: GrantId,
+    scheme_id: u64,
     ctx: Context,
     byte_size: u64,
-    return_pool: Arc<Mutex<Vec<BufferHandle>>>,
+    return_pool: Arc<GrantStagingPool>,
     _marker: PhantomData<T>,
 }
 
 impl<T> ReadGrant<T> {
     /// Readable bytes for `frame`'s submission (full logical buffer size).
     ///
+    /// `frame` must come from the same [`Scheme`] that created this grant.
     /// Blocks until this frame's GPU work (dispatch + grant staging copy) completes,
     /// then reads from that submission's dedicated staging buffer. Each frame may be
-    /// read at most once per grant.
+    /// read at most once per grant. Drop any unconsumed [`Frame`] tokens before dropping
+    /// the scheme if you rely on staging-buffer reuse rather than immediate free.
     pub fn read(&self, frame: &Frame) -> Result<Loan<T>, GoldyError> {
+        if frame.data.scheme_id != self.scheme_id {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "ReadGrant belongs to a different scheme than this SchemeFrame"
+            )));
+        }
         frame.wait(&self.ctx)?;
         let idx = self.grant_id.0 as usize;
+        if validation_env::scheme_validation_enabled() && idx >= frame.data.cells.len() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "grant index {} out of range for frame ({} grants)",
+                idx,
+                frame.data.cells.len()
+            )));
+        }
         let handle = frame
             .data
             .cells
@@ -132,7 +257,7 @@ impl<T> ReadGrant<T> {
                 ))
             })?
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .take()
             .ok_or_else(|| {
                 GoldyError::Backend(anyhow::anyhow!(
@@ -212,6 +337,8 @@ pub struct Scheme {
     last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
     next_grant_id: u32,
+    /// Process-unique identity for cross-scheme [`Frame`] / [`ReadGrant`] pairing.
+    scheme_id: u64,
     /// Read-easement grants: N-backed staging per submission.
     grants: Vec<GrantInfo>,
 }
@@ -229,6 +356,7 @@ impl Scheme {
             last_submitted_tv: None,
             stats: ReplayStats::default(),
             next_grant_id: 0,
+            scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             grants: Vec::new(),
         }
     }
@@ -401,8 +529,10 @@ impl Scheme {
         if self.grants.is_empty() {
             return Ok(Frame {
                 data: Arc::new(FrameData {
+                    scheme_id: self.scheme_id,
                     timeline: tv_dispatch,
                     cells: Vec::new(),
+                    staging_pools: Vec::new(),
                 }),
             });
         }
@@ -410,27 +540,36 @@ impl Scheme {
         let device = self.ctx.device().inner.handle;
         let mut copy_cmds = Vec::with_capacity(self.grants.len());
         let mut cells = Vec::with_capacity(self.grants.len());
+        let mut staging_pools = Vec::with_capacity(self.grants.len());
+        let mut staging_handles = Vec::with_capacity(self.grants.len());
 
         {
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
             for grant in &self.grants {
-                let staging = {
-                    let mut pool = grant.staging_pool.lock().unwrap();
-                    if let Some(handle) = pool.pop() {
-                        handle
-                    } else {
-                        backend
-                            .alloc_readback_buffer(device, grant.byte_size)
-                            .map_err(|e| self.ctx.classify(e))?
+                let staging = grant
+                    .staging_pool
+                    .take_or_alloc(&mut **backend, device, grant.byte_size)?;
+                if validation_env::scheme_validation_enabled() {
+                    if staging_handles.contains(&staging) {
+                        return Err(GoldyError::Backend(anyhow::anyhow!(
+                            "duplicate grant staging buffer handle in one submission"
+                        )));
                     }
-                };
+                    staging_handles.push(staging);
+                }
                 copy_cmds.push(GpuCommand::CopyBuffer {
                     src: grant.source,
                     dst: staging,
                     size: grant.byte_size,
                 });
                 cells.push(Mutex::new(Some(staging)));
+                staging_pools.push(Arc::clone(&grant.staging_pool));
             }
+        }
+
+        if validation_env::scheme_validation_enabled() {
+            debug_assert_eq!(cells.len(), self.grants.len());
+            debug_assert_eq!(staging_pools.len(), self.grants.len());
         }
 
         let tv_copy = {
@@ -443,8 +582,10 @@ impl Scheme {
 
         Ok(Frame {
             data: Arc::new(FrameData {
+                scheme_id: self.scheme_id,
                 timeline: tv_copy,
                 cells,
+                staging_pools,
             }),
         })
     }
@@ -462,16 +603,8 @@ impl Scheme {
 
 impl Drop for Scheme {
     fn drop(&mut self) {
-        let device = self.ctx.device().inner.handle;
-        {
-            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
-            for grant in &self.grants {
-                if let Ok(pool) = grant.staging_pool.lock() {
-                    for &handle in pool.iter() {
-                        backend.free_readback_buffer(handle);
-                    }
-                }
-            }
+        for grant in &self.grants {
+            grant.staging_pool.mark_scheme_dropped_and_drain();
         }
 
         let ctx = self.ctx.clone();
@@ -482,7 +615,6 @@ impl Drop for Scheme {
                 pool.adopt(StampedParcel { parcel, ready_after });
             });
         }
-        let _ = device;
     }
 }
 
@@ -491,7 +623,9 @@ impl Scheme {
     ///
     /// Returns a stable [`ReadGrant`] handle; call [`ReadGrant::read`] with a
     /// [`Frame`] from [`Self::submit`] to obtain that submission's bytes.
-    /// Record after the producing dispatch node(s).
+    /// Record after the producing dispatch node(s). The parcel's backing buffer is
+    /// retained for the scheme's lifetime so resubmits remain valid after the
+    /// [`Parcel`] is dropped.
     pub fn grant_read(&mut self, parcel: &Parcel) -> Result<ReadGrant<GrantBuffer>, GoldyError> {
         self.dirty = true;
         self.submit_state.register_parcel_stamp(parcel);
@@ -500,15 +634,24 @@ impl Scheme {
                 "parcel home device does not match scheme context"
             )));
         }
+        let source_backing = parcel
+            .grant_buffer_keepalive()
+            .map_err(|e| self.ctx.classify(e))?;
         let source = parcel
             .buffer_handle()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read requires buffer parcel")))?;
         let byte_size = parcel.byte_size();
+        if byte_size == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "grant_read requires non-zero buffer byte size"
+            )));
+        }
         let grant_id = GrantId(self.next_grant_id);
         self.next_grant_id += 1;
-        let staging_pool = Arc::new(Mutex::new(Vec::new()));
+        let staging_pool = GrantStagingPool::new(&self.ctx);
         self.grants.push(GrantInfo {
             source,
+            source_backing,
             byte_size,
             staging_pool: Arc::clone(&staging_pool),
         });
@@ -525,6 +668,7 @@ impl Scheme {
         });
         Ok(ReadGrant {
             grant_id,
+            scheme_id: self.scheme_id,
             ctx: self.ctx.clone(),
             byte_size,
             return_pool: staging_pool,
@@ -611,6 +755,14 @@ mod tests {
 
     fn mock_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    fn mock_readback_counts(device: &Device) -> (usize, usize) {
+        let backend = device.inner.backend.lock().unwrap();
+        (
+            backend.test_readback_alloc_count(),
+            backend.test_readback_free_count(),
+        )
     }
 
     fn mock_shader(device: &Device) -> ShaderModule {
@@ -1015,6 +1167,23 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    fn grant_read_resubmit_after_parcel_drop() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let grant = scheme.grant_read(&parcel).expect("grant_read");
+        let frame1 = scheme.submit().expect("submit 1");
+        drop(parcel);
+        drop(pool);
+        let frame2 = scheme.submit().expect("submit 2 after parcel drop");
+        let loan1 = grant.read(&frame1).expect("read frame1");
+        let loan2 = grant.read(&frame2).expect("read frame2");
+        assert_eq!(loan1.len(), 32);
+        assert_eq!(loan2.len(), 32);
+    }
+
+    #[test]
     fn grant_read_concurrent_frames_succeed() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
@@ -1034,6 +1203,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         for chunk in loan1.chunks_exact(4) {
             assert_eq!(u32::from_le_bytes(chunk.try_into().unwrap()), 7);
         }
+        let (allocs, _) = mock_readback_counts(&device);
+        assert_eq!(allocs, 2, "two live frames require two staging allocations");
     }
 
     #[test]
@@ -1074,6 +1245,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame2 = scheme.submit().expect("submit 2 after loan drop");
         let loan2 = grant.read(&frame2).expect("read frame2 after pool recycle");
         assert_eq!(loan2.len(), 32);
+        let (allocs, _) = mock_readback_counts(&device);
+        assert_eq!(allocs, 1, "pool recycles staging buffer on loan drop");
     }
 
     #[test]
@@ -1094,5 +1267,72 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             "unexpected error: {err}"
         );
         drop(ctx_a);
+    }
+
+    #[test]
+    fn grant_read_rejects_cross_scheme_frame() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = retained_buffer_parcel(&mut pool);
+
+        let mut scheme_a = Scheme::new(&ctx);
+        let grant_a = scheme_a.grant_read(&parcel).expect("grant_a");
+
+        let mut scheme_b = Scheme::new(&ctx);
+        let _grant_b = scheme_b.grant_read(&parcel).expect("grant_b");
+        let frame_b = scheme_b.submit().expect("submit b");
+
+        let err = match grant_a.read(&frame_b) {
+            Ok(_) => panic!("cross-scheme read must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("different scheme"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_read_drop_scheme_with_outstanding_frame_frees_staging() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = pool
+            .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
+            .expect("parcel");
+        let mut scheme = Scheme::new(&ctx);
+        let _grant = scheme.grant_read(&parcel).expect("grant");
+        let frame = scheme.submit().expect("submit");
+        let (allocs_after_submit, frees_before) = mock_readback_counts(&device);
+        assert_eq!(allocs_after_submit, 1, "submit allocates one staging buffer");
+        drop(scheme);
+        drop(frame);
+        let (allocs, frees) = mock_readback_counts(&device);
+        assert_eq!(frees, frees_before + 1, "outstanding frame frees staging on drop");
+        assert_eq!(frees, allocs, "all staging buffers freed");
+    }
+
+    #[test]
+    fn grant_read_rejects_zero_byte_buffer() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = pool
+            .acquire_buffer(0, BufferKind::Scattered, None, crate::types::BufferFlags::empty(), None);
+        if parcel.is_err() {
+            // Pools/backends may reject zero-byte buffers; guard is still covered at grant_read.
+            return;
+        }
+        let parcel = parcel.unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let err = match scheme.grant_read(&parcel) {
+            Ok(_) => panic!("zero-byte grant must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("non-zero"),
+            "unexpected error: {err}"
+        );
     }
 }

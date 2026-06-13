@@ -10,7 +10,8 @@
 //!     built; Metal `MTL_SHADER_VALIDATION` when applicable). For loader-only Vulkan layers, set
 //!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
-//!   - `all` — layout, GPU API, and timeline
+//!   - `scheme` / `readback` — retained-scheme grant readback invariants (staging pool, frame pairing)
+//!   - `all` — layout, GPU API, timeline, and scheme
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
@@ -20,6 +21,7 @@ struct ParsedValidation {
     layout: bool,
     gpu_api: bool,
     timeline: bool,
+    scheme: bool,
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -58,10 +60,12 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                     out.layout = true;
                     out.gpu_api = true;
                     out.timeline = true;
+                    out.scheme = true;
                 }
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
                 "timeline" => out.timeline = true,
+                "scheme" | "readback" => out.scheme = true,
                 _ => {}
             }
         }
@@ -98,6 +102,12 @@ pub(crate) fn timeline_validation_enabled() -> bool {
     from_goldy_validation_var().timeline
 }
 
+/// Retained-scheme grant readback invariants (frame/grant pairing, staging pool checks).
+#[must_use]
+pub(crate) fn scheme_validation_enabled() -> bool {
+    from_goldy_validation_var().scheme
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_validation_list;
@@ -116,11 +126,22 @@ mod tests {
         assert!(p.layout);
         assert!(p.gpu_api);
         assert!(p.timeline);
+        assert!(p.scheme);
 
         let p = parse_validation_list("timeline");
         assert!(!p.layout);
         assert!(!p.gpu_api);
         assert!(p.timeline);
+        assert!(!p.scheme);
+
+        let p = parse_validation_list("scheme");
+        assert!(!p.layout);
+        assert!(!p.gpu_api);
+        assert!(!p.timeline);
+        assert!(p.scheme);
+
+        let p = parse_validation_list("readback");
+        assert!(p.scheme);
 
         let p = parse_validation_list("api; api");
         assert!(!p.layout);

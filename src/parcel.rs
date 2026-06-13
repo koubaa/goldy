@@ -190,11 +190,6 @@ impl Parcel {
         }
     }
 
-    /// Capture read state for [`crate::scheme::ReadGrant`] at grant time.
-    pub(crate) fn readback_sink(&self, ctx: &Context) -> anyhow::Result<ReadbackSink> {
-        ReadbackSink::from_parcel(ctx, self)
-    }
-
     /// Approximate committed byte size for accounting.
     pub fn byte_size(&self) -> u64 {
         match &self.storage {
@@ -305,6 +300,15 @@ impl Parcel {
         }
     }
 
+    /// Clone the backing [`Buffer`] keepalive for a grant-read source parcel.
+    pub(crate) fn grant_buffer_keepalive(&self) -> Result<std::sync::Arc<crate::Buffer>, anyhow::Error> {
+        match &self.storage {
+            ParcelStorage::Buffer(b) => Ok(std::sync::Arc::clone(b)),
+            ParcelStorage::Texture(_) => anyhow::bail!("grant_read requires buffer parcel"),
+            ParcelStorage::Mosaic(_) => anyhow::bail!("grant_read requires non-mosaic buffer parcel"),
+        }
+    }
+
     /// Release pool bookkeeping so [`Drop`] does not double-decrement after [`RetainedPool::release`].
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
@@ -406,49 +410,5 @@ impl BufferSource for Parcel {
 
     fn source_offset(&self) -> u64 {
         0
-    }
-}
-
-/// Captured read path for grant readback — context, buffer keepalive, and stamp for currency checks.
-pub(crate) struct ReadbackSink {
-    ctx: Context,
-    target: crate::buffer::BufferReadbackTarget,
-    stamp: Arc<ParcelStamp>,
-}
-
-impl ReadbackSink {
-    pub(crate) fn from_parcel(ctx: &Context, parcel: &Parcel) -> anyhow::Result<Self> {
-        if !parcel.is_homed_on(ctx) {
-            anyhow::bail!("parcel home device does not match scheme context");
-        }
-        match &parcel.storage {
-            ParcelStorage::Buffer(b) => Ok(Self {
-                ctx: ctx.clone(),
-                target: Buffer::readback_target(b),
-                stamp: parcel.stamp_handle(),
-            }),
-            ParcelStorage::Texture(_) => {
-                anyhow::bail!("grant_read is only valid for buffer parcels in v1")
-            }
-            ParcelStorage::Mosaic(_) => {
-                anyhow::bail!("grant_read is only valid for non-mosaic buffer parcels")
-            }
-        }
-    }
-
-    pub(crate) fn ctx(&self) -> &Context {
-        &self.ctx
-    }
-
-    pub(crate) fn byte_size(&self) -> u64 {
-        self.target.byte_size()
-    }
-
-    pub(crate) fn stamp(&self) -> &Arc<ParcelStamp> {
-        &self.stamp
-    }
-
-    pub(crate) fn read_to_cpu(&self, output: &mut [u8]) -> anyhow::Result<()> {
-        self.target.read_to_cpu(output)
     }
 }

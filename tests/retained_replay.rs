@@ -439,10 +439,13 @@ fn grant_read_concurrent_frames_distinct_backings() {
         }
     }
 
-    assert_eq!(scheme.replay_stats().records, 1, "dispatch records once");
+    let stats = scheme.replay_stats();
+    drop(scheme);
+
+    assert_eq!(stats.records, 1, "dispatch records once");
     #[cfg(not(feature = "metal"))]
     assert_eq!(
-        scheme.replay_stats().resubmit_hits,
+        stats.resubmit_hits,
         1,
         "second dispatch submit is a retention hit"
     );

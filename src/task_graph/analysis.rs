@@ -420,9 +420,9 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        // GrantRead participates in ordering edges but emits no GPU work in v1.
-        // Barriers involving grant nodes intentionally have an empty dst usage
-        // until Unit 3 inserts device→host transition at the grant site.
+        // GrantRead participates in ordering edges but emits no GPU work in the IR.
+        // Device→host copy is emitted out-of-band by [`crate::Scheme::finish_submit_frame`]
+        // via `submit_standalone` after the dispatch timeline completes.
         NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
     }
 }
