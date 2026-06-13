@@ -1383,7 +1383,8 @@ fn scheme_scattered_typed_variable_assignment() {
         .acquire_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
         .expect("output");
 
-    let in_h = input.handle(ResourceAccess::ReadWrite).expect("in");
+    // BufRO<Pair> must bind the SRV slot; ReadWrite yields UAV and reads zeros on WARP.
+    let in_h = input.handle(ResourceAccess::Read).expect("in");
     let out_h = output.handle(ResourceAccess::Write).expect("out");
 
     let mut scheme = Scheme::new(&ctx);
