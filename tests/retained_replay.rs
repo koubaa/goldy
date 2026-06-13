@@ -23,12 +23,19 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat, TextureKind,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess,
+    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags,
+    TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
 use upload::write_to_parcel;
+
+fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
+    let loan = grant.read(frame).expect("grant read");
+    assert_eq!(loan.len(), count * 4, "grant readback size");
+    bytemuck::cast_slice(&loan).to_vec()
+}
 
 fn make_device() -> Device {
     let instance = Instance::new().expect("Failed to create instance");
@@ -85,19 +92,16 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
         ])
         .dispatch(1, 1, 1);
 
+    let grant = worker.grant_read(&output).expect("grant_read");
     const FRAMES: u32 = 3;
     for submission in 1..=FRAMES {
         // Separate upload submission per frame via the property-only-dispatch API.
         write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[submission; 8])).expect("write_to_parcel");
 
-        let submit_frame = worker.submit().expect("submit worker");
-        submit_frame.wait(&ctx).expect("wait");
-
-        let mut raw = vec![0u8; 8 * 4];
-        output.read_to_cpu(&device, &mut raw).expect("readback output");
-        for v in bytemuck::cast_slice::<u8, u32>(&raw) {
+        let frame = worker.submit().expect("submit worker");
+        for v in read_grant_u32(&grant, &frame, 8) {
             assert_eq!(
-                *v, submission,
+                v, submission,
                 "submission {submission} must observe its upload (cross-scheme serialization)"
             );
         }
@@ -191,16 +195,14 @@ fn selector_advances_across_identical_submissions() {
         .bind_resources_typed(&[selector.handle(ResourceAccess::ReadWrite).expect("selector handle")])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&selector).expect("grant_read");
     const N: u64 = 5;
     let mut last_frame = None;
     for _ in 0..N {
         last_frame = Some(scheme.submit().expect("submit"));
     }
-    last_frame.expect("submit").wait(&ctx).expect("wait");
-
-    let mut raw = vec![0u8; 4];
-    selector.read_to_cpu(&device, &mut raw).expect("readback selector");
-    let count = u32::from_le_bytes(raw.try_into().unwrap());
+    let frame = last_frame.expect("submit");
+    let count = read_grant_u32(&grant, &frame, 1)[0];
     assert_eq!(
         count as u64, N,
         "each submission must advance the GPU-side selector once"
@@ -263,23 +265,20 @@ fn two_schemes_on_one_context_do_not_collide() {
         ])
         .dispatch(1, 1, 1);
 
+    let grant_a = scheme_a.grant_read(&out_a).expect("grant_read");
+    let grant_b = scheme_b.grant_read(&out_b).expect("grant_read");
+
     // Interleave submissions: A, B, A, B
     let _ = scheme_a.submit().expect("a1");
     let _ = scheme_b.submit().expect("b1");
-    let _ = scheme_a.submit().expect("a2");
-    let frame = scheme_b.submit().expect("b2");
-    frame.wait(&ctx).expect("wait");
+    let frame_a = scheme_a.submit().expect("a2");
+    let frame_b = scheme_b.submit().expect("b2");
 
-    let mut raw_a = vec![0u8; 8 * 4];
-    out_a.read_to_cpu(&device, &mut raw_a).expect("readback a");
-    for v in bytemuck::cast_slice::<u8, u32>(&raw_a) {
-        assert_eq!(*v, 1u32, "scheme_a must produce 1s");
+    for v in read_grant_u32(&grant_a, &frame_a, 8) {
+        assert_eq!(v, 1u32, "scheme_a must produce 1s");
     }
-
-    let mut raw_b = vec![0u8; 8 * 4];
-    out_b.read_to_cpu(&device, &mut raw_b).expect("readback b");
-    for v in bytemuck::cast_slice::<u8, u32>(&raw_b) {
-        assert_eq!(*v, 2u32, "scheme_b must produce 2s");
+    for v in read_grant_u32(&grant_b, &frame_b, 8) {
+        assert_eq!(v, 2u32, "scheme_b must produce 2s");
     }
 
     assert_eq!(scheme_a.replay_stats().records, 1, "scheme_a records once");

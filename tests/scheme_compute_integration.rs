@@ -44,17 +44,41 @@ fn make_device() -> Device {
         .expect("Failed to create device")
 }
 
-fn readback_parcel_u32(device: &Device, parcel: &Parcel, count: usize) -> Vec<u32> {
-    let mut output = vec![0u8; count * 4];
-    parcel.read_to_cpu(device, &mut output).expect("readback");
-    bytemuck::cast_slice(&output).to_vec()
+fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
+    let loan = grant.read(frame).expect("grant read");
+    assert_eq!(loan.len(), count * 4, "grant readback size");
+    bytemuck::cast_slice(&loan).to_vec()
 }
 
-    fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
-        let loan = grant.read(frame).expect("grant read");
-        assert_eq!(loan.len(), count * 4, "grant readback size");
-        bytemuck::cast_slice(&loan).to_vec()
-    }
+/// Read parcel bytes after an upload micro-scheme (grant-only verification scheme).
+fn read_uploaded_parcel_u32(ctx: &goldy::Context, parcel: &Parcel, count: usize) -> Vec<u32> {
+    let mut scheme = Scheme::new(ctx);
+    let grant = scheme.grant_read(parcel).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+    read_grant_u32(&grant, &frame, count)
+}
+
+fn dispatch_u32_write_and_read(
+    ctx: &goldy::Context,
+    shader_src: &str,
+    out: &Parcel,
+    count: usize,
+) -> Vec<u32> {
+    let device = ctx.device();
+    let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
+    let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
+    let out_w = out.handle(ResourceAccess::Write).expect("out handle");
+
+    let mut scheme = Scheme::new(ctx);
+    scheme
+        .node("n0", &pipeline)
+        .bind_parcel(out, NodeAccess::Write)
+        .bind_resources_typed(&[out_w])
+        .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(out).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+    read_grant_u32(&grant, &frame, count)
+}
 
 fn write_zeros_to_parcel(ctx: &goldy::Context, parcel: &Parcel, byte_len: usize) {
     // Upload micro-scheme: separate from worker Scheme.
@@ -218,6 +242,7 @@ fn scheme_graph_linear_chain() {
         .bind_resources_typed(&[dst.handle(ResourceAccess::ReadWrite).unwrap()])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&dst).expect("grant_read");
     scheme.submit().unwrap();
     let frame = scheme.submit().unwrap();
     assert_eq!(scheme.replay_stats().records, 1, "linear chain records once");
@@ -227,9 +252,8 @@ fn scheme_graph_linear_chain() {
         1,
         "second submit must resubmit without re-record"
     );
-    frame.wait(&ctx).unwrap();
 
-    let result = readback_parcel_u32(&device, &dst, 64);
+    let result = read_grant_u32(&grant, &frame, 64);
     for (i, &val) in result.iter().enumerate() {
         let expected = (i as u32) * 2 + 10;
         assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
@@ -264,13 +288,14 @@ fn scheme_graph_independent_dispatches() {
         .bind_resources_typed(&[buf_b.handle(ResourceAccess::Write).unwrap()])
         .dispatch(1, 1, 1);
 
+    let grant_a = scheme.grant_read(&buf_a).expect("grant_read");
+    let grant_b = scheme.grant_read(&buf_b).expect("grant_read");
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    for &v in &readback_parcel_u32(&device, &buf_a, 64) {
+    for &v in &read_grant_u32(&grant_a, &frame, 64) {
         assert_eq!(v, 42);
     }
-    for &v in &readback_parcel_u32(&device, &buf_b, 64) {
+    for &v in &read_grant_u32(&grant_b, &frame, 64) {
         assert_eq!(v, 99);
     }
 }
@@ -334,11 +359,11 @@ fn scheme_graph_diamond_dependency() {
         .bind_resources_typed(&[y_w, z_w, out_w])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().unwrap();
     assert_eq!(scheme.replay_stats().records, 1, "diamond records once");
-    frame.wait(&ctx).unwrap();
 
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = read_grant_u32(&grant, &frame, 64);
     for (i, &val) in result.iter().enumerate() {
         let expected = (i as u32) * 4;
         assert_eq!(val, expected, "element {i}: expected {expected}, got {val}");
@@ -399,10 +424,10 @@ fn scheme_zeros_then_dispatch_reads_zeros() {
         ])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    for (i, &val) in readback_parcel_u32(&device, &out, 64).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
         assert_eq!(val, 0, "element {i}: expected 0 after zero write, got {val}");
     }
 }
@@ -436,10 +461,10 @@ fn scheme_write_then_dispatch_reads_uploaded_data() {
         ])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    for (i, &val) in readback_parcel_u32(&device, &out, 64).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
         assert_eq!(val, known_data[i], "element {i}");
     }
 }
@@ -473,10 +498,10 @@ fn scheme_stress_zeros_then_dispatch_large() {
         ])
         .dispatch((N / 64) as u32, 1, 1);
 
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    let nonzero_count = readback_parcel_u32(&device, &out, N)
+    let nonzero_count = read_grant_u32(&grant, &frame, N)
         .iter()
         .filter(|&&v| v != 0)
         .count();
@@ -524,11 +549,14 @@ fn scheme_stress_many_zero_writes_many_dispatches() {
             .dispatch((N / 64) as u32, 1, 1);
     }
 
+    let mut grants = Vec::new();
+    for out in &outs {
+        grants.push(scheme.grant_read(out).expect("grant_read"));
+    }
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    for (i, out) in outs.iter().enumerate() {
-        let nonzero_count = readback_parcel_u32(&device, out, N).iter().filter(|&&v| v != 0).count();
+    for (i, grant) in grants.iter().enumerate() {
+        let nonzero_count = read_grant_u32(grant, &frame, N).iter().filter(|&&v| v != 0).count();
         assert_eq!(nonzero_count, 0, "buffer {i}: expected all zeros after zero write");
     }
 }
@@ -563,10 +591,10 @@ fn scheme_stress_write_then_dispatch_chain() {
         ])
         .dispatch((N / 64) as u32, 1, 1);
 
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().unwrap();
-    frame.wait(&ctx).unwrap();
 
-    for (i, &val) in readback_parcel_u32(&device, &out, N).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
         assert_eq!(val, known_data[i], "element {i}");
     }
 }
@@ -600,22 +628,22 @@ fn scheme_stress_two_phase_submission() {
             .bind_parcel(&tmp, NodeAccess::Write)
             .bind_resources_typed(&[buf_rw, tmp_rw])
             .dispatch((N / 64) as u32, 1, 1);
-        let frame = scheme.submit().unwrap();
-        frame.wait(&ctx).unwrap();
+        scheme.submit().unwrap();
     }
 
-    {
+    let result = {
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("add_ten", &add_pipe)
             .bind_parcel(&tmp, NodeAccess::ReadWrite)
             .bind_resources_typed(&[tmp_rw])
             .dispatch((N / 64) as u32, 1, 1);
+        let grant = scheme.grant_read(&tmp).expect("grant_read");
         let frame = scheme.submit().unwrap();
-        frame.wait(&ctx).unwrap();
-    }
+        read_grant_u32(&grant, &frame, N)
+    };
 
-    for (i, &val) in readback_parcel_u32(&device, &tmp, N).iter().enumerate() {
+    for (i, &val) in result.iter().enumerate() {
         let expected = (i as u32) * 2 + 10;
         assert_eq!(val, expected, "element {i}");
     }
@@ -641,12 +669,13 @@ fn scheme_stress_rapid_submissions() {
         .bind_resources_typed(&[buf.handle(ResourceAccess::ReadWrite).unwrap()])
         .dispatch((N / 64) as u32, 1, 1);
 
+    let grant = scheme.grant_read(&buf).expect("grant_read");
     const ROUNDS: u32 = 20;
     let mut last_frame = None;
     for _ in 0..ROUNDS {
         last_frame = Some(scheme.submit().unwrap());
     }
-    last_frame.expect("submit").wait(&ctx).unwrap();
+    let frame = last_frame.expect("submit");
 
     assert_eq!(scheme.replay_stats().records, 1, "rapid submissions record once");
     #[cfg(not(feature = "metal"))]
@@ -657,7 +686,7 @@ fn scheme_stress_rapid_submissions() {
     );
 
     let expected = ROUNDS * 10;
-    for (i, &val) in readback_parcel_u32(&device, &buf, N).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
         assert_eq!(val, expected, "element {i}");
     }
 }
@@ -704,10 +733,10 @@ fn scheme_compute_write_and_readback() {
         .bind_parcel(&buffer, NodeAccess::ReadWrite)
         .bind_resources_typed(&[buffer.handle(ResourceAccess::ReadWrite).expect("handle")])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&buffer).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &buffer, 64).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
         assert_eq!(val, (i as u32) * 2, "element {i}");
     }
 }
@@ -734,10 +763,10 @@ fn scheme_compute_with_uav_parcel() {
         .bind_parcel(&buffer, NodeAccess::ReadWrite)
         .bind_resources_typed(&[buffer.handle(ResourceAccess::ReadWrite).expect("handle")])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&buffer).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &buffer, 64).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
         assert_eq!(val, (i as u32) * 2, "element {i}");
     }
 }
@@ -771,11 +800,11 @@ fn scheme_compute_with_srv_and_uav_parcels() {
             output.handle(ResourceAccess::Write).expect("out"),
         ])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
 
-    let input_vals = readback_parcel_u32(&device, &input, 64);
-    let output_vals = readback_parcel_u32(&device, &output, 64);
+    let output_vals = read_grant_u32(&grant, &frame, 64);
+    let input_vals = read_uploaded_parcel_u32(&ctx, &input, 64);
     assert_eq!(output_vals, input_vals, "copy must reproduce input in output");
 }
 
@@ -792,7 +821,7 @@ fn scheme_parcel_write_zeros_full() {
     let token = write_to_parcel(&ctx, &parcel, &vec![0u8; 64 * 4]).expect("write_to_parcel zeros");
     token.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &parcel, 64).iter().enumerate() {
+    for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, 64).iter().enumerate() {
         assert_eq!(val, 0, "element {i} should be 0 after zero write");
     }
 }
@@ -815,7 +844,7 @@ fn scheme_parcel_write_zeros_partial() {
     let token = write_to_parcel(&ctx, &parcel, bytemuck::cast_slice(&data)).expect("write_to_parcel");
     token.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &parcel, 64).iter().enumerate() {
+    for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, 64).iter().enumerate() {
         let expected = if (16..32).contains(&i) { 0 } else { SENTINEL };
         assert_eq!(val, expected, "element {i}");
     }
@@ -839,7 +868,7 @@ fn scheme_parcel_write_zeros_to_end() {
     let token = write_to_parcel(&ctx, &parcel, bytemuck::cast_slice(&data)).expect("write_to_parcel");
     token.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &parcel, 64).iter().enumerate() {
+    for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, 64).iter().enumerate() {
         let expected = if i < 32 { SENTINEL } else { 0 };
         assert_eq!(val, expected, "element {i}");
     }
@@ -876,10 +905,10 @@ fn scheme_zeros_before_copy_dispatch() {
             output.handle(ResourceAccess::Write).expect("out"),
         ])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &output, 64).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, 64).iter().enumerate() {
         assert_eq!(val, 0, "output[{i}] should be 0 (copied from zeroed input)");
     }
 }
@@ -937,18 +966,19 @@ fn scheme_write_to_parcel_zeros_between_submissions() {
     // No wait here: zero write must serialize after copy via queue order alone.
     write_zeros_to_parcel(&ctx, &output, 64 * 4);
 
-    let frame = {
+    let result = {
         let mut inc_scheme = Scheme::new(&ctx);
         inc_scheme
             .node("inc", &inc_pipe)
             .bind_parcel(&output, NodeAccess::ReadWrite)
             .bind_resources_typed(&[out_rw])
             .dispatch(1, 1, 1);
-        inc_scheme.submit().expect("inc submit")
+        let grant = inc_scheme.grant_read(&output).expect("grant_read");
+        let frame = inc_scheme.submit().expect("inc submit");
+        read_grant_u32(&grant, &frame, 64)
     };
-    frame.wait(&ctx).expect("wait after inc");
 
-    for (i, &val) in readback_parcel_u32(&device, &output, 64).iter().enumerate() {
+    for (i, &val) in result.iter().enumerate() {
         assert_eq!(
             val, 1,
             "output[{i}]: expected 1 (write_to_parcel zeroed before increment), got {val}"
@@ -992,10 +1022,10 @@ fn scheme_upload_frame_unwaited_serializes_before_worker_submit() {
             output.handle(ResourceAccess::Write).expect("out"),
         ])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&output).expect("grant_read");
     let worker_frame = scheme.submit().expect("worker submit");
-    worker_frame.wait(&ctx).expect("wait on worker frame only");
 
-    for (i, &val) in readback_parcel_u32(&device, &output, 64).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &worker_frame, 64).iter().enumerate() {
         assert_eq!(
             val, PATTERN,
             "output[{i}]: upload must be visible without waiting on upload frame"
@@ -1054,10 +1084,10 @@ fn scheme_compute_many_resource_slots() {
         ])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
 
-    for (i, &val) in readback_parcel_u32(&device, &out, N).iter().enumerate() {
+    for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
         assert_eq!(val, 15, "out[{i}] expected 15, got {val}");
     }
 }
@@ -1117,11 +1147,11 @@ fn scheme_regular_buffer_write_then_copy() {
         .bind_resources_typed(&[scratch_rw, out_w])
         .dispatch(1, 1, 1);
 
+    let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
 
     let expected: Vec<u32> = (1..=N as u32).collect();
-    assert_eq!(readback_parcel_u32(&device, &output, N), expected);
+    assert_eq!(read_grant_u32(&grant, &frame, N), expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -1354,24 +1384,6 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 }
 "#;
 
-fn dispatch_u32_write_scheme(device: &Device, ctx: &goldy::Context, shader_src: &str, out: &Parcel, byte_len: u64) {
-    let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
-    let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
-    let out_w = out.handle(ResourceAccess::Write).expect("out handle");
-
-    let mut scheme = Scheme::new(ctx);
-    scheme
-        .node("n0", &pipeline)
-        .bind_parcel(out, NodeAccess::Write)
-        .bind_resources_typed(&[out_w])
-        .dispatch(1, 1, 1);
-    let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
-
-    let count = (byte_len / 4) as usize;
-    let _ = readback_parcel_u32(device, out, count);
-}
-
 #[test]
 fn scheme_compute_with_struct_buffer() {
     let device = make_device();
@@ -1411,6 +1423,69 @@ fn scheme_compute_with_struct_buffer() {
     scheme.submit().expect("submit with struct buffer");
 }
 
+const DOUBLE_SHADER_COHERENT: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
+}
+"#;
+
+/// [`BufferFlags::CPU_READABLE`] is a medium hint — grant readback uses the same path as any buffer parcel.
+#[test]
+fn scheme_cpu_readable_compute_write_and_read() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER_COHERENT).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const N: usize = 64;
+    let initial: Vec<u32> = (0..N as u32).collect();
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buffer = pool
+        .acquire_buffer_with_data_and_flags(&initial, BufferKind::Scattered, BufferFlags::CPU_READABLE)
+        .expect("buffer");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("double", &pipeline)
+        .bind_parcel(&buffer, NodeAccess::ReadWrite)
+        .bind_resources_typed(&[buffer.handle(ResourceAccess::ReadWrite).expect("handle")])
+        .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&buffer).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    for (i, &val) in read_grant_u32(&grant, &frame, N).iter().enumerate() {
+        assert_eq!(val, (i as u32) * 2, "element {i}: expected {} got {val}", i * 2);
+    }
+}
+
+/// CPU-visible data uploaded via [`write_to_parcel`] round-trips through grant readback.
+#[test]
+fn scheme_cpu_readable_write_to_parcel_roundtrip() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const N: usize = 16;
+    let initial: Vec<u32> = vec![0xABCD_1234u32; N];
+    let new_values: Vec<u32> = (100..100 + N as u32).collect();
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let parcel = pool
+        .acquire_buffer_with_data_and_flags(&initial, BufferKind::Scattered, BufferFlags::CPU_READABLE)
+        .expect("parcel");
+
+    write_to_parcel(&ctx, &parcel, bytemuck::cast_slice(&new_values)).expect("write_to_parcel");
+
+    for (i, &val) in read_uploaded_parcel_u32(&ctx, &parcel, N).iter().enumerate() {
+        assert_eq!(val, 100 + i as u32, "element {i}: expected {} got {val}", 100 + i);
+    }
+}
+
 #[test]
 fn scheme_scattered_typed_variable_assignment() {
     let device = make_device();
@@ -1447,12 +1522,10 @@ fn scheme_scattered_typed_variable_assignment() {
         .bind_parcel(&output, NodeAccess::Write)
         .bind_resources_typed(&[in_h, out_h])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
-
-    let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
-    output.read_to_cpu(&device, &mut raw).expect("readback");
-    let result: &[Pair] = bytemuck::cast_slice(&raw);
+    let loan = grant.read(&frame).expect("grant read");
+    let result: &[Pair] = bytemuck::cast_slice(&loan);
 
     for i in 0..8u32 {
         let expected_a = (i + 1) + (i + 10);
@@ -1464,6 +1537,7 @@ fn scheme_scattered_typed_variable_assignment() {
 
 #[test]
 fn scheme_compute_write_to_texture() {
+    // Texture grant readback deferred (buffers-first v1); buffer output uses grant in dual-view test.
     let device = make_device();
     let ctx = submission_context(&device);
 
@@ -1520,8 +1594,7 @@ fn scheme_wave_inclusive_scan_uniform_64() {
     let out = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, WAVE_SCAN_64_UNIFORM, &out, 64 * 4);
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = dispatch_u32_write_and_read(&ctx, WAVE_SCAN_64_UNIFORM, &out, 64);
     for (i, &val) in result.iter().enumerate() {
         assert_eq!(val, i as u32 + 1, "wave_scan_uniform_64[{i}]");
     }
@@ -1535,8 +1608,7 @@ fn scheme_wave_inclusive_scan_ramp_64() {
     let out = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, WAVE_SCAN_64_RAMP, &out, 64 * 4);
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = dispatch_u32_write_and_read(&ctx, WAVE_SCAN_64_RAMP, &out, 64);
     for (i, &val) in result.iter().enumerate() {
         let k = (i + 1) as u32;
         let expected = k * (k + 1) / 2;
@@ -1552,8 +1624,7 @@ fn scheme_wave_inclusive_scan_uniform_256() {
     let out = pool
         .acquire_buffer(256 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, WAVE_SCAN_256_UNIFORM, &out, 256 * 4);
-    let result = readback_parcel_u32(&device, &out, 256);
+    let result = dispatch_u32_write_and_read(&ctx, WAVE_SCAN_256_UNIFORM, &out, 256);
     for (i, &val) in result.iter().enumerate() {
         assert_eq!(val, i as u32 + 1, "wave_scan_uniform_256[{i}]");
     }
@@ -1567,8 +1638,7 @@ fn scheme_workgroup_reduce_uint_correct() {
     let out = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, REDUCE_64_UNIFORM, &out, 64 * 4);
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = dispatch_u32_write_and_read(&ctx, REDUCE_64_UNIFORM, &out, 64);
     assert_eq!(result[0], 64, "workgroup_reduce thread 0");
 }
 
@@ -1580,8 +1650,7 @@ fn scheme_workgroup_inclusive_scan_uint_correct() {
     let out = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, INCLUSIVE_SCAN_64_UNIFORM, &out, 64 * 4);
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = dispatch_u32_write_and_read(&ctx, INCLUSIVE_SCAN_64_UNIFORM, &out, 64);
     for (i, &val) in result.iter().enumerate() {
         assert_eq!(val, i as u32 + 1, "workgroup_inclusive_scan[{i}]");
     }
@@ -1595,8 +1664,7 @@ fn scheme_workgroup_broadcast_correct() {
     let out = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, BROADCAST_64, &out, 64 * 4);
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = dispatch_u32_write_and_read(&ctx, BROADCAST_64, &out, 64);
     for (i, &val) in result.iter().enumerate() {
         assert_eq!(val, 42, "workgroup_broadcast[{i}]");
     }
@@ -1610,8 +1678,7 @@ fn scheme_workgroup_upper_bound_linear() {
     let out = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
-    dispatch_u32_write_scheme(&device, &ctx, UPPER_BOUND_64, &out, 64 * 4);
-    let result = readback_parcel_u32(&device, &out, 64);
+    let result = dispatch_u32_write_and_read(&ctx, UPPER_BOUND_64, &out, 64);
     for (i, &val) in result.iter().enumerate() {
         assert_eq!(val, i as u32, "workgroup_upper_bound[{i}]");
     }
@@ -1664,12 +1731,10 @@ fn scheme_texture_dual_view_round_trip() {
         .bind_parcel(&out, NodeAccess::Write)
         .bind_resources_typed(&[tex_r, smp_r, out_w])
         .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
-
-    let mut raw = vec![0u8; N * 4];
-    out.read_to_cpu(&device, &mut raw).expect("readback");
-    let result: &[u32] = bytemuck::cast_slice(&raw);
+    let loan = grant.read(&frame).expect("grant read");
+    let result: &[u32] = bytemuck::cast_slice(&loan);
 
     for y in 0..H as usize {
         for x in 0..W as usize {
@@ -1714,6 +1779,7 @@ fn scheme_two_contexts_both_submit_and_complete() {
         .bind_parcel(&buf_a, NodeAccess::ReadWrite)
         .bind_resources_typed(&[buf_a_rw])
         .dispatch(1, 1, 1);
+    let grant_a = scheme_a.grant_read(&buf_a).expect("grant_read");
     let frame_a = scheme_a.submit().expect("ctx_a submit");
 
     let mut scheme_b = Scheme::new(&ctx_b);
@@ -1722,13 +1788,11 @@ fn scheme_two_contexts_both_submit_and_complete() {
         .bind_parcel(&buf_b, NodeAccess::ReadWrite)
         .bind_resources_typed(&[buf_b_rw])
         .dispatch(1, 1, 1);
+    let grant_b = scheme_b.grant_read(&buf_b).expect("grant_read");
     let frame_b = scheme_b.submit().expect("ctx_b submit");
 
-    frame_a.wait(&ctx_a).expect("ctx_a wait");
-    frame_b.wait(&ctx_b).expect("ctx_b wait");
-
-    let result_a = readback_parcel_u32(&device, &buf_a, 64);
-    let result_b = readback_parcel_u32(&device, &buf_b, 64);
+    let result_a = read_grant_u32(&grant_a, &frame_a, 64);
+    let result_b = read_grant_u32(&grant_b, &frame_b, 64);
     for i in 0..64 {
         assert_eq!(result_a[i], i as u32 * 2, "buf_a[{i}]");
         assert_eq!(result_b[i], (100 + i as u32) * 2, "buf_b[{i}]");

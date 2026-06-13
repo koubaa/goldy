@@ -181,6 +181,10 @@ impl Parcel {
     /// Read buffer parcel contents back to CPU memory.
     ///
     /// Valid only for non-mosaic buffer parcels acquired via [`crate::RetainedPool::acquire_buffer`].
+    #[deprecated(
+        since = "0.2.0",
+        note = "use Scheme::grant_read and ReadGrant::read with a Frame from Scheme::submit"
+    )]
     pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
         match &self.storage {
             ParcelStorage::Buffer(b) => b.read_to_cpu(device, output),
