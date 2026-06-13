@@ -1681,3 +1681,28 @@ fn scheme_two_contexts_both_submit_and_complete() {
         assert_eq!(result_b[i], (100 + i as u32) * 2, "buf_b[{i}]");
     }
 }
+
+#[test]
+fn scheme_two_contexts_reclaim_independently() {
+    let device = make_device();
+    let ctx_a = submission_context(&device);
+    let _ctx_b = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("buf");
+
+    let mut scheme = Scheme::new(&ctx_a);
+    let tv_a = scheme.submit().expect("ctx_a submit");
+    drop(buf);
+
+    ctx_a.wait_until(tv_a).expect("ctx_a wait_until");
+    ctx_a.flush_deferred_deletions();
+
+    assert_eq!(
+        ctx_a.deferred_deletion_pending_count(),
+        0,
+        "ctx_a must reclaim without waiting for ctx_b (no device-global horizon)"
+    );
+}

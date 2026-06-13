@@ -1498,6 +1498,106 @@ mod binding_stride_validation_tests {
         .unwrap();
     }
 
+    /// Broadcast slot correct, scattered slot wrong — only slot 1 reported.
+    #[test]
+    fn multi_binding_second_slot_mismatch() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Broadcast), Some(ResourceCategory::Scattered)];
+        let expected = vec![Some(16u32), Some(16u32)];
+
+        let err = validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |idx, cat| match (idx, cat) {
+                (0, ResourceCategory::Broadcast) => Some(16),
+                (1, ResourceCategory::Scattered) => Some(4),
+                _ => None,
+            },
+            "struct_shader",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("slot 1"), "error must identify slot 1: {err}");
+        assert!(err.contains("stride"), "error must mention stride: {err}");
+    }
+
+    /// Broadcast 16 + Scattered<float4> 16 both match.
+    #[test]
+    fn multi_binding_all_correct_passes() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Broadcast), Some(ResourceCategory::Scattered)];
+        let expected = vec![Some(16u32), Some(16u32)];
+
+        validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |_idx, _cat| Some(16),
+            "struct_shader",
+        )
+        .unwrap();
+    }
+
+    /// SimParams natural stride 4 (not cbuffer-padded 16).
+    #[test]
+    fn broadcast_single_float_natural_stride_passes() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
+        let expected = vec![Some(4u32), Some(4u32)];
+
+        validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |idx, cat| match (idx, cat) {
+                (0, ResourceCategory::Scattered) => Some(4),
+                (1, ResourceCategory::Broadcast) => Some(4),
+                _ => None,
+            },
+            "sim_params_shader",
+        )
+        .unwrap();
+    }
+
+    /// Broadcast buffer with stride 16 must fail against natural stride 4.
+    #[test]
+    fn broadcast_single_float_cbuffer_stride_fails() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
+        let expected = vec![Some(4u32), Some(4u32)];
+
+        let err = validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |idx, cat| match (idx, cat) {
+                (0, ResourceCategory::Scattered) => Some(4),
+                (1, ResourceCategory::Broadcast) => Some(16),
+                _ => None,
+            },
+            "sim_params_shader",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("slot 1"), "params is slot 1: {err}");
+        assert!(err.contains("stride"), "error must mention stride: {err}");
+    }
+
     /// Stride validation for render passes runs at prepare time (before lowering).
     #[test]
     fn validate_render_pass_bind_resources_catches_mismatch() {

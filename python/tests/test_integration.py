@@ -78,8 +78,8 @@ def test_parcel_creation_numpy(device):
     assert index_parcel.byte_size == indices.nbytes
 
 
-def test_parcel_write_via_graph(device):
-    """Upload bytes into a parcel through TaskGraph.write_parcel."""
+def test_parcel_write(device):
+    """Upload bytes into a parcel through write_to_parcel."""
     import goldy
 
     pool = goldy.RetainedPool(device)
@@ -87,10 +87,10 @@ def test_parcel_write_via_graph(device):
         np.zeros(16, dtype=np.uint32),
         goldy.BufferKind.SCATTERED,
     )
-    graph = goldy.TaskGraph()
-    graph.write_parcel(
+    ctx = device.create_context()
+    goldy.write_to_parcel(
+        ctx,
         parcel,
-        0,
         np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes(),
     )
 
