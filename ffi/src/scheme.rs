@@ -107,7 +107,7 @@ pub unsafe extern "C" fn goldy_scheme_len(scheme: *const GoldyScheme) -> u32 {
     if scheme.is_null() {
         return 0;
     }
-    (*scheme).inner.diagnostics().ir_node_count() as u32
+    (*scheme).inner.ir_node_count() as u32
 }
 
 /// True when the next submit must re-record.

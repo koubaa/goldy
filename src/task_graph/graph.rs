@@ -1210,12 +1210,7 @@ impl TaskGraph {
     /// (every frame pays full record cost; nothing can resubmit).
     ///
     /// The `#[deprecated]` attribute lands once `Scheme` exists as the migration
-    /// target (deprecating with no alternative would strand clients). `Scheme` has no
-    /// equivalent: structural change is a re-record tier, per-submission data enters
-    /// via `goldy::write_to_parcel` / upload windows, and a fresh graph is a fresh
-    /// object. Call sites to migrate: ekrano's frame loop, examples,
-    /// `FrameOrchestrator::flush`. See
-    /// `docu/development/projects/diwan/in-progress/retained-scheme/design.md`.
+    /// target (deprecating with no alternative would strand clients).
     ///
     /// ## Slot identity reset
     ///

@@ -8,8 +8,6 @@
 //! **Construction**: `Scheme::new(&ctx)` — bound to one context for its lifetime.
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
-//!
-//! CPU uploads over deed parcels use [`crate::write_to_parcel`].
 
 use crate::context::Context;
 use crate::error::GoldyError;
@@ -20,6 +18,7 @@ use crate::task_graph::IrSubmitState;
 use crate::timeline::TimelineValue;
 use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// Stable index of a scheme-held lease declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,6 +107,36 @@ impl Scheme {
         }
     }
 
+    /// Append a CPU→GPU write node for a retained buffer [`Parcel`].
+    ///
+    /// Marks the scheme dirty. Pair with [`Self::submit`] for a property-only upload
+    /// dispatch, or retain the scheme and refresh the payload each submission.
+    pub fn commit_write_parcel(
+        &mut self,
+        parcel: &Parcel,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let (buffer, resource) = parcel
+            .write_buffer_target()
+            .map_err(|e| self.ctx.classify(e))?;
+        self.submit_state.register_parcel_stamp(parcel);
+        self.ir.nodes.push(TaskNode {
+            label: "write_parcel",
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer,
+                offset,
+                data: Arc::from(data),
+            },
+        });
+        Ok(())
+    }
+
     /// Append a compute dispatch node to the scheme IR.
     pub(crate) fn commit_compute_dispatch(
         &mut self,
@@ -135,9 +164,9 @@ impl Scheme {
 
     /// Submit and block until GPU completion.
     ///
-    /// **Temporary.** This will be removed once `NodeKind::ReadbackBuffer` exists in the IR so
-    /// callers can express CPU readback as an explicit graph node and manage synchronisation
-    /// without implicit blocking. See project docs (FFI sync §).
+    /// **Temporary FFI helper.** This will be removed once `NodeKind::ReadbackBuffer` exists in
+    /// the IR so callers can express CPU readback as an explicit graph node and manage
+    /// synchronisation without implicit blocking. See project docs (FFI sync §).
     #[doc(hidden)]
     pub fn submit_blocking(&mut self) -> Result<(), GoldyError> {
         let tv = self.submit()?;
@@ -242,23 +271,13 @@ impl Scheme {
     }
 }
 
-/// Read-only diagnostic view of a [`Scheme`].
-///
-/// Intended for tests and debug tooling only. Do **not** use node counts for synchronisation;
-/// the scheme IR is an internal implementation detail and its shape may change without notice.
-pub struct SchemeDiagnostics<'a>(&'a Scheme);
-
 impl Scheme {
-    /// Borrow a diagnostic view of this scheme.
-    pub fn diagnostics(&self) -> SchemeDiagnostics<'_> {
-        SchemeDiagnostics(self)
-    }
-}
-
-impl SchemeDiagnostics<'_> {
     /// Number of IR nodes recorded in the scheme.
+    ///
+    /// Intended for tests and debug tooling only. Do **not** use for synchronisation.
+    #[doc(hidden)]
     pub fn ir_node_count(&self) -> usize {
-        self.0.ir.nodes.len()
+        self.ir.nodes.len()
     }
 }
 

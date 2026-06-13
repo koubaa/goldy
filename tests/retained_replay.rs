@@ -18,14 +18,17 @@
 
 #[path = "common/submission.rs"]
 mod submission;
+#[path = "common/upload.rs"]
+mod upload;
 
 use goldy::{
-    types::ResourceAccess, write_to_parcel, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
+    types::ResourceAccess, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
     NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
     TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
+use upload::write_to_parcel;
 
 fn make_device() -> Device {
     let instance = Instance::new().expect("Failed to create instance");
@@ -52,7 +55,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 ///
 /// The worker scheme (`records == 1`; `resubmit_hits == N-1` on non-Metal backends) observes each frame's
 /// data through the shared input parcel — serialized by queue order on the same context.
-/// This is the pattern `goldy::write_to_parcel` will package as a property-only dispatch.
+/// This is the pattern `upload::write_to_parcel` packages as a property-only dispatch.
 #[test]
 fn upload_graph_feeds_retained_worker_without_rerecord() {
     let device = make_device();

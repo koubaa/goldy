@@ -1,22 +1,25 @@
 //! Scheme compute integration tests — migrated from `TaskGraph` coverage.
 //!
 //! Retained worker schemes: parcels + `bind_resources_typed` + [`Scheme::submit`].
-//! CPU→GPU parcel writes (including zero-fills) use [`goldy::write_to_parcel`] — a
-//! separate upload submission per call (internally a one-node write graph on `ctx`),
+//! CPU→GPU parcel writes (including zero-fills) use [`upload::write_to_parcel`] — a
+//! separate upload submission per call (one-node upload [`Scheme`] on `ctx`),
 //! serialized against worker schemes by queue order. Callers do not use
 //! `TaskGraph::clear_buffer` or `TaskGraph::write_buffer` directly.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 #[path = "common/submission.rs"]
 mod submission;
+#[path = "common/upload.rs"]
+mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    write_to_parcel, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
     Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
 };
 use std::sync::Arc;
 use submission::submission_context;
+use upload::write_to_parcel;
 
 fn make_device() -> Device {
     let instance = Instance::new().expect("Failed to create instance");
@@ -47,7 +50,7 @@ fn readback_parcel_u32(device: &Device, parcel: &Parcel, count: usize) -> Vec<u3
 }
 
 fn write_zeros_to_parcel(ctx: &goldy::Context, parcel: &Parcel, byte_len: usize) {
-    // Upload micro-scheme: TaskGraph::write_parcel internally, separate from worker Scheme.
+    // Upload micro-scheme: separate from worker Scheme.
     write_to_parcel(ctx, parcel, &vec![0u8; byte_len]).expect("write_to_parcel zeros");
 }
 
