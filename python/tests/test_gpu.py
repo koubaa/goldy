@@ -108,6 +108,21 @@ class TestRetainedPool:
         graph = goldy.TaskGraph()
         graph.write_parcel(parcel, 0, np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
 
+    def test_write_parcel_via_scheme(self, device):
+        import goldy
+
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(
+            np.zeros(64, dtype=np.uint32),
+            goldy.BufferKind.SCATTERED,
+        )
+        ctx = device.create_context()
+        goldy.write_to_parcel(
+            ctx,
+            parcel,
+            np.array([1, 2, 3, 4], dtype=np.uint32).tobytes(),
+        )
+
 
 class TestShaderModule:
     """Test ShaderModule class."""
@@ -170,6 +185,32 @@ class TestComputePipeline:
         with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
             node.bind_parcel(parcel, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
         graph.dispatch(device)
+
+        values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
+        assert np.all(values == 42)
+
+    def test_dispatch_via_scheme(self, device):
+        import goldy
+
+        source = '''
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(64, 1, 1)]
+        void cs_main(Scattered<uint> data, ThreadId id) {
+            data[id.x] = 42;
+        }
+        '''
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
+        shader = goldy.ShaderModule.from_slang(device, source)
+        pipeline = goldy.ComputePipeline(device, shader)
+
+        ctx = device.create_context()
+        scheme = goldy.Scheme(ctx)
+        scheme.node("fill", pipeline).declare_parcel(
+            parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        ).dispatch(1, 1, 1)
+        scheme.submit()
 
         values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
         assert np.all(values == 42)

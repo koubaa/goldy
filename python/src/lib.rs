@@ -18,6 +18,7 @@ mod parcel;
 mod pipeline;
 mod render_target;
 mod retained_pool;
+mod scheme;
 mod shader;
 mod surface;
 mod task_graph;
@@ -55,6 +56,9 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<instance::PyInstance>()?;
     m.add_class::<instance::PyAdapter>()?;
     m.add_class::<device::PyDevice>()?;
+    m.add_class::<scheme::PyContext>()?;
+    m.add_class::<scheme::PyScheme>()?;
+    m.add_class::<scheme::PySchemeComputeNode>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;
     m.add_class::<retained_pool::PyMosaicBuilder>()?;
@@ -72,6 +76,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
+    m.add_function(wrap_pyfunction!(scheme::write_to_parcel, m)?)?;
 
     // Surface (windowed rendering)
     m.add_class::<surface::PySurface>()?;

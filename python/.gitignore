@@ -51,3 +51,5 @@ Thumbs.db
 python/goldy/*.so
 python/goldy/*.dylib
 python/goldy/*.dll
+
+*.pdb

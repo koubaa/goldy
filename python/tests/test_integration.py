@@ -203,6 +203,38 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     assert np.all(values == 42)
 
 
+def test_compute_node_fills_buffer_with_42_scheme(device):
+    """Fill a buffer via Scheme compute node and verify readback."""
+    import goldy
+
+    fill_shader = """
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = 42;
+}
+"""
+
+    retained_pool = goldy.RetainedPool(device)
+    zeros = np.zeros(64, dtype=np.uint32)
+    parcel = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
+    shader = goldy.ShaderModule.from_slang(device, fill_shader)
+    pipeline = goldy.ComputePipeline(device, shader)
+
+    ctx = device.create_context()
+    scheme = goldy.Scheme(ctx)
+    scheme.node("fill", pipeline).declare_parcel(
+        parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+    ).dispatch(1, 1, 1)
+    scheme.submit()
+
+    values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
+    assert values.shape == (64,)
+    assert np.all(values == 42)
+
+
 def test_triangle_via_graph(device):
     """Render a triangle through TaskGraph and verify non-empty readback."""
     import goldy

@@ -254,6 +254,40 @@ internal static partial class NativeMethods
     internal static partial GoldyResult TaskGraphWriteParcel(nint graph, nint parcel, ulong offset, nint data, nuint size);
 
     // ========================================================================
+    // Context
+    // ========================================================================
+
+    [LibraryImport(LibName, EntryPoint = "goldy_context_create")]
+    internal static partial nint ContextCreate(nint device);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_context_destroy")]
+    internal static partial void ContextDestroy(nint ctx);
+
+    // ========================================================================
+    // Scheme
+    // ========================================================================
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_create")]
+    internal static partial nint SchemeCreate(nint ctx);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_destroy")]
+    internal static partial void SchemeDestroy(nint scheme);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_begin", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial GoldyResult SchemeComputeNodeBegin(nint scheme, string label, nint pipeline);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_declare_parcel")]
+    internal static partial GoldyResult SchemeComputeNodeDeclareParcel(
+        nint scheme, nint parcel, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_dispatch")]
+    internal static partial GoldyResult SchemeComputeNodeDispatch(
+        nint scheme, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submit")]
+    internal static partial GoldyResult SchemeSubmit(nint scheme);
+
+    // ========================================================================
     // RetainedPool / Parcel
     // ========================================================================
 

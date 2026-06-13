@@ -62,6 +62,7 @@ from goldy._goldy import (
     Instance,
     Adapter,
     Device,
+    Context,
     Parcel,
     RetainedPool,
     MosaicBuilder,
@@ -72,9 +73,12 @@ from goldy._goldy import (
     TaskGraph,
     RenderPass,
     ComputeNode,
+    Scheme,
+    SchemeComputeNode,
     SwapchainOutput,
     NodeAccess,
     ResourceAccess,
+    write_to_parcel,
     # Shader builtins
     Builtins,
     # Compute
@@ -107,6 +111,7 @@ __all__ = [
     "Instance",
     "Adapter",
     "Device",
+    "Context",
     "Parcel",
     "RetainedPool",
     "MosaicBuilder",
@@ -117,9 +122,12 @@ __all__ = [
     "TaskGraph",
     "RenderPass",
     "ComputeNode",
+    "Scheme",
+    "SchemeComputeNode",
     "SwapchainOutput",
     "NodeAccess",
     "ResourceAccess",
+    "write_to_parcel",
     # Shader builtins
     "Builtins",
     # Compute

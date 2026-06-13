@@ -13,9 +13,10 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::{BufferFlags, ResourceAccess},
+    types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
     BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
-    Parcel, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    Parcel, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
+    StructuredBufferElement,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -1112,4 +1113,620 @@ fn scheme_regular_buffer_write_then_copy() {
 
     let expected: Vec<u32> = (1..=N as u32).collect();
     assert_eq!(readback_parcel_u32(&device, &output, N), expected);
+}
+
+// ---------------------------------------------------------------------------
+// Duplicated from compute_integration.rs
+// ---------------------------------------------------------------------------
+
+const PARTICLE_SHADER: &str = r#"
+import goldy_exp;
+
+struct Particle {
+    float2 position;
+    float2 velocity;
+};
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<Particle> particles, ThreadId id) {
+    uint idx = id.x;
+    if (idx >= 4) return;
+    Particle p = particles[idx];
+    p.position += float2(0.01, 0.01);
+    particles[idx] = p;
+}
+"#;
+
+const TYPED_PAIR_SHADER: &str = r#"
+import goldy_exp;
+
+struct Pair { uint a; uint b; };
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
+    uint idx = id.x;
+    if (idx >= 8) return;
+    Pair p = input[idx];
+    output[idx].a = p.a + p.b;
+    output[idx].b = p.a * p.b;
+}
+"#;
+
+const WRITE_TEXTURE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(8, 8, 1)]
+void cs_main(DirectSpatial<float4> output, ThreadId id) {
+    uint2 dims;
+    output.GetDimensions(dims.x, dims.y);
+    if (id.x < dims.x && id.y < dims.y) {
+        output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#;
+
+const WAVE_SCAN_64_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[32];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix  = local_id.x;
+    uint val = 1u;
+    uint lc  = WaveGetLaneCount();
+    uint nw  = 64 / lc;
+    uint wave_ix = ix / lc;
+    uint inclusive = WavePrefixSum(val) + val;
+    uint total     = WaveActiveSum(val);
+    if (WaveIsFirstLane())
+        sh_scratch[wave_ix] = total;
+    GroupMemoryBarrierWithGroupSync();
+    if (ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_scratch[wave_ix] + inclusive;
+}
+"#;
+
+const WAVE_SCAN_64_RAMP: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[32];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix  = local_id.x;
+    uint val = ix + 1u;
+    uint lc  = WaveGetLaneCount();
+    uint nw  = 64 / lc;
+    uint wave_ix = ix / lc;
+    uint inclusive = WavePrefixSum(val) + val;
+    uint total     = WaveActiveSum(val);
+    if (WaveIsFirstLane())
+        sh_scratch[wave_ix] = total;
+    GroupMemoryBarrierWithGroupSync();
+    if (ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_scratch[wave_ix] + inclusive;
+}
+"#;
+
+const WAVE_SCAN_256_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[64];
+[goldy_compute]
+[numthreads(256, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix  = local_id.x;
+    uint val = 1u;
+    uint lc  = WaveGetLaneCount();
+    uint nw  = 256 / lc;
+    uint wave_ix = ix / lc;
+    uint inclusive = WavePrefixSum(val) + val;
+    uint total     = WaveActiveSum(val);
+    if (WaveIsFirstLane())
+        sh_scratch[wave_ix] = total;
+    GroupMemoryBarrierWithGroupSync();
+    if (ix == 0) {
+        uint run = 0;
+        for (uint i = 0; i < nw; i++) {
+            uint s = sh_scratch[i]; sh_scratch[i] = run; run += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_scratch[wave_ix] + inclusive;
+}
+"#;
+
+const REDUCE_64_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[64];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix  = local_id.x;
+    uint val = 1u;
+    sh_scratch[ix] = val;
+    for (uint i = 0; i < 6; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (ix + (1u << i) < 64u)
+            val = val + sh_scratch[ix + (1u << i)];
+        GroupMemoryBarrierWithGroupSync();
+        sh_scratch[ix] = val;
+    }
+    OUT[ix] = val;
+}
+"#;
+
+const INCLUSIVE_SCAN_64_UNIFORM: &str = r#"
+import goldy_exp;
+groupshared uint sh_scratch[64];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix  = local_id.x;
+    uint val = 1u;
+    sh_scratch[ix] = val;
+    for (uint i = 0; i < 6; i++) {
+        GroupMemoryBarrierWithGroupSync();
+        if (ix >= (1u << i))
+            val = sh_scratch[ix - (1u << i)] + val;
+        GroupMemoryBarrierWithGroupSync();
+        sh_scratch[ix] = val;
+    }
+    OUT[ix] = val;
+}
+"#;
+
+const BROADCAST_64: &str = r#"
+import goldy_exp;
+groupshared uint sh_slot[1];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    if (ix == 0) sh_slot[0] = 42u;
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = sh_slot[0];
+}
+"#;
+
+const UPPER_BOUND_64: &str = r#"
+import goldy_exp;
+groupshared uint sh_ps[64];
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> OUT, GroupThreadId local_id) {
+    uint ix = local_id.x;
+    sh_ps[ix] = ix + 1u;
+    GroupMemoryBarrierWithGroupSync();
+    OUT[ix] = workgroup_upper_bound<6>(ix, sh_ps);
+}
+"#;
+
+const DUAL_VIEW_WRITE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(4, 4, 1)]
+void cs_main(DirectSpatial<float4> dst, ThreadId id) {
+    uint x = id.x;
+    uint y = id.y;
+    dst[uint2(x, y)] = float4(float(x) / 255.0, float(y) / 255.0, 0.0, 1.0);
+}
+"#;
+
+const DUAL_VIEW_READ_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(4, 4, 1)]
+void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId id) {
+    uint x = id.x;
+    uint y = id.y;
+    float2 uv = (float2(x, y) + 0.5) / float2(4.0, 4.0);
+    float4 v = src.Sample(smp, uv);
+    uint r = uint(v.x * 255.0 + 0.5);
+    uint g = uint(v.y * 255.0 + 0.5);
+    uint b = uint(v.z * 255.0 + 0.5);
+    uint a = uint(v.w * 255.0 + 0.5);
+    out[y * 4 + x] = r | (g << 8) | (b << 16) | (a << 24);
+}
+"#;
+
+fn dispatch_u32_write_scheme(
+    device: &Device,
+    ctx: &goldy::Context,
+    shader_src: &str,
+    out: &Parcel,
+    byte_len: u64,
+) {
+    let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
+    let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
+    let out_w = out.handle(ResourceAccess::Write).expect("out handle");
+
+    let mut scheme = Scheme::new(ctx);
+    scheme
+        .node("n0", &pipeline)
+        .bind_parcel(out, NodeAccess::Write)
+        .bind_resources_typed(&[out_w])
+        .dispatch(1, 1, 1);
+    let tv = scheme.submit().expect("submit");
+    ctx.wait_until(tv).expect("wait");
+
+    let count = (byte_len / 4) as usize;
+    let _ = readback_parcel_u32(device, out, count);
+}
+
+#[test]
+fn scheme_compute_with_struct_buffer() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, PARTICLE_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Particle {
+        position: [f32; 2],
+        velocity: [f32; 2],
+    }
+    impl StructuredBufferElement for Particle {}
+
+    let particles = vec![
+        Particle {
+            position: [0.0, 0.0],
+            velocity: [0.1, 0.0],
+        };
+        4
+    ];
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buffer = pool
+        .acquire_buffer_with_data(&particles, BufferKind::Scattered)
+        .expect("buffer");
+    let handle = buffer.handle(ResourceAccess::ReadWrite).expect("handle");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("n0", &pipeline)
+        .bind_parcel(&buffer, NodeAccess::ReadWrite)
+        .bind_resources_typed(&[handle])
+        .dispatch(1, 1, 1);
+    scheme.submit().expect("submit with struct buffer");
+}
+
+#[test]
+fn scheme_scattered_typed_variable_assignment() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, TYPED_PAIR_SHADER).expect("compile shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+    impl StructuredBufferElement for Pair {}
+
+    let input_data: Vec<Pair> = (0..8).map(|i| Pair { a: i + 1, b: i + 10 }).collect();
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let input = pool
+        .acquire_buffer_with_data(&input_data, BufferKind::Scattered)
+        .expect("input");
+    let output = pool
+        .acquire_buffer_with_data(&[Pair { a: 0, b: 0 }; 8], BufferKind::Scattered)
+        .expect("output");
+
+    let in_h = input.handle(ResourceAccess::ReadWrite).expect("in");
+    let out_h = output.handle(ResourceAccess::Write).expect("out");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("typed_copy", &pipeline)
+        .bind_parcel(&input, NodeAccess::Read)
+        .bind_parcel(&output, NodeAccess::Write)
+        .bind_resources_typed(&[in_h, out_h])
+        .dispatch(1, 1, 1);
+    let tv = scheme.submit().expect("submit");
+    ctx.wait_until(tv).expect("wait");
+
+    let mut raw = vec![0u8; 8 * std::mem::size_of::<Pair>()];
+    output.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[Pair] = bytemuck::cast_slice(&raw);
+
+    for i in 0..8u32 {
+        let expected_a = (i + 1) + (i + 10);
+        let expected_b = (i + 1) * (i + 10);
+        assert_eq!(result[i as usize].a, expected_a, "output[{i}].a");
+        assert_eq!(result[i as usize].b, expected_b, "output[{i}].b");
+    }
+}
+
+#[test]
+fn scheme_compute_write_to_texture() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let width = 16u32;
+    let height = 16u32;
+    let wg_x = width.div_ceil(8);
+    let wg_y = height.div_ceil(8);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let texture = pool
+        .acquire_texture(
+            width,
+            height,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+            None,
+        )
+        .expect("texture");
+    let tex_w = texture.handle(ResourceAccess::Write).expect("tex write");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_tex", &pipeline)
+        .bind_parcel(&texture, NodeAccess::Write)
+        .bind_resources_typed(&[tex_w])
+        .dispatch(wg_x, wg_y, 1);
+    let tv = scheme.submit().expect("submit");
+    ctx.wait_until(tv).expect("wait");
+
+    let mut output = vec![0u8; (width * height * 4) as usize];
+    texture
+        .detach_texture()
+        .expect("detach texture parcel")
+        .read_to_cpu(&mut output)
+        .expect("readback");
+
+    let nonzero = output.iter().filter(|&&b| b != 0).count();
+    assert!(nonzero > 0, "texture readback all zeros");
+    assert_eq!(output[0], 255, "R channel");
+    assert_eq!(output[1], 0, "G channel");
+    assert_eq!(output[2], 0, "B channel");
+    assert_eq!(output[3], 255, "A channel");
+}
+
+#[test]
+fn scheme_wave_inclusive_scan_uniform_64() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, WAVE_SCAN_64_UNIFORM, &out, 64 * 4);
+    let result = readback_parcel_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, i as u32 + 1, "wave_scan_uniform_64[{i}]");
+    }
+}
+
+#[test]
+fn scheme_wave_inclusive_scan_ramp_64() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, WAVE_SCAN_64_RAMP, &out, 64 * 4);
+    let result = readback_parcel_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        let k = (i + 1) as u32;
+        let expected = k * (k + 1) / 2;
+        assert_eq!(val, expected, "wave_scan_ramp_64[{i}]");
+    }
+}
+
+#[test]
+fn scheme_wave_inclusive_scan_uniform_256() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(256 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, WAVE_SCAN_256_UNIFORM, &out, 256 * 4);
+    let result = readback_parcel_u32(&device, &out, 256);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, i as u32 + 1, "wave_scan_uniform_256[{i}]");
+    }
+}
+
+#[test]
+fn scheme_workgroup_reduce_uint_correct() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, REDUCE_64_UNIFORM, &out, 64 * 4);
+    let result = readback_parcel_u32(&device, &out, 64);
+    assert_eq!(result[0], 64, "workgroup_reduce thread 0");
+}
+
+#[test]
+fn scheme_workgroup_inclusive_scan_uint_correct() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, INCLUSIVE_SCAN_64_UNIFORM, &out, 64 * 4);
+    let result = readback_parcel_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, i as u32 + 1, "workgroup_inclusive_scan[{i}]");
+    }
+}
+
+#[test]
+fn scheme_workgroup_broadcast_correct() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, BROADCAST_64, &out, 64 * 4);
+    let result = readback_parcel_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, 42, "workgroup_broadcast[{i}]");
+    }
+}
+
+#[test]
+fn scheme_workgroup_upper_bound_linear() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let out = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+    dispatch_u32_write_scheme(&device, &ctx, UPPER_BOUND_64, &out, 64 * 4);
+    let result = readback_parcel_u32(&device, &out, 64);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, i as u32, "workgroup_upper_bound[{i}]");
+    }
+}
+
+#[test]
+fn scheme_texture_dual_view_round_trip() {
+    const W: u32 = 4;
+    const H: u32 = 4;
+    const N: usize = (W * H) as usize;
+
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let tex = pool
+        .acquire_texture(
+            W,
+            H,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::DirectInterpolated,
+            TextureFlags::empty(),
+            None,
+        )
+        .expect("texture");
+    let out = pool
+        .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out");
+
+    let write_shader = ShaderModule::from_slang(&device, DUAL_VIEW_WRITE_SHADER).expect("write shader");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
+    let read_shader = ShaderModule::from_slang(&device, DUAL_VIEW_READ_SHADER).expect("read shader");
+    let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
+    let sampler = Sampler::nearest(&device).expect("sampler");
+
+    let tex_w = tex.handle(ResourceAccess::Write).expect("tex write");
+    let tex_r = tex.handle(ResourceAccess::Read).expect("tex read");
+    let smp_r = sampler.handle(ResourceAccess::Read).expect("sampler");
+    let out_w = out.handle(ResourceAccess::Write).expect("out write");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write", &write_pipeline)
+        .bind_parcel(&tex, NodeAccess::Write)
+        .bind_resources_typed(&[tex_w])
+        .dispatch(1, 1, 1);
+    scheme
+        .node("read", &read_pipeline)
+        .bind_parcel(&tex, NodeAccess::Read)
+        .bind_parcel(&out, NodeAccess::Write)
+        .bind_resources_typed(&[tex_r, smp_r, out_w])
+        .dispatch(1, 1, 1);
+    let tv = scheme.submit().expect("submit");
+    ctx.wait_until(tv).expect("wait");
+
+    let mut raw = vec![0u8; N * 4];
+    out.read_to_cpu(&device, &mut raw).expect("readback");
+    let result: &[u32] = bytemuck::cast_slice(&raw);
+
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let expected_r = x as u8;
+            let expected_g = y as u8;
+            let packed = result[y * W as usize + x];
+            let r = (packed & 0xFF) as u8;
+            let g = ((packed >> 8) & 0xFF) as u8;
+            let b = ((packed >> 16) & 0xFF) as u8;
+            let a = ((packed >> 24) & 0xFF) as u8;
+            assert_eq!(r, expected_r, "r mismatch at ({x},{y})");
+            assert_eq!(g, expected_g, "g mismatch at ({x},{y})");
+            assert_eq!(b, 0, "b mismatch at ({x},{y})");
+            assert_eq!(a, 255, "a mismatch at ({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn scheme_two_contexts_both_submit_and_complete() {
+    let device = make_device();
+    let ctx_a = submission_context(&device);
+    let ctx_b = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, IN_PLACE_DOUBLE_SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf_a = pool
+        .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("buf_a");
+    let buf_b = pool
+        .acquire_buffer_with_data(&(100..164).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("buf_b");
+
+    let buf_a_rw = buf_a.handle(ResourceAccess::ReadWrite).expect("buf_a");
+    let buf_b_rw = buf_b.handle(ResourceAccess::ReadWrite).expect("buf_b");
+
+    let mut scheme_a = Scheme::new(&ctx_a);
+    scheme_a
+        .node("n0", &pipeline)
+        .bind_parcel(&buf_a, NodeAccess::ReadWrite)
+        .bind_resources_typed(&[buf_a_rw])
+        .dispatch(1, 1, 1);
+    let tv_a = scheme_a.submit().expect("ctx_a submit");
+
+    let mut scheme_b = Scheme::new(&ctx_b);
+    scheme_b
+        .node("n0", &pipeline)
+        .bind_parcel(&buf_b, NodeAccess::ReadWrite)
+        .bind_resources_typed(&[buf_b_rw])
+        .dispatch(1, 1, 1);
+    let tv_b = scheme_b.submit().expect("ctx_b submit");
+
+    ctx_a.wait_until(tv_a).expect("ctx_a wait");
+    ctx_b.wait_until(tv_b).expect("ctx_b wait");
+
+    let result_a = readback_parcel_u32(&device, &buf_a, 64);
+    let result_b = readback_parcel_u32(&device, &buf_b, 64);
+    for i in 0..64 {
+        assert_eq!(result_a[i], i as u32 * 2, "buf_a[{i}]");
+        assert_eq!(result_b[i], (100 + i as u32) * 2, "buf_b[{i}]");
+    }
 }
