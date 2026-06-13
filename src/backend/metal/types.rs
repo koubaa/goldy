@@ -626,7 +626,6 @@ impl TimelineWaiter {
     }
 }
 
-
 /// Per-context async submission stream (timeline shared event, in-flight CBs, signals).
 pub(crate) struct MetalSubmissionContext {
     pub device: super::DeviceHandle,

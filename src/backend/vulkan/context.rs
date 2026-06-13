@@ -153,8 +153,7 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
                     super::frame_table::unpin_row(ft, row);
                 }
             }
-            ld.device
-                .free_command_buffers(command_pool, &[retained.command_buffer]);
+            ld.device.free_command_buffers(command_pool, &[retained.command_buffer]);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);

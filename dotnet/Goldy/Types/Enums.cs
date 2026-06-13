@@ -23,7 +23,6 @@ public enum BackendType
     Vulkan = 0,
     Metal = 1,
     Dx12 = 2,
-    WebGpu = 3,
 }
 
 /// <summary>

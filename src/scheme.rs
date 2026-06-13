@@ -13,8 +13,8 @@ use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
 use crate::retained_pool::StampedParcel;
-use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::task_graph::IrSubmitState;
+use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use crate::timeline::TimelineValue;
 use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use std::marker::PhantomData;
@@ -111,16 +111,9 @@ impl Scheme {
     ///
     /// Marks the scheme dirty. Pair with [`Self::submit`] for a property-only upload
     /// dispatch, or retain the scheme and refresh the payload each submission.
-    pub fn commit_write_parcel(
-        &mut self,
-        parcel: &Parcel,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> Result<(), GoldyError> {
+    pub fn commit_write_parcel(&mut self, parcel: &Parcel, offset: u64, data: Vec<u8>) -> Result<(), GoldyError> {
         self.dirty = true;
-        let (buffer, resource) = parcel
-            .write_buffer_target()
-            .map_err(|e| self.ctx.classify(e))?;
+        let (buffer, resource) = parcel.write_buffer_target().map_err(|e| self.ctx.classify(e))?;
         self.submit_state.register_parcel_stamp(parcel);
         self.ir.nodes.push(TaskNode {
             label: "write_parcel",
@@ -145,9 +138,7 @@ impl Scheme {
         bindings: Vec<ResourceBinding>,
         resource_slots: Vec<u32>,
         user_slots: Vec<u32>,
-        x: u32,
-        y: u32,
-        z: u32,
+        dispatch: DispatchDim,
     ) {
         self.dirty = true;
         self.ir.nodes.push(TaskNode {
@@ -157,7 +148,7 @@ impl Scheme {
                 pipeline,
                 resource_slots,
                 user_slots,
-                dispatch: DispatchDim::Direct { x, y, z },
+                dispatch,
             },
         });
     }
@@ -233,11 +224,8 @@ impl Scheme {
                     self.ctx.wait_until(prev_tv)?;
                 }
                 if let Some(tv) = self.ctx.try_resubmit_retained(key)? {
-                    self.submit_state.apply_reference_stamps(
-                        self.ctx.backend_handle(),
-                        &self.ctx.device().inner,
-                        tv,
-                    );
+                    self.submit_state
+                        .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
                     self.last_submitted_tv = Some(tv);
                     #[cfg(not(feature = "metal"))]
                     {
@@ -252,11 +240,8 @@ impl Scheme {
             .submit_state
             .submit_pipelined_and_retain(&self.ctx, &self.ir)
             .map_err(|e| self.ctx.classify(e))?;
-        self.submit_state.apply_reference_stamps(
-            self.ctx.backend_handle(),
-            &self.ctx.device().inner,
-            tv,
-        );
+        self.submit_state
+            .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
         self.ctx.advance_high_water_timeline(tv);
 
         self.retention_key = if IrSubmitState::ir_can_retain(&self.ir) {
@@ -425,7 +410,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
-        scheme.node("a", &pipeline).bind_parcel(&parcel, NodeAccess::Write).dispatch(1, 1, 1);
+        scheme
+            .node("a", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::Write)
+            .dispatch(1, 1, 1);
 
         scheme.submit().unwrap();
         assert!(!scheme.is_dirty(), "successful submit clears the dirty bit");
@@ -450,9 +438,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 TextureFlags::empty(),
             )
             .expect("lease texture");
-        let handle = scheme.leases[0]
-            .handle(ResourceAccess::Write)
-            .expect("lease handle");
+        let handle = scheme.leases[0].handle(ResourceAccess::Write).expect("lease handle");
         scheme
             .node("write_tex", &pipeline)
             .writes_lease(&lease)
@@ -473,7 +459,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         assert_eq!(scheme.replay_stats().records, 1, "only the first submit records");
         #[cfg(not(feature = "metal"))]
-        assert_eq!(scheme.replay_stats().resubmit_hits, 2, "subsequent clean submits resubmit");
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            2,
+            "subsequent clean submits resubmit"
+        );
     }
 
     #[test]
@@ -497,7 +487,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
         let parcel2 = retained_buffer_parcel(&mut pool);
-        scheme.node("b", &pipeline).bind_parcel(&parcel2, NodeAccess::Write).dispatch(1, 1, 1);
+        scheme
+            .node("b", &pipeline)
+            .bind_parcel(&parcel2, NodeAccess::Write)
+            .dispatch(1, 1, 1);
 
         assert!(scheme.is_dirty());
         scheme.submit().unwrap();
@@ -534,7 +527,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let parcel = retained_buffer_parcel(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
-        scheme.node("a", &pipeline).bind_parcel(&parcel, NodeAccess::Write).dispatch(1, 1, 1);
+        scheme
+            .node("a", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::Write)
+            .dispatch(1, 1, 1);
 
         let tv1 = scheme.submit().unwrap();
         assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv1));
@@ -559,7 +555,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
         #[cfg(not(feature = "metal"))]
-        assert_eq!(scheme.replay_stats().resubmit_hits, 2, "remaining submits are retention hits");
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            2,
+            "remaining submits are retention hits"
+        );
     }
 
     #[test]

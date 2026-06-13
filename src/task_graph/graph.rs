@@ -374,11 +374,7 @@ impl IrSubmitState {
     }
 
     /// Record and retain the command list for `ir` on `ctx`.
-    pub fn submit_pipelined_and_retain(
-        &mut self,
-        ctx: &crate::Context,
-        ir: &GraphIR,
-    ) -> Result<TimelineValue> {
+    pub fn submit_pipelined_and_retain(&mut self, ctx: &crate::Context, ir: &GraphIR) -> Result<TimelineValue> {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         submit_resolved_ir_and_retain(&mut self.schedule_cache, ctx, backend.as_mut(), ir)
     }

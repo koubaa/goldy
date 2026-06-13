@@ -2118,15 +2118,14 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
         let sc = sc_arc.lock().unwrap();
-        match sc.retained_graphs.get(&key) {
-            Some(r) => Some((
+        sc.retained_graphs.get(&key).map(|r| {
+            (
                 r.command_list.clone(),
                 r.slot_idx,
                 r.used_slots.clone(),
                 r.frame_table_staging.clone(),
-            )),
-            None => None,
-        }
+            )
+        })
     };
 
     let Some((command_list, slot_idx, used_slots, _frame_table_staging)) = retained else {

@@ -2429,10 +2429,9 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
         let sc = sc_arc.lock().unwrap();
-        match sc.retained_compute_cbs.get(&key) {
-            Some(r) => Some((r.command_buffer, r.used_slots.clone())),
-            None => None,
-        }
+        sc.retained_compute_cbs
+            .get(&key)
+            .map(|r| (r.command_buffer, r.used_slots.clone()))
     };
 
     let Some((cmd, used_slots)) = retained else {

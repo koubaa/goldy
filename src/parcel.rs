@@ -5,8 +5,8 @@
 //! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
 
 use crate::backend::{BufferHandle, ContextHandle};
-use crate::context::Context;
 use crate::buffer::{Buffer, BufferPool, BufferSource, BufferView};
+use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;

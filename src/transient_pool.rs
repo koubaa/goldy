@@ -5,7 +5,7 @@
 //! Relinquished parcels enter as [`StampedParcel`]s and are handed out again by lease
 //! realization **only once every stamped epoch has retired**. Clients never compare
 //! timeline values; the pool consumes `ready_after` internally through
-//! [`crate::Context::parcel_ready`].
+//! `Context::parcel_ready`.
 //!
 //! **Observability** pool internals — recycle bins, pending counts, epoch tables — are never
 //! public API. Clients assert parcel currency via [`Parcel::is_settled`] and attribute aggregate
@@ -70,7 +70,7 @@ impl TransientPool {
     ///
     /// Reuse requires an exact descriptor match `(width, height, format, access, flags)`
     /// **and** `ctx.parcel_ready(ready_after)`. Otherwise a fresh texture is allocated.
-    /// 
+    ///
     /// In the future, this could be made async to give the runtime an oppotunity to
     /// wait for a texture that is nearly ready (perhaps by passing in a desird epoch
     /// that can be compared against the epochs with parked textures)
@@ -204,6 +204,12 @@ impl TransientPool {
     /// Number of parked parcels (all bins plus non-reusable holding).
     pub fn pending_count(&self) -> usize {
         self.texture_bins.values().map(Vec::len).sum::<usize>() + self.holding.len()
+    }
+}
+
+impl Default for TransientPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

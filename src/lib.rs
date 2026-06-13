@@ -56,12 +56,13 @@ pub mod parcel;
 pub mod placement_heap;
 pub mod retained_pool;
 pub mod scheme;
-pub mod transient_pool;
-pub(crate) mod write_to_parcel;
 pub mod signal;
 pub mod timeline;
 pub mod transient_allocator;
+pub mod transient_pool;
 pub mod vram_allocator;
+#[allow(dead_code)] // Internal upload helper kept for callers that only build with backend features.
+pub(crate) mod write_to_parcel;
 pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, BudgetPolicy, NoPolicy};
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};

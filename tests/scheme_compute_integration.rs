@@ -14,9 +14,8 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
-    Parcel, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
-    StructuredBufferElement,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess, Parcel, RequestAdapterOptions,
+    RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -184,16 +183,9 @@ fn scheme_graph_linear_chain() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let double_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap(),
-    )
-    .unwrap();
-    let add_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap(),
-    )
-    .unwrap();
+    let double_pipe =
+        ComputePipeline::new(&device, &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap()).unwrap();
+    let add_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let src = pool
@@ -242,16 +234,8 @@ fn scheme_graph_independent_dispatches() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let pipe_42 = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap(),
-    )
-    .unwrap();
-    let pipe_99 = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, FILL_99_SHADER).unwrap(),
-    )
-    .unwrap();
+    let pipe_42 = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap()).unwrap();
+    let pipe_99 = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_99_SHADER).unwrap()).unwrap();
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let buf_a = pool
@@ -294,16 +278,9 @@ fn scheme_graph_diamond_dependency() {
         &ShaderModule::from_slang(&device, FILL_SRC_WITH_INDEX_SHADER).unwrap(),
     )
     .unwrap();
-    let double_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap(),
-    )
-    .unwrap();
-    let sum_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, SUM_SHADER).unwrap(),
-    )
-    .unwrap();
+    let double_pipe =
+        ComputePipeline::new(&device, &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap()).unwrap();
+    let sum_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, SUM_SHADER).unwrap()).unwrap();
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let src = pool
@@ -366,11 +343,7 @@ fn scheme_graph_fill_readback() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap(),
-    )
-    .unwrap();
+    let pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap()).unwrap();
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let buf = pool
@@ -397,11 +370,7 @@ fn scheme_zeros_then_dispatch_reads_zeros() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let copy_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, COPY_SHADER).unwrap(),
-    )
-    .unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let buf = pool
@@ -437,11 +406,7 @@ fn scheme_write_then_dispatch_reads_uploaded_data() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let copy_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, COPY_SHADER).unwrap(),
-    )
-    .unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let buf = pool
@@ -478,11 +443,7 @@ fn scheme_stress_zeros_then_dispatch_large() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let copy_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, COPY_SHADER).unwrap(),
-    )
-    .unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
     const N: usize = 16384;
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -521,11 +482,7 @@ fn scheme_stress_many_zero_writes_many_dispatches() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let copy_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, COPY_SHADER).unwrap(),
-    )
-    .unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
     const N: usize = 1024;
     const NUM_BUFS: usize = 8;
@@ -565,14 +522,8 @@ fn scheme_stress_many_zero_writes_many_dispatches() {
     ctx.wait_until(tv).unwrap();
 
     for (i, out) in outs.iter().enumerate() {
-        let nonzero_count = readback_parcel_u32(&device, out, N)
-            .iter()
-            .filter(|&&v| v != 0)
-            .count();
-        assert_eq!(
-            nonzero_count, 0,
-            "buffer {i}: expected all zeros after zero write"
-        );
+        let nonzero_count = readback_parcel_u32(&device, out, N).iter().filter(|&&v| v != 0).count();
+        assert_eq!(nonzero_count, 0, "buffer {i}: expected all zeros after zero write");
     }
 }
 
@@ -581,11 +532,7 @@ fn scheme_stress_write_then_dispatch_chain() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let copy_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, COPY_SHADER).unwrap(),
-    )
-    .unwrap();
+    let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
     const N: usize = 1024;
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -623,16 +570,9 @@ fn scheme_stress_two_phase_submission() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let double_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap(),
-    )
-    .unwrap();
-    let add_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap(),
-    )
-    .unwrap();
+    let double_pipe =
+        ComputePipeline::new(&device, &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap()).unwrap();
+    let add_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
     const N: usize = 4096;
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -680,11 +620,7 @@ fn scheme_stress_rapid_submissions() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let add_pipe = ComputePipeline::new(
-        &device,
-        &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap(),
-    )
-    .unwrap();
+    let add_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
     const N: usize = 256;
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -706,11 +642,7 @@ fn scheme_stress_rapid_submissions() {
     }
     ctx.wait_until(last_tv).unwrap();
 
-    assert_eq!(
-        scheme.replay_stats().records,
-        1,
-        "rapid submissions record once"
-    );
+    assert_eq!(scheme.replay_stats().records, 1, "rapid submissions record once");
     #[cfg(not(feature = "metal"))]
     assert_eq!(
         scheme.replay_stats().resubmit_hits,
@@ -1031,12 +963,24 @@ fn scheme_compute_many_resource_slots() {
 
     const N: usize = 16;
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
-    let a = pool.acquire_buffer_with_data(&[1u32; N], BufferKind::Scattered).expect("a");
-    let b = pool.acquire_buffer_with_data(&[2u32; N], BufferKind::Scattered).expect("b");
-    let c = pool.acquire_buffer_with_data(&[3u32; N], BufferKind::Scattered).expect("c");
-    let d = pool.acquire_buffer_with_data(&[4u32; N], BufferKind::Scattered).expect("d");
-    let e = pool.acquire_buffer_with_data(&[5u32; N], BufferKind::Scattered).expect("e");
-    let out = pool.acquire_buffer_with_data(&[0u32; N], BufferKind::Scattered).expect("out");
+    let a = pool
+        .acquire_buffer_with_data(&[1u32; N], BufferKind::Scattered)
+        .expect("a");
+    let b = pool
+        .acquire_buffer_with_data(&[2u32; N], BufferKind::Scattered)
+        .expect("b");
+    let c = pool
+        .acquire_buffer_with_data(&[3u32; N], BufferKind::Scattered)
+        .expect("c");
+    let d = pool
+        .acquire_buffer_with_data(&[4u32; N], BufferKind::Scattered)
+        .expect("d");
+    let e = pool
+        .acquire_buffer_with_data(&[5u32; N], BufferKind::Scattered)
+        .expect("e");
+    let out = pool
+        .acquire_buffer_with_data(&[0u32; N], BufferKind::Scattered)
+        .expect("out");
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -1086,10 +1030,22 @@ fn scheme_regular_buffer_write_then_copy() {
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let scratch = pool
-        .acquire_buffer(byte_size as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            byte_size as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
         .expect("scratch");
     let output = pool
-        .acquire_buffer(byte_size as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            byte_size as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
         .expect("output");
 
     let scratch_rw = scratch.handle(ResourceAccess::ReadWrite).expect("scratch");
@@ -1345,13 +1301,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
 }
 "#;
 
-fn dispatch_u32_write_scheme(
-    device: &Device,
-    ctx: &goldy::Context,
-    shader_src: &str,
-    out: &Parcel,
-    byte_len: u64,
-) {
+fn dispatch_u32_write_scheme(device: &Device, ctx: &goldy::Context, shader_src: &str, out: &Parcel, byte_len: u64) {
     let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
     let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
     let out_w = out.handle(ResourceAccess::Write).expect("out handle");

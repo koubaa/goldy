@@ -297,9 +297,7 @@ impl ComputeNodeRecord {
             self.bindings,
             self.resource_slots,
             self.user_slots,
-            x,
-            y,
-            z,
+            DispatchDim::Direct { x, y, z },
         );
     }
 }

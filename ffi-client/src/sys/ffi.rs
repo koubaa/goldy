@@ -17,16 +17,11 @@ pub type FnGoldySchemeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut
 pub type FnGoldySchemeDestroy = unsafe extern "C" fn(*mut GoldyScheme);
 pub type FnGoldySchemeLen = unsafe extern "C" fn(*const GoldyScheme) -> u32;
 pub type FnGoldySchemeIsDirty = unsafe extern "C" fn(*const GoldyScheme) -> bool;
-pub type FnGoldySchemeReplayStats =
-    unsafe extern "C" fn(*const GoldyScheme, *mut GoldyReplayStats) -> GoldyResult;
+pub type FnGoldySchemeReplayStats = unsafe extern "C" fn(*const GoldyScheme, *mut GoldyReplayStats) -> GoldyResult;
 pub type FnGoldySchemeComputeNodeBegin =
     unsafe extern "C" fn(*mut GoldyScheme, *const c_char, *const GoldyComputePipeline) -> GoldyResult;
-pub type FnGoldySchemeComputeNodeDeclareParcel = unsafe extern "C" fn(
-    *mut GoldyScheme,
-    *const GoldyParcel,
-    GoldyNodeAccess,
-    GoldyResourceAccess,
-) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeDeclareParcel =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyNodeAccess, GoldyResourceAccess) -> GoldyResult;
 pub type FnGoldySchemeComputeNodeDeclareParcelView = unsafe extern "C" fn(
     *mut GoldyScheme,
     *const GoldyParcel,

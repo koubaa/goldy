@@ -106,7 +106,7 @@ impl Context {
         F: FnOnce(&mut TransientPool) -> R,
     {
         let mut pool = self.inner.transient_pool.lock().unwrap();
-        f(&mut *pool)
+        f(&mut pool)
     }
 
     /// Bytes held outside this context's transient pool (leased or otherwise acquired).

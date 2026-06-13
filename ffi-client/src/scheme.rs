@@ -42,9 +42,7 @@ impl Scheme {
 
     pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
         let label = CString::new(label).expect("compute node label contains interior null byte");
-        expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr())
-        });
+        expect_ok(unsafe { sys::goldy_scheme_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr()) });
         ComputeNodeBuilder {
             scheme: self,
             active: true,

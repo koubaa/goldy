@@ -997,9 +997,6 @@ impl Device {
             BackendType::Vulkan => ShaderTarget::Spirv,
             BackendType::Dx12 => ShaderTarget::Dxil,
             BackendType::Metal => ShaderTarget::Metal,
-            BackendType::WebGPU => {
-                anyhow::bail!("reflect_struct is not supported on the WebGPU backend yet");
-            }
         };
         let compiler = SlangCompiler::new().context("Failed to create Slang compiler for reflect_struct")?;
         compiler.reflect_struct_layout(shader_source, target, &path_refs, type_name)

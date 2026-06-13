@@ -8,11 +8,11 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
-    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu,
-    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
-    goldy_scheme_compute_node_declare_parcel, goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy,
-    goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess,
-    GoldyResult,
+    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_byte_size, goldy_parcel_destroy,
+    goldy_parcel_read_to_cpu, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
+    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_declare_parcel,
+    goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_submit,
+    goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -81,12 +81,7 @@ fn scheme_read_after_acquire_then_copy() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_declare_parcel(
-                scheme,
-                dst,
-                GoldyNodeAccess::Write,
-                GoldyResourceAccess::Write
-            ),
+            goldy_scheme_compute_node_declare_parcel(scheme, dst, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -97,12 +92,7 @@ fn scheme_read_after_acquire_then_copy() {
             "{}",
             last_ffi_message()
         );
-        assert_eq!(
-            goldy_scheme_submit(scheme),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
+        assert_eq!(goldy_scheme_submit(scheme), GoldyResult::Ok, "{}", last_ffi_message());
 
         let mut readback = vec![0u8; goldy_parcel_byte_size(dst) as usize];
         assert_eq!(

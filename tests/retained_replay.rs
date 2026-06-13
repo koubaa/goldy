@@ -22,9 +22,8 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::ResourceAccess, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
-    NodeAccess, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
-    TextureKind,
+    types::ResourceAccess, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, NodeAccess,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -88,8 +87,7 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
     const FRAMES: u32 = 3;
     for frame in 1..=FRAMES {
         // Separate upload submission per frame via the property-only-dispatch API.
-        write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[frame; 8]))
-            .expect("write_to_parcel");
+        write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[frame; 8])).expect("write_to_parcel");
 
         let tv = worker.submit().expect("submit worker");
         ctx.wait_until(tv).expect("wait");
@@ -148,7 +146,11 @@ fn clean_scheme_resubmits_without_rerecord() {
 
     assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
     #[cfg(not(feature = "metal"))]
-    assert_eq!(scheme.replay_stats().resubmit_hits, 1, "submission 1 must be a zero-record retention hit");
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "submission 1 must be a zero-record retention hit"
+    );
 }
 
 /// Selector-advance: a recorded single-thread node increments a GPU-side counter.
@@ -198,11 +200,18 @@ fn selector_advances_across_identical_submissions() {
     let mut raw = vec![0u8; 4];
     selector.read_to_cpu(&device, &mut raw).expect("readback selector");
     let count = u32::from_le_bytes(raw.try_into().unwrap());
-    assert_eq!(count as u64, N, "each submission must advance the GPU-side selector once");
+    assert_eq!(
+        count as u64, N,
+        "each submission must advance the GPU-side selector once"
+    );
 
     assert_eq!(scheme.replay_stats().records, 1, "one record, then pure resubmits");
     #[cfg(not(feature = "metal"))]
-    assert_eq!(scheme.replay_stats().resubmit_hits, N - 1, "remaining submissions are retention hits");
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        N - 1,
+        "remaining submissions are retention hits"
+    );
 }
 
 /// Two independent schemes sharing one context must not evict each other's retained
@@ -218,8 +227,12 @@ fn two_schemes_on_one_context_do_not_collide() {
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
 
     // Scheme A: copies [1u32; 8] → out_a
-    let in_a = pool.acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered).expect("in_a");
-    let out_a = pool.acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered).expect("out_a");
+    let in_a = pool
+        .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
+        .expect("in_a");
+    let out_a = pool
+        .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+        .expect("out_a");
     let mut scheme_a = Scheme::new(&ctx);
     scheme_a
         .node("copy_a", &pipeline)
@@ -232,8 +245,12 @@ fn two_schemes_on_one_context_do_not_collide() {
         .dispatch(1, 1, 1);
 
     // Scheme B: copies [2u32; 8] → out_b
-    let in_b = pool.acquire_buffer_with_data(&[2u32; 8], BufferKind::Scattered).expect("in_b");
-    let out_b = pool.acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered).expect("out_b");
+    let in_b = pool
+        .acquire_buffer_with_data(&[2u32; 8], BufferKind::Scattered)
+        .expect("in_b");
+    let out_b = pool
+        .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+        .expect("out_b");
     let mut scheme_b = Scheme::new(&ctx);
     scheme_b
         .node("copy_b", &pipeline)

@@ -51,7 +51,10 @@ impl PyScheme {
         }
         let static_label = slf.intern_label(&label)?;
         *slf.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(static_label, &pipeline.inner));
-        Ok(PySchemeComputeNode { scheme: slf.into(), committed: RefCell::new(false) })
+        Ok(PySchemeComputeNode {
+            scheme: slf.into(),
+            committed: RefCell::new(false),
+        })
     }
 
     /// Submit the scheme and block until GPU completion.
@@ -79,9 +82,11 @@ impl PyScheme {
     }
 
     fn finish_compute_node(&self, workgroups: (u32, u32, u32)) -> PyResult<()> {
-        let node = self.active_compute.borrow_mut().take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded")
-        })?;
+        let node = self
+            .active_compute
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
         node.commit_dispatch_scheme(&mut self.inner.borrow_mut(), workgroups.0, workgroups.1, workgroups.2);
         Ok(())
     }
@@ -106,15 +111,11 @@ impl PySchemeComputeNode {
         {
             let scheme = slf.scheme.borrow(py);
             let mut active = scheme.active_compute.borrow_mut();
-            let node = active.as_mut().ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded")
-            })?;
-            node.declare_parcel(
-                parcel.inner.as_ref(),
-                node_access.into(),
-                resource_access.into(),
-            )
-            .ok_or_else(|| GoldyError::new_err("Parcel has no resource index for the requested access"))?;
+            let node = active
+                .as_mut()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
+            node.declare_parcel(parcel.inner.as_ref(), node_access.into(), resource_access.into())
+                .ok_or_else(|| GoldyError::new_err("Parcel has no resource index for the requested access"))?;
         }
         Ok(slf)
     }
@@ -128,7 +129,10 @@ impl PySchemeComputeNode {
         workgroups_z: u32,
     ) {
         if !*slf.committed.borrow() {
-            let _ = slf.scheme.borrow(py).finish_compute_node((workgroups_x, workgroups_y, workgroups_z));
+            let _ = slf
+                .scheme
+                .borrow(py)
+                .finish_compute_node((workgroups_x, workgroups_y, workgroups_z));
             *slf.committed.borrow_mut() = true;
         }
     }
@@ -140,10 +144,7 @@ impl PySchemeComputeNode {
 
 impl Drop for PySchemeComputeNode {
     fn drop(&mut self) {
-        debug_assert!(
-            *self.committed.borrow(),
-            "SchemeComputeNode dropped without dispatch()"
-        );
+        debug_assert!(*self.committed.borrow(), "SchemeComputeNode dropped without dispatch()");
     }
 }
 

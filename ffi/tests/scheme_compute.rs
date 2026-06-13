@@ -7,11 +7,12 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
-    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_byte_size, goldy_parcel_destroy, goldy_parcel_read_to_cpu,
-    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
-    goldy_scheme_compute_node_declare_parcel, goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy,
-    goldy_scheme_len, goldy_scheme_replay_stats, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
-    GoldyBufferKind, GoldyNodeAccess, GoldyReplayStats, GoldyResourceAccess, GoldyResult,
+    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_byte_size, goldy_parcel_destroy,
+    goldy_parcel_read_to_cpu, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
+    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_declare_parcel,
+    goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len,
+    goldy_scheme_replay_stats, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind,
+    GoldyNodeAccess, GoldyReplayStats, GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -35,14 +36,8 @@ fn scheme_compute_node_fills_buffer_with_42() {
 
         let pool = goldy_retained_pool_create(device);
         assert!(!pool.is_null(), "{}", last_ffi_message());
-        let buffer = goldy_retained_pool_acquire_buffer(
-            pool,
-            64 * 4,
-            GoldyBufferKind::Scattered,
-            0,
-            std::ptr::null(),
-            0,
-        );
+        let buffer =
+            goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!buffer.is_null(), "{}", last_ffi_message());
 
         let src = CString::new(FILL_42_SHADER).unwrap();
@@ -80,12 +75,7 @@ fn scheme_compute_node_fills_buffer_with_42() {
             last_ffi_message()
         );
         assert_eq!(goldy_scheme_len(scheme), 1, "scheme should contain one compute node");
-        assert_eq!(
-            goldy_scheme_submit(scheme),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
+        assert_eq!(goldy_scheme_submit(scheme), GoldyResult::Ok, "{}", last_ffi_message());
 
         let mut readback = vec![0u8; goldy_parcel_byte_size(buffer) as usize];
         assert_eq!(
@@ -103,12 +93,7 @@ fn scheme_compute_node_fills_buffer_with_42() {
             assert_eq!(v, 42, "index {i}: got {v}");
         }
 
-        assert_eq!(
-            goldy_scheme_submit(scheme),
-            GoldyResult::Ok,
-            "{}",
-            last_ffi_message()
-        );
+        assert_eq!(goldy_scheme_submit(scheme), GoldyResult::Ok, "{}", last_ffi_message());
         let mut stats = GoldyReplayStats::default();
         assert_eq!(
             goldy_scheme_replay_stats(scheme, &mut stats),

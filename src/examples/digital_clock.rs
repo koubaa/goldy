@@ -5,9 +5,6 @@
 //! - Vertex data structures
 //! - Digit pattern generation
 //! - Time formatting
-//!
-//! Both native (Vulkan) and web (WebGPU) examples import this shared code,
-//! ensuring identical rendering across platforms.
 
 use crate::buffer::StructuredBufferElement;
 use crate::types::{Color, VertexBufferLayout, VertexFormat};

@@ -13,11 +13,7 @@ impl WriteToken {
 }
 
 /// Upload CPU bytes into a retained buffer [`Parcel`] via a property-only dispatch.
-pub fn write_to_parcel(
-    ctx: &Context,
-    parcel: &Parcel,
-    data: &[u8],
-) -> Result<WriteToken, GoldyError> {
+pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, data: &[u8]) -> Result<WriteToken, GoldyError> {
     let mut upload = Scheme::new(ctx);
     upload.commit_write_parcel(parcel, 0, data.to_vec())?;
     let tv = upload.submit()?;
