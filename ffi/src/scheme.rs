@@ -301,10 +301,7 @@ pub unsafe extern "C" fn goldy_scheme_submit(
 /// # Safety
 /// `ctx` and `frame` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_frame_wait(
-    ctx: *const GoldyContext,
-    frame: GoldySchemeFrame,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_scheme_frame_wait(ctx: *const GoldyContext, frame: GoldySchemeFrame) -> GoldyResult {
     if ctx.is_null() {
         return GoldyResult::NullPointer;
     }

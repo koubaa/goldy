@@ -46,10 +46,7 @@ pub unsafe extern "C" fn goldy_context_destroy(ctx: *mut GoldyContext) {
 /// # Safety
 /// `ctx` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_context_wait_until(
-    ctx: *const GoldyContext,
-    timeline_value: u64,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_context_wait_until(ctx: *const GoldyContext, timeline_value: u64) -> GoldyResult {
     if ctx.is_null() {
         return GoldyResult::NullPointer;
     }

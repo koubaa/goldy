@@ -11,8 +11,8 @@ use goldy_ffi::{
     goldy_parcel_read_to_cpu, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
     goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_declare_parcel,
     goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_frame_wait,
-    goldy_scheme_len, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind,
-    GoldyNodeAccess, GoldyResourceAccess, GoldyResult, GoldySchemeFrame,
+    goldy_scheme_len, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess,
+    GoldyResourceAccess, GoldyResult, GoldySchemeFrame,
 };
 use std::ffi::CString;
 

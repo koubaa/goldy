@@ -1536,14 +1536,7 @@ mod binding_stride_validation_tests {
         let categories = vec![Some(ResourceCategory::Broadcast), Some(ResourceCategory::Scattered)];
         let expected = vec![Some(16u32), Some(16u32)];
 
-        validate_raw_binding_strides(
-            &indices,
-            &categories,
-            &expected,
-            |_idx, _cat| Some(16),
-            "struct_shader",
-        )
-        .unwrap();
+        validate_raw_binding_strides(&indices, &categories, &expected, |_idx, _cat| Some(16), "struct_shader").unwrap();
     }
 
     /// SimParams natural stride 4 (not cbuffer-padded 16).
