@@ -950,6 +950,53 @@ fn scheme_write_to_parcel_zeros_between_submissions() {
     }
 }
 
+/// Cross-scheme ordering: an upload micro-scheme may return its [`SchemeFrame`] without
+/// waiting; the next worker [`Scheme::submit`] on the same context still sees the upload.
+#[test]
+fn scheme_upload_frame_unwaited_serializes_before_worker_submit() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let copy_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, COPY_SHADER).expect("shader"),
+    )
+    .expect("pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let input = pool
+        .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; 64], BufferKind::Scattered)
+        .expect("input");
+    let output = pool
+        .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
+        .expect("output");
+
+    const PATTERN: u32 = 0xCAFE_BABE;
+    let upload_data = vec![PATTERN; 64];
+    let _upload_frame = write_to_parcel(&ctx, &input, bytemuck::cast_slice(&upload_data)).expect("write_to_parcel");
+    // Deliberately no wait on upload frame — queue order must serialize before worker submit.
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("copy", &copy_pipe)
+        .bind_parcel(&input, NodeAccess::Read)
+        .bind_parcel(&output, NodeAccess::Write)
+        .bind_resources_typed(&[
+            input.handle(ResourceAccess::ReadWrite).expect("in"),
+            output.handle(ResourceAccess::Write).expect("out"),
+        ])
+        .dispatch(1, 1, 1);
+    let worker_frame = scheme.submit().expect("worker submit");
+    worker_frame.wait(&ctx).expect("wait on worker frame only");
+
+    for (i, &val) in readback_parcel_u32(&device, &output, 64).iter().enumerate() {
+        assert_eq!(
+            val, PATTERN,
+            "output[{i}]: upload must be visible without waiting on upload frame"
+        );
+    }
+}
+
 #[test]
 fn scheme_compute_many_resource_slots() {
     let device = make_device();

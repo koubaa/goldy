@@ -419,6 +419,19 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("alloc buffer parcel")
     }
 
+    fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> Scheme {
+        let shader = mock_shader(device);
+        let pipeline = mock_pipeline(device, &shader);
+        let parcel = retained_buffer_parcel(pool);
+
+        let mut scheme = Scheme::new(ctx);
+        scheme
+            .node("a", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+    }
+
     fn clean_scheme(device: &Arc<Device>, pool: &mut RetainedPool) -> Scheme {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
@@ -532,6 +545,46 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let parcel = retained_buffer_parcel(&mut pool);
         assert!(parcel.is_settled(&ctx), "never-referenced parcel is settled");
+    }
+
+    #[test]
+    fn frame_timeline_value_round_trip() {
+        use crate::timeline::TimelineValue;
+
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let frame = scheme.submit().unwrap();
+        let tv = frame.timeline_value();
+        assert!(tv > 0);
+        assert_eq!(TimelineValue::from(frame), tv);
+        assert_eq!(frame.timeline_value(), tv);
+    }
+
+    #[test]
+    fn frame_wait_completes_submission() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let frame = scheme.submit().unwrap();
+        frame.wait(&ctx).unwrap();
+        assert!(ctx.gpu_progress() >= frame.timeline_value());
+    }
+
+    #[test]
+    fn submit_returns_frame_without_calling_wait() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut scheme = recording_scheme(&device, &mut pool, &ctx);
+        let frame = scheme.submit().unwrap();
+        assert!(frame.timeline_value() > 0, "submit must return a frame token");
+        // Non-blocking: a second submit must succeed without waiting on the first frame.
+        let frame2 = scheme.submit().unwrap();
+        assert!(frame2.timeline_value() >= frame.timeline_value());
+        frame2.wait(&ctx).unwrap();
     }
 
     #[test]
