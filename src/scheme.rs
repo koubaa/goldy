@@ -20,6 +20,34 @@ use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, 
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Per-submission identity returned by [`Scheme::submit`].
+///
+/// A lightweight token with no resources attached. The timeline value identifies
+/// which submission this frame represents; use [`Self::wait`] to block until that
+/// submission's GPU work completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    timeline: TimelineValue,
+}
+
+impl Frame {
+    /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
+    pub fn timeline_value(self) -> TimelineValue {
+        self.timeline
+    }
+
+    /// Block until this submission's GPU work has completed.
+    pub fn wait(self, ctx: &Context) -> Result<(), GoldyError> {
+        ctx.wait_until(self.timeline)
+    }
+}
+
+impl From<Frame> for TimelineValue {
+    fn from(frame: Frame) -> Self {
+        frame.timeline
+    }
+}
+
 /// Stable index of a scheme-held lease declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LeaseId(pub(crate) u32);
@@ -153,17 +181,6 @@ impl Scheme {
         });
     }
 
-    /// Submit and block until GPU completion.
-    ///
-    /// **Temporary FFI helper.** This will be removed once `NodeKind::ReadbackBuffer` exists in
-    /// the IR so callers can express CPU readback as an explicit graph node and manage
-    /// synchronisation without implicit blocking. See project docs (FFI sync §).
-    #[doc(hidden)]
-    pub fn submit_blocking(&mut self) -> Result<(), GoldyError> {
-        let tv = self.submit()?;
-        self.ctx.wait_until(tv)
-    }
-
     /// Declare a transient texture lease backed by the context's transient pool (N=1).
     ///
     /// The backing parcel is held until the scheme is dropped. Structural mutation.
@@ -217,7 +234,7 @@ impl Scheme {
     /// On a clean resubmit, bound parcels' reference tables are stamped with the new
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
-    pub fn submit(&mut self) -> Result<TimelineValue, GoldyError> {
+    pub fn submit(&mut self) -> Result<Frame, GoldyError> {
         if !self.dirty {
             if let Some(key) = self.retention_key {
                 if let Some(prev_tv) = self.last_submitted_tv {
@@ -231,7 +248,7 @@ impl Scheme {
                     {
                         self.stats.resubmit_hits += 1;
                     }
-                    return Ok(tv);
+                    return Ok(Frame { timeline: tv });
                 }
             }
         }
@@ -252,7 +269,7 @@ impl Scheme {
         self.dirty = false;
         self.last_submitted_tv = Some(tv);
         self.stats.records += 1;
-        Ok(tv)
+        Ok(Frame { timeline: tv })
     }
 }
 
@@ -532,14 +549,20 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .bind_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let tv1 = scheme.submit().unwrap();
-        assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv1));
-
-        let tv2 = scheme.submit().unwrap();
-        assert!(tv2 >= tv1, "timeline must be monotonic");
+        let frame1 = scheme.submit().unwrap();
         assert_eq!(
             parcel.last_referenced_on(ctx.backend_handle()),
-            Some(tv2),
+            Some(frame1.timeline_value())
+        );
+
+        let frame2 = scheme.submit().unwrap();
+        assert!(
+            frame2.timeline_value() >= frame1.timeline_value(),
+            "timeline must be monotonic"
+        );
+        assert_eq!(
+            parcel.last_referenced_on(ctx.backend_handle()),
+            Some(frame2.timeline_value()),
             "resubmit path must also stamp parcel references"
         );
     }
@@ -568,14 +591,17 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let (mut scheme, _lease) = leased_texture_scheme(&device);
         let ctx = scheme.ctx.clone();
 
-        let tv1 = scheme.submit().unwrap();
-        assert_eq!(scheme.leases[0].last_referenced_on(ctx.backend_handle()), Some(tv1));
-
-        let tv2 = scheme.submit().unwrap();
-        assert!(tv2 >= tv1);
+        let frame1 = scheme.submit().unwrap();
         assert_eq!(
             scheme.leases[0].last_referenced_on(ctx.backend_handle()),
-            Some(tv2),
+            Some(frame1.timeline_value())
+        );
+
+        let frame2 = scheme.submit().unwrap();
+        assert!(frame2.timeline_value() >= frame1.timeline_value());
+        assert_eq!(
+            scheme.leases[0].last_referenced_on(ctx.backend_handle()),
+            Some(frame2.timeline_value()),
             "lease backing must be stamped on resubmit"
         );
     }

@@ -85,19 +85,19 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
         .dispatch(1, 1, 1);
 
     const FRAMES: u32 = 3;
-    for frame in 1..=FRAMES {
+    for submission in 1..=FRAMES {
         // Separate upload submission per frame via the property-only-dispatch API.
-        write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[frame; 8])).expect("write_to_parcel");
+        write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[submission; 8])).expect("write_to_parcel");
 
-        let tv = worker.submit().expect("submit worker");
-        ctx.wait_until(tv).expect("wait");
+        let submit_frame = worker.submit().expect("submit worker");
+        submit_frame.wait(&ctx).expect("wait");
 
         let mut raw = vec![0u8; 8 * 4];
         output.read_to_cpu(&device, &mut raw).expect("readback output");
         for v in bytemuck::cast_slice::<u8, u32>(&raw) {
             assert_eq!(
-                *v, frame,
-                "submission {frame} must observe its upload (cross-scheme serialization)"
+                *v, submission,
+                "submission {submission} must observe its upload (cross-scheme serialization)"
             );
         }
     }
@@ -140,8 +140,8 @@ fn clean_scheme_resubmits_without_rerecord() {
         .dispatch(1, 1, 1);
 
     scheme.submit().expect("submit 0");
-    let tv = scheme.submit().expect("submit 1");
-    ctx.wait_until(tv).expect("wait");
+    let frame = scheme.submit().expect("submit 1");
+    frame.wait(&ctx).expect("wait");
     assert!(output.is_settled(&ctx), "completed work must leave parcel settled");
 
     assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
@@ -191,11 +191,11 @@ fn selector_advances_across_identical_submissions() {
         .dispatch(1, 1, 1);
 
     const N: u64 = 5;
-    let mut last_tv = 0;
+    let mut last_frame = None;
     for _ in 0..N {
-        last_tv = scheme.submit().expect("submit");
+        last_frame = Some(scheme.submit().expect("submit"));
     }
-    ctx.wait_until(last_tv).expect("wait");
+    last_frame.expect("submit").wait(&ctx).expect("wait");
 
     let mut raw = vec![0u8; 4];
     selector.read_to_cpu(&device, &mut raw).expect("readback selector");
@@ -266,8 +266,8 @@ fn two_schemes_on_one_context_do_not_collide() {
     let _ = scheme_a.submit().expect("a1");
     let _ = scheme_b.submit().expect("b1");
     let _ = scheme_a.submit().expect("a2");
-    let tv = scheme_b.submit().expect("b2");
-    ctx.wait_until(tv).expect("wait");
+    let frame = scheme_b.submit().expect("b2");
+    frame.wait(&ctx).expect("wait");
 
     let mut raw_a = vec![0u8; 8 * 4];
     out_a.read_to_cpu(&device, &mut raw_a).expect("readback a");

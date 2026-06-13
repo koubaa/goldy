@@ -3,9 +3,25 @@ use crate::context::Context;
 use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::retained_pool::MosaicSlot;
-use crate::sys::{self, GoldyReplayStats, GoldyScheme};
+use crate::sys::{self, GoldyReplayStats, GoldyScheme, GoldySchemeFrame};
 use crate::types::{NodeAccess, ResourceAccess};
 use std::ffi::CString;
+
+/// Per-submission identity returned by [`Scheme::submit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemeFrame {
+    inner: GoldySchemeFrame,
+}
+
+impl SchemeFrame {
+    pub fn timeline_value(self) -> u64 {
+        self.inner.timeline_value
+    }
+
+    pub fn wait(self, ctx: &Context) -> Result<()> {
+        check(unsafe { sys::goldy_scheme_frame_wait(ctx.as_ptr(), self.inner) })
+    }
+}
 
 /// Retained compute scheme bound to one [`Context`].
 pub struct Scheme {
@@ -35,9 +51,10 @@ impl Scheme {
         })
     }
 
-    /// Submit and block until GPU completion (temporary; see project docs).
-    pub fn submit(&mut self) -> Result<()> {
-        check(unsafe { sys::goldy_scheme_submit(self.ptr) })
+    pub fn submit(&mut self) -> Result<SchemeFrame> {
+        let mut frame = GoldySchemeFrame::default();
+        check(unsafe { sys::goldy_scheme_submit(self.ptr, &mut frame) })?;
+        Ok(SchemeFrame { inner: frame })
     }
 
     pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {

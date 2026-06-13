@@ -25,6 +25,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
     pub goldy_context_create: FnGoldyContextCreate,
     pub goldy_context_destroy: FnGoldyContextDestroy,
+    pub goldy_context_wait_until: FnGoldyContextWaitUntil,
     pub goldy_device_adapter_id: FnGoldyDeviceAdapterId,
     pub goldy_device_destroy: FnGoldyDeviceDestroy,
     pub goldy_device_has_library: FnGoldyDeviceHasLibrary,
@@ -115,6 +116,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_compute_node_declare_parcel_view: FnGoldySchemeComputeNodeDeclareParcelView,
     pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
     pub goldy_scheme_submit: FnGoldySchemeSubmit,
+    pub goldy_scheme_frame_wait: FnGoldySchemeFrameWait,
 }
 
 impl GoldyFfi {
@@ -143,6 +145,7 @@ impl GoldyFfi {
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
             goldy_context_create: sym!("goldy_context_create", FnGoldyContextCreate),
             goldy_context_destroy: sym!("goldy_context_destroy", FnGoldyContextDestroy),
+            goldy_context_wait_until: sym!("goldy_context_wait_until", FnGoldyContextWaitUntil),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),
             goldy_device_destroy: sym!("goldy_device_destroy", FnGoldyDeviceDestroy),
             goldy_device_has_library: sym!("goldy_device_has_library", FnGoldyDeviceHasLibrary),
@@ -326,6 +329,7 @@ impl GoldyFfi {
                 FnGoldySchemeComputeNodeDispatch
             ),
             goldy_scheme_submit: sym!("goldy_scheme_submit", FnGoldySchemeSubmit),
+            goldy_scheme_frame_wait: sym!("goldy_scheme_frame_wait", FnGoldySchemeFrameWait),
             _library: library,
         })
     }

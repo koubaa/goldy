@@ -41,7 +41,8 @@ fn main() -> goldy_ffi_client::Result<()> {
     let mut node = scheme.compute_node("double", &pipeline);
     node.declare_parcel(&buffer, NodeAccess::ReadWrite, ResourceAccess::Write);
     node.dispatch(1, 1, 1);
-    scheme.submit()?;
+    let frame = scheme.submit()?;
+    frame.wait(&ctx)?;
 
     let bytes = buffer.read_to_cpu(&device)?;
     let values: &[f32] = bytemuck::cast_slice(&bytes);

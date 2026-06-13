@@ -56,7 +56,7 @@ int main() {
             node.declare_parcel(buffer, goldy::NodeAccess::ReadWrite, goldy::ResourceAccess::Write);
             node.dispatch(1, 1, 1);
         }
-        scheme.submit();
+        scheme.submit().wait(ctx);
 
         const auto bytes = buffer.read_to_cpu(device);
         if (bytes.size() < 64 * sizeof(float)) {

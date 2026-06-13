@@ -32,6 +32,17 @@ public sealed class Context : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
+    /// <summary>
+    /// Block until the GPU has completed all work scheduled up to <paramref name="timelineValue"/>.
+    /// </summary>
+    public void WaitUntil(ulong timelineValue)
+    {
+        ThrowIfDisposed();
+        var result = NativeMethods.ContextWaitUntil(Handle, timelineValue);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Context wait_until");
+    }
+
     public void Dispose()
     {
         if (!_disposed)

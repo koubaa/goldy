@@ -31,14 +31,15 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
-    /// Submit the scheme and block until GPU completion.
+    /// Submit the scheme and return a per-submission frame token.
     /// </summary>
-    public void Submit()
+    public SchemeFrame Submit()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var result = NativeMethods.SchemeSubmit(Handle);
+        var result = NativeMethods.SchemeSubmit(Handle, out var frame);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme submit");
+        return new SchemeFrame(frame.TimelineValue);
     }
 
     internal void ThrowIfDisposed()

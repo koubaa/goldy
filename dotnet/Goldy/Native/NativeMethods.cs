@@ -263,6 +263,9 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_context_destroy")]
     internal static partial void ContextDestroy(nint ctx);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_context_wait_until")]
+    internal static partial GoldyResult ContextWaitUntil(nint ctx, ulong timelineValue);
+
     // ========================================================================
     // Scheme
     // ========================================================================
@@ -285,7 +288,10 @@ internal static partial class NativeMethods
         nint scheme, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_submit")]
-    internal static partial GoldyResult SchemeSubmit(nint scheme);
+    internal static partial GoldyResult SchemeSubmit(nint scheme, out GoldySchemeFrameNative frame);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_wait")]
+    internal static partial GoldyResult SchemeFrameWait(nint ctx, GoldySchemeFrameNative frame);
 
     // ========================================================================
     // RetainedPool / Parcel

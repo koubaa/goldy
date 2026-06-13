@@ -37,7 +37,7 @@ public class SchemeTests
                     .Dispatch(1, 1, 1);
             }
 
-            scheme.Submit();
+            scheme.Submit().Wait(ctx);
 
             var bytes = parcel.ReadToCpu(device);
             var values = MemoryMarshal.Cast<byte, uint>(bytes);

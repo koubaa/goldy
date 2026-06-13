@@ -90,3 +90,11 @@ internal struct SamplerDescNative
     };
 }
 
+/// <summary>
+/// Per-submission identity returned by scheme submit (mirrors C ABI).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct GoldySchemeFrameNative
+{
+    public ulong TimelineValue;
+}

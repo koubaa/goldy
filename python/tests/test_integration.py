@@ -88,11 +88,12 @@ def test_parcel_write(device):
         goldy.BufferKind.SCATTERED,
     )
     ctx = device.create_context()
-    goldy.write_to_parcel(
+    frame = goldy.write_to_parcel(
         ctx,
         parcel,
         np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes(),
     )
+    frame.wait(ctx)
 
 
 def test_shader_compilation(device):
@@ -196,7 +197,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     scheme.node("fill", pipeline).declare_parcel(
         parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
     ).dispatch(1, 1, 1)
-    scheme.submit()
+    frame = scheme.submit()
+    frame.wait(ctx)
 
     values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
     assert values.shape == (64,)

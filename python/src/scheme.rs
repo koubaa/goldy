@@ -20,6 +20,33 @@ impl PyContext {
     fn __repr__(&self) -> String {
         "Context()".to_string()
     }
+
+    /// Block until the GPU has completed all work scheduled up to `timeline_value`.
+    fn wait_until(&self, timeline_value: u64) -> PyResult<()> {
+        self.inner.wait_until(timeline_value).into_py_result()
+    }
+}
+
+/// Per-submission identity returned by [`PyScheme::submit`].
+#[pyclass(name = "SchemeFrame", module = "goldy", unsendable)]
+#[derive(Clone, Copy)]
+pub struct PySchemeFrame {
+    pub(crate) timeline_value: u64,
+}
+
+#[pymethods]
+impl PySchemeFrame {
+    fn timeline_value(&self) -> u64 {
+        self.timeline_value
+    }
+
+    fn wait(&self, ctx: &PyContext) -> PyResult<()> {
+        ctx.inner.wait_until(self.timeline_value).into_py_result()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SchemeFrame(timeline_value={})", self.timeline_value)
+    }
 }
 
 /// Retained compute scheme bound to one [`PyContext`].
@@ -57,14 +84,17 @@ impl PyScheme {
         })
     }
 
-    /// Submit the scheme and block until GPU completion.
-    fn submit(&self) -> PyResult<()> {
+    /// Submit the scheme and return a per-submission frame token.
+    fn submit(&self) -> PyResult<PySchemeFrame> {
         if self.active_compute.borrow().is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot submit while recording a compute node",
             ));
         }
-        self.inner.borrow_mut().submit_blocking().into_py_result()
+        let frame = self.inner.borrow_mut().submit().into_py_result()?;
+        Ok(PySchemeFrame {
+            timeline_value: frame.timeline_value(),
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -151,10 +181,13 @@ impl Drop for PySchemeComputeNode {
 /// Upload CPU bytes into a retained buffer parcel via a property-only dispatch.
 #[pyfunction]
 #[pyo3(signature = (ctx, parcel, data))]
-pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyResult<()> {
+pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyResult<PySchemeFrame> {
     let mut upload = Scheme::new(&ctx.inner);
     upload
         .commit_write_parcel(parcel.inner.as_ref(), 0, data.to_vec())
         .into_py_result()?;
-    upload.submit_blocking().into_py_result()
+    let frame = upload.submit().into_py_result()?;
+    Ok(PySchemeFrame {
+        timeline_value: frame.timeline_value(),
+    })
 }

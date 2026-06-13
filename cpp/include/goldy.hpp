@@ -436,6 +436,10 @@ public:
 
     GoldyContext* get() const { return ptr_.get(); }
 
+    void wait_until(uint64_t timeline_value) const {
+        detail::throw_on_result(goldy_context_wait_until(ptr_.get(), timeline_value));
+    }
+
 private:
     std::unique_ptr<GoldyContext, detail::ContextDeleter> ptr_;
 };
@@ -1303,6 +1307,24 @@ private:
 // =============================================================================
 
 /**
+ * @brief Per-submission identity returned by Scheme::submit().
+ */
+class SchemeFrame {
+public:
+    SchemeFrame() = default;
+    explicit SchemeFrame(GoldySchemeFrame frame) : frame_(frame) {}
+
+    [[nodiscard]] uint64_t timeline_value() const { return frame_.timeline_value; }
+
+    void wait(const Context& ctx) const {
+        detail::throw_on_result(goldy_scheme_frame_wait(ctx.get(), frame_));
+    }
+
+private:
+    GoldySchemeFrame frame_{};
+};
+
+/**
  * @brief Retained compute scheme bound to one Context.
  */
 class Scheme {
@@ -1326,8 +1348,10 @@ public:
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
 
-    void submit() {
-        detail::throw_on_result(goldy_scheme_submit(ptr_.get()));
+    [[nodiscard]] SchemeFrame submit() {
+        GoldySchemeFrame frame{};
+        detail::throw_on_result(goldy_scheme_submit(ptr_.get(), &frame));
+        return SchemeFrame{frame};
     }
 
     [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);

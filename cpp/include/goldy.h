@@ -275,6 +275,11 @@ typedef struct GoldySamplerDesc {
     float lod_max_clamp;
 } GoldySamplerDesc;
 
+// Per-submission identity returned by [`goldy_scheme_submit`].
+typedef struct GoldySchemeFrame {
+    uint64_t timeline_value;
+} GoldySchemeFrame;
+
 // Outcome counters for [`goldy_scheme_replay_stats`].
 typedef struct GoldyReplayStats {
     uint64_t records;
@@ -338,6 +343,12 @@ void goldy_context_destroy(struct GoldyContext *ctx);
 // # Safety
 // `ctx` must be valid when non-null.
 enum GoldyResult goldy_context_is_valid(const struct GoldyContext *ctx);
+
+// Block until the GPU has completed all work scheduled up to `timeline_value`.
+//
+// # Safety
+// `ctx` must be valid.
+enum GoldyResult goldy_context_wait_until(const struct GoldyContext *ctx, uint64_t timeline_value);
 
 // Get the adapter ID this device was created on.
 //
@@ -698,6 +709,13 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
 
+// Block until the GPU work for `frame` has completed.
+//
+// # Safety
+// `ctx` and `frame` must be valid.
+enum GoldyResult goldy_scheme_frame_wait(const struct GoldyContext *ctx,
+                                         struct GoldySchemeFrame frame);
+
 // True when the next submit must re-record.
 //
 // # Safety
@@ -717,14 +735,15 @@ uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
 enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
                                            struct GoldyReplayStats *out_stats);
 
-// Submit the scheme and block until GPU completion.
+// Submit the scheme and return a per-submission [`GoldySchemeFrame`].
 //
-// TODO: remove blocking when readback IR node exists; callers should manage sync via
-// an explicit readback node instead of implicit wait-after-submit.
+// Does not block — call [`goldy_context_wait_until`] or [`goldy_scheme_frame_wait`]
+// to wait for GPU completion.
 //
 // # Safety
-// `scheme` must be valid.
-enum GoldyResult goldy_scheme_submit(struct GoldyScheme *scheme);
+// `scheme` and `out_frame` must be valid.
+enum GoldyResult goldy_scheme_submit(struct GoldyScheme *scheme,
+                                     struct GoldySchemeFrame *out_frame);
 
 // Get the built-in vertex color 2D shader source.
 //

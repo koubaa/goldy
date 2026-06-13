@@ -226,6 +226,12 @@ pub struct GoldyTextureFlags {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GoldySchemeFrame {
+    pub timeline_value: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GoldyReplayStats {
     pub records: u64,
     pub resubmit_hits: u64,

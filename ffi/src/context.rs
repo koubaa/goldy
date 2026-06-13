@@ -41,6 +41,27 @@ pub unsafe extern "C" fn goldy_context_destroy(ctx: *mut GoldyContext) {
     }
 }
 
+/// Block until the GPU has completed all work scheduled up to `timeline_value`.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_context_wait_until(
+    ctx: *const GoldyContext,
+    timeline_value: u64,
+) -> GoldyResult {
+    if ctx.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    match (*ctx).inner.wait_until(timeline_value) {
+        Ok(()) => GoldyResult::Ok,
+        Err(e) => {
+            set_last_error(format!("{e}"));
+            GoldyResult::GpuError
+        }
+    }
+}
+
 /// Smoke-test helper: returns [`GoldyResult::Ok`] when `ctx` is non-null.
 ///
 /// # Safety

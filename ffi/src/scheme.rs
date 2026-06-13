@@ -11,6 +11,13 @@ use goldy::types::ResourceAccess;
 use goldy::MosaicSlot;
 use std::ffi::CStr;
 
+/// Per-submission identity returned by [`goldy_scheme_submit`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GoldySchemeFrame {
+    pub timeline_value: u64,
+}
+
 /// Outcome counters for [`goldy_scheme_replay_stats`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -256,23 +263,52 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_dispatch(
     GoldyResult::Ok
 }
 
-/// Submit the scheme and block until GPU completion.
+/// Submit the scheme and return a per-submission [`GoldySchemeFrame`].
 ///
-/// TODO: remove blocking when readback IR node exists; callers should manage sync via
-/// an explicit readback node instead of implicit wait-after-submit.
+/// Does not block — call [`goldy_context_wait_until`] or [`goldy_scheme_frame_wait`]
+/// to wait for GPU completion.
 ///
 /// # Safety
-/// `scheme` must be valid.
+/// `scheme` and `out_frame` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_submit(scheme: *mut GoldyScheme) -> GoldyResult {
-    if scheme.is_null() {
+pub unsafe extern "C" fn goldy_scheme_submit(
+    scheme: *mut GoldyScheme,
+    out_frame: *mut GoldySchemeFrame,
+) -> GoldyResult {
+    if scheme.is_null() || out_frame.is_null() {
         return GoldyResult::NullPointer;
     }
     if (*scheme).has_active_recorder() {
         set_last_error("Cannot submit while recording a compute node");
         return GoldyResult::InvalidArgument;
     }
-    match (*scheme).inner.submit_blocking() {
+    match (*scheme).inner.submit() {
+        Ok(frame) => {
+            *out_frame = GoldySchemeFrame {
+                timeline_value: frame.timeline_value(),
+            };
+            GoldyResult::Ok
+        }
+        Err(e) => {
+            set_last_error(format!("{e}"));
+            GoldyResult::GpuError
+        }
+    }
+}
+
+/// Block until the GPU work for `frame` has completed.
+///
+/// # Safety
+/// `ctx` and `frame` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_scheme_frame_wait(
+    ctx: *const GoldyContext,
+    frame: GoldySchemeFrame,
+) -> GoldyResult {
+    if ctx.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    match (*ctx).inner.wait_until(frame.timeline_value) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));

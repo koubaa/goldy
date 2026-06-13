@@ -28,6 +28,10 @@ pub unsafe fn goldy_context_create(device: *const GoldyDevice) -> *mut GoldyCont
     (lib().goldy_context_create)(device)
 }
 
+pub unsafe fn goldy_context_wait_until(ctx: *const GoldyContext, timeline_value: u64) -> GoldyResult {
+    (lib().goldy_context_wait_until)(ctx, timeline_value)
+}
+
 pub unsafe fn goldy_context_destroy(ctx: *mut GoldyContext) {
     (lib().goldy_context_destroy)(ctx)
 }
@@ -550,6 +554,10 @@ pub unsafe fn goldy_scheme_compute_node_dispatch(
     (lib().goldy_scheme_compute_node_dispatch)(scheme, workgroups_x, workgroups_y, workgroups_z)
 }
 
-pub unsafe fn goldy_scheme_submit(scheme: *mut GoldyScheme) -> GoldyResult {
-    (lib().goldy_scheme_submit)(scheme)
+pub unsafe fn goldy_scheme_submit(scheme: *mut GoldyScheme, out_frame: *mut GoldySchemeFrame) -> GoldyResult {
+    (lib().goldy_scheme_submit)(scheme, out_frame)
+}
+
+pub unsafe fn goldy_scheme_frame_wait(ctx: *const GoldyContext, frame: GoldySchemeFrame) -> GoldyResult {
+    (lib().goldy_scheme_frame_wait)(ctx, frame)
 }

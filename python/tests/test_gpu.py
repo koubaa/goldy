@@ -106,11 +106,12 @@ class TestRetainedPool:
             goldy.BufferKind.SCATTERED,
         )
         ctx = device.create_context()
-        goldy.write_to_parcel(
+        frame = goldy.write_to_parcel(
             ctx,
             parcel,
             np.array([1, 2, 3, 4], dtype=np.uint32).tobytes(),
         )
+        frame.wait(ctx)
 
 
 class TestShaderModule:
@@ -174,7 +175,8 @@ class TestComputePipeline:
         scheme.node("fill", pipeline).declare_parcel(
             parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
         ).dispatch(1, 1, 1)
-        scheme.submit()
+        frame = scheme.submit()
+        frame.wait(ctx)
 
         values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
         assert np.all(values == 42)

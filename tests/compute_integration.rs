@@ -1773,26 +1773,6 @@ fn test_alloc_texture(
         .expect("detach_texture")
 }
 
-fn test_alloc_buffer_with_bytes_stride(
-    device: &goldy::Device,
-    data: &[u8],
-    kind: goldy::BufferKind,
-    stride: u32,
-) -> goldy::Buffer {
-    use std::sync::Arc;
-    goldy::RetainedPool::new(Arc::new(device.clone()))
-        .acquire_buffer(
-            data.len() as u64,
-            kind,
-            Some(stride),
-            goldy::BufferFlags::empty(),
-            Some(data),
-        )
-        .expect("acquire_buffer")
-        .detach_buffer()
-        .expect("detach_buffer")
-}
-
 fn test_alloc_buffer_with_bytes_stride_and_flags(
     device: &goldy::Device,
     data: &[u8],

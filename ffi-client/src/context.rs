@@ -1,5 +1,5 @@
 use crate::device::Device;
-use crate::error::{non_null_expect, Result};
+use crate::error::{check, non_null_expect, Result};
 use crate::sys::{self, GoldyContext};
 
 /// Submission context for retained [`crate::Scheme`] instances.
@@ -15,6 +15,10 @@ impl Context {
 
     pub(crate) fn as_ptr(&self) -> *const GoldyContext {
         self.ptr
+    }
+
+    pub fn wait_until(&self, timeline_value: u64) -> Result<()> {
+        check(unsafe { sys::goldy_context_wait_until(self.as_ptr(), timeline_value) })
     }
 }
 
