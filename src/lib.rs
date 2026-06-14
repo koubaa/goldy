@@ -69,7 +69,7 @@ pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
 pub use scheme::{
-    write_to_parcel, Frame as SchemeFrame, GrantBuffer, GrantTexture, Lease, LeaseTexture, Loan, PresentGrant,
+    write_to_parcel, Submission, Frame as SchemeFrame, GrantBuffer, GrantTexture, Lease, LeaseTexture, Loan, PresentGrant,
     ReadGrant, ReplayStats, Scheme,
 };
 pub use swapchain_pool::{PresentLease, SwapchainPool};

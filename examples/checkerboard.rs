@@ -8,7 +8,7 @@
 
 use goldy::{
     shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, LayoutCheckable, NodeAccess,
-    Parcel, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
+    Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
     ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
@@ -41,6 +41,7 @@ struct App {
     window: Option<Arc<Window>>,
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
     scene_rt: Option<RenderTarget>,
     scheme: Option<Scheme>,
     start_time: Instant,
@@ -60,6 +61,7 @@ impl App {
             window: None,
             swapchain: None,
             screen: None,
+            present: None,
             scene_rt: None,
             scheme: None,
             start_time: Instant::now(),
@@ -78,15 +80,15 @@ impl App {
         uniform: &Parcel,
         scene_rt: &RenderTarget,
         screen: &goldy::PresentLease,
-    ) {
+    ) -> PresentGrant {
         let mut pass = scheme.render_pass("checkerboard", scene_rt);
-        pass.bind_parcel_slot_mut(uniform, NodeAccess::Read);
+        pass.bind_parcel_mut(uniform, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(pipeline);
         pass.draw_fullscreen();
         pass.finish();
         scheme.copy_to_present(scene_rt, screen);
-        scheme.grant_present(screen);
+        scheme.grant_present(screen)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -125,7 +127,7 @@ impl App {
 
         let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
         let mut scheme = Scheme::new(&ctx);
-        Self::record_scheme(&mut scheme, &pipeline, &uniform, &scene_rt, &screen);
+        let present = Self::record_scheme(&mut scheme, &pipeline, &uniform, &scene_rt, &screen);
 
         self.ctx = Some(ctx);
         self.device = Some(device);
@@ -135,6 +137,7 @@ impl App {
         self.uniform = Some(uniform);
         self.swapchain = Some(swapchain);
         self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         Ok(())
@@ -157,7 +160,9 @@ impl App {
         let uniforms = TimeUniforms { time };
         write_to_parcel(ctx, uniform, 0, bytemuck::bytes_of(&uniforms))?;
 
-        scheme.submit()?.present()?;
+        let present = self.present.as_ref().unwrap();
+        let submission = scheme.submit()?;
+        present.present(&submission)?;
         Ok(())
     }
 
@@ -175,7 +180,8 @@ impl App {
                         self.screen.as_ref(),
                     ) {
                         scheme.begin_rerecord();
-                        Self::record_scheme(scheme, pipeline, uniform, &rt, screen);
+                        let present = Self::record_scheme(scheme, pipeline, uniform, &rt, screen);
+                        self.present = Some(present);
                     }
                     self.scene_rt = Some(rt);
                 }

@@ -1,7 +1,7 @@
 //! Compute-to-Surface example — pure compute rendering without a graphics pipeline.
 //!
 //! Demonstrates present-on-scheme: a retained [`Scheme`] writes directly to a
-//! [`PresentLease`] from [`SwapchainPool`], then presents via [`SchemeFrame::present`].
+//! [`PresentLease`] from [`SwapchainPool`], then presents via [`PresentGrant::present`].
 //!
 //! Run with: cargo run --example compute_to_surface
 
@@ -99,6 +99,7 @@ struct RenderState {
     ctx: goldy::Context,
     swapchain: SwapchainPool,
     screen: goldy::PresentLease,
+    present: goldy::PresentGrant,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
@@ -115,20 +116,20 @@ fn record_scheme(
     screen: &goldy::PresentLease,
     width: u32,
     height: u32,
-) {
+) -> goldy::PresentGrant {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
     scheme
         .node("compute", pipeline)
-        .bind_parcel_slot(uniform, NodeAccess::Read)
+        .bind_parcel(uniform, NodeAccess::Read)
         .writes_present(screen)
         .dispatch(wg_x, wg_y, 1);
-    scheme.grant_present(screen);
+    scheme.grant_present(screen)
 }
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     state.scheme.begin_rerecord();
-    record_scheme(
+    state.present = record_scheme(
         &mut state.scheme,
         &state.compute_pipeline,
         &state.uniform_buffer,
@@ -174,7 +175,7 @@ impl App {
         )?;
 
         let mut scheme = Scheme::new(&ctx);
-        record_scheme(
+        let present = record_scheme(
             &mut scheme,
             &compute_pipeline,
             &uniform_buffer,
@@ -188,6 +189,7 @@ impl App {
             ctx,
             swapchain,
             screen,
+            present,
             scheme,
             compute_pipeline,
             _retained_pool: retained_pool,
@@ -304,7 +306,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
 
     write_to_parcel(&state.ctx, &state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))?;
 
-    state.scheme.submit()?.present()?;
+    let submission = state.scheme.submit()?;
+    state.present.present(&submission)?;
 
     Ok(())
 }
