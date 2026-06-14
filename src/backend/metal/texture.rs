@@ -113,6 +113,12 @@ pub(super) fn create(
     if flags.contains(TextureFlags::RENDER_TARGET) {
         mtl_usage |= MTLTextureUsage::RenderTarget;
     }
+    // COPY_SRC: Metal's blit encoder can copy any StorageModeShared texture without
+    // a special usage bit, but we mirror the Vulkan TRANSFER_SRC convention so that
+    // internal assertions stay consistent across backends.
+    if flags.contains(TextureFlags::COPY_SRC) {
+        mtl_usage |= MTLTextureUsage::ShaderRead;
+    }
     descriptor.set_usage(mtl_usage);
     descriptor.set_storage_mode(MTLStorageMode::Shared);
 

@@ -1000,6 +1000,7 @@ fn stage_uploads(
             GpuCommand::ClearBuffer { .. }
             | GpuCommand::CopyBuffer { .. }
             | GpuCommand::CopyTexture { .. }
+            | GpuCommand::CopyTextureToReadback { .. }
             | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)
             | GpuCommand::BindResourcesRaw { .. }

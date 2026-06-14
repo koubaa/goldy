@@ -756,12 +756,20 @@ impl Scheme {
         let source = parcel
             .texture_handle()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read_texture requires texture parcel")))?;
-        let (width, height, format, _access, flags) = parcel
+        let (width, height, format, access, flags) = parcel
             .texture_descriptor()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read_texture requires texture parcel")))?;
         if !flags.contains(TextureFlags::COPY_SRC) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "grant_read_texture requires TextureFlags::COPY_SRC"
+            )));
+        }
+        // v1: only storage-writable textures (Direct / DirectInterpolated) are valid sources;
+        // Interpolated (sampled-only) textures cannot be written by a compute shader.
+        if matches!(access, TextureKind::Interpolated) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "grant_read_texture requires a storage-writable texture (TextureKind::Direct or DirectInterpolated); \
+                 TextureKind::Interpolated is sampled-only and cannot be a compute output"
             )));
         }
         if width == 0 || height == 0 {
@@ -1444,5 +1452,202 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             Err(e) => e,
         };
         assert!(err.to_string().contains("non-zero"), "unexpected error: {err}");
+    }
+
+    // ------------------------------------------------------------------
+    // Texture grant tests
+    // ------------------------------------------------------------------
+
+    fn texture_parcel(pool: &mut RetainedPool) -> Parcel {
+        pool.acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+            None,
+        )
+        .expect("texture parcel")
+    }
+
+    #[test]
+    fn grant_read_texture_basic_succeeds() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+        let frame = scheme.submit().expect("submit");
+
+        let loan = grant.read(&frame).expect("read texture grant");
+        assert_eq!(loan.len(), 4 * 4 * 4, "Rgba8Unorm 4×4 = 64 bytes");
+    }
+
+    #[test]
+    fn grant_read_texture_appends_ir_node() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let _grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+
+        assert!(scheme.is_dirty(), "grant_read_texture is structural");
+        assert_eq!(scheme.ir_node_count(), 1);
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::GrantRead { grant_id: 0 } => {}
+            other => panic!("expected GrantRead node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grant_read_texture_staging_alloc_and_free() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+        let frame = scheme.submit().expect("submit");
+
+        let (allocs_before, frees_before) = mock_readback_counts(&device);
+        assert_eq!(allocs_before, 1, "one staging alloc per submit");
+        assert_eq!(frees_before, 0, "not freed yet");
+
+        let loan = grant.read(&frame).expect("read");
+        drop(loan);
+
+        // After loan drop the handle returns to pool (scheme alive) — no free yet.
+        let (_, frees_after_loan) = mock_readback_counts(&device);
+        assert_eq!(frees_after_loan, 0, "pool recycles on loan drop");
+
+        // Resubmit — pool recycles the same staging handle.
+        let frame2 = scheme.submit().expect("resubmit");
+        let (allocs_after_resubmit, _) = mock_readback_counts(&device);
+        assert_eq!(allocs_after_resubmit, 1, "recycled: no new alloc");
+        let _loan2 = grant.read(&frame2).expect("read frame2");
+
+        // Drop scheme — pool drains and frees all handles.
+        drop(_loan2);
+        drop(frame2);
+        drop(grant);
+        drop(scheme);
+        let (_, frees_final) = mock_readback_counts(&device);
+        assert_eq!(frees_final, 1, "all staging freed on scheme drop");
+    }
+
+    #[test]
+    fn grant_read_texture_double_read_same_frame_errors() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+        let frame = scheme.submit().expect("submit");
+
+        let _loan = grant.read(&frame).expect("first read");
+        let err = grant.read(&frame).expect_err("second read must fail");
+        assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grant_read_texture_concurrent_frames() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+        let frame1 = scheme.submit().expect("first submit");
+        let frame2 = scheme.submit().expect("second submit without waiting on frame1");
+
+        let loan1 = grant.read(&frame1).expect("read frame1");
+        let loan2 = grant.read(&frame2).expect("read frame2");
+        assert_eq!(loan1.len(), loan2.len());
+
+        let (allocs, _) = mock_readback_counts(&device);
+        assert_eq!(allocs, 2, "two live frames require two staging allocations");
+    }
+
+    #[test]
+    fn grant_read_texture_rejects_sampled_only_texture() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+
+        let texture = pool
+            .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Interpolated, TextureFlags::COPY_SRC, None)
+            .expect("texture");
+        let mut scheme = Scheme::new(&ctx);
+        let err = match scheme.grant_read_texture(&texture) {
+            Ok(_) => panic!("must reject Interpolated texture"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("sampled-only") || err.to_string().contains("storage-writable"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn grant_read_texture_rejects_missing_copy_src_flag() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+
+        let texture = pool
+            .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty(), None)
+            .expect("texture");
+        let mut scheme = Scheme::new(&ctx);
+        let err = match scheme.grant_read_texture(&texture) {
+            Ok(_) => panic!("must reject missing COPY_SRC flag"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("COPY_SRC"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grant_read_texture_rejects_cross_scheme_frame() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx_a = device.create_context().unwrap();
+        let ctx_b = device.create_context().unwrap();
+
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme_a = Scheme::new(&ctx_a);
+        let grant_a = scheme_a.grant_read_texture(&texture).expect("grant_a");
+        let _frame_a = scheme_a.submit().expect("submit a");
+
+        let mut scheme_b = Scheme::new(&ctx_b);
+        let _grant_b = scheme_b.grant_read_texture(&texture).expect("grant_b");
+        let frame_b = scheme_b.submit().expect("submit b");
+
+        let err = grant_a.read(&frame_b).expect_err("cross-scheme read must fail");
+        assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grant_read_texture_survives_parcel_drop() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let texture = texture_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+        let frame = scheme.submit().expect("submit");
+        drop(texture);
+        drop(pool);
+
+        let loan = grant.read(&frame).expect("read after parcel drop");
+        assert_eq!(loan.len(), 4 * 4 * 4);
     }
 }
