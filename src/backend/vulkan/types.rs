@@ -771,6 +771,7 @@ pub(crate) struct BufferState {
     pub sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>>,
     /// Grant-read staging buffer (host-visible, persistently mapped; no bindless slot).
     pub is_grant_readback: bool,
+    pub grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
 }
 
 /// Shader module state with cached compiled stages.

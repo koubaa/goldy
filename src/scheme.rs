@@ -9,7 +9,7 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand};
+use crate::backend::{BufferHandle, GpuCommand, TextureHandle, TextureReadbackLayout};
 use crate::buffer::Buffer;
 use crate::context::Context;
 use crate::error::GoldyError;
@@ -17,6 +17,7 @@ use crate::parcel::Parcel;
 use crate::retained_pool::StampedParcel;
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::validation_env;
@@ -32,16 +33,32 @@ static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 /// TODO: this is an implementation detail of schemes for now, but eventually
 /// it makes more sense to have device-scoped, size-bucketed pools for this.
 /// That would back single schemes and multiple submissions and the reverse.
+enum GrantStagingAllocSpec {
+    Buffer { byte_size: u64 },
+    Texture { layout: TextureReadbackLayout },
+}
+
 struct GrantStagingPool {
     handles: Mutex<Vec<BufferHandle>>,
+    alloc_spec: GrantStagingAllocSpec,
     ctx: Context,
     scheme_alive: AtomicBool,
 }
 
 impl GrantStagingPool {
-    fn new(ctx: &Context) -> Arc<Self> {
+    fn new_buffer(ctx: &Context, byte_size: u64) -> Arc<Self> {
         Arc::new(Self {
             handles: Mutex::new(Vec::new()),
+            alloc_spec: GrantStagingAllocSpec::Buffer { byte_size },
+            ctx: ctx.clone(),
+            scheme_alive: AtomicBool::new(true),
+        })
+    }
+
+    fn new_texture(ctx: &Context, layout: TextureReadbackLayout) -> Arc<Self> {
+        Arc::new(Self {
+            handles: Mutex::new(Vec::new()),
+            alloc_spec: GrantStagingAllocSpec::Texture { layout },
             ctx: ctx.clone(),
             scheme_alive: AtomicBool::new(true),
         })
@@ -51,26 +68,47 @@ impl GrantStagingPool {
         &self,
         backend: &mut dyn crate::backend::GpuBackend,
         device: crate::backend::DeviceHandle,
-        byte_size: u64,
     ) -> Result<BufferHandle, GoldyError> {
         let handle = {
             let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
             pool.pop()
         };
-        if let Some(handle) = handle {
-            if validation_env::scheme_validation_enabled() {
-                let cap = backend.buffer_size(handle);
-                if cap < byte_size {
-                    return Err(GoldyError::Backend(anyhow::anyhow!(
-                        "recycled grant staging buffer capacity {cap} is smaller than grant byte size {byte_size}"
-                    )));
+        match self.alloc_spec {
+            GrantStagingAllocSpec::Buffer { byte_size } => {
+                if let Some(handle) = handle {
+                    if validation_env::scheme_validation_enabled() {
+                        let cap = backend.buffer_size(handle);
+                        if cap < byte_size {
+                            return Err(GoldyError::Backend(anyhow::anyhow!(
+                                "recycled grant staging buffer capacity {cap} is smaller than grant byte size {byte_size}"
+                            )));
+                        }
+                    }
+                    Ok(handle)
+                } else {
+                    backend
+                        .alloc_readback_buffer(device, byte_size)
+                        .map_err(|e| self.ctx.classify(e))
                 }
             }
-            Ok(handle)
-        } else {
-            backend
-                .alloc_readback_buffer(device, byte_size)
-                .map_err(|e| self.ctx.classify(e))
+            GrantStagingAllocSpec::Texture { layout } => {
+                if let Some(handle) = handle {
+                    if validation_env::scheme_validation_enabled() {
+                        let cap = backend.buffer_size(handle);
+                        if cap < layout.staging_bytes {
+                            return Err(GoldyError::Backend(anyhow::anyhow!(
+                                "recycled texture grant staging capacity {cap} is smaller than required {}",
+                                layout.staging_bytes
+                            )));
+                        }
+                    }
+                    Ok(handle)
+                } else {
+                    backend
+                        .alloc_texture_readback_staging(device, layout)
+                        .map_err(|e| self.ctx.classify(e))
+                }
+            }
         }
     }
 
@@ -156,15 +194,34 @@ impl From<Frame> for TimelineValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GrantId(pub(crate) u32);
 
-/// Marker type for buffer read grants (v1: deed buffer parcels only).
+/// Marker type for buffer read grants.
 pub struct GrantBuffer;
 
+/// Marker type for texture read grants (v1: deed texture parcels, uncompressed formats).
+pub struct GrantTexture;
+
+enum GrantReadKind {
+    Buffer,
+    Texture(TextureReadbackLayout),
+}
+
+enum GrantSource {
+    Buffer {
+        source: BufferHandle,
+        #[allow(dead_code)]
+        source_backing: Arc<Buffer>,
+        byte_size: u64,
+    },
+    Texture {
+        source: TextureHandle,
+        #[allow(dead_code)]
+        source_backing: Texture,
+        layout: TextureReadbackLayout,
+    },
+}
+
 struct GrantInfo {
-    source: BufferHandle,
-    /// Keeps the deed buffer alive after the parcel is dropped.
-    #[allow(dead_code)]
-    source_backing: Arc<Buffer>,
-    byte_size: u64,
+    source: GrantSource,
     staging_pool: Arc<GrantStagingPool>,
 }
 
@@ -211,6 +268,7 @@ pub struct ReadGrant<T> {
     scheme_id: u64,
     ctx: Context,
     byte_size: u64,
+    read_kind: GrantReadKind,
     return_pool: Arc<GrantStagingPool>,
     _marker: PhantomData<T>,
 }
@@ -263,9 +321,14 @@ impl<T> ReadGrant<T> {
         let mut bytes = vec![0u8; byte_size];
         {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend
-                .read_readback_buffer(handle, &mut bytes)
-                .map_err(|e| self.ctx.classify(e))?;
+            match self.read_kind {
+                GrantReadKind::Buffer => backend
+                    .read_readback_buffer(handle, &mut bytes)
+                    .map_err(|e| self.ctx.classify(e))?,
+                GrantReadKind::Texture(layout) => backend
+                    .read_texture_readback_staging(handle, layout, &mut bytes)
+                    .map_err(|e| self.ctx.classify(e))?,
+            }
         }
         Ok(Loan {
             bytes,
@@ -479,7 +542,6 @@ impl Scheme {
                 if let Some(tv) = self.ctx.try_resubmit_retained(key)? {
                     self.submit_state
                         .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
-                    self.last_submitted_tv = Some(tv);
                     #[cfg(not(feature = "metal"))]
                     {
                         self.stats.resubmit_hits += 1;
@@ -495,7 +557,9 @@ impl Scheme {
             self.record_and_retain()?
         };
 
-        self.finish_submit_frame(tv_dispatch)
+        let frame = self.finish_submit_frame(tv_dispatch)?;
+        self.last_submitted_tv = Some(frame.timeline_value());
+        Ok(frame)
     }
 
     fn record_and_retain(&mut self) -> Result<TimelineValue, GoldyError> {
@@ -513,7 +577,6 @@ impl Scheme {
             None
         };
         self.dirty = false;
-        self.last_submitted_tv = Some(tv);
         self.stats.records += 1;
         Ok(tv)
     }
@@ -539,9 +602,7 @@ impl Scheme {
         {
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
             for grant in &self.grants {
-                let staging = grant
-                    .staging_pool
-                    .take_or_alloc(&mut **backend, device, grant.byte_size)?;
+                let staging = grant.staging_pool.take_or_alloc(&mut **backend, device)?;
                 if validation_env::scheme_validation_enabled() {
                     if staging_handles.contains(&staging) {
                         return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -550,11 +611,22 @@ impl Scheme {
                     }
                     staging_handles.push(staging);
                 }
-                copy_cmds.push(GpuCommand::CopyBuffer {
-                    src: grant.source,
-                    dst: staging,
-                    size: grant.byte_size,
-                });
+                match &grant.source {
+                    GrantSource::Buffer { source, byte_size, .. } => {
+                        copy_cmds.push(GpuCommand::CopyBuffer {
+                            src: *source,
+                            dst: staging,
+                            size: *byte_size,
+                        });
+                    }
+                    GrantSource::Texture { source, layout, .. } => {
+                        copy_cmds.push(GpuCommand::CopyTextureToReadback {
+                            src: *source,
+                            dst: staging,
+                            layout: *layout,
+                        });
+                    }
+                }
                 cells.push(Mutex::new(Some(staging)));
                 staging_pools.push(Arc::clone(&grant.staging_pool));
             }
@@ -639,11 +711,13 @@ impl Scheme {
         }
         let grant_id = GrantId(self.next_grant_id);
         self.next_grant_id += 1;
-        let staging_pool = GrantStagingPool::new(&self.ctx);
+        let staging_pool = GrantStagingPool::new_buffer(&self.ctx, byte_size);
         self.grants.push(GrantInfo {
-            source,
-            source_backing,
-            byte_size,
+            source: GrantSource::Buffer {
+                source,
+                source_backing,
+                byte_size,
+            },
             staging_pool: Arc::clone(&staging_pool),
         });
         let resource = parcel.resource_id();
@@ -660,6 +734,73 @@ impl Scheme {
             scheme_id: self.scheme_id,
             ctx: self.ctx.clone(),
             byte_size,
+            read_kind: GrantReadKind::Buffer,
+            return_pool: staging_pool,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Record a read easement grant over a texture deed parcel.
+    ///
+    /// The texture must have been created with [`TextureFlags::COPY_SRC`].
+    /// v1 supports uncompressed 2D formats only.
+    pub fn grant_read_texture(&mut self, parcel: &Parcel) -> Result<ReadGrant<GrantTexture>, GoldyError> {
+        self.dirty = true;
+        self.submit_state.register_parcel_stamp(parcel);
+        if !parcel.is_homed_on(&self.ctx) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "parcel home device does not match scheme context"
+            )));
+        }
+        let source_backing = parcel.grant_texture_keepalive().map_err(|e| self.ctx.classify(e))?;
+        let source = parcel
+            .texture_handle()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read_texture requires texture parcel")))?;
+        let (width, height, format, _access, flags) = parcel
+            .texture_descriptor()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read_texture requires texture parcel")))?;
+        if !flags.contains(TextureFlags::COPY_SRC) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "grant_read_texture requires TextureFlags::COPY_SRC"
+            )));
+        }
+        if width == 0 || height == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "grant_read_texture requires non-zero texture dimensions"
+            )));
+        }
+        let layout = {
+            let backend = self.ctx.device().inner.backend.lock().unwrap();
+            backend
+                .query_texture_readback_layout(self.ctx.device().inner.handle, width, height, format)
+                .map_err(|e| self.ctx.classify(e))?
+        };
+        let grant_id = GrantId(self.next_grant_id);
+        self.next_grant_id += 1;
+        let staging_pool = GrantStagingPool::new_texture(&self.ctx, layout);
+        self.grants.push(GrantInfo {
+            source: GrantSource::Texture {
+                source,
+                source_backing,
+                layout,
+            },
+            staging_pool: Arc::clone(&staging_pool),
+        });
+        let resource = parcel.resource_id();
+        self.ir.nodes.push(TaskNode {
+            label: "grant_read",
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::GrantRead { grant_id: grant_id.0 },
+        });
+        Ok(ReadGrant {
+            grant_id,
+            scheme_id: self.scheme_id,
+            ctx: self.ctx.clone(),
+            byte_size: layout.logical_bytes,
+            read_kind: GrantReadKind::Texture(layout),
             return_pool: staging_pool,
             _marker: PhantomData,
         })

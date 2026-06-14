@@ -1215,6 +1215,22 @@ pub(super) fn submit(
                             .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
                     }
                 }
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                    let _tz = tracy_zone!("vk.copy_texture_to_readback");
+                    let staging_buffer = state
+                        .buffers
+                        .get(dst)
+                        .context("CopyTextureToReadback: invalid dst")?
+                        .buffer;
+                    super::texture::record_copy_texture_to_readback(
+                        cmd,
+                        logical_device,
+                        &state.textures,
+                        staging_buffer,
+                        *src,
+                        *layout,
+                    )?;
+                }
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_render_target");
                     let (src_image, width, height) = {
@@ -2095,6 +2111,22 @@ fn submit_graph_impl(
                             .device
                             .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
                     }
+                }
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                    let _tz = tracy_zone!("vk.copy_texture_to_readback");
+                    let staging_buffer = state
+                        .buffers
+                        .get(dst)
+                        .context("CopyTextureToReadback: invalid dst")?
+                        .buffer;
+                    super::texture::record_copy_texture_to_readback(
+                        cmd,
+                        logical_device,
+                        &state.textures,
+                        staging_buffer,
+                        *src,
+                        *layout,
+                    )?;
                 }
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_render_target");

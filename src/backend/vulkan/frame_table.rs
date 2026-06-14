@@ -205,6 +205,7 @@ fn create_scattered_u32_buffer_at_slot(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
     Ok(handle)

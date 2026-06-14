@@ -551,6 +551,40 @@ impl GpuBackend for VulkanBackend {
         buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer);
     }
 
+    fn query_texture_readback_layout(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        Ok(buffer::query_texture_readback_layout(width, height, format))
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        buffer::alloc_texture_readback_staging(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            device,
+            layout,
+        )
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
+    }
+
     fn clear_buffer(
         &mut self,
         device_handle: DeviceHandle,

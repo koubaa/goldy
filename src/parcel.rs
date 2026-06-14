@@ -270,8 +270,7 @@ impl Parcel {
         }
     }
 
-    /// Backend texture handle (runtime only; for tests comparing identity across transfer).
-    #[cfg(test)]
+    /// Backend texture handle (runtime only).
     pub(crate) fn texture_handle(&self) -> Option<crate::backend::TextureHandle> {
         match &self.storage {
             ParcelStorage::Texture(t) => Some(t.gpu_handle()),
@@ -294,6 +293,15 @@ impl Parcel {
             ParcelStorage::Buffer(b) => Ok(std::sync::Arc::clone(b)),
             ParcelStorage::Texture(_) => anyhow::bail!("grant_read requires buffer parcel"),
             ParcelStorage::Mosaic(_) => anyhow::bail!("grant_read requires non-mosaic buffer parcel"),
+        }
+    }
+
+    /// Clone the backing [`Texture`] keepalive for a grant-read source parcel.
+    pub(crate) fn grant_texture_keepalive(&self) -> Result<crate::Texture, anyhow::Error> {
+        match &self.storage {
+            ParcelStorage::Texture(t) => Ok(t.clone()),
+            ParcelStorage::Buffer(_) => anyhow::bail!("grant_read_texture requires texture parcel"),
+            ParcelStorage::Mosaic(_) => anyhow::bail!("grant_read_texture requires texture parcel"),
         }
     }
 

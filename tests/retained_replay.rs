@@ -479,10 +479,7 @@ fn grant_read_double_read_same_frame_errors() {
 
     let _loan = grant.read(&frame).expect("first read");
     let err = grant.read(&frame).expect_err("second read must fail");
-    assert!(
-        err.to_string().contains("already consumed"),
-        "unexpected error: {err}"
-    );
+    assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
 /// Cloned frames share one staging cell; only one read succeeds.
@@ -503,11 +500,10 @@ fn grant_read_cloned_frame_double_read_errors() {
     let frame_clone = frame.clone();
 
     let _loan = grant.read(&frame).expect("first read");
-    let err = grant.read(&frame_clone).expect_err("cloned frame second read must fail");
-    assert!(
-        err.to_string().contains("already consumed"),
-        "unexpected error: {err}"
-    );
+    let err = grant
+        .read(&frame_clone)
+        .expect_err("cloned frame second read must fail");
+    assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
 /// Grant with no producing dispatch copies uninitialized parcel bytes (zeros on fresh acquire).
@@ -525,7 +521,10 @@ fn grant_read_without_producing_dispatch_reads_zeros() {
     let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().expect("submit");
     let values = read_grant_u32(&grant, &frame, 64);
-    assert!(values.iter().all(|&v| v == 0), "expected zeros without a producer dispatch");
+    assert!(
+        values.iter().all(|&v| v == 0),
+        "expected zeros without a producer dispatch"
+    );
 }
 
 /// Grant node before dispatch in IR still reads post-dispatch bytes — copy runs after all dispatches.
@@ -549,7 +548,10 @@ fn grant_read_before_dispatch_node_still_reads_producer_output() {
         .dispatch(1, 1, 1);
     let frame = scheme.submit().expect("submit");
     let values = read_grant_u32(&grant, &frame, 64);
-    assert!(values.iter().all(|&v| v == 42), "grant before dispatch in IR still sees fill output");
+    assert!(
+        values.iter().all(|&v| v == 42),
+        "grant before dispatch in IR still sees fill output"
+    );
 }
 
 /// Dropping a frame without reading returns staging; a later submission can still be read.
@@ -572,7 +574,10 @@ fn grant_read_drop_frame_without_read_then_submit_and_read() {
 
     let frame2 = scheme.submit().expect("submit 2 after frame1 drop");
     let values = read_grant_u32(&grant, &frame2, 64);
-    assert!(values.iter().all(|&v| v == 42), "second frame after dropped unread frame1");
+    assert!(
+        values.iter().all(|&v| v == 42),
+        "second frame after dropped unread frame1"
+    );
 }
 
 /// Many consecutive submits with dropped unread frames must not exhaust staging (pool recycles on frame drop).

@@ -258,6 +258,7 @@ pub(super) fn create(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -390,6 +391,7 @@ pub(super) fn create_sparse_with_capacity(
             sparse_block_size: block,
             sparse_pages,
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -1087,6 +1089,7 @@ pub(super) fn resize(
         sparse_block_size: 0,
         sparse_pages: Vec::new(),
         is_grant_readback: false,
+        grant_texture_readback: None,
     };
 
     let view_handles: Vec<BufferHandle> = buffers
@@ -1304,6 +1307,7 @@ pub(super) fn create_view(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -1659,9 +1663,77 @@ pub(super) fn alloc_readback_buffer(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: true,
+            grant_texture_readback: None,
         },
     );
     Ok(handle)
+}
+
+pub(super) fn query_texture_readback_layout(
+    width: u32,
+    height: u32,
+    format: crate::types::TextureFormat,
+) -> crate::backend::TextureReadbackLayout {
+    let row_pitch = width.saturating_mul(format.bytes_per_pixel());
+    let logical_bytes = row_pitch as u64 * height as u64;
+    crate::backend::TextureReadbackLayout {
+        width,
+        height,
+        format,
+        logical_bytes,
+        staging_bytes: logical_bytes,
+        row_pitch,
+        footprint_offset: 0,
+    }
+}
+
+pub(super) fn alloc_texture_readback_staging(
+    instance: &ash::Instance,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    buffers: &mut HashMap<BufferHandle, BufferState>,
+    next_buffer_handle: &mut BufferHandle,
+    device_handle: DeviceHandle,
+    layout: crate::backend::TextureReadbackLayout,
+) -> Result<BufferHandle> {
+    let handle = alloc_readback_buffer(
+        instance,
+        devices,
+        buffers,
+        next_buffer_handle,
+        device_handle,
+        layout.staging_bytes,
+    )?;
+    if let Some(buf) = buffers.get_mut(&handle) {
+        buf.grant_texture_readback = Some(layout);
+    }
+    Ok(handle)
+}
+
+pub(super) fn read_texture_readback_staging(
+    buffers: &HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    layout: crate::backend::TextureReadbackLayout,
+    output: &mut [u8],
+) -> Result<()> {
+    if output.len() as u64 != layout.logical_bytes {
+        anyhow::bail!("read_texture_readback_staging size mismatch");
+    }
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    }
+    let base = buffer.host_mapped.context("texture grant readback buffer not mapped")?;
+    let row_bytes = layout.tight_row_bytes() as usize;
+    let pitch = layout.row_pitch as usize;
+    let p = base as *const u8;
+    for row in 0..layout.height as usize {
+        let src_offset = layout.footprint_offset as usize + row * pitch;
+        let dst_offset = row * row_bytes;
+        unsafe {
+            std::ptr::copy_nonoverlapping(p.add(src_offset), output.as_mut_ptr().add(dst_offset), row_bytes);
+        }
+    }
+    Ok(())
 }
 
 /// Read bytes from a grant readback staging buffer.

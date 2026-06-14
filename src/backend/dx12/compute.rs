@@ -1311,6 +1311,18 @@ fn record_gpu_command(
             }
             unsafe { cl.CopyBufferRegion(&dst_resource, 0, &src_resource, 0, *size) };
         }
+        GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+            let _tz = tracy_zone!("dx12.copy_texture_to_readback");
+            super::texture::record_copy_texture_to_readback(
+                cl,
+                cl7,
+                &state.textures,
+                &state.buffers,
+                *src,
+                *dst,
+                *layout,
+            )?;
+        }
         GpuCommand::CopyRenderTarget { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_render_target");
             let src_res = {

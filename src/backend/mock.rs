@@ -100,6 +100,7 @@ struct MockBuffer {
     flags: BufferFlags,
     /// Grant-read staging buffer (persistently CPU-readable; no bindless slot).
     is_grant_readback: bool,
+    grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
 }
 
 #[allow(dead_code)]
@@ -302,6 +303,33 @@ impl MockBackend {
         dst_buf.data[..copy_len].copy_from_slice(&src_data);
         Ok(())
     }
+
+    fn execute_copy_texture_to_readback(
+        &mut self,
+        src: TextureHandle,
+        dst: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<()> {
+        let tex = self
+            .textures
+            .get(&src)
+            .ok_or_else(|| anyhow::anyhow!("CopyTextureToReadback: invalid src"))?;
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        let dst_buf = self
+            .buffers
+            .get_mut(&dst)
+            .ok_or_else(|| anyhow::anyhow!("CopyTextureToReadback: invalid dst"))?;
+        if dst_buf.size < layout.staging_bytes {
+            anyhow::bail!("CopyTextureToReadback: dst too small");
+        }
+        for row in 0..layout.height as usize {
+            let src_off = row * row_bytes;
+            let dst_off = layout.footprint_offset as usize + row * pitch;
+            dst_buf.data[dst_off..dst_off + row_bytes].copy_from_slice(&tex.data[src_off..src_off + row_bytes]);
+        }
+        Ok(())
+    }
 }
 
 impl Default for MockBackend {
@@ -425,6 +453,7 @@ impl GpuBackend for MockBackend {
                 bindless_index,
                 flags,
                 is_grant_readback: false,
+                grant_texture_readback: None,
             },
         );
 
@@ -461,6 +490,7 @@ impl GpuBackend for MockBackend {
                 bindless_index,
                 flags,
                 is_grant_readback: false,
+                grant_texture_readback: None,
             },
         );
 
@@ -553,6 +583,7 @@ impl GpuBackend for MockBackend {
                 bindless_index: index,
                 flags: BufferFlags::empty(),
                 is_grant_readback: false,
+                grant_texture_readback: None,
             },
         );
 
@@ -616,9 +647,87 @@ impl GpuBackend for MockBackend {
                 bindless_index: 0,
                 flags: BufferFlags::empty(),
                 is_grant_readback: true,
+                grant_texture_readback: None,
             },
         );
         Ok(handle)
+    }
+
+    fn query_texture_readback_layout(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        let row_pitch = width.saturating_mul(format.bytes_per_pixel());
+        let logical_bytes = row_pitch as u64 * height as u64;
+        Ok(crate::backend::TextureReadbackLayout {
+            width,
+            height,
+            format,
+            logical_bytes,
+            staging_bytes: logical_bytes,
+            row_pitch,
+            footprint_offset: 0,
+        })
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+        self.readback_alloc_count += 1;
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle: device,
+                size: layout.staging_bytes,
+                alloc_size: layout.staging_bytes,
+                data: vec![0u8; layout.staging_bytes as usize],
+                bindless_index: 0,
+                flags: BufferFlags::empty(),
+                is_grant_readback: true,
+                grant_texture_readback: Some(layout),
+            },
+        );
+        Ok(handle)
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        if output.len() as u64 != layout.logical_bytes {
+            anyhow::bail!(
+                "read_texture_readback_staging size mismatch: expected {}, got {}",
+                layout.logical_bytes,
+                output.len()
+            );
+        }
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if !buf.is_grant_readback {
+            anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+        }
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        for row in 0..layout.height as usize {
+            let src = row * pitch;
+            let dst = row * row_bytes;
+            output[dst..dst + row_bytes].copy_from_slice(&buf.data[src..src + row_bytes]);
+        }
+        Ok(())
     }
 
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
@@ -1239,8 +1348,14 @@ impl GpuBackend for MockBackend {
         self.compute_dispatch_count += 1;
 
         for cmd in commands {
-            if let GpuCommand::CopyBuffer { src, dst, size } = cmd {
-                self.execute_copy_buffer(*src, *dst, *size)?;
+            match cmd {
+                GpuCommand::CopyBuffer { src, dst, size } => {
+                    self.execute_copy_buffer(*src, *dst, *size)?;
+                }
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                    self.execute_copy_texture_to_readback(*src, *dst, *layout)?;
+                }
+                _ => {}
             }
         }
 

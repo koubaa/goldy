@@ -213,6 +213,7 @@ fn create_scattered_u32_buffer_at_slot(
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
     Ok(handle)

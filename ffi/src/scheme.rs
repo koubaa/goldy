@@ -8,8 +8,7 @@ use crate::types::{GoldyNodeAccess, GoldyResourceAccess};
 use goldy::scheme::{ReadGrant, Scheme};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess};
 use goldy::types::ResourceAccess;
-use goldy::GrantBuffer;
-use goldy::MosaicSlot;
+use goldy::{GrantBuffer, GrantTexture, MosaicSlot, ParcelType};
 use std::ffi::CStr;
 
 /// Opaque per-submission frame token returned by [`goldy_scheme_submit`].
@@ -23,7 +22,35 @@ pub struct GoldySchemeFrame {
 ///
 /// Heap-allocated; destroy with [`goldy_read_grant_destroy`].
 pub struct GoldyReadGrant {
-    pub(crate) inner: ReadGrant<GrantBuffer>,
+    pub(crate) inner: ReadGrantInner,
+}
+
+pub(crate) enum ReadGrantInner {
+    Buffer(ReadGrant<GrantBuffer>),
+    Texture(ReadGrant<GrantTexture>),
+}
+
+impl ReadGrantInner {
+    fn byte_size(&self) -> u64 {
+        match self {
+            ReadGrantInner::Buffer(g) => g.byte_size(),
+            ReadGrantInner::Texture(g) => g.byte_size(),
+        }
+    }
+
+    fn read_copy(&self, frame: &goldy::SchemeFrame, output: &mut [u8]) -> Result<(), goldy::GoldyError> {
+        match self {
+            ReadGrantInner::Buffer(g) => {
+                let loan = g.read(frame)?;
+                output.copy_from_slice(&loan);
+            }
+            ReadGrantInner::Texture(g) => {
+                let loan = g.read(frame)?;
+                output.copy_from_slice(&loan);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Outcome counters for [`goldy_scheme_replay_stats`].
@@ -369,12 +396,25 @@ pub unsafe extern "C" fn goldy_scheme_grant_read(
         set_last_error("Cannot grant_read while recording a compute node");
         return std::ptr::null_mut();
     }
-    match (*scheme).inner.grant_read(&(*parcel).inner) {
-        Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant { inner: grant })),
-        Err(e) => {
-            set_last_error(format!("{e}"));
-            std::ptr::null_mut()
-        }
+    match (*parcel).inner.kind() {
+        ParcelType::Texture => match (*scheme).inner.grant_read_texture(&(*parcel).inner) {
+            Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
+                inner: ReadGrantInner::Texture(grant),
+            })),
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                std::ptr::null_mut()
+            }
+        },
+        ParcelType::Buffer => match (*scheme).inner.grant_read(&(*parcel).inner) {
+            Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
+                inner: ReadGrantInner::Buffer(grant),
+            })),
+            Err(e) => {
+                set_last_error(format!("{e}"));
+                std::ptr::null_mut()
+            }
+        },
     }
 }
 
@@ -420,18 +460,15 @@ pub unsafe extern "C" fn goldy_read_grant_read(
         return GoldyResult::NullPointer;
     }
     let out = std::slice::from_raw_parts_mut(output, output_size);
-    match (*grant).inner.read(&(*frame).inner) {
-        Ok(loan) => {
-            if loan.len() != output_size {
-                set_last_error(format!(
-                    "grant readback size mismatch: expected {output_size}, got {}",
-                    loan.len()
-                ));
-                return GoldyResult::InvalidArgument;
-            }
-            out.copy_from_slice(&loan);
-            GoldyResult::Ok
-        }
+    if output_size as u64 != (*grant).inner.byte_size() {
+        set_last_error(format!(
+            "grant readback size mismatch: expected {output_size}, grant byte size is {}",
+            (*grant).inner.byte_size()
+        ));
+        return GoldyResult::InvalidArgument;
+    }
+    match (*grant).inner.read_copy(&(*frame).inner, out) {
+        Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));
             GoldyResult::GpuError

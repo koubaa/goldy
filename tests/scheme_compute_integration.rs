@@ -1528,7 +1528,6 @@ fn scheme_scattered_typed_variable_assignment() {
 
 #[test]
 fn scheme_compute_write_to_texture() {
-    // Texture grant readback deferred (buffers-first v1); buffer output uses grant in dual-view test.
     let device = make_device();
     let ctx = submission_context(&device);
 
@@ -1559,16 +1558,11 @@ fn scheme_compute_write_to_texture() {
         .bind_parcel(&texture, NodeAccess::Write)
         .bind_resources_typed(&[tex_w])
         .dispatch(wg_x, wg_y, 1);
+    let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
     let frame = scheme.submit().expect("submit");
-    frame.wait(&ctx).expect("wait");
+    let loan = grant.read(&frame).expect("grant read");
 
-    let mut output = vec![0u8; (width * height * 4) as usize];
-    texture
-        .detach_texture()
-        .expect("detach texture parcel")
-        .read_to_cpu(&mut output)
-        .expect("readback");
-
+    let output = &*loan;
     let nonzero = output.iter().filter(|&&b| b != 0).count();
     assert!(nonzero > 0, "texture readback all zeros");
     assert_eq!(output[0], 255, "R channel");

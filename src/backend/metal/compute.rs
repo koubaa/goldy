@@ -46,7 +46,7 @@ fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCate
 }
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
+use mtl::{MTLBlitOption, MTLCommandBufferStatus, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -764,6 +764,34 @@ pub(super) fn record_commands_to_buffer(
                     (src_state.buffer.clone(), dst_state.buffer.clone())
                 };
                 guard.blit.unwrap().copy_from_buffer(&src_mtl, 0, &dst_mtl, 0, *size);
+            }
+            GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                ensure_blit_buf!(*dst);
+                let (src_tex, dst_mtl, bytes_per_row) = {
+                    let src_state = state.textures.get(src).context("CopyTextureToReadback: invalid src")?;
+                    let dst_state = state.buffers.get(dst).context("CopyTextureToReadback: invalid dst")?;
+                    (
+                        src_state.texture.clone(),
+                        dst_state.buffer.clone(),
+                        layout.tight_row_bytes() as u64,
+                    )
+                };
+                guard.blit.unwrap().copy_from_texture_to_buffer(
+                    &src_tex,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    MTLSize {
+                        width: layout.width as u64,
+                        height: layout.height as u64,
+                        depth: 1,
+                    },
+                    &dst_mtl,
+                    layout.footprint_offset,
+                    bytes_per_row,
+                    layout.staging_bytes,
+                    MTLBlitOption::empty(),
+                );
             }
             GpuCommand::CopyRenderTarget { src, dst } => {
                 ensure_blit_tex!(*dst);

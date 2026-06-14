@@ -640,6 +640,33 @@ impl GpuBackend for Dx12Backend {
         buffer::destroy(&mut self.state, buffer);
     }
 
+    fn query_texture_readback_layout(
+        &self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        texture::query_readback_layout(&self.state, device, width, height, format)
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        buffer::alloc_texture_readback_staging(&mut self.state, device, layout)
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
+    }
+
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let adapter_id = self.state.devices.get(&device).map(|d| d.adapter_id).unwrap_or(0);
         self.adapter_capabilities(adapter_id)

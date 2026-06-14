@@ -709,6 +709,82 @@ pub(super) fn write_region(
     Ok(())
 }
 
+/// Record copy from a texture into a grant-readback staging buffer.
+pub(super) fn record_copy_texture_to_readback(
+    cmd: vk::CommandBuffer,
+    logical_device: &types::SharedLogicalDevice,
+    textures: &HashMap<TextureHandle, TextureState>,
+    staging_buffer: vk::Buffer,
+    src: TextureHandle,
+    layout: crate::backend::TextureReadbackLayout,
+) -> Result<()> {
+    let (image, old_layout) = {
+        let texture = textures
+            .get(&src)
+            .context("CopyTextureToReadback: src texture not found")?;
+        (texture.image, texture.image_layout())
+    };
+    unsafe {
+        let (src_stage, src_access) = match old_layout {
+            vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+                vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+            ),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL => {
+                (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE)
+            }
+            vk::ImageLayout::GENERAL => (
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+            ),
+            _ => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
+        };
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: layout.width,
+                height: layout.height,
+                depth: 1,
+            });
+        logical_device.device.cmd_copy_image_to_buffer(
+            cmd,
+            image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            staging_buffer,
+            std::slice::from_ref(&region),
+        );
+    }
+    Ok(())
+}
+
 /// Read texture contents to CPU memory.
 /// The texture must have been created with TextureFlags::COPY_SRC.
 #[allow(clippy::too_many_arguments)]

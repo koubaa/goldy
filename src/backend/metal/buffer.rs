@@ -182,6 +182,7 @@ fn insert_buffer_common(
             access,
             view_byte_offset,
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -409,6 +410,7 @@ pub(super) fn create_view(
             access: BufferKind::Scattered,
             view_byte_offset: Some(offset),
             is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -516,6 +518,7 @@ pub(super) fn resize(
         access: old_state.access,
         view_byte_offset: None,
         is_grant_readback: false,
+        grant_texture_readback: None,
     };
 
     let new_mtl = state.buffers.get(&buffer_handle).unwrap().buffer.clone();
@@ -804,9 +807,66 @@ pub(super) fn alloc_readback_buffer(
             access: BufferKind::Scattered,
             view_byte_offset: None,
             is_grant_readback: true,
+            grant_texture_readback: None,
         },
     );
     Ok(handle)
+}
+
+pub(super) fn query_texture_readback_layout(
+    width: u32,
+    height: u32,
+    format: crate::types::TextureFormat,
+) -> crate::backend::TextureReadbackLayout {
+    let row_pitch = width.saturating_mul(format.bytes_per_pixel());
+    let logical_bytes = row_pitch as u64 * height as u64;
+    crate::backend::TextureReadbackLayout {
+        width,
+        height,
+        format,
+        logical_bytes,
+        staging_bytes: logical_bytes,
+        row_pitch,
+        footprint_offset: 0,
+    }
+}
+
+pub(super) fn alloc_texture_readback_staging(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    layout: crate::backend::TextureReadbackLayout,
+) -> Result<BufferHandle> {
+    let handle = alloc_readback_buffer(state, device_handle, layout.staging_bytes)?;
+    if let Some(buf) = state.buffers.get_mut(&handle) {
+        buf.grant_texture_readback = Some(layout);
+    }
+    Ok(handle)
+}
+
+pub(super) fn read_texture_readback_staging(
+    state: &MetalState,
+    buffer_handle: BufferHandle,
+    layout: crate::backend::TextureReadbackLayout,
+    output: &mut [u8],
+) -> Result<()> {
+    if output.len() as u64 != layout.logical_bytes {
+        anyhow::bail!("read_texture_readback_staging size mismatch");
+    }
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    }
+    let row_bytes = layout.tight_row_bytes() as usize;
+    let pitch = layout.row_pitch as usize;
+    unsafe {
+        let ptr = buffer.buffer.contents() as *const u8;
+        for row in 0..layout.height as usize {
+            let src_offset = layout.footprint_offset as usize + row * pitch;
+            let dst_offset = row * row_bytes;
+            std::ptr::copy_nonoverlapping(ptr.add(src_offset), output.as_mut_ptr().add(dst_offset), row_bytes);
+        }
+    }
+    Ok(())
 }
 
 /// Read bytes from a grant readback staging buffer.
