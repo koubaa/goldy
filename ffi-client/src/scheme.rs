@@ -3,23 +3,58 @@ use crate::context::Context;
 use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::retained_pool::MosaicSlot;
-use crate::sys::{self, GoldyReplayStats, GoldyScheme, GoldySchemeFrame};
+use crate::sys::{self, GoldyReadGrant, GoldyReplayStats, GoldyScheme, GoldySchemeFrame};
 use crate::types::{NodeAccess, ResourceAccess};
 use std::ffi::CString;
 
 /// Per-submission identity returned by [`Scheme::submit`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemeFrame {
-    inner: GoldySchemeFrame,
+    ptr: *mut GoldySchemeFrame,
 }
 
 impl SchemeFrame {
-    pub fn timeline_value(self) -> u64 {
-        self.inner.timeline_value
+    pub fn timeline_value(&self) -> u64 {
+        unsafe { sys::goldy_scheme_frame_timeline_value(self.ptr) }
     }
 
-    pub fn wait(self, ctx: &Context) -> Result<()> {
-        check(unsafe { sys::goldy_scheme_frame_wait(ctx.as_ptr(), self.inner) })
+    pub fn wait(&self, ctx: &Context) -> Result<()> {
+        check(unsafe { sys::goldy_scheme_frame_wait(ctx.as_ptr(), self.ptr) })
+    }
+}
+
+impl Drop for SchemeFrame {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { sys::goldy_scheme_frame_destroy(self.ptr) };
+            self.ptr = std::ptr::null_mut();
+        }
+    }
+}
+
+/// Read easement grant recorded once via [`Scheme::grant_read`].
+pub struct ReadGrant {
+    ptr: *mut GoldyReadGrant,
+}
+
+impl ReadGrant {
+    pub fn byte_size(&self) -> u64 {
+        unsafe { sys::goldy_read_grant_byte_size(self.ptr) }
+    }
+
+    /// Readable bytes for `frame`'s submission (full logical buffer size).
+    pub fn read(&self, frame: &SchemeFrame) -> Result<Vec<u8>> {
+        let mut output = vec![0u8; self.byte_size() as usize];
+        check(unsafe { sys::goldy_read_grant_read(self.ptr, frame.ptr, output.as_mut_ptr(), output.len()) })?;
+        Ok(output)
+    }
+}
+
+impl Drop for ReadGrant {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { sys::goldy_read_grant_destroy(self.ptr) };
+            self.ptr = std::ptr::null_mut();
+        }
     }
 }
 
@@ -51,10 +86,16 @@ impl Scheme {
         })
     }
 
+    /// Record a read easement over a buffer parcel (once per scheme).
+    pub fn grant_read(&mut self, parcel: &Parcel) -> Result<ReadGrant> {
+        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read(self.ptr, parcel.as_ptr()) });
+        Ok(ReadGrant { ptr })
+    }
+
     pub fn submit(&mut self) -> Result<SchemeFrame> {
-        let mut frame = GoldySchemeFrame::default();
+        let mut frame = std::ptr::null_mut();
         check(unsafe { sys::goldy_scheme_submit(self.ptr, &mut frame) })?;
-        Ok(SchemeFrame { inner: frame })
+        Ok(SchemeFrame { ptr: frame })
     }
 
     pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {

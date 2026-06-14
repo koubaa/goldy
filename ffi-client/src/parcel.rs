@@ -17,12 +17,6 @@ impl Parcel {
         unsafe { sys::goldy_parcel_byte_size(self.ptr) }
     }
 
-    pub fn read_to_cpu(&self, device: &Device) -> Result<Vec<u8>> {
-        let mut output = vec![0u8; self.byte_size() as usize];
-        check(unsafe { sys::goldy_parcel_read_to_cpu(self.ptr, device.as_ptr(), output.as_mut_ptr(), output.len()) })?;
-        Ok(output)
-    }
-
     pub fn mosaic_view_resource_index(
         &self,
         slot: crate::retained_pool::MosaicSlot,

@@ -1614,8 +1614,8 @@ pub(super) fn alloc_readback_buffer(
         .size(size)
         .usage(vk::BufferUsageFlags::TRANSFER_DST)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
-    let buffer =
-        unsafe { logical_device.device.create_buffer(&buffer_info, None) }.context("Failed to create readback buffer")?;
+    let buffer = unsafe { logical_device.device.create_buffer(&buffer_info, None) }
+        .context("Failed to create readback buffer")?;
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
     let desired_flags = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
     let memory_type = find_memory_type(
@@ -1632,8 +1632,7 @@ pub(super) fn alloc_readback_buffer(
         .context("Failed to allocate readback buffer memory")?;
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind readback buffer memory")?;
-    let ptr = unsafe { logical_device.map_memory2(memory, 0, size) }
-        .context("Failed to map grant readback buffer")?;
+    let ptr = unsafe { logical_device.map_memory2(memory, 0, size) }.context("Failed to map grant readback buffer")?;
     let host_mapped = Some(ptr as usize);
 
     let handle = *next_buffer_handle;

@@ -197,10 +197,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     scheme.node("fill", pipeline).declare_parcel(
         parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
     ).dispatch(1, 1, 1)
+    grant = scheme.grant_read(parcel)
     frame = scheme.submit()
-    frame.wait(ctx)
-
-    values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
+    values = np.frombuffer(grant.read(frame), dtype=np.uint32)
     assert values.shape == (64,)
     assert np.all(values == 42)
 

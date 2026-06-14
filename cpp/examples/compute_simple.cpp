@@ -1,5 +1,5 @@
 /**
- * Headless compute — Scheme compute dispatch + CPU readback (no GLFW).
+ * Headless compute — Scheme compute dispatch + grant readback (no GLFW).
  *
  * Mirrors ffi-client/examples/compute_simple.rs.
  *
@@ -56,9 +56,10 @@ int main() {
             node.declare_parcel(buffer, goldy::NodeAccess::ReadWrite, goldy::ResourceAccess::Write);
             node.dispatch(1, 1, 1);
         }
-        scheme.submit().wait(ctx);
+        auto grant = scheme.grant_read(buffer);
+        auto frame = scheme.submit();
+        const auto bytes = grant.read(frame);
 
-        const auto bytes = buffer.read_to_cpu(device);
         if (bytes.size() < 64 * sizeof(float)) {
             throw std::runtime_error("readback too small");
         }

@@ -776,7 +776,11 @@ pub(super) fn clear(
 }
 
 /// Allocate a shared-storage staging buffer for grant readback (no argument-buffer slot).
-pub(super) fn alloc_readback_buffer(state: &mut MetalState, device_handle: DeviceHandle, size: u64) -> Result<BufferHandle> {
+pub(super) fn alloc_readback_buffer(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    size: u64,
+) -> Result<BufferHandle> {
     use metal as mtl;
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let buffer = logical_device.device.new_buffer(
@@ -806,11 +810,7 @@ pub(super) fn alloc_readback_buffer(state: &mut MetalState, device_handle: Devic
 }
 
 /// Read bytes from a grant readback staging buffer.
-pub(super) fn read_readback_buffer(
-    state: &MetalState,
-    buffer_handle: BufferHandle,
-    output: &mut [u8],
-) -> Result<()> {
+pub(super) fn read_readback_buffer(state: &MetalState, buffer_handle: BufferHandle, output: &mut [u8]) -> Result<()> {
     let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
     if !buffer.is_grant_readback {
         anyhow::bail!("read_readback_buffer requires a grant readback buffer");

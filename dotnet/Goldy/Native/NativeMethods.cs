@@ -263,9 +263,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_context_destroy")]
     internal static partial void ContextDestroy(nint ctx);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_context_wait_until")]
-    internal static partial GoldyResult ContextWaitUntil(nint ctx, ulong timelineValue);
-
     // ========================================================================
     // Scheme
     // ========================================================================
@@ -288,10 +285,29 @@ internal static partial class NativeMethods
         nint scheme, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_submit")]
-    internal static partial GoldyResult SchemeSubmit(nint scheme, out GoldySchemeFrameNative frame);
+    internal static partial GoldyResult SchemeSubmit(nint scheme, out nint outFrame);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_destroy")]
+    internal static partial void SchemeFrameDestroy(nint frame);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_timeline_value")]
+    internal static partial ulong SchemeFrameTimelineValue(nint frame);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_wait")]
-    internal static partial GoldyResult SchemeFrameWait(nint ctx, GoldySchemeFrameNative frame);
+    internal static partial GoldyResult SchemeFrameWait(nint ctx, nint frame);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_grant_read")]
+    internal static partial nint SchemeGrantRead(nint scheme, nint parcel);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_destroy")]
+    internal static partial void ReadGrantDestroy(nint grant);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_byte_size")]
+    internal static partial ulong ReadGrantByteSize(nint grant);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_read")]
+    internal static partial GoldyResult ReadGrantRead(
+        nint grant, nint frame, nint output, nuint outputSize);
 
     // ========================================================================
     // RetainedPool / Parcel
@@ -315,9 +331,6 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_parcel_resource_index")]
     internal static partial uint ParcelResourceIndex(nint parcel, ResourceAccess access);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_parcel_read_to_cpu")]
-    internal static partial GoldyResult ParcelReadToCpu(nint parcel, nint device, nint output, nuint outputSize);
 
     // ========================================================================
     // Surface - Platform-specific creation

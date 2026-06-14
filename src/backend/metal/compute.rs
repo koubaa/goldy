@@ -763,10 +763,7 @@ pub(super) fn record_commands_to_buffer(
                     }
                     (src_state.buffer.clone(), dst_state.buffer.clone())
                 };
-                guard
-                    .blit
-                    .unwrap()
-                    .copy_from_buffer(&src_mtl, 0, &dst_mtl, 0, *size);
+                guard.blit.unwrap().copy_from_buffer(&src_mtl, 0, &dst_mtl, 0, *size);
             }
             GpuCommand::CopyRenderTarget { src, dst } => {
                 ensure_blit_tex!(*dst);

@@ -182,31 +182,6 @@ pub unsafe extern "C" fn goldy_parcel_byte_size(parcel: *const GoldyParcel) -> u
     (*parcel).inner.byte_size()
 }
 
-/// Read buffer parcel contents back to CPU memory.
-///
-/// # Safety
-/// All pointers must be valid. `output` must point to at least `output_size` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_parcel_read_to_cpu(
-    parcel: *const GoldyParcel,
-    device: *const GoldyDevice,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    if parcel.is_null() || device.is_null() || output.is_null() {
-        return GoldyResult::NullPointer;
-    }
-
-    let out = slice::from_raw_parts_mut(output, output_size);
-    match (*parcel).inner.read_to_cpu(&(*device).inner, out) {
-        Ok(()) => GoldyResult::Ok,
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            GoldyResult::GpuError
-        }
-    }
-}
-
 /// Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
 #[no_mangle]
 pub unsafe extern "C" fn goldy_mosaic_builder_create() -> *mut GoldyMosaicBuilder {

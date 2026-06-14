@@ -2036,7 +2036,11 @@ pub(super) fn clear(
 }
 
 /// Allocate a persistently mapped READBACK staging buffer for grant readback.
-pub(super) fn alloc_readback_buffer(state: &mut Dx12State, device_handle: DeviceHandle, size: u64) -> Result<BufferHandle> {
+pub(super) fn alloc_readback_buffer(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    size: u64,
+) -> Result<BufferHandle> {
     use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
     let device = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -2074,8 +2078,7 @@ pub(super) fn alloc_readback_buffer(state: &mut Dx12State, device_handle: Device
     let resource = resource.context("CreateCommittedResource readback returned null")?;
     let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
     let no_read = D3D12_RANGE { Begin: 0, End: 0 };
-    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
-        .context("Failed to map grant readback buffer")?;
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map grant readback buffer")?;
     let mapped_addr = mapped as usize;
 
     let handle = state.next_buffer_handle;

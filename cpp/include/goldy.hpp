@@ -256,6 +256,14 @@ struct SchemeDeleter {
     void operator()(GoldyScheme* p) const { if (p) goldy_scheme_destroy(p); }
 };
 
+struct SchemeFrameDeleter {
+    void operator()(GoldySchemeFrame* p) const { if (p) goldy_scheme_frame_destroy(p); }
+};
+
+struct ReadGrantDeleter {
+    void operator()(GoldyReadGrant* p) const { if (p) goldy_read_grant_destroy(p); }
+};
+
 struct ComputePipelineDeleter {
     void operator()(GoldyComputePipeline* p) const { if (p) goldy_compute_pipeline_destroy(p); }
 };
@@ -436,10 +444,6 @@ public:
 
     GoldyContext* get() const { return ptr_.get(); }
 
-    void wait_until(uint64_t timeline_value) const {
-        detail::throw_on_result(goldy_context_wait_until(ptr_.get(), timeline_value));
-    }
-
 private:
     std::unique_ptr<GoldyContext, detail::ContextDeleter> ptr_;
 };
@@ -611,13 +615,6 @@ public:
     Parcel& operator=(Parcel&&) = default;
 
     uint64_t byte_size() const { return goldy_parcel_byte_size(ptr_.get()); }
-
-    std::vector<uint8_t> read_to_cpu(const Device& device) const {
-        std::vector<uint8_t> output(byte_size());
-        detail::throw_on_result(goldy_parcel_read_to_cpu(
-            ptr_.get(), device.get(), output.data(), output.size()));
-        return output;
-    }
 
     uint32_t mosaic_view_resource_index(uint32_t slot, ResourceAccess access) const {
         uint32_t idx = goldy_parcel_mosaic_view_resource_index(
@@ -1312,16 +1309,57 @@ private:
 class SchemeFrame {
 public:
     SchemeFrame() = default;
-    explicit SchemeFrame(GoldySchemeFrame frame) : frame_(frame) {}
 
-    [[nodiscard]] uint64_t timeline_value() const { return frame_.timeline_value; }
+    explicit SchemeFrame(GoldySchemeFrame* frame) : ptr_(frame) {}
 
-    void wait(const Context& ctx) const {
-        detail::throw_on_result(goldy_scheme_frame_wait(ctx.get(), frame_));
+    SchemeFrame(const SchemeFrame&) = delete;
+    SchemeFrame& operator=(const SchemeFrame&) = delete;
+    SchemeFrame(SchemeFrame&&) = default;
+    SchemeFrame& operator=(SchemeFrame&&) = default;
+
+    [[nodiscard]] uint64_t timeline_value() const {
+        return goldy_scheme_frame_timeline_value(ptr_.get());
     }
 
+    void wait(const Context& ctx) const {
+        detail::throw_on_result(goldy_scheme_frame_wait(ctx.get(), ptr_.get()));
+    }
+
+    GoldySchemeFrame* get() const { return ptr_.get(); }
+
 private:
-    GoldySchemeFrame frame_{};
+    std::unique_ptr<GoldySchemeFrame, detail::SchemeFrameDeleter> ptr_;
+};
+
+/**
+ * @brief Read easement grant recorded once via Scheme::grant_read().
+ */
+class ReadGrant {
+public:
+    ReadGrant() = default;
+
+    explicit ReadGrant(GoldyReadGrant* grant) : ptr_(grant) {}
+
+    ReadGrant(const ReadGrant&) = delete;
+    ReadGrant& operator=(const ReadGrant&) = delete;
+    ReadGrant(ReadGrant&&) = default;
+    ReadGrant& operator=(ReadGrant&&) = default;
+
+    [[nodiscard]] uint64_t byte_size() const {
+        return goldy_read_grant_byte_size(ptr_.get());
+    }
+
+    [[nodiscard]] std::vector<uint8_t> read(const SchemeFrame& frame) const {
+        std::vector<uint8_t> output(byte_size());
+        detail::throw_on_result(goldy_read_grant_read(
+            ptr_.get(), frame.get(), output.data(), output.size()));
+        return output;
+    }
+
+    GoldyReadGrant* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyReadGrant, detail::ReadGrantDeleter> ptr_;
 };
 
 /**
@@ -1348,8 +1386,16 @@ public:
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
 
+    [[nodiscard]] ReadGrant grant_read(const Parcel& parcel) {
+        GoldyReadGrant* grant = goldy_scheme_grant_read(ptr_.get(), parcel.get());
+        if (!grant) {
+            throw Exception::from_last_error();
+        }
+        return ReadGrant{grant};
+    }
+
     [[nodiscard]] SchemeFrame submit() {
-        GoldySchemeFrame frame{};
+        GoldySchemeFrame* frame = nullptr;
         detail::throw_on_result(goldy_scheme_submit(ptr_.get(), &frame));
         return SchemeFrame{frame};
     }

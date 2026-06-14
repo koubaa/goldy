@@ -89,12 +89,3 @@ internal struct SamplerDescNative
         LodMaxClamp = 32.0f,
     };
 }
-
-/// <summary>
-/// Per-submission identity returned by scheme submit (mirrors C ABI).
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct GoldySchemeFrameNative
-{
-    public ulong TimelineValue;
-}

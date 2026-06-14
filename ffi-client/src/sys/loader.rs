@@ -25,7 +25,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
     pub goldy_context_create: FnGoldyContextCreate,
     pub goldy_context_destroy: FnGoldyContextDestroy,
-    pub goldy_context_wait_until: FnGoldyContextWaitUntil,
     pub goldy_device_adapter_id: FnGoldyDeviceAdapterId,
     pub goldy_device_destroy: FnGoldyDeviceDestroy,
     pub goldy_device_has_library: FnGoldyDeviceHasLibrary,
@@ -103,7 +102,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_parcel_mosaic_view_resource_index: FnGoldyParcelMosaicViewResourceIndex,
     pub goldy_parcel_mosaic_view_read_to_cpu: FnGoldyParcelMosaicViewReadToCpu,
     pub goldy_parcel_mosaic_view_size: FnGoldyParcelMosaicViewSize,
-    pub goldy_parcel_read_to_cpu: FnGoldyParcelReadToCpu,
     pub goldy_task_graph_compute_node_bind_parcel_view: FnGoldyTaskGraphComputeNodeBindParcelView,
     pub goldy_task_graph_render_pass_bind_parcel_view: FnGoldyTaskGraphRenderPassBindParcelView,
     pub goldy_scheme_create: FnGoldySchemeCreate,
@@ -116,7 +114,13 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_compute_node_declare_parcel_view: FnGoldySchemeComputeNodeDeclareParcelView,
     pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
     pub goldy_scheme_submit: FnGoldySchemeSubmit,
+    pub goldy_scheme_frame_destroy: FnGoldySchemeFrameDestroy,
+    pub goldy_scheme_frame_timeline_value: FnGoldySchemeFrameTimelineValue,
     pub goldy_scheme_frame_wait: FnGoldySchemeFrameWait,
+    pub goldy_scheme_grant_read: FnGoldySchemeGrantRead,
+    pub goldy_read_grant_destroy: FnGoldyReadGrantDestroy,
+    pub goldy_read_grant_byte_size: FnGoldyReadGrantByteSize,
+    pub goldy_read_grant_read: FnGoldyReadGrantRead,
 }
 
 impl GoldyFfi {
@@ -145,7 +149,6 @@ impl GoldyFfi {
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
             goldy_context_create: sym!("goldy_context_create", FnGoldyContextCreate),
             goldy_context_destroy: sym!("goldy_context_destroy", FnGoldyContextDestroy),
-            goldy_context_wait_until: sym!("goldy_context_wait_until", FnGoldyContextWaitUntil),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),
             goldy_device_destroy: sym!("goldy_device_destroy", FnGoldyDeviceDestroy),
             goldy_device_has_library: sym!("goldy_device_has_library", FnGoldyDeviceHasLibrary),
@@ -301,7 +304,6 @@ impl GoldyFfi {
                 FnGoldyParcelMosaicViewReadToCpu
             ),
             goldy_parcel_mosaic_view_size: sym!("goldy_parcel_mosaic_view_size", FnGoldyParcelMosaicViewSize),
-            goldy_parcel_read_to_cpu: sym!("goldy_parcel_read_to_cpu", FnGoldyParcelReadToCpu),
             goldy_task_graph_compute_node_bind_parcel_view: sym!(
                 "goldy_task_graph_compute_node_bind_parcel_view",
                 FnGoldyTaskGraphComputeNodeBindParcelView
@@ -329,7 +331,16 @@ impl GoldyFfi {
                 FnGoldySchemeComputeNodeDispatch
             ),
             goldy_scheme_submit: sym!("goldy_scheme_submit", FnGoldySchemeSubmit),
+            goldy_scheme_frame_destroy: sym!("goldy_scheme_frame_destroy", FnGoldySchemeFrameDestroy),
+            goldy_scheme_frame_timeline_value: sym!(
+                "goldy_scheme_frame_timeline_value",
+                FnGoldySchemeFrameTimelineValue
+            ),
             goldy_scheme_frame_wait: sym!("goldy_scheme_frame_wait", FnGoldySchemeFrameWait),
+            goldy_scheme_grant_read: sym!("goldy_scheme_grant_read", FnGoldySchemeGrantRead),
+            goldy_read_grant_destroy: sym!("goldy_read_grant_destroy", FnGoldyReadGrantDestroy),
+            goldy_read_grant_byte_size: sym!("goldy_read_grant_byte_size", FnGoldyReadGrantByteSize),
+            goldy_read_grant_read: sym!("goldy_read_grant_read", FnGoldyReadGrantRead),
             _library: library,
         })
     }

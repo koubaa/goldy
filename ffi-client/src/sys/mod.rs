@@ -28,10 +28,6 @@ pub unsafe fn goldy_context_create(device: *const GoldyDevice) -> *mut GoldyCont
     (lib().goldy_context_create)(device)
 }
 
-pub unsafe fn goldy_context_wait_until(ctx: *const GoldyContext, timeline_value: u64) -> GoldyResult {
-    (lib().goldy_context_wait_until)(ctx, timeline_value)
-}
-
 pub unsafe fn goldy_context_destroy(ctx: *mut GoldyContext) {
     (lib().goldy_context_destroy)(ctx)
 }
@@ -128,15 +124,6 @@ pub unsafe fn goldy_parcel_mosaic_view_read_to_cpu(
 
 pub unsafe fn goldy_parcel_mosaic_view_size(parcel: *const GoldyParcel, slot: u32) -> u64 {
     (lib().goldy_parcel_mosaic_view_size)(parcel, slot)
-}
-
-pub unsafe fn goldy_parcel_read_to_cpu(
-    parcel: *const GoldyParcel,
-    device: *const GoldyDevice,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    (lib().goldy_parcel_read_to_cpu)(parcel, device, output, output_size)
 }
 
 pub unsafe fn goldy_instance_adapter_count(instance: *const GoldyInstance) -> u32 {
@@ -554,10 +541,39 @@ pub unsafe fn goldy_scheme_compute_node_dispatch(
     (lib().goldy_scheme_compute_node_dispatch)(scheme, workgroups_x, workgroups_y, workgroups_z)
 }
 
-pub unsafe fn goldy_scheme_submit(scheme: *mut GoldyScheme, out_frame: *mut GoldySchemeFrame) -> GoldyResult {
+pub unsafe fn goldy_scheme_submit(scheme: *mut GoldyScheme, out_frame: *mut *mut GoldySchemeFrame) -> GoldyResult {
     (lib().goldy_scheme_submit)(scheme, out_frame)
 }
 
-pub unsafe fn goldy_scheme_frame_wait(ctx: *const GoldyContext, frame: GoldySchemeFrame) -> GoldyResult {
+pub unsafe fn goldy_scheme_frame_destroy(frame: *mut GoldySchemeFrame) {
+    (lib().goldy_scheme_frame_destroy)(frame)
+}
+
+pub unsafe fn goldy_scheme_frame_timeline_value(frame: *const GoldySchemeFrame) -> u64 {
+    (lib().goldy_scheme_frame_timeline_value)(frame)
+}
+
+pub unsafe fn goldy_scheme_frame_wait(ctx: *const GoldyContext, frame: *const GoldySchemeFrame) -> GoldyResult {
     (lib().goldy_scheme_frame_wait)(ctx, frame)
+}
+
+pub unsafe fn goldy_scheme_grant_read(scheme: *mut GoldyScheme, parcel: *const GoldyParcel) -> *mut GoldyReadGrant {
+    (lib().goldy_scheme_grant_read)(scheme, parcel)
+}
+
+pub unsafe fn goldy_read_grant_destroy(grant: *mut GoldyReadGrant) {
+    (lib().goldy_read_grant_destroy)(grant)
+}
+
+pub unsafe fn goldy_read_grant_byte_size(grant: *const GoldyReadGrant) -> u64 {
+    (lib().goldy_read_grant_byte_size)(grant)
+}
+
+pub unsafe fn goldy_read_grant_read(
+    grant: *const GoldyReadGrant,
+    frame: *const GoldySchemeFrame,
+    output: *mut u8,
+    output_size: usize,
+) -> GoldyResult {
+    (lib().goldy_read_grant_read)(grant, frame, output, output_size)
 }

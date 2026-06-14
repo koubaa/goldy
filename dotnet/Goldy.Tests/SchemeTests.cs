@@ -37,9 +37,9 @@ public class SchemeTests
                     .Dispatch(1, 1, 1);
             }
 
-            scheme.Submit().Wait(ctx);
-
-            var bytes = parcel.ReadToCpu(device);
+            using var grant = scheme.GrantRead(parcel);
+            using var frame = scheme.Submit();
+            var bytes = grant.Read(frame);
             var values = MemoryMarshal.Cast<byte, uint>(bytes);
             foreach (var v in values)
                 Assert.Equal(42u, v);

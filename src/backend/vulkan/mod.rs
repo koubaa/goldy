@@ -548,11 +548,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
-        buffer::destroy(
-            &self.state.devices,
-            &mut self.state.buffers,
-            buffer,
-        );
+        buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer);
     }
 
     fn clear_buffer(

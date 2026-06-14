@@ -14,9 +14,8 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, Parcel,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Sampler, Scheme, SchemeFrame, ShaderModule,
-    StructuredBufferElement,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
+    RequestAdapterOptions, RetainedPool, Sampler, Scheme, SchemeFrame, ShaderModule, StructuredBufferElement,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -58,12 +57,7 @@ fn read_uploaded_parcel_u32(ctx: &goldy::Context, parcel: &Parcel, count: usize)
     read_grant_u32(&grant, &frame, count)
 }
 
-fn dispatch_u32_write_and_read(
-    ctx: &goldy::Context,
-    shader_src: &str,
-    out: &Parcel,
-    count: usize,
-) -> Vec<u32> {
+fn dispatch_u32_write_and_read(ctx: &goldy::Context, shader_src: &str, out: &Parcel, count: usize) -> Vec<u32> {
     let device = ctx.device();
     let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
     let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
@@ -501,10 +495,7 @@ fn scheme_stress_zeros_then_dispatch_large() {
     let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().unwrap();
 
-    let nonzero_count = read_grant_u32(&grant, &frame, N)
-        .iter()
-        .filter(|&&v| v != 0)
-        .count();
+    let nonzero_count = read_grant_u32(&grant, &frame, N).iter().filter(|&&v| v != 0).count();
     assert_eq!(nonzero_count, 0, "expected all zeros after zero write");
 }
 

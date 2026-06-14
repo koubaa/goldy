@@ -23,9 +23,8 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags,
-    TextureFormat, TextureKind,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, ReadGrant,
+    RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags, TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -443,9 +442,5 @@ fn grant_read_concurrent_frames_distinct_backings() {
 
     assert_eq!(stats.records, 1, "dispatch records once");
     #[cfg(not(feature = "metal"))]
-    assert_eq!(
-        stats.resubmit_hits,
-        1,
-        "second dispatch submit is a retention hit"
-    );
+    assert_eq!(stats.resubmit_hits, 1, "second dispatch submit is a retention hit");
 }

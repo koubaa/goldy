@@ -34,27 +34,6 @@ public sealed class Parcel : IDisposable
         return idx;
     }
 
-    /// <summary>
-    /// Read buffer parcel contents back to CPU memory from offset 0.
-    /// </summary>
-    public byte[] ReadToCpu(Device device)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        device.ThrowIfDisposed();
-
-        var output = new byte[ByteSize];
-        unsafe
-        {
-            fixed (byte* p = output)
-            {
-                var result = NativeMethods.ParcelReadToCpu(Handle, device.Handle, (nint)p, (nuint)output.Length);
-                if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("Parcel read_to_cpu");
-            }
-        }
-        return output;
-    }
-
     public void Dispose()
     {
         if (!_disposed)

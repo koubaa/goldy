@@ -76,10 +76,7 @@ impl GrantStagingPool {
 
     fn return_handle(&self, handle: BufferHandle) {
         if self.scheme_alive.load(Ordering::Acquire) {
-            self.handles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(handle);
+            self.handles.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
         } else {
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
             backend.free_readback_buffer(handle);
@@ -117,11 +114,7 @@ struct FrameData {
 impl Drop for FrameData {
     fn drop(&mut self) {
         for (cell, pool) in self.cells.iter().zip(self.staging_pools.iter()) {
-            if let Some(handle) = cell
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-            {
+            if let Some(handle) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 pool.return_handle(handle);
             }
         }
@@ -223,6 +216,11 @@ pub struct ReadGrant<T> {
 }
 
 impl<T> ReadGrant<T> {
+    /// Logical byte size of readable data for this grant.
+    pub fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
     /// Readable bytes for `frame`'s submission (full logical buffer size).
     ///
     /// `frame` must come from the same [`Scheme`] that created this grant.
@@ -259,14 +257,9 @@ impl<T> ReadGrant<T> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
-            .ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!(
-                    "grant already consumed for this SchemeFrame"
-                ))
-            })?;
-        let byte_size = usize::try_from(self.byte_size).map_err(|_| {
-            GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space"))
-        })?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant already consumed for this SchemeFrame")))?;
+        let byte_size = usize::try_from(self.byte_size)
+            .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
         let mut bytes = vec![0u8; byte_size];
         {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
@@ -634,9 +627,7 @@ impl Scheme {
                 "parcel home device does not match scheme context"
             )));
         }
-        let source_backing = parcel
-            .grant_buffer_keepalive()
-            .map_err(|e| self.ctx.classify(e))?;
+        let source_backing = parcel.grant_buffer_keepalive().map_err(|e| self.ctx.classify(e))?;
         let source = parcel
             .buffer_handle()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant_read requires buffer parcel")))?;
@@ -662,9 +653,7 @@ impl Scheme {
                 resource,
                 access: NodeAccess::Read,
             }],
-            kind: NodeKind::GrantRead {
-                grant_id: grant_id.0,
-            },
+            kind: NodeKind::GrantRead { grant_id: grant_id.0 },
         });
         Ok(ReadGrant {
             grant_id,
@@ -759,10 +748,7 @@ mod tests {
 
     fn mock_readback_counts(device: &Device) -> (usize, usize) {
         let backend = device.inner.backend.lock().unwrap();
-        (
-            backend.test_readback_alloc_count(),
-            backend.test_readback_free_count(),
-        )
+        (backend.test_readback_alloc_count(), backend.test_readback_free_count())
     }
 
     fn mock_shader(device: &Device) -> ShaderModule {
@@ -810,11 +796,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("alloc buffer parcel")
     }
 
-    fn recording_scheme_with_parcel(
-        device: &Arc<Device>,
-        pool: &mut RetainedPool,
-        ctx: &Context,
-    ) -> (Scheme, Parcel) {
+    fn recording_scheme_with_parcel(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> (Scheme, Parcel) {
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
         let parcel = retained_buffer_parcel(pool);
@@ -1220,10 +1202,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             Ok(_) => panic!("second read must fail"),
             Err(e) => e,
         };
-        assert!(
-            err.to_string().contains("already consumed"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1262,10 +1241,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             Ok(_) => panic!("cross-device grant must fail"),
             Err(e) => e,
         };
-        assert!(
-            err.to_string().contains("home device"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("home device"), "unexpected error: {err}");
         drop(ctx_a);
     }
 
@@ -1287,10 +1263,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             Ok(_) => panic!("cross-scheme read must fail"),
             Err(e) => e,
         };
-        assert!(
-            err.to_string().contains("different scheme"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1318,8 +1291,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
-        let parcel = pool
-            .acquire_buffer(0, BufferKind::Scattered, None, crate::types::BufferFlags::empty(), None);
+        let parcel = pool.acquire_buffer(0, BufferKind::Scattered, None, crate::types::BufferFlags::empty(), None);
         if parcel.is_err() {
             // Pools/backends may reject zero-byte buffers; guard is still covered at grant_read.
             return;
@@ -1330,9 +1302,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             Ok(_) => panic!("zero-byte grant must fail"),
             Err(e) => e,
         };
-        assert!(
-            err.to_string().contains("non-zero"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("non-zero"), "unexpected error: {err}");
     }
 }

@@ -59,6 +59,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheme::PyContext>()?;
     m.add_class::<scheme::PyScheme>()?;
     m.add_class::<scheme::PySchemeFrame>()?;
+    m.add_class::<scheme::PyReadGrant>()?;
     m.add_class::<scheme::PySchemeComputeNode>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;

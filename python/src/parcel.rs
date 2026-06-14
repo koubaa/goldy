@@ -47,12 +47,6 @@ impl PyParcel {
         Ok(pyo3::types::PyBytes::new(py, &output).into_any())
     }
 
-    fn read_to_cpu<'py>(&self, py: Python<'py>, device: &PyDevice) -> PyResult<Bound<'py, PyAny>> {
-        let mut output = vec![0u8; self.inner.byte_size() as usize];
-        self.inner.read_to_cpu(&device.inner, &mut output).into_py_result()?;
-        Ok(pyo3::types::PyBytes::new(py, &output).into_any())
-    }
-
     fn __repr__(&self) -> String {
         format!("Parcel(byte_size={})", self.inner.byte_size())
     }

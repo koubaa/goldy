@@ -186,6 +186,11 @@ typedef struct GoldyMosaicBuilder GoldyMosaicBuilder;
 // Opaque handle to a retained [`goldy::Parcel`].
 typedef struct GoldyParcel GoldyParcel;
 
+// Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
+//
+// Heap-allocated; destroy with [`goldy_read_grant_destroy`].
+typedef struct GoldyReadGrant GoldyReadGrant;
+
 // Opaque handle to a Goldy RenderPipeline.
 typedef struct GoldyRenderPipeline GoldyRenderPipeline;
 
@@ -200,6 +205,11 @@ typedef struct GoldySampler GoldySampler;
 
 // Opaque handle to a retained Goldy scheme.
 typedef struct GoldyScheme GoldyScheme;
+
+// Opaque per-submission frame token returned by [`goldy_scheme_submit`].
+//
+// Heap-allocated; destroy with [`goldy_scheme_frame_destroy`].
+typedef struct GoldySchemeFrame GoldySchemeFrame;
 
 // Opaque handle to a Goldy ShaderModule.
 typedef struct GoldyShaderModule GoldyShaderModule;
@@ -275,11 +285,6 @@ typedef struct GoldySamplerDesc {
     float lod_max_clamp;
 } GoldySamplerDesc;
 
-// Per-submission identity returned by [`goldy_scheme_submit`].
-typedef struct GoldySchemeFrame {
-    uint64_t timeline_value;
-} GoldySchemeFrame;
-
 // Outcome counters for [`goldy_scheme_replay_stats`].
 typedef struct GoldyReplayStats {
     uint64_t records;
@@ -343,12 +348,6 @@ void goldy_context_destroy(struct GoldyContext *ctx);
 // # Safety
 // `ctx` must be valid when non-null.
 enum GoldyResult goldy_context_is_valid(const struct GoldyContext *ctx);
-
-// Block until the GPU has completed all work scheduled up to `timeline_value`.
-//
-// # Safety
-// `ctx` must be valid.
-enum GoldyResult goldy_context_wait_until(const struct GoldyContext *ctx, uint64_t timeline_value);
 
 // Get the adapter ID this device was created on.
 //
@@ -496,14 +495,30 @@ uint32_t goldy_parcel_mosaic_view_resource_index(const struct GoldyParcel *parce
 // The parcel pointer must be valid.
 uint64_t goldy_parcel_mosaic_view_size(const struct GoldyParcel *parcel, uint32_t slot);
 
-// Read buffer parcel contents back to CPU memory.
+// Logical byte size of readable data for this grant.
+//
+// # Safety
+// `grant` must be valid.
+uint64_t goldy_read_grant_byte_size(const struct GoldyReadGrant *grant);
+
+// Destroy a read grant from [`goldy_scheme_grant_read`].
+//
+// # Safety
+// `grant` must be valid and not used after this call.
+void goldy_read_grant_destroy(struct GoldyReadGrant *grant);
+
+// Read bytes for the `(grant × frame)` cell into `output`.
+//
+// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
+// Each frame may be read at most once per grant. Drop the frame when done if you
+// rely on staging-buffer reuse.
 //
 // # Safety
 // All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_parcel_read_to_cpu(const struct GoldyParcel *parcel,
-                                          const struct GoldyDevice *device,
-                                          uint8_t *output,
-                                          size_t output_size);
+enum GoldyResult goldy_read_grant_read(const struct GoldyReadGrant *grant,
+                                       const struct GoldySchemeFrame *frame,
+                                       uint8_t *output,
+                                       size_t output_size);
 
 // Create a new render pipeline.
 //
@@ -709,12 +724,36 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
 
+// Destroy a frame token from [`goldy_scheme_submit`].
+//
+// # Safety
+// `frame` must be valid and not used after this call.
+void goldy_scheme_frame_destroy(struct GoldySchemeFrame *frame);
+
+// Timeline value for this submission (for debugging only).
+//
+// # Safety
+// `frame` must be valid.
+uint64_t goldy_scheme_frame_timeline_value(const struct GoldySchemeFrame *frame);
+
 // Block until the GPU work for `frame` has completed.
+//
+// Prefer [`goldy_read_grant_read`] when verifying compute output through a grant.
 //
 // # Safety
 // `ctx` and `frame` must be valid.
 enum GoldyResult goldy_scheme_frame_wait(const struct GoldyContext *ctx,
-                                         struct GoldySchemeFrame frame);
+                                         const struct GoldySchemeFrame *frame);
+
+// Record a read-easement grant over a buffer parcel (once per scheme).
+//
+// Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
+// Call after the producing dispatch node(s). Marks the scheme dirty.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyReadGrant *goldy_scheme_grant_read(struct GoldyScheme *scheme,
+                                               const struct GoldyParcel *parcel);
 
 // True when the next submit must re-record.
 //
@@ -735,15 +774,16 @@ uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
 enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
                                            struct GoldyReplayStats *out_stats);
 
-// Submit the scheme and return a per-submission [`GoldySchemeFrame`].
+// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeFrame`].
 //
-// Does not block — call [`goldy_context_wait_until`] or [`goldy_scheme_frame_wait`]
-// to wait for GPU completion.
+// Does not block. The caller owns `*out_frame` and must call
+// [`goldy_scheme_frame_destroy`]. To read bytes from a recorded grant, use
+// [`goldy_read_grant_read`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
 //
 // # Safety
-// `scheme` and `out_frame` must be valid.
+// `scheme` and `out_frame` must be valid; `*out_frame` is written on success.
 enum GoldyResult goldy_scheme_submit(struct GoldyScheme *scheme,
-                                     struct GoldySchemeFrame *out_frame);
+                                     struct GoldySchemeFrame **out_frame);
 
 // Get the built-in vertex color 2D shader source.
 //

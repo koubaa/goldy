@@ -31,6 +31,20 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
+    /// Record a read easement over a buffer parcel (once per scheme).
+    /// </summary>
+    public ReadGrant GrantRead(Parcel parcel)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(parcel);
+
+        var grant = NativeMethods.SchemeGrantRead(Handle, parcel.Handle);
+        if (grant == nint.Zero)
+            throw GoldyException.FromLastError("Scheme grant_read");
+        return new ReadGrant(grant);
+    }
+
+    /// <summary>
     /// Submit the scheme and return a per-submission frame token.
     /// </summary>
     public SchemeFrame Submit()
@@ -39,7 +53,7 @@ public sealed class Scheme : IDisposable
         var result = NativeMethods.SchemeSubmit(Handle, out var frame);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme submit");
-        return new SchemeFrame(frame.TimelineValue);
+        return new SchemeFrame(frame);
     }
 
     internal void ThrowIfDisposed()

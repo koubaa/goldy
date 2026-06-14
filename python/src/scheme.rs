@@ -5,8 +5,9 @@ use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::types::{PyNodeAccess, PyResourceAccess};
 use goldy::task_graph::ComputeNodeRecord;
-use goldy::Scheme;
+use goldy::{GrantBuffer, ReadGrant, Scheme, SchemeFrame};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use std::cell::RefCell;
 
 /// GPU submission context — one per scheme.
@@ -20,32 +21,49 @@ impl PyContext {
     fn __repr__(&self) -> String {
         "Context()".to_string()
     }
-
-    /// Block until the GPU has completed all work scheduled up to `timeline_value`.
-    fn wait_until(&self, timeline_value: u64) -> PyResult<()> {
-        self.inner.wait_until(timeline_value).into_py_result()
-    }
 }
 
 /// Per-submission identity returned by [`PyScheme::submit`].
 #[pyclass(name = "SchemeFrame", module = "goldy", unsendable)]
-#[derive(Clone, Copy)]
 pub struct PySchemeFrame {
-    pub(crate) timeline_value: u64,
+    pub(crate) inner: SchemeFrame,
 }
 
 #[pymethods]
 impl PySchemeFrame {
     fn timeline_value(&self) -> u64 {
-        self.timeline_value
+        self.inner.timeline_value()
     }
 
     fn wait(&self, ctx: &PyContext) -> PyResult<()> {
-        ctx.inner.wait_until(self.timeline_value).into_py_result()
+        self.inner.wait(&ctx.inner).into_py_result()
     }
 
     fn __repr__(&self) -> String {
-        format!("SchemeFrame(timeline_value={})", self.timeline_value)
+        format!("SchemeFrame(timeline_value={})", self.inner.timeline_value())
+    }
+}
+
+/// Read easement grant recorded once via [`PyScheme::grant_read`].
+#[pyclass(name = "ReadGrant", module = "goldy", unsendable)]
+pub struct PyReadGrant {
+    pub(crate) inner: ReadGrant<GrantBuffer>,
+}
+
+#[pymethods]
+impl PyReadGrant {
+    fn byte_size(&self) -> u64 {
+        self.inner.byte_size()
+    }
+
+    /// Readable bytes for `frame`'s submission.
+    fn read<'py>(&self, py: Python<'py>, frame: &PySchemeFrame) -> PyResult<Bound<'py, PyBytes>> {
+        let loan = self.inner.read(&frame.inner).into_py_result()?;
+        Ok(PyBytes::new(py, &loan))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ReadGrant(byte_size={})", self.inner.byte_size())
     }
 }
 
@@ -84,6 +102,21 @@ impl PyScheme {
         })
     }
 
+    /// Record a read easement over a buffer parcel (once per scheme).
+    fn grant_read(&self, parcel: &PyParcel) -> PyResult<PyReadGrant> {
+        if self.active_compute.borrow().is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot grant_read while recording a compute node",
+            ));
+        }
+        let grant = self
+            .inner
+            .borrow_mut()
+            .grant_read(parcel.inner.as_ref())
+            .into_py_result()?;
+        Ok(PyReadGrant { inner: grant })
+    }
+
     /// Submit the scheme and return a per-submission frame token.
     fn submit(&self) -> PyResult<PySchemeFrame> {
         if self.active_compute.borrow().is_some() {
@@ -92,9 +125,7 @@ impl PyScheme {
             ));
         }
         let frame = self.inner.borrow_mut().submit().into_py_result()?;
-        Ok(PySchemeFrame {
-            timeline_value: frame.timeline_value(),
-        })
+        Ok(PySchemeFrame { inner: frame })
     }
 
     fn __repr__(&self) -> String {
@@ -187,7 +218,5 @@ pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyRes
         .commit_write_parcel(parcel.inner.as_ref(), 0, data.to_vec())
         .into_py_result()?;
     let frame = upload.submit().into_py_result()?;
-    Ok(PySchemeFrame {
-        timeline_value: frame.timeline_value(),
-    })
+    Ok(PySchemeFrame { inner: frame })
 }

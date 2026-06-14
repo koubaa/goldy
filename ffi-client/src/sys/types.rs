@@ -225,9 +225,13 @@ pub struct GoldyTextureFlags {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GoldySchemeFrame {
-    pub timeline_value: u64,
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct GoldyReadGrant {
+    _private: [u8; 0],
 }
 
 #[repr(C)]
