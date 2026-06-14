@@ -1316,7 +1316,7 @@ fn record_gpu_command(
             super::texture::record_copy_texture_to_readback(
                 cl,
                 cl7,
-                &state.textures,
+                &mut state.textures,
                 &state.buffers,
                 *src,
                 *dst,

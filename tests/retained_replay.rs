@@ -649,6 +649,73 @@ fn grant_read_drop_frame_without_read_then_submit_and_read() {
     );
 }
 
+/// Texture grant: sequential wait-then-resubmit must produce correct data on every frame,
+/// including retained resubmits that re-execute `CopyTextureToReadback`.
+///
+/// This is the regression test for the DX12 `last_layout` tracking bug: if
+/// `record_copy_texture_to_readback` does not update the texture's tracked layout after
+/// the restore barrier, a subsequent copy will compute the wrong `layout_before` and emit
+/// a barrier with an incorrect source layout, potentially producing corrupt data or a
+/// validation error on the second submission.
+///
+/// The test waits on each frame before the next submit so the second submit is always a
+/// retained resubmit (`records == 1`, `resubmit_hits >= 1`), exercising the path where
+/// `finish_submit_frame` issues `CopyTextureToReadback` on an already-used, retained
+/// command list.
+#[test]
+fn grant_read_texture_sequential_resubmit_correct_data() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("compile texture shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let width = 16u32;
+    let height = 16u32;
+    let wg_x = width.div_ceil(8);
+    let wg_y = height.div_ceil(8);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let texture = pool
+        .acquire_texture(
+            width,
+            height,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+            None,
+        )
+        .expect("texture parcel");
+    let tex_w = texture.handle(ResourceAccess::Write).expect("tex write");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_tex", &pipeline)
+        .bind_parcel(&texture, NodeAccess::Write)
+        .bind_resources_typed(&[tex_w])
+        .dispatch(wg_x, wg_y, 1);
+    let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+
+    // Three sequential submits: wait and read each one before the next.
+    // The second and third submits are retained resubmits. Each triggers
+    // a new CopyTextureToReadback in finish_submit_frame. The DX12 backend
+    // must have the correct last_layout going into the copy barrier each time.
+    for round in 0..3u32 {
+        let frame = scheme.submit().expect("submit");
+        let loan = grant.read(&frame).expect("grant read");
+        assert!(loan.len() > 0, "texture readback empty on round {round}");
+        assert_eq!(loan[0], 255, "R channel, round {round}");
+        assert_eq!(loan[1], 0, "G channel, round {round}");
+        assert_eq!(loan[2], 0, "B channel, round {round}");
+        assert_eq!(loan[3], 255, "A channel, round {round}");
+    }
+
+    let stats = scheme.replay_stats();
+    assert_eq!(stats.records, 1, "dispatch records exactly once");
+    #[cfg(not(feature = "metal"))]
+    assert!(stats.resubmit_hits >= 2, "rounds 2 and 3 must be retention hits");
+}
+
 /// Many consecutive submits with dropped unread frames must not exhaust staging (pool recycles on frame drop).
 #[test]
 fn grant_read_many_dropped_frames_without_read_then_read_succeeds() {

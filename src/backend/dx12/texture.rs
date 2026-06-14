@@ -789,23 +789,31 @@ pub(super) fn query_readback_layout(
 pub(super) fn record_copy_texture_to_readback(
     command_list: &ID3D12GraphicsCommandList,
     command_list7: &ID3D12GraphicsCommandList7,
-    textures: &std::collections::HashMap<TextureHandle, TextureState>,
+    textures: &mut std::collections::HashMap<TextureHandle, TextureState>,
     buffers: &std::collections::HashMap<BufferHandle, super::types::BufferState>,
     src: TextureHandle,
     dst: BufferHandle,
     layout: crate::backend::TextureReadbackLayout,
 ) -> Result<()> {
-    let texture = textures
-        .get(&src)
-        .context("CopyTextureToReadback: src texture not found")?;
-    let dst_buf = buffers
-        .get(&dst)
-        .context("CopyTextureToReadback: dst buffer not found")?;
-    let layout_before = texture.last_layout;
-    let dxgi_format = format_to_dxgi(layout.format);
+    // Extract everything we need from the immutable borrow before any mutable access.
+    let (src_resource, dst_resource, layout_before, is_storage, dxgi_format) = {
+        let texture = textures
+            .get(&src)
+            .context("CopyTextureToReadback: src texture not found")?;
+        let dst_buf = buffers
+            .get(&dst)
+            .context("CopyTextureToReadback: dst buffer not found")?;
+        (
+            texture.resource.clone(),
+            dst_buf.resource.clone(),
+            texture.last_layout,
+            texture.is_storage,
+            format_to_dxgi(layout.format),
+        )
+    };
 
     let b_to_src = barriers::texture_barrier_full(
-        &texture.resource,
+        &src_resource,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_SYNC_COPY,
         access_for_layout(layout_before),
@@ -816,12 +824,12 @@ pub(super) fn record_copy_texture_to_readback(
     unsafe { barriers::barrier_textures(command_list7, &[b_to_src]) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+        pResource: unsafe { std::mem::transmute_copy(&src_resource) },
         Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
     };
     let dst_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&dst_buf.resource) },
+        pResource: unsafe { std::mem::transmute_copy(&dst_resource) },
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
@@ -838,18 +846,18 @@ pub(super) fn record_copy_texture_to_readback(
     };
     unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
 
-    let post_access = if texture.is_storage {
+    let post_access = if is_storage {
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
     } else {
         D3D12_BARRIER_ACCESS_SHADER_RESOURCE
     };
-    let post_layout = if texture.is_storage {
+    let post_layout = if is_storage {
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
     } else {
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
     };
     let b_back = barriers::texture_barrier_full(
-        &texture.resource,
+        &src_resource,
         D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_ACCESS_COPY_SOURCE,
@@ -858,6 +866,15 @@ pub(super) fn record_copy_texture_to_readback(
         post_layout,
     );
     unsafe { barriers::barrier_textures(command_list7, &[b_back]) };
+
+    // Update tracked layout so subsequent copies (retained resubmits) use the correct
+    // layout_before. Without this, the pre-copy barrier would repeat the same transition
+    // correctly only by accident (round-trip textures happen to match), but any code path
+    // that transitions the texture to a layout other than post_layout between copies
+    // would compute a wrong layout_before on the next call.
+    if let Some(tex) = textures.get_mut(&src) {
+        tex.last_layout = post_layout;
+    }
 
     Ok(())
 }

@@ -1583,7 +1583,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
 
         let texture = pool
-            .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Interpolated, TextureFlags::COPY_SRC, None)
+            .acquire_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Interpolated,
+                TextureFlags::COPY_SRC,
+                None,
+            )
             .expect("texture");
         let mut scheme = Scheme::new(&ctx);
         let err = match scheme.grant_read_texture(&texture) {
@@ -1603,7 +1610,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
 
         let texture = pool
-            .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty(), None)
+            .acquire_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::empty(),
+                None,
+            )
             .expect("texture");
         let mut scheme = Scheme::new(&ctx);
         let err = match scheme.grant_read_texture(&texture) {

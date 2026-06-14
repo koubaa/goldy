@@ -798,8 +798,7 @@ pub(super) fn record_copy_texture_to_readback(
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        let restore_dep =
-            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&restore_barrier));
+        let restore_dep = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&restore_barrier));
         logical_device.device.cmd_pipeline_barrier2(cmd, &restore_dep);
     }
 
