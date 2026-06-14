@@ -20,7 +20,7 @@ goldy = { path = "..", default-features = false }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 
 # NumPy interop for zero-copy buffer access
-numpy = "0.28"
+numpy = "0.29"
 
 # Error handling
 anyhow = "1.0"
