@@ -291,6 +291,11 @@ impl VulkanBackend {
 // GpuBackend trait implementation - thin wrapper delegating to domain modules
 #[allow(clippy::manual_find)]
 impl GpuBackend for VulkanBackend {
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Vulkan
     }

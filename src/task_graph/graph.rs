@@ -1,7 +1,7 @@
 //! `TaskGraph` — analyzed GPU task graph with automatic barrier insertion.
 
 use super::analysis;
-use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
     ResourceId, SwapchainOutputHandle, TransientBufferSpec, TransientId, TransientTextureId, TransientTextureKey,
     TransientTextureSpec,
@@ -280,6 +280,107 @@ pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
     h.finish()
 }
 
+/// Per-partition retention fingerprint.
+///
+/// Hashes the same fields as [`retention_fingerprint`] but restricted to
+/// the nodes assigned to `partition_idx` in the compiled schedule.  Two
+/// partitions from different IRs will have the same key if and only if their
+/// node sets are structurally identical — pipeline handles, resource-access
+/// bindings, slot arrays, and dispatch dimensions.
+///
+/// The hash also folds in the partition index itself so that two consecutive
+/// identical partitions receive distinct keys.
+pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, partition_waves: &[Wave]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    // Collect node indices in this partition's waves in stable order.
+    let mut node_indices: Vec<usize> = partition_waves.iter().flat_map(|w| w.node_indices.iter().copied()).collect();
+    node_indices.sort_unstable();
+    node_indices.len().hash(&mut h);
+    // Include partition's wave count to distinguish same-sized different positions.
+    partition_waves.len().hash(&mut h);
+    for &ni in &node_indices {
+        let node = &ir.nodes[ni];
+        // Wave depth of this node (its position in the schedule).
+        let wave_depth = schedule.waves.iter().position(|w| w.node_indices.contains(&ni)).unwrap_or(0);
+        wave_depth.hash(&mut h);
+        node.bindings.len().hash(&mut h);
+        for b in &node.bindings {
+            b.hash(&mut h);
+        }
+        match &node.kind {
+            NodeKind::Dispatch {
+                pipeline,
+                resource_slots,
+                user_slots,
+                dispatch,
+            } => {
+                0u8.hash(&mut h);
+                pipeline.hash(&mut h);
+                resource_slots.hash(&mut h);
+                user_slots.hash(&mut h);
+                match dispatch {
+                    DispatchDim::Direct { x, y, z } => {
+                        0u8.hash(&mut h);
+                        x.hash(&mut h);
+                        y.hash(&mut h);
+                        z.hash(&mut h);
+                    }
+                    DispatchDim::Indirect { buffer, offset } => {
+                        1u8.hash(&mut h);
+                        buffer.hash(&mut h);
+                        offset.hash(&mut h);
+                    }
+                }
+            }
+            NodeKind::ClearBuffer { buffer, offset, size } => {
+                1u8.hash(&mut h);
+                buffer.hash(&mut h);
+                offset.hash(&mut h);
+                size.hash(&mut h);
+            }
+            NodeKind::GrantRead { grant_id } => {
+                3u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
+            _ => {
+                2u8.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// True when all nodes in the given waves are retainable (no uploads).
+///
+/// Upload nodes (WriteBuffer, WriteTexture, etc.) must be staged on every
+/// submit, so a partition containing them is submitted standalone rather than
+/// retained.
+fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
+    for wave in waves {
+        for &ni in &wave.node_indices {
+            if matches!(
+                ir.nodes[ni].kind,
+                NodeKind::WriteBuffer { .. }
+                    | NodeKind::WriteTexture { .. }
+                    | NodeKind::WriteTextureRegion { .. }
+                    | NodeKind::CopyTexture { .. }
+                    | NodeKind::CopyRenderTarget { .. }
+            ) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// True when the partition's waves contain at least one [`NodeKind::RenderPass`] node.
+fn partition_waves_have_render(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves
+        .iter()
+        .any(|w| w.node_indices.iter().any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. })))
+}
+
 /// Submit `ir`, partitioned into wave groups.
 pub(crate) fn submit_resolved_ir(
     cache: &mut Option<CompiledCacheEntry>,
@@ -304,44 +405,136 @@ pub(crate) fn submit_resolved_ir(
     Ok(last_tv)
 }
 
-/// Submit `ir` to the backend and retain the closed command list for future resubmission.
+/// Outcome of [`submit_resolved_ir_and_retain`]: how many partitions were re-recorded
+/// versus resubmitted from the retained cache.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PartitionSubmitResult {
+    /// Partitions that were re-recorded (and retained) this call.
+    pub records: usize,
+    /// Partitions that were resubmitted from the cached command list without re-recording.
+    pub resubmit_hits: usize,
+}
+
+impl PartitionSubmitResult {
+    /// True when every retainable partition was served from cache (zero re-records).
+    pub fn all_from_cache(&self) -> bool {
+        self.records == 0
+    }
+}
+
+/// Submit `ir` to the backend with per-partition (slice-aware) retention.
 ///
-/// The retention key is always derived from `retention_fingerprint` so it
-/// reflects every field that affects the recorded command buffer. Render-pass graphs
-/// and graphs containing upload nodes fall back to a plain submit (no retention).
+/// The IR is split into the same partitions as [`submit_resolved_ir`] — one or
+/// two wave groups depending on barrier cost or swapchain presence.  Each
+/// partition is treated independently:
+///
+/// - **Upload partition** (contains `WriteBuffer`/`WriteTexture`/copy nodes):
+///   submitted via `submit_standalone` on every call — data is staged fresh
+///   each frame and cannot be retained.
+/// - **Render partition** (contains `RenderPass` nodes):
+///   submitted via `submit_graph_and_retain`; the backend retains the closed
+///   list and can resubmit it on cache hit.
+/// - **Pure-compute partition**: submitted via `submit_graph_and_retain`; the
+///   retained command list is reused whenever the partition fingerprint matches.
+///
+/// Upload partitions do not prevent retention of adjacent pure-compute
+/// partitions — this is the key improvement over the previous whole-IR bail-out.
+///
+/// Returns both the final timeline value and a [`PartitionSubmitResult`] so callers
+/// can decide whether to count this call as a record or a resubmit.
 pub(crate) fn submit_resolved_ir_and_retain(
     cache: &mut Option<CompiledCacheEntry>,
     context: &crate::Context,
     backend: &mut dyn GpuBackend,
     ir: &GraphIR,
-) -> Result<TimelineValue> {
-    let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
-
-    if has_render {
-        let g = compile_graph_commands_for_ir(ir);
-        return backend.submit_graph(context.backend_handle(), &g);
-    }
-
-    let has_upload = ir.nodes.iter().any(|n| {
-        matches!(
-            n.kind,
-            NodeKind::WriteBuffer { .. }
-                | NodeKind::WriteTexture { .. }
-                | NodeKind::WriteTextureRegion { .. }
-                | NodeKind::CopyTexture { .. }
-                | NodeKind::CopyRenderTarget { .. }
-        )
-    });
+) -> Result<(TimelineValue, PartitionSubmitResult)> {
     let fp = binding_fingerprint(ir);
-    if has_upload {
-        let cmds = TaskGraph::get_or_build_compute_commands(cache, ir, fp);
-        return backend.submit_standalone(context.backend_handle(), cmds);
+
+    // Ensure schedule exists in the cache.
+    TaskGraph::get_or_build_schedule(cache, ir, fp);
+
+    // Compute partition wave ranges from the cached schedule (same split logic as
+    // `emit_partitioned_commands`).
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+
+    // Compute per-partition fingerprints up front so we can check them against the
+    // cached keys without borrowing `cache` mutably yet.
+    let schedule = &cache.as_ref().unwrap().schedule;
+    let partition_fps: Vec<u64> = wave_ranges
+        .iter()
+        .enumerate()
+        .map(|(part_idx, range)| {
+            let waves = &schedule.waves[range.clone()];
+            let raw_fp = partition_fingerprint(ir, schedule, waves);
+            // Fold in partition index so identical adjacent partitions have distinct keys.
+            use std::hash::{Hash, Hasher};
+            use std::collections::hash_map::DefaultHasher;
+            let mut h = DefaultHasher::new();
+            raw_fp.hash(&mut h);
+            part_idx.hash(&mut h);
+            h.finish()
+        })
+        .collect();
+
+    // Ensure the partition_retention_keys vec is sized correctly.
+    // On a topology change (fp miss) the schedule was just rebuilt; reset keys.
+    {
+        let entry = cache.as_mut().unwrap();
+        if entry.partition_retention_keys.len() != wave_ranges.len() {
+            entry.partition_retention_keys = vec![None; wave_ranges.len()];
+        }
     }
 
-    let key = retention_fingerprint(ir);
-    let cmds = TaskGraph::get_or_build_compute_commands(cache, ir, fp);
-    let graph_cmds: Vec<GraphCommand> = cmds.iter().cloned().map(GraphCommand::Compute).collect();
-    backend.submit_graph_and_retain(context.backend_handle(), &graph_cmds, key)
+    // Build partitioned commands (cached; only emits on topology change).
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+
+    let ctx = context.backend_handle();
+    let mut last_tv = backend.gpu_progress(ctx);
+    let mut result = PartitionSubmitResult::default();
+
+    for part_idx in 0..wave_ranges.len() {
+        let part_fp = partition_fps[part_idx];
+        let range = wave_ranges[part_idx].clone();
+        let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+        let waves = &cache.as_ref().unwrap().schedule.waves[range.clone()];
+        let can_retain = partition_waves_can_retain(ir, waves);
+        let has_render = partition_waves_have_render(ir, waves);
+
+        if !can_retain {
+            // Upload/copy partition: always submit standalone, never retain.
+            let cmds = &cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap()[part_idx];
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend.submit_standalone(ctx, cmds)?;
+            // Leave partition_retention_keys[part_idx] as None.
+            continue;
+        }
+
+        // Try to resubmit from the retained cache if the fingerprint matches.
+        if cached_key == Some(part_fp) {
+            if let Some(tv) = backend.try_resubmit_retained(ctx, part_fp)? {
+                last_tv = tv;
+                result.resubmit_hits += 1;
+                continue;
+            }
+            // Backend evicted the entry (e.g. out of slots); fall through to re-record.
+        }
+
+        // Re-record this partition.
+        let cmds = &cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap()[part_idx];
+        let graph_cmds: Vec<GraphCommand> = if has_render {
+            // Render partitions must go through `emit_graph_commands` to get RenderCommands.
+            let waves = &cache.as_ref().unwrap().schedule.waves[range];
+            analysis::emit_graph_commands_for_waves(ir, waves, None)
+        } else {
+            cmds.iter().cloned().map(GraphCommand::Compute).collect()
+        };
+        let _tz = crate::tracy_zone!("goldy.submit_partition");
+        last_tv = backend.submit_graph_and_retain(ctx, &graph_cmds, part_fp)?;
+        cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
+        result.records += 1;
+    }
+
+    Ok((last_tv, result))
 }
 
 /// Schedule cache + parcel stamp targets for a retained [`GraphIR`] submission.
@@ -378,7 +571,10 @@ impl IrSubmitState {
     }
 
     /// Record and retain the command list for `ir` on `ctx`.
-    pub fn submit_pipelined_and_retain(&mut self, ctx: &crate::Context, ir: &GraphIR) -> Result<TimelineValue> {
+    ///
+    /// Returns the final timeline value and a [`PartitionSubmitResult`] describing
+    /// how many partitions were re-recorded versus resubmitted from cache.
+    pub fn submit_pipelined_and_retain(&mut self, ctx: &crate::Context, ir: &GraphIR) -> Result<(TimelineValue, PartitionSubmitResult)> {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         submit_resolved_ir_and_retain(&mut self.schedule_cache, ctx, backend.as_mut(), ir)
     }
@@ -388,7 +584,11 @@ impl IrSubmitState {
         retention_fingerprint(ir)
     }
 
-    /// True when the backend can retain and resubmit `ir` without re-recording.
+    /// True when the entire IR can be retained as a single command list.
+    ///
+    /// This is no longer used for the primary resubmit path (which uses per-partition
+    /// fingerprints inside [`submit_resolved_ir_and_retain`]), but kept as a diagnostic.
+    #[allow(dead_code)]
     pub fn ir_can_retain(ir: &GraphIR) -> bool {
         if ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. })) {
             return false;
@@ -421,6 +621,12 @@ pub(crate) struct CompiledCacheEntry {
     partitioned_commands: Option<Vec<Vec<GpuCommand>>>,
     /// `(partition_idx, cmd_idx, ir_node_idx)` for upload commands across partitions.
     partitioned_upload_remap: Vec<(usize, usize, usize)>,
+    /// Per-partition retention keys for slice-aware retention.
+    ///
+    /// `Some(key)` when partition `i` was last successfully retained with that key;
+    /// `None` when the partition has not yet been retained (e.g. it contains upload
+    /// nodes and is submitted standalone rather than retained).
+    partition_retention_keys: Vec<Option<u64>>,
 }
 
 /// Per-page cache of a fully-lowered [`GraphIR`].
@@ -592,6 +798,7 @@ impl TaskGraph {
             return submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir);
         }
         submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir)
+            .map(|(tv, _)| tv)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -1345,6 +1552,7 @@ impl TaskGraph {
             upload_remap: Vec::new(),
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
+            partition_retention_keys: Vec::new(),
         });
         &cache.as_ref().unwrap().schedule
     }
@@ -1402,6 +1610,7 @@ impl TaskGraph {
             upload_remap,
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
+            partition_retention_keys: Vec::new(),
         });
         cache.as_ref().unwrap().commands.as_deref().unwrap()
     }
@@ -1433,6 +1642,7 @@ impl TaskGraph {
                 upload_remap: Vec::new(),
                 partitioned_commands: None,
                 partitioned_upload_remap: Vec::new(),
+                partition_retention_keys: Vec::new(),
             });
         }
 
@@ -3438,5 +3648,351 @@ mod tests {
             ctx_b.parcel_ready(&parcel.last_referenced()),
             "readiness checks the stamping context's progress, not the caller's"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slice-aware retention tests
+//
+// These test the per-partition retain/resubmit logic in `submit_resolved_ir_and_retain`.
+// All tests run against the mock backend.  Submission calls use `IrSubmitState` (which
+// acquires the backend lock internally) and stats are read via `Device::with_mock` after
+// each call (a separate lock acquisition) to avoid holding the lock across a submit.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod slice_retention_tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::buffer::Buffer;
+    use crate::compute::ComputePipeline;
+    use crate::device::Device;
+    use crate::shader::ShaderModule;
+    use crate::task_graph::{IrSubmitState, NodeAccess};
+    use std::sync::Arc;
+
+    fn mock_device() -> Arc<Device> {
+        Arc::new(Device::from_backend(Box::new(MockBackend::new())).unwrap())
+    }
+
+    fn mock_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(device, "void main() {}").unwrap()
+    }
+
+    fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
+        ComputePipeline::new(device, shader).unwrap()
+    }
+
+    fn mock_buf(device: &Device) -> Buffer {
+        Buffer::new(device, 256, crate::BufferKind::Scattered).unwrap()
+    }
+
+    /// Read `retained_resubmit_count` from the mock backend.
+    fn resubmit_count(device: &Device) -> usize {
+        device.with_mock(|m| m.retained_resubmit_count)
+    }
+
+    /// Read the number of live retained graph entries.
+    fn retained_count(device: &Device) -> usize {
+        device.with_mock(|m| m.retained_graph_count())
+    }
+
+    fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR) {
+        state.submit_pipelined_and_retain(ctx, ir).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Baseline: a single-partition (1 or 2 wave) scheme retains as one slice
+    // and resubmits from it on subsequent clean submits.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn single_partition_retains_and_resubmits() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "a",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+
+        let mut state = IrSubmitState::new();
+
+        // First submit: records and retains.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0, "first submit records, does not resubmit");
+        assert_eq!(retained_count(&device), 1, "one slice retained");
+
+        // Second submit (unchanged IR): should resubmit from cache.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 1, "second submit resubmits retained slice");
+        assert_eq!(retained_count(&device), 1, "still one slice retained");
+    }
+
+    // ------------------------------------------------------------------
+    // Two-partition IR: a 3-wave linear chain produces two partitions.
+    // Both are retained on first submit; both resubmit on second submit.
+    // ------------------------------------------------------------------
+
+    /// Build a 3-wave linear-chain IR: A writes buf0 → B reads buf0 writes buf1 → C reads buf1.
+    /// With 3 waves the `emit_partitioned_commands` split produces two partitions:
+    ///   partition 0 = waves 0..split, partition 1 = waves split..3.
+    fn three_wave_ir(
+        p_a: &ComputePipeline,
+        p_b: &ComputePipeline,
+        p_c: &ComputePipeline,
+        buf0: &Buffer,
+        buf1: &Buffer,
+    ) -> GraphIR {
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "a",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf0.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p_a.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "b",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf0.handle),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf1.handle),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::Dispatch {
+                pipeline: p_b.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "c",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf1.handle),
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p_c.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir
+    }
+
+    #[test]
+    fn two_partition_ir_retains_both_slices() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+
+        let ir = three_wave_ir(&p_a, &p_b, &p_c, &buf0, &buf1);
+        let mut state = IrSubmitState::new();
+
+        // First submit: both partitions record and retain.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0, "first submit records all partitions");
+        assert_eq!(retained_count(&device), 2, "two slices retained for two partitions");
+
+        // Second submit: both partitions resubmit.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 2, "second submit resubmits both retained slices");
+        assert_eq!(retained_count(&device), 2, "still two slices retained");
+    }
+
+    // ------------------------------------------------------------------
+    // Selective re-record: change only partition 1 (node C's pipeline),
+    // assert partition 0 is resubmitted while partition 1 re-records.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn changing_second_partition_only_rerecords_second_partition() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let p_c2 = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+
+        // The mock assigns distinct handles per pipeline.
+        assert_ne!(p_c.handle, p_c2.handle, "test requires distinct pipeline handles");
+
+        let ir = three_wave_ir(&p_a, &p_b, &p_c, &buf0, &buf1);
+        let mut state = IrSubmitState::new();
+
+        // Frame 1: record all partitions.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0);
+
+        // Frame 2: only node C's pipeline changed → only partition 1 re-records;
+        //          partition 0 resubmits from retained cache (one resubmit hit).
+        let ir2 = three_wave_ir(&p_a, &p_b, &p_c2, &buf0, &buf1);
+        do_submit(&mut state, &ctx, &ir2);
+        assert_eq!(
+            resubmit_count(&device), 1,
+            "partition 0 resubmits; partition 1 re-records — one resubmit total"
+        );
+
+        // Frame 3: both partitions are now cached (partition 1 was retained in frame 2).
+        do_submit(&mut state, &ctx, &ir2);
+        assert_eq!(resubmit_count(&device), 3, "third submit resubmits both partitions");
+    }
+
+    // ------------------------------------------------------------------
+    // Changing partition 0 invalidates only partition 0; partition 1 resubmits.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn changing_first_partition_only_rerecords_first_partition() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_a2 = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+
+        assert_ne!(p_a.handle, p_a2.handle);
+
+        let ir = three_wave_ir(&p_a, &p_b, &p_c, &buf0, &buf1);
+        let mut state = IrSubmitState::new();
+
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0);
+
+        // Change only node A → partition 0 re-records; partition 1 resubmits.
+        let ir2 = three_wave_ir(&p_a2, &p_b, &p_c, &buf0, &buf1);
+        do_submit(&mut state, &ctx, &ir2);
+        assert_eq!(
+            resubmit_count(&device), 1,
+            "partition 1 resubmits; partition 0 re-records"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Upload node in one partition does not prevent retention of the other
+    // partition. The upload partition is submitted standalone each frame;
+    // the pure-compute partition is retained.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn upload_in_one_partition_does_not_prevent_other_partition_retention() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+        let buf2 = mock_buf(&device);
+
+        // Three-wave IR so `emit_partitioned_commands` splits into two partitions.
+        //
+        // Wave 0: upload writes buf0          → partition 0 (upload present, not retainable)
+        // Wave 1: compute_b reads buf0        → partition 0 (same partition as wave 0)
+        //         writes buf1
+        // Wave 2: compute_c reads buf1        → partition 1 (pure compute, retained)
+        //         writes buf2
+        //
+        // The split point is the wave boundary with highest barrier cost; for this chain
+        // both wave-1 and wave-2 each have one buffer barrier so `max_by_key` (last-max
+        // semantics) picks split = 2 → partition 0 = waves 0..2, partition 1 = wave 2.
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "upload",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf0.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer: buf0.handle,
+                offset: 0,
+                data: Arc::from(vec![0u8; 4]),
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "compute_b",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf0.handle),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf1.handle),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::Dispatch {
+                pipeline: p_b.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "compute_c",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf1.handle),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf2.handle),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::Dispatch {
+                pipeline: p_c.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+
+        let mut state = IrSubmitState::new();
+
+        // Frame 1: partition 0 (upload) submitted standalone; partition 1 (compute) retained.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0, "first submit: no resubmits");
+        assert_eq!(retained_count(&device), 1, "one retained slice (partition 1 only)");
+
+        // Frame 2: partition 0 re-runs standalone; partition 1 resubmits from cache.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 1, "compute partition resubmits on second submit");
     }
 }

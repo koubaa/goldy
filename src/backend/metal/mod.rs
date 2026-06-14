@@ -173,6 +173,11 @@ impl Drop for MetalBackend {
 }
 
 impl GpuBackend for MetalBackend {
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Metal
     }

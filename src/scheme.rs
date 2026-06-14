@@ -534,36 +534,32 @@ impl Scheme {
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
     pub fn submit(&mut self) -> Result<Frame, GoldyError> {
-        let tv_dispatch = if !self.dirty {
-            if let Some(key) = self.retention_key {
-                if let Some(prev_tv) = self.last_submitted_tv {
-                    self.ctx.wait_until(prev_tv)?;
-                }
-                if let Some(tv) = self.ctx.try_resubmit_retained(key)? {
-                    self.submit_state
-                        .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
-                    #[cfg(not(feature = "metal"))]
-                    {
-                        self.stats.resubmit_hits += 1;
-                    }
-                    tv
-                } else {
-                    self.record_and_retain()?
-                }
-            } else {
-                self.record_and_retain()?
-            }
-        } else {
-            self.record_and_retain()?
-        };
-
+        let tv_dispatch = self.record_and_retain()?;
         let frame = self.finish_submit_frame(tv_dispatch)?;
         self.last_submitted_tv = Some(frame.timeline_value());
         Ok(frame)
     }
 
+    /// Submit the scheme through the per-partition lowering path.
+    ///
+    /// When the IR is clean (`!dirty`) and the lowering's per-partition cache is warm,
+    /// every partition is resubmitted without re-recording — equivalent to the old
+    /// whole-scheme shortcut but operating at partition granularity.
+    ///
+    /// `records` is incremented when at least one partition was re-recorded.
+    /// `resubmit_hits` is incremented when all partitions were served from cache.
     fn record_and_retain(&mut self) -> Result<TimelineValue, GoldyError> {
-        let tv = self
+        // Gate: wait for the previous submission before resubmitting any retained CB so
+        // we do not violate VUID-vkQueueSubmit2-commandBuffer-03875 (Vulkan) or the DX12
+        // equivalent.  This is conservative — a per-slice retirement gate is the right
+        // long-term fix (tracked in TODO: impl-scheme).
+        if let Some(prev_tv) = self.last_submitted_tv {
+            if !self.dirty {
+                self.ctx.wait_until(prev_tv)?;
+            }
+        }
+
+        let (tv, part_result) = self
             .submit_state
             .submit_pipelined_and_retain(&self.ctx, &self.ir)
             .map_err(|e| self.ctx.classify(e))?;
@@ -571,13 +567,18 @@ impl Scheme {
             .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
         self.ctx.advance_high_water_timeline(tv);
 
-        self.retention_key = if IrSubmitState::ir_can_retain(&self.ir) {
-            Some(IrSubmitState::retention_fingerprint(&self.ir))
-        } else {
-            None
-        };
         self.dirty = false;
-        self.stats.records += 1;
+        // Retain key is no longer used for the resubmit path; keep None.
+        self.retention_key = None;
+
+        if part_result.all_from_cache() {
+            #[cfg(not(feature = "metal"))]
+            {
+                self.stats.resubmit_hits += 1;
+            }
+        } else {
+            self.stats.records += 1;
+        }
         Ok(tv)
     }
 

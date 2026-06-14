@@ -900,6 +900,59 @@ pub fn emit_partitioned_commands(
     vec![early, late]
 }
 
+/// Compute the wave-index ranges for each partition of a compiled schedule.
+///
+/// Returns a `Vec<std::ops::Range<usize>>` using the same split algorithm as
+/// [`emit_partitioned_commands`].  Callers can use these ranges to compute
+/// per-partition fingerprints without re-running the full command-emission pass.
+///
+/// This function always returns at least one range covering all waves.
+pub(crate) fn partition_wave_ranges(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<std::ops::Range<usize>> {
+    let waves = &schedule.waves;
+    let n = waves.len();
+    if n == 0 {
+        return vec![0..0];
+    }
+
+    let swapchain_wave: Option<usize> = waves
+        .iter()
+        .enumerate()
+        .find(|(_, w)| {
+            w.node_indices.iter().any(|&ni| {
+                ir.nodes[ni]
+                    .bindings
+                    .iter()
+                    .any(|b| b.resource == ResourceId::SwapchainOutput)
+            })
+        })
+        .map(|(idx, _)| idx);
+
+    if let Some(split_wave) = swapchain_wave {
+        if split_wave > 0 {
+            return vec![0..split_wave, split_wave..n];
+        }
+        return vec![0..n];
+    }
+
+    if n < 3 {
+        return vec![0..n];
+    }
+
+    let (split_wave, max_cost) = waves
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(idx, w)| (idx, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
+        .max_by_key(|&(_, cost)| cost)
+        .unwrap();
+
+    if max_cost == 0 {
+        return vec![0..n];
+    }
+
+    vec![0..split_wave, split_wave..n]
+}
+
 /// Returns true if any node in `waves` is an offscreen [`NodeKind::RenderPass`].
 pub(crate) fn waves_contain_render_pass(ir: &GraphIR, waves: &[Wave]) -> bool {
     waves.iter().any(|w| {

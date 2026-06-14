@@ -609,6 +609,12 @@ pub type ComputeCommand = GpuCommand;
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 pub trait GpuBackend: Send + Sync {
+    /// Downcast to `&mut dyn std::any::Any` for test introspection.
+    ///
+    /// Only available in `#[cfg(test)]` builds.  Implementations should return `self`.
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     /// Get the backend type.
     fn backend_type(&self) -> BackendType;
 

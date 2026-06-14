@@ -1442,7 +1442,8 @@ struct StagingFinish {
 ///    command list across frames when `compute_retention_fingerprint` was stable.
 ///    Reverted: the required `wait_for_fence` after every `ExecuteCommandLists` to prevent
 ///    CPU/GPU races on the shared binding-table buffer cut throughput from ~2500 FPS to
-///    ~1200 FPS — a net regression for the common case.
+///    ~1200 FPS — a net regression for the common case. Note: this may be obsolete, as
+///    it was observed in an earlier design for binding tables.
 ///
 /// 2. **CBV binding table + bind groups**: same binding-table layout as above, with
 ///    per-pipeline bind groups (descriptor-table caching) to amortise heap binding cost.

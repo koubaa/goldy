@@ -469,6 +469,11 @@ impl Drop for Dx12Backend {
 }
 
 impl GpuBackend for Dx12Backend {
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Dx12
     }

@@ -266,6 +266,11 @@ impl MockBackend {
         self.default_surface_format = format;
     }
 
+    /// Number of live retained command lists (test introspection).
+    pub fn retained_graph_count(&self) -> usize {
+        self.retained_graphs.len()
+    }
+
     /// Reset recorded state for a new test.
     pub fn reset_tracking(&mut self) {
         self.recorded_commands.clear();
@@ -339,6 +344,11 @@ impl Default for MockBackend {
 }
 
 impl GpuBackend for MockBackend {
+    #[cfg(test)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Vulkan
     }
@@ -1413,8 +1423,8 @@ impl GpuBackend for MockBackend {
         commands: &[GraphCommand],
         key: u64,
     ) -> Result<crate::timeline::TimelineValue> {
-        // One retained list per context: evict any prior entry for this context.
-        self.retained_graphs.retain(|(c, _), _| *c != ctx);
+        // Per-slice retention: each key is an independent retained entry.
+        // Overwrite any prior entry for the same (ctx, key) but leave other entries intact.
         self.retained_graphs.insert((ctx, key), commands.to_vec());
         self.submit_graph(ctx, commands)
     }
