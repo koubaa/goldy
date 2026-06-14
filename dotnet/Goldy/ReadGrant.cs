@@ -1,7 +1,7 @@
 namespace Goldy;
 
 /// <summary>
-/// Read easement grant recorded once via <see cref="Scheme.GrantRead"/>.
+/// Read easement grant recorded once via <see cref="Scheme.GrantRead"/> or <see cref="Scheme.GrantReadTexture"/>.
 /// </summary>
 public sealed class ReadGrant : IDisposable
 {

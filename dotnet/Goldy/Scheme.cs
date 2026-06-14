@@ -45,6 +45,20 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
+    /// Record a read easement over a texture parcel (once per scheme).
+    /// </summary>
+    public ReadGrant GrantReadTexture(Parcel parcel)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(parcel);
+
+        var grant = NativeMethods.SchemeGrantRead(Handle, parcel.Handle);
+        if (grant == nint.Zero)
+            throw GoldyException.FromLastError("Scheme grant_read_texture");
+        return new ReadGrant(grant);
+    }
+
+    /// <summary>
     /// Submit the scheme and return a per-submission frame token.
     /// </summary>
     public SchemeFrame Submit()

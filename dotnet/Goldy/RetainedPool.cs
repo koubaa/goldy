@@ -64,6 +64,24 @@ public sealed class RetainedPool : IDisposable
         return AcquireBuffer(bytes, access, stride);
     }
 
+    /// <summary>
+    /// Acquire an uninitialized retained texture parcel.
+    /// </summary>
+    public Parcel AcquireTexture(
+        uint width,
+        uint height,
+        TextureFormat format,
+        TextureKind access,
+        TextureFlags flags = TextureFlags.None)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var parcel = NativeMethods.RetainedPoolAcquireTexture(
+            Handle, width, height, format, access, flags, nint.Zero, 0);
+        if (parcel == nint.Zero)
+            throw GoldyException.FromLastError("RetainedPool acquire_texture");
+        return new Parcel(parcel, 0);
+    }
+
     public void Dispose()
     {
         if (!_disposed)

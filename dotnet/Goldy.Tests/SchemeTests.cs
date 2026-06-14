@@ -49,4 +49,60 @@ public class SchemeTests
             // No GPU in CI — skip gracefully.
         }
     }
+
+    [Fact]
+    public void Scheme_GrantReadTexture_ReadsRedPixel()
+    {
+        const string writeTextureShader = """
+            import goldy_exp;
+
+            [goldy_compute]
+            [numthreads(8, 8, 1)]
+            void cs_main(DirectSpatial<float4> output, ThreadId id) {
+                uint2 dims;
+                output.GetDimensions(dims.x, dims.y);
+                if (id.x < dims.x && id.y < dims.y) {
+                    output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
+                }
+            }
+            """;
+
+        try
+        {
+            using var instance = new Instance();
+            using var device = instance.RequestAdapter().RequestDevice();
+
+            using var retainedPool = new RetainedPool(device);
+            using var parcel = retainedPool.AcquireTexture(
+                16,
+                16,
+                TextureFormat.Rgba8Unorm,
+                TextureKind.Direct,
+                TextureFlags.CopySrc);
+            using var shader = new ShaderModule(device, writeTextureShader);
+            using var pipeline = new ComputePipeline(device, shader);
+            using var ctx = device.CreateContext();
+            using var scheme = new Scheme(ctx);
+
+            using (var node = scheme.ComputeNode("write_tex", pipeline))
+            {
+                node
+                    .DeclareParcel(parcel, NodeAccess.Write, ResourceAccess.Write)
+                    .Dispatch(2, 2, 1);
+            }
+
+            using var grant = scheme.GrantReadTexture(parcel);
+            using var frame = scheme.Submit();
+            var bytes = grant.Read(frame);
+            Assert.True(bytes.Length > 0);
+            Assert.Equal(255, bytes[0]);
+            Assert.Equal(0, bytes[1]);
+            Assert.Equal(0, bytes[2]);
+            Assert.Equal(255, bytes[3]);
+        }
+        catch (GoldyException ex) when (ex.Message.Contains("adapter", StringComparison.OrdinalIgnoreCase))
+        {
+            // No GPU in CI — skip gracefully.
+        }
+    }
 }

@@ -179,3 +179,44 @@ class TestComputePipeline:
         frame = scheme.submit()
         values = np.frombuffer(grant.read(frame), dtype=np.uint32)
         assert np.all(values == 42)
+
+    def test_grant_read_texture(self, device):
+        import goldy
+
+        source = '''
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(8, 8, 1)]
+        void cs_main(DirectSpatial<float4> output, ThreadId id) {
+            uint2 dims;
+            output.GetDimensions(dims.x, dims.y);
+            if (id.x < dims.x && id.y < dims.y) {
+                output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
+            }
+        }
+        '''
+        width = height = 16
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_texture(
+            width,
+            height,
+            goldy.TextureFormat.RGBA8_UNORM,
+            goldy.TextureKind.DIRECT,
+            copy_src=True,
+        )
+        shader = goldy.ShaderModule.from_slang(device, source)
+        pipeline = goldy.ComputePipeline(device, shader)
+
+        ctx = device.create_context()
+        scheme = goldy.Scheme(ctx)
+        scheme.node("write_tex", pipeline).declare_parcel(
+            parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        ).dispatch(2, 2, 1)
+        grant = scheme.grant_read_texture(parcel)
+        frame = scheme.submit()
+        pixels = grant.read(frame)
+        assert len(pixels) > 0
+        assert pixels[0] == 255
+        assert pixels[1] == 0
+        assert pixels[2] == 0
+        assert pixels[3] == 255

@@ -3,7 +3,7 @@
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
 use crate::parcel::PyParcel;
-use crate::types::PyBufferKind;
+use crate::types::{PyBufferKind, PyTextureFormat, PyTextureKind};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::cell::RefCell;
@@ -49,6 +49,31 @@ impl PyRetainedPool {
                 goldy::BufferFlags::empty(),
                 Some(&bytes),
             )
+            .into_py_result()?;
+        Ok(PyParcel {
+            inner: Arc::new(parcel),
+        })
+    }
+
+    /// Acquire a retained texture parcel.
+    #[pyo3(signature = (width, height, format, kind, *, copy_src = true))]
+    fn acquire_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: PyTextureFormat,
+        kind: PyTextureKind,
+        copy_src: bool,
+    ) -> PyResult<PyParcel> {
+        let flags = if copy_src {
+            goldy::TextureFlags::COPY_SRC
+        } else {
+            goldy::TextureFlags::empty()
+        };
+        let parcel = self
+            .inner
+            .borrow_mut()
+            .acquire_texture(width, height, format.into(), kind.into(), flags, None)
             .into_py_result()?;
         Ok(PyParcel {
             inner: Arc::new(parcel),

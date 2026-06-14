@@ -446,6 +446,75 @@ fn grant_read_concurrent_frames_distinct_backings() {
     assert_eq!(stats.resubmit_hits, 1, "second dispatch submit is a retention hit");
 }
 
+const WRITE_TEXTURE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(8, 8, 1)]
+void cs_main(DirectSpatial<float4> output, ThreadId id) {
+    uint2 dims;
+    output.GetDimensions(dims.x, dims.y);
+    if (id.x < dims.x && id.y < dims.y) {
+        output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
+    }
+}
+"#;
+
+/// Texture grant readback with N-backing: submit K and K+1 without waiting; both frames read correctly.
+#[test]
+fn grant_read_texture_concurrent_frames_distinct_backings() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("compile texture shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    let width = 16u32;
+    let height = 16u32;
+    let wg_x = width.div_ceil(8);
+    let wg_y = height.div_ceil(8);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let texture = pool
+        .acquire_texture(
+            width,
+            height,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+            None,
+        )
+        .expect("texture parcel");
+    let tex_w = texture.handle(ResourceAccess::Write).expect("tex write");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_tex", &pipeline)
+        .bind_parcel(&texture, NodeAccess::Write)
+        .bind_resources_typed(&[tex_w])
+        .dispatch(wg_x, wg_y, 1);
+    let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
+
+    let frame1 = scheme.submit().expect("submit K");
+    let frame2 = scheme.submit().expect("submit K+1 without waiting on K");
+
+    for frame in [&frame1, &frame2] {
+        let loan = grant.read(frame).expect("grant read");
+        assert!(loan.len() > 0, "texture readback empty");
+        assert_eq!(loan[0], 255, "R channel");
+        assert_eq!(loan[1], 0, "G channel");
+        assert_eq!(loan[2], 0, "B channel");
+        assert_eq!(loan[3], 255, "A channel");
+    }
+
+    let stats = scheme.replay_stats();
+    drop(scheme);
+
+    assert_eq!(stats.records, 1, "dispatch records once");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(stats.resubmit_hits, 1, "second dispatch submit is a retention hit");
+}
+
 fn fill_42_pipeline(device: &Device) -> ComputePipeline {
     let shader = ShaderModule::from_slang(device, FILL_42_SHADER).expect("compile fill shader");
     ComputePipeline::new(device, &shader).expect("create pipeline")

@@ -5,7 +5,7 @@ use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::types::{PyNodeAccess, PyResourceAccess};
 use goldy::task_graph::ComputeNodeRecord;
-use goldy::{GrantBuffer, ReadGrant, Scheme, SchemeFrame};
+use goldy::{GrantBuffer, GrantTexture, ReadGrant, Scheme, SchemeFrame};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::cell::RefCell;
@@ -44,10 +44,24 @@ impl PySchemeFrame {
     }
 }
 
-/// Read easement grant recorded once via [`PyScheme::grant_read`].
+pub(crate) enum PyReadGrantInner {
+    Buffer(ReadGrant<GrantBuffer>),
+    Texture(ReadGrant<GrantTexture>),
+}
+
+impl PyReadGrantInner {
+    fn byte_size(&self) -> u64 {
+        match self {
+            Self::Buffer(grant) => grant.byte_size(),
+            Self::Texture(grant) => grant.byte_size(),
+        }
+    }
+}
+
+/// Read easement grant recorded once via [`PyScheme::grant_read`] or [`PyScheme::grant_read_texture`].
 #[pyclass(name = "ReadGrant", module = "goldy", unsendable)]
 pub struct PyReadGrant {
-    pub(crate) inner: ReadGrant<GrantBuffer>,
+    pub(crate) inner: PyReadGrantInner,
 }
 
 #[pymethods]
@@ -58,8 +72,16 @@ impl PyReadGrant {
 
     /// Readable bytes for `frame`'s submission.
     fn read<'py>(&self, py: Python<'py>, frame: &PySchemeFrame) -> PyResult<Bound<'py, PyBytes>> {
-        let loan = self.inner.read(&frame.inner).into_py_result()?;
-        Ok(PyBytes::new(py, &loan))
+        match &self.inner {
+            PyReadGrantInner::Buffer(grant) => {
+                let loan = grant.read(&frame.inner).into_py_result()?;
+                Ok(PyBytes::new(py, &loan))
+            }
+            PyReadGrantInner::Texture(grant) => {
+                let loan = grant.read(&frame.inner).into_py_result()?;
+                Ok(PyBytes::new(py, &loan))
+            }
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -114,7 +136,27 @@ impl PyScheme {
             .borrow_mut()
             .grant_read(parcel.inner.as_ref())
             .into_py_result()?;
-        Ok(PyReadGrant { inner: grant })
+        Ok(PyReadGrant {
+            inner: PyReadGrantInner::Buffer(grant),
+        })
+    }
+
+    /// Record a read easement over a texture parcel (once per scheme).
+    #[pyo3(signature = (parcel))]
+    fn grant_read_texture(&self, parcel: &PyParcel) -> PyResult<PyReadGrant> {
+        if self.active_compute.borrow().is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot grant_read_texture while recording a compute node",
+            ));
+        }
+        let grant = self
+            .inner
+            .borrow_mut()
+            .grant_read_texture(parcel.inner.as_ref())
+            .into_py_result()?;
+        Ok(PyReadGrant {
+            inner: PyReadGrantInner::Texture(grant),
+        })
     }
 
     /// Submit the scheme and return a per-submission frame token.

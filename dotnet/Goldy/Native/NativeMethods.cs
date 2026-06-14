@@ -323,6 +323,17 @@ internal static partial class NativeMethods
     internal static partial nint RetainedPoolAcquireBuffer(
         nint pool, ulong size, BufferKind access, uint elementStride, nint data, nuint dataSize);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_acquire_texture")]
+    internal static partial nint RetainedPoolAcquireTexture(
+        nint pool,
+        uint width,
+        uint height,
+        TextureFormat format,
+        TextureKind access,
+        TextureFlags flags,
+        nint data,
+        nuint dataSize);
+
     [LibraryImport(LibName, EntryPoint = "goldy_parcel_destroy")]
     internal static partial void ParcelDestroy(nint parcel);
 
