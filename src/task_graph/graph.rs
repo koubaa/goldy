@@ -294,7 +294,10 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
     use std::collections::hash_map::DefaultHasher;
     let mut h = DefaultHasher::new();
     // Collect node indices in this partition's waves in stable order.
-    let mut node_indices: Vec<usize> = partition_waves.iter().flat_map(|w| w.node_indices.iter().copied()).collect();
+    let mut node_indices: Vec<usize> = partition_waves
+        .iter()
+        .flat_map(|w| w.node_indices.iter().copied())
+        .collect();
     node_indices.sort_unstable();
     node_indices.len().hash(&mut h);
     // Include partition's wave count to distinguish same-sized different positions.
@@ -302,7 +305,11 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
     for &ni in &node_indices {
         let node = &ir.nodes[ni];
         // Wave depth of this node (its position in the schedule).
-        let wave_depth = schedule.waves.iter().position(|w| w.node_indices.contains(&ni)).unwrap_or(0);
+        let wave_depth = schedule
+            .waves
+            .iter()
+            .position(|w| w.node_indices.contains(&ni))
+            .unwrap_or(0);
         wave_depth.hash(&mut h);
         node.bindings.len().hash(&mut h);
         for b in &node.bindings {
@@ -376,9 +383,11 @@ fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
 
 /// True when the partition's waves contain at least one [`NodeKind::RenderPass`] node.
 fn partition_waves_have_render(ir: &GraphIR, waves: &[Wave]) -> bool {
-    waves
-        .iter()
-        .any(|w| w.node_indices.iter().any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. })))
+    waves.iter().any(|w| {
+        w.node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
+    })
 }
 
 /// Submit `ir`, partitioned into wave groups.
@@ -467,8 +476,8 @@ pub(crate) fn submit_resolved_ir_and_retain(
             let waves = &schedule.waves[range.clone()];
             let raw_fp = partition_fingerprint(ir, schedule, waves);
             // Fold in partition index so identical adjacent partitions have distinct keys.
-            use std::hash::{Hash, Hasher};
             use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
             let mut h = DefaultHasher::new();
             raw_fp.hash(&mut h);
             part_idx.hash(&mut h);
@@ -574,7 +583,11 @@ impl IrSubmitState {
     ///
     /// Returns the final timeline value and a [`PartitionSubmitResult`] describing
     /// how many partitions were re-recorded versus resubmitted from cache.
-    pub fn submit_pipelined_and_retain(&mut self, ctx: &crate::Context, ir: &GraphIR) -> Result<(TimelineValue, PartitionSubmitResult)> {
+    pub fn submit_pipelined_and_retain(
+        &mut self,
+        ctx: &crate::Context,
+        ir: &GraphIR,
+    ) -> Result<(TimelineValue, PartitionSubmitResult)> {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         submit_resolved_ir_and_retain(&mut self.schedule_cache, ctx, backend.as_mut(), ir)
     }
@@ -771,8 +784,7 @@ impl TaskGraph {
         if self.has_transient_resources() {
             return submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir);
         }
-        submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir)
-            .map(|(tv, _)| tv)
+        submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir).map(|(tv, _)| tv)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -3800,7 +3812,11 @@ mod slice_retention_tests {
 
         // Second submit: both partitions resubmit.
         do_submit(&mut state, &ctx, &ir);
-        assert_eq!(resubmit_count(&device), 2, "second submit resubmits both retained slices");
+        assert_eq!(
+            resubmit_count(&device),
+            2,
+            "second submit resubmits both retained slices"
+        );
         assert_eq!(retained_count(&device), 2, "still two slices retained");
     }
 
@@ -3836,7 +3852,8 @@ mod slice_retention_tests {
         let ir2 = three_wave_ir(&p_a, &p_b, &p_c2, &buf0, &buf1);
         do_submit(&mut state, &ctx, &ir2);
         assert_eq!(
-            resubmit_count(&device), 1,
+            resubmit_count(&device),
+            1,
             "partition 0 resubmits; partition 1 re-records — one resubmit total"
         );
 
@@ -3873,7 +3890,8 @@ mod slice_retention_tests {
         let ir2 = three_wave_ir(&p_a2, &p_b, &p_c, &buf0, &buf1);
         do_submit(&mut state, &ctx, &ir2);
         assert_eq!(
-            resubmit_count(&device), 1,
+            resubmit_count(&device),
+            1,
             "partition 1 resubmits; partition 0 re-records"
         );
     }
@@ -3967,6 +3985,10 @@ mod slice_retention_tests {
 
         // Frame 2: partition 0 re-runs standalone; partition 1 resubmits from cache.
         do_submit(&mut state, &ctx, &ir);
-        assert_eq!(resubmit_count(&device), 1, "compute partition resubmits on second submit");
+        assert_eq!(
+            resubmit_count(&device),
+            1,
+            "compute partition resubmits on second submit"
+        );
     }
 }

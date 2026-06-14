@@ -815,13 +815,7 @@ impl GpuBackend for VulkanBackend {
             .lock()
             .unwrap()
             .timeline_semaphore;
-        surface::render(
-            &mut self.state,
-            frame.surface,
-            frame.image,
-            timeline_sem,
-            commands,
-        )?;
+        surface::render(&mut self.state, frame.surface, frame.image, timeline_sem, commands)?;
         if let Some(tv) = self
             .state
             .surfaces
