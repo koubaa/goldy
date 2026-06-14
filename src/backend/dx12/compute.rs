@@ -691,7 +691,14 @@ fn record_gpu_command(
     let cl7 = ctx.command_list7;
     match cmd {
         GpuCommand::FrameTableStaging { data } => {
-            super::frame_table::record_prologue(state, device_handle, cl7, data)?;
+            super::frame_table::record_prologue(
+                &state.contexts,
+                &state.frame_tables,
+                &state.buffers,
+                device_handle,
+                cl7,
+                data,
+            )?;
         }
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
@@ -989,11 +996,19 @@ fn record_gpu_command(
             let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = Vec::new();
             if ctx.use_global_buffer_barriers {
                 for (_, usage) in buf_entries {
+                    let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, true);
+                    let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, true);
+                    // WARP validation (ID 1331): global barriers with AccessBefore=COMMON
+                    // must use AccessAfter=COMMON. Empty producer usage sets COMMON; clamp
+                    // rather than emitting UAV/SRV which fails Close() on the debug layer.
+                    if access_before == D3D12_BARRIER_ACCESS_COMMON {
+                        access_after = D3D12_BARRIER_ACCESS_COMMON;
+                    }
                     let g = D3D12_GLOBAL_BARRIER {
                         SyncBefore: slot_usage_to_dx12_sync(&usage.src),
                         SyncAfter: slot_usage_to_dx12_sync(&usage.dst),
-                        AccessBefore: slot_usage_to_dx12_access_for_buffer(&usage.src, true),
-                        AccessAfter: slot_usage_to_dx12_access_for_buffer(&usage.dst, true),
+                        AccessBefore: access_before,
+                        AccessAfter: access_after,
                     };
                     unsafe { barriers::barrier_globals(cl7, &[g]) };
                 }
@@ -2248,14 +2263,18 @@ pub(super) fn try_resubmit_retained(
     Ok(Some(fence_value))
 }
 
-/// Drop the retained command list for `key`, marking its pool slot as reusable.
-pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle, key: u64) {
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
+fn evict_retained_on_context(
+    contexts: &std::collections::HashMap<ContextHandle, types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    ctx: ContextHandle,
+    key: u64,
+) {
+    if let Some(sc_arc) = contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_graphs.remove(&key) {
             if let Some(row) = old.frame_table_row {
                 let device_handle = sc.device;
-                if let Some(ft) = state.frame_tables.get(&device_handle) {
+                if let Some(ft) = frame_tables.get(&device_handle) {
                     super::frame_table::unpin_row(ft, row);
                 }
             }
@@ -2264,6 +2283,44 @@ pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle, key: u64
             }
         }
     }
+}
+
+/// Evict every retained graph on contexts for `device_handle` that pins `row`.
+///
+/// Called when the frame-table ring wraps and a new prologue needs to overwrite staging
+/// bytes for a row still held by a retained command list from partitioned retention.
+pub(super) fn evict_retained_pinning_row(
+    contexts: &std::collections::HashMap<ContextHandle, types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    device_handle: DeviceHandle,
+    row: u32,
+) {
+    let ctxs: Vec<ContextHandle> = contexts
+        .iter()
+        .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
+        .map(|(h, _)| *h)
+        .collect();
+    for ctx in ctxs {
+        let keys: Vec<u64> = {
+            let sc_arc = contexts.get(&ctx).expect("context handle in device scan");
+            sc_arc
+                .lock()
+                .unwrap()
+                .retained_graphs
+                .iter()
+                .filter(|(_, g)| g.frame_table_row == Some(row))
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for key in keys {
+            evict_retained_on_context(contexts, frame_tables, ctx, key);
+        }
+    }
+}
+
+/// Drop the retained command list for `key`, marking its pool slot as reusable.
+pub(super) fn evict_retained(state: &Dx12State, ctx: ContextHandle, key: u64) {
+    evict_retained_on_context(&state.contexts, &state.frame_tables, ctx, key);
 }
 
 /// Check if the fence for the given token has signaled.

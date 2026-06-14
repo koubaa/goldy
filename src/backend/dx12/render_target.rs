@@ -348,7 +348,14 @@ pub(super) fn record_render_pass_to_list(
         } else {
             // Legacy BindResources is lowered here (not at emit time), or this is a
             // standalone render pass — record the full prologue (bump + copy + selector).
-            super::frame_table::record_prologue(state, device_handle, cmd_list, &staging_data)?;
+            super::frame_table::record_prologue(
+                &state.contexts,
+                &state.frame_tables,
+                &state.buffers,
+                device_handle,
+                cmd_list,
+                &staging_data,
+            )?;
         }
     }
 

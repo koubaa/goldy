@@ -578,32 +578,6 @@ impl IrSubmitState {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         submit_resolved_ir_and_retain(&mut self.schedule_cache, ctx, backend.as_mut(), ir)
     }
-
-    /// Fingerprint of all state that affects the recorded command buffer.
-    pub fn retention_fingerprint(ir: &GraphIR) -> u64 {
-        retention_fingerprint(ir)
-    }
-
-    /// True when the entire IR can be retained as a single command list.
-    ///
-    /// This is no longer used for the primary resubmit path (which uses per-partition
-    /// fingerprints inside [`submit_resolved_ir_and_retain`]), but kept as a diagnostic.
-    #[allow(dead_code)]
-    pub fn ir_can_retain(ir: &GraphIR) -> bool {
-        if ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. })) {
-            return false;
-        }
-        !ir.nodes.iter().any(|n| {
-            matches!(
-                n.kind,
-                NodeKind::WriteBuffer { .. }
-                    | NodeKind::WriteTexture { .. }
-                    | NodeKind::WriteTextureRegion { .. }
-                    | NodeKind::CopyTexture { .. }
-                    | NodeKind::CopyRenderTarget { .. }
-            )
-        })
-    }
 }
 
 /// Cache entry holding both the wave schedule and the emitted compute command stream.

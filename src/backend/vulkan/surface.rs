@@ -839,22 +839,19 @@ pub(super) fn frame_texture(
 }
 
 /// Render commands to the surface's current swapchain image.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render<F>(
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
-    buffers: &HashMap<super::BufferHandle, types::BufferState>,
-    pipelines: &HashMap<super::PipelineHandle, types::PipelineState>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+#[allow(clippy::too_many_lines)]
+pub(super) fn render(
+    state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
     timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
-    record_commands_fn: F,
-) -> Result<()>
-where
-    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>) -> Result<()>,
-{
+) -> Result<()> {
+    let devices = &state.devices;
+    let frame_tables = &state.frame_tables;
+    let buffers = &state.buffers;
+    let pipelines = &state.pipelines;
+    let surfaces = &mut state.surfaces;
     let (
         _image_index,
         current_frame,
@@ -955,6 +952,7 @@ where
 
         if has_bindings {
             super::frame_table::record_prologue_for_tables(
+                &state.contexts,
                 frame_tables,
                 buffers,
                 device_handle,
@@ -1086,8 +1084,8 @@ where
         // Track current pipeline for bind group binding
         let mut current_pipeline: Option<PipelineHandle> = None;
 
-        // Execute render commands using provided callback
-        record_commands_fn(cmd, &lowered, logical_device, &mut current_pipeline)?;
+        // Execute render commands
+        super::render_commands::record(cmd, &lowered, logical_device, pipelines, buffers, &mut current_pipeline)?;
 
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };

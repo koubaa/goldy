@@ -721,11 +721,13 @@ impl GpuBackend for VulkanBackend {
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()> {
+        let contexts = &self.state.contexts;
         let pipelines = &self.state.pipelines;
         let buffers = &self.state.buffers;
         let devices = &self.state.devices;
         let frame_tables = &self.state.frame_tables;
         let render_resources = render_target::RenderToResources {
+            contexts,
             devices,
             frame_tables,
             buffers,
@@ -813,23 +815,12 @@ impl GpuBackend for VulkanBackend {
             .lock()
             .unwrap()
             .timeline_semaphore;
-        let pipelines = &self.state.pipelines;
-        let buffers = &self.state.buffers;
-        let devices = &self.state.devices;
-        let frame_tables = &self.state.frame_tables;
         surface::render(
-            devices,
-            frame_tables,
-            buffers,
-            pipelines,
-            &mut self.state.surfaces,
+            &mut self.state,
             frame.surface,
             frame.image,
             timeline_sem,
             commands,
-            |cmd, cmds, logical_device, current_pipeline| {
-                render_commands::record(cmd, cmds, logical_device, pipelines, buffers, current_pipeline)
-            },
         )?;
         if let Some(tv) = self
             .state

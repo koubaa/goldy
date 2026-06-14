@@ -480,6 +480,14 @@ fn compute_barriers(
         if depth[from] < wave_idx && wave_set.contains(&to) {
             let from_node = &ir.nodes[from];
             let to_node = &ir.nodes[to];
+            // GrantRead emits no GPU work in this command stream (copy is out-of-band in
+            // `Scheme::finish_submit_frame`).  Skip it for barrier semantics so recording
+            // grant before dispatch does not emit bogus COMMON→UAV global barriers on WARP.
+            if matches!(from_node.kind, NodeKind::GrantRead { .. })
+                || matches!(to_node.kind, NodeKind::GrantRead { .. })
+            {
+                continue;
+            }
             for bi in &from_node.bindings {
                 for bj in &to_node.bindings {
                     if bindings_conflict(bi, bj) {

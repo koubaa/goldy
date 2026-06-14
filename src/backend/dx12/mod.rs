@@ -1012,7 +1012,7 @@ impl GpuBackend for Dx12Backend {
         commands: &[GraphCommand],
         key: u64,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::evict_retained(&mut self.state, ctx, key);
+        compute::evict_retained(&self.state, ctx, key);
         compute::submit_graph(&mut self.state, ctx, commands, Some(key))
     }
 
@@ -1025,7 +1025,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
-        compute::evict_retained(&mut self.state, ctx, key);
+        compute::evict_retained(&self.state, ctx, key);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {

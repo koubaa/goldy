@@ -836,7 +836,15 @@ pub(super) fn submit(
         for command in &commands {
             match command {
                 GpuCommand::FrameTableStaging { data } => {
-                    super::frame_table::record_prologue(state, device_handle, logical_device, cmd, data)?;
+                    super::frame_table::record_prologue(
+                        &state.contexts,
+                        &state.frame_tables,
+                        &state.buffers,
+                        device_handle,
+                        logical_device,
+                        cmd,
+                        data,
+                    )?;
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -1744,7 +1752,15 @@ fn submit_graph_impl(
             GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table_prologue_in_cb = true;
-                    super::frame_table::record_prologue(state, device_handle, logical_device, cmd, data)?;
+                    super::frame_table::record_prologue(
+                        &state.contexts,
+                        &state.frame_tables,
+                        &state.buffers,
+                        device_handle,
+                        logical_device,
+                        cmd,
+                        data,
+                    )?;
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -2238,7 +2254,15 @@ fn submit_graph_impl(
                             &sync_data,
                         )?;
                     } else {
-                        super::frame_table::record_prologue(state, device_handle, logical_device, cmd, &staging_data)?;
+                        super::frame_table::record_prologue(
+                            &state.contexts,
+                            &state.frame_tables,
+                            &state.buffers,
+                            device_handle,
+                            logical_device,
+                            cmd,
+                            &staging_data,
+                        )?;
                     }
                 }
 
@@ -2590,20 +2614,59 @@ pub(super) fn try_resubmit_retained(
     Ok(Some(signal_value))
 }
 
-/// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
-pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
+fn evict_retained_on_context(
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::frame_table::FrameTableDevice>,
+    ctx: super::ContextHandle,
+    key: u64,
+) {
+    if let Some(sc_arc) = contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_compute_cbs.remove(&key) {
             if let Some(row) = old.frame_table_row {
                 let device = sc.device;
-                if let Some(ft) = state.frame_tables.get(&device) {
+                if let Some(ft) = frame_tables.get(&device) {
                     super::frame_table::unpin_row(ft, row);
                 }
             }
             sc.free_cmd_buffers.push(old.command_buffer);
         }
     }
+}
+
+/// Evict every retained dispatch CB on contexts for `device_handle` that pins `row`.
+pub(super) fn evict_retained_pinning_row(
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::frame_table::FrameTableDevice>,
+    device_handle: super::DeviceHandle,
+    row: u32,
+) {
+    let ctxs: Vec<super::ContextHandle> = contexts
+        .iter()
+        .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
+        .map(|(h, _)| *h)
+        .collect();
+    for ctx in ctxs {
+        let keys: Vec<u64> = {
+            let sc_arc = contexts.get(&ctx).expect("context handle in device scan");
+            sc_arc
+                .lock()
+                .unwrap()
+                .retained_compute_cbs
+                .iter()
+                .filter(|(_, g)| g.frame_table_row == Some(row))
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for key in keys {
+            evict_retained_on_context(contexts, frame_tables, ctx, key);
+        }
+    }
+}
+
+/// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
+pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {
+    evict_retained_on_context(&state.contexts, &state.frame_tables, ctx, key);
 }
 
 pub(super) fn reap_timeline_cmd_buffers_up_to(

@@ -544,6 +544,7 @@ where
 }
 
 pub(super) struct RenderToResources<'a> {
+    pub(super) contexts: &'a HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
     pub(super) devices: &'a HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     pub(super) frame_tables: &'a HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
     pub(super) buffers: &'a HashMap<BufferHandle, super::types::BufferState>,
@@ -577,6 +578,7 @@ where
 
     if has_bindings {
         super::frame_table::record_prologue_for_tables(
+            resources.contexts,
             resources.frame_tables,
             resources.buffers,
             device_handle,
