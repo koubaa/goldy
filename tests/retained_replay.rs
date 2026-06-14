@@ -23,8 +23,9 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, ReadGrant,
-    RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags, TextureFormat, TextureKind,
+    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, Parcel,
+    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -443,4 +444,159 @@ fn grant_read_concurrent_frames_distinct_backings() {
     assert_eq!(stats.records, 1, "dispatch records once");
     #[cfg(not(feature = "metal"))]
     assert_eq!(stats.resubmit_hits, 1, "second dispatch submit is a retention hit");
+}
+
+fn fill_42_pipeline(device: &Device) -> ComputePipeline {
+    let shader = ShaderModule::from_slang(device, FILL_42_SHADER).expect("compile fill shader");
+    ComputePipeline::new(device, &shader).expect("create pipeline")
+}
+
+fn fill_42_scheme(ctx: &Context, pipe: &ComputePipeline, buf: &Parcel) -> Scheme {
+    let mut scheme = Scheme::new(ctx);
+    scheme
+        .node("fill", pipe)
+        .bind_parcel(buf, NodeAccess::Write)
+        .bind_resources_typed(&[buf.handle(ResourceAccess::Write).expect("handle")])
+        .dispatch(1, 1, 1);
+    scheme
+}
+
+/// Second `grant.read` on the same frame must fail (staging cell is single-consume).
+#[test]
+fn grant_read_double_read_same_frame_errors() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipe = fill_42_pipeline(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let _loan = grant.read(&frame).expect("first read");
+    let err = grant.read(&frame).expect_err("second read must fail");
+    assert!(
+        err.to_string().contains("already consumed"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Cloned frames share one staging cell; only one read succeeds.
+#[test]
+fn grant_read_cloned_frame_double_read_errors() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipe = fill_42_pipeline(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+    let frame_clone = frame.clone();
+
+    let _loan = grant.read(&frame).expect("first read");
+    let err = grant.read(&frame_clone).expect_err("cloned frame second read must fail");
+    assert!(
+        err.to_string().contains("already consumed"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Grant with no producing dispatch copies uninitialized parcel bytes (zeros on fresh acquire).
+#[test]
+fn grant_read_without_producing_dispatch_reads_zeros() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = Scheme::new(&ctx);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+    let values = read_grant_u32(&grant, &frame, 64);
+    assert!(values.iter().all(|&v| v == 0), "expected zeros without a producer dispatch");
+}
+
+/// Grant node before dispatch in IR still reads post-dispatch bytes — copy runs after all dispatches.
+#[test]
+fn grant_read_before_dispatch_node_still_reads_producer_output() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipe = fill_42_pipeline(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = Scheme::new(&ctx);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    scheme
+        .node("fill", &pipe)
+        .bind_parcel(&buf, NodeAccess::Write)
+        .bind_resources_typed(&[buf.handle(ResourceAccess::Write).expect("handle")])
+        .dispatch(1, 1, 1);
+    let frame = scheme.submit().expect("submit");
+    let values = read_grant_u32(&grant, &frame, 64);
+    assert!(values.iter().all(|&v| v == 42), "grant before dispatch in IR still sees fill output");
+}
+
+/// Dropping a frame without reading returns staging; a later submission can still be read.
+#[test]
+fn grant_read_drop_frame_without_read_then_submit_and_read() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipe = fill_42_pipeline(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+
+    let frame1 = scheme.submit().expect("submit 1");
+    drop(frame1);
+
+    let frame2 = scheme.submit().expect("submit 2 after frame1 drop");
+    let values = read_grant_u32(&grant, &frame2, 64);
+    assert!(values.iter().all(|&v| v == 42), "second frame after dropped unread frame1");
+}
+
+/// Many consecutive submits with dropped unread frames must not exhaust staging (pool recycles on frame drop).
+#[test]
+fn grant_read_many_dropped_frames_without_read_then_read_succeeds() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipe = fill_42_pipeline(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output parcel");
+
+    let mut scheme = fill_42_scheme(&ctx, &pipe, &buf);
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+
+    for _ in 0..8 {
+        drop(scheme.submit().expect("submit with dropped frame"));
+    }
+    let frame = scheme.submit().expect("final submit");
+    let values = read_grant_u32(&grant, &frame, 64);
+    assert!(
+        values.iter().all(|&v| v == 42),
+        "read succeeds after many dropped unread frames (staging pool must recycle)"
+    );
 }
