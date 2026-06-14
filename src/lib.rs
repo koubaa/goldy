@@ -57,6 +57,7 @@ pub mod placement_heap;
 pub mod retained_pool;
 pub mod scheme;
 pub mod signal;
+pub mod swapchain_pool;
 pub mod timeline;
 pub mod transient_allocator;
 pub mod transient_pool;
@@ -68,8 +69,11 @@ pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
 pub use scheme::{
-    Frame as SchemeFrame, GrantBuffer, GrantTexture, Lease, LeaseTexture, Loan, ReadGrant, ReplayStats, Scheme,
+    write_to_parcel, Frame as SchemeFrame, GrantBuffer, GrantTexture, Lease, LeaseTexture, Loan, PresentGrant,
+    ReadGrant, ReplayStats, Scheme,
 };
+pub use swapchain_pool::{PresentLease, SwapchainPool};
+pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
 

@@ -206,6 +206,10 @@ pub enum NodeKind {
     /// Emits no GPU commands in v1; exists so the analyzer can eventually
     /// choose host-visible backing vs an inserted device→host blit per backend.
     GrantRead { grant_id: u32 },
+    /// Present easement grant — recorded once, replayed with the scheme.
+    ///
+    /// Emits no GPU commands; owns the ordering edge before scanout return.
+    GrantPresent { grant_id: u32 },
 }
 
 /// A single node in the task graph.

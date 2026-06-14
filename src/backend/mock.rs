@@ -768,6 +768,16 @@ impl GpuBackend for MockBackend {
         self.readback_free_count
     }
 
+    #[cfg(test)]
+    fn test_surface_present_count(&self) -> usize {
+        self.surface_present_count
+    }
+
+    #[cfg(test)]
+    fn test_wait_until_count(&self) -> usize {
+        self.wait_until_count
+    }
+
     fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         let buf = self
             .buffers
@@ -1067,6 +1077,7 @@ impl GpuBackend for MockBackend {
                 surface,
                 image,
                 context: ctx,
+                frame_slot: image as u32,
             },
             tex_handle,
         ))

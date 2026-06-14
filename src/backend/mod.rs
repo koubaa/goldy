@@ -369,9 +369,16 @@ pub type SamplerHandle = u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameToken {
     pub surface: SurfaceHandle,
+    /// WSI swapchain image index (which drawable will be presented).
     pub image: SwapchainImageHandle,
     /// Submission context that owns this frame's timeline (set by [`crate::surface::Frame`]).
     pub context: ContextHandle,
+    /// In-flight slot index for the compute/scratch texture bound this frame.
+    ///
+    /// Used for present-lease retention keys: must match the physical backing that
+    /// shader dispatches and copies target, not necessarily [`Self::image`].
+    /// On Vulkan this is `current_frame`; on DX12 it equals the swapchain image index.
+    pub frame_slot: u32,
 }
 
 /// Render command for command buffer recording.
@@ -719,6 +726,22 @@ pub trait GpuBackend: Send + Sync {
     #[doc(hidden)]
     #[cfg(test)]
     fn test_readback_free_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
+    /// Mock-backend surface present counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_surface_present_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
+    /// Mock-backend wait_until call counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_wait_until_count(&self) -> usize {
         let _ = self;
         0
     }

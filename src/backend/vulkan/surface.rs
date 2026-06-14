@@ -838,6 +838,14 @@ pub(super) fn frame_texture(
     surfaces.get(&surface_handle).and_then(|s| s.current_texture_handle)
 }
 
+/// In-flight slot index for the frame most recently acquired on this surface.
+pub(super) fn current_frame_slot(
+    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
+    surface_handle: SurfaceHandle,
+) -> Option<u32> {
+    surfaces.get(&surface_handle).map(|s| s.current_frame as u32)
+}
+
 /// Render commands to the surface's current swapchain image.
 #[allow(clippy::too_many_lines)]
 pub(super) fn render(

@@ -596,6 +596,25 @@ impl Frame {
     pub fn image_index(&self) -> u32 {
         self.token.image as u32
     }
+
+    /// In-flight slot index for the compute/scratch texture bound this frame.
+    ///
+    /// Present-lease retention keys must use this, not [`Self::image_index`], because
+    /// on Vulkan the WSI swapchain image and the shader-target scratch texture are
+    /// indexed independently.
+    pub fn frame_slot(&self) -> u32 {
+        self.token.frame_slot
+    }
+
+    /// Abandon this frame without presenting.
+    ///
+    /// Marks the frame as already-presented so the `Drop` impl does not trigger
+    /// an implicit swapchain present. Use this to cancel a frame when submission
+    /// fails after the swapchain image was acquired but before work was submitted.
+    pub(crate) fn cancel(mut self) {
+        self.presented = true;
+        // Drop self — with `presented = true` the Drop impl is a no-op.
+    }
 }
 
 impl Drop for Frame {

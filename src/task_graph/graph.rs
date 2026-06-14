@@ -222,6 +222,27 @@ pub(crate) fn binding_fingerprint(ir: &GraphIR) -> u64 {
     h.finish()
 }
 
+/// Hash dispatch `resource_slots` for retention fingerprints.
+///
+/// Late-bound present/swapchain placeholders are normalized to a single sentinel
+/// tag so slot indices do not affect the fingerprint.
+fn hash_resource_slots_for_fingerprint(slots: &[u32], h: &mut impl std::hash::Hasher) {
+    use super::{PRESENT_LEASE_SLOT_PLACEHOLDER, SWAPCHAIN_SLOT_PLACEHOLDER};
+    slots.len().hash(h);
+    for &slot in slots {
+        let tag = match slot {
+            PRESENT_LEASE_SLOT_PLACEHOLDER => 0u8,
+            SWAPCHAIN_SLOT_PLACEHOLDER => 1u8,
+            _ => {
+                2u8.hash(h);
+                slot.hash(h);
+                continue;
+            }
+        };
+        tag.hash(h);
+    }
+}
+
 /// Fingerprint of all state that affects the *recorded* command buffer.
 ///
 /// Hashes everything `binding_fingerprint` covers plus per-`Dispatch` node:
@@ -246,7 +267,7 @@ pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
             } => {
                 0u8.hash(&mut h);
                 pipeline.hash(&mut h);
-                resource_slots.hash(&mut h);
+                hash_resource_slots_for_fingerprint(resource_slots, &mut h);
                 user_slots.hash(&mut h);
                 match dispatch {
                     DispatchDim::Direct { x, y, z } => {
@@ -270,6 +291,10 @@ pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
             }
             NodeKind::GrantRead { grant_id } => {
                 3u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
+            NodeKind::GrantPresent { grant_id } => {
+                4u8.hash(&mut h);
                 grant_id.hash(&mut h);
             }
             _ => {
@@ -324,7 +349,7 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
             } => {
                 0u8.hash(&mut h);
                 pipeline.hash(&mut h);
-                resource_slots.hash(&mut h);
+                hash_resource_slots_for_fingerprint(resource_slots, &mut h);
                 user_slots.hash(&mut h);
                 match dispatch {
                     DispatchDim::Direct { x, y, z } => {
@@ -350,6 +375,10 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 3u8.hash(&mut h);
                 grant_id.hash(&mut h);
             }
+            NodeKind::GrantPresent { grant_id } => {
+                4u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
             _ => {
                 2u8.hash(&mut h);
             }
@@ -364,17 +393,20 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
 /// submit, so a partition containing them is submitted standalone rather than
 /// retained.
 fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
+    use super::ResourceId;
     for wave in waves {
         for &ni in &wave.node_indices {
-            if matches!(
-                ir.nodes[ni].kind,
+            match &ir.nodes[ni].kind {
                 NodeKind::WriteBuffer { .. }
-                    | NodeKind::WriteTexture { .. }
-                    | NodeKind::WriteTextureRegion { .. }
-                    | NodeKind::CopyTexture { .. }
-                    | NodeKind::CopyRenderTarget { .. }
-            ) {
-                return false;
+                | NodeKind::WriteTexture { .. }
+                | NodeKind::WriteTextureRegion { .. }
+                | NodeKind::CopyTexture { .. } => return false,
+                NodeKind::CopyRenderTarget { dst, .. } => {
+                    if !matches!(dst, ResourceId::PresentLease(_)) {
+                        return false;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -388,6 +420,76 @@ fn partition_waves_have_render(ir: &GraphIR, waves: &[Wave]) -> bool {
             .iter()
             .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
     })
+}
+
+/// Emit graph commands for a retainable partition from the cache or by re-emitting.
+///
+/// For render-pass partitions the cached `GraphCommand` list is used; re-emit only
+/// happens on the very first submission (before the cache is warm) or after a
+/// present-slot resolver is provided.  Compute-only partitions use the cached
+/// `GpuCommand` slice wrapped in `GraphCommand::Compute`.
+fn partition_graph_commands_for_retain(
+    ir: &GraphIR,
+    cache: &CompiledCacheEntry,
+    waves: &[Wave],
+    part_idx: usize,
+    has_render: bool,
+    resolver: Option<&super::SlotResolver>,
+) -> Vec<GraphCommand> {
+    // When a resolver is given (present partition), we must re-emit to patch in the
+    // concrete drawable handle — the cached form was emitted without a resolver.
+    if resolver.is_some() {
+        if has_render {
+            return analysis::emit_graph_commands_for_waves(ir, waves, resolver);
+        }
+        return analysis::emit_waves_to_commands(ir, waves, resolver)
+            .into_iter()
+            .map(GraphCommand::Compute)
+            .collect();
+    }
+
+    // No resolver: use the cache.
+    if has_render {
+        if let Some(cmds) = cache.partitioned_graph_commands.get(part_idx).and_then(|o| o.as_ref()) {
+            return cmds.clone();
+        }
+        // Cache not yet warm — emit fresh (will be cached next call).
+        return analysis::emit_graph_commands_for_waves(ir, waves, None);
+    }
+
+    if let Some(parts) = cache.partitioned_commands.as_ref() {
+        return parts[part_idx].iter().cloned().map(GraphCommand::Compute).collect();
+    }
+    // Cache not yet warm.
+    analysis::emit_waves_to_commands(ir, waves, None)
+        .into_iter()
+        .map(GraphCommand::Compute)
+        .collect()
+}
+
+/// Emit standalone (non-retained) commands for a non-retainable partition.
+fn partition_standalone_commands(
+    ir: &GraphIR,
+    cache: &CompiledCacheEntry,
+    waves: &[Wave],
+    part_idx: usize,
+    has_render: bool,
+    has_present: bool,
+    resolver: Option<&super::SlotResolver>,
+) -> Result<Vec<GpuCommand>> {
+    if has_render {
+        anyhow::bail!(
+            "retained submit: standalone partition contains render_pass nodes; \
+             render-pass partitions must always be retainable (no upload nodes)"
+        );
+    }
+    if has_present {
+        return Ok(analysis::emit_waves_to_commands(ir, waves, resolver));
+    }
+    if let Some(parts) = cache.partitioned_commands.as_ref() {
+        return Ok(parts[part_idx].clone());
+    }
+    Ok(analysis::emit_waves_to_commands(ir, waves, None))
 }
 
 /// Submit `ir`, partitioned into wave groups.
@@ -405,11 +507,30 @@ pub(crate) fn submit_resolved_ir(
     }
 
     let fp = binding_fingerprint(ir);
-    let partitions = TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+    // Iterate over the partitions we just built. Render partitions have an empty
+    // compute slot; they are submitted below via `partitioned_graph_commands`.
     let mut last_tv = backend.gpu_progress(context.backend_handle());
-    for partition in partitions {
+    let n_parts = cache
+        .as_ref()
+        .unwrap()
+        .partitioned_commands
+        .as_ref()
+        .map(|p| p.len())
+        .unwrap_or(0);
+    for part_idx in 0..n_parts {
         let _tz = crate::tracy_zone!("goldy.submit_partition");
-        last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
+        let cache_ref = cache.as_ref().unwrap();
+        if let Some(graph_cmds) = cache_ref
+            .partitioned_graph_commands
+            .get(part_idx)
+            .and_then(|o| o.as_ref())
+        {
+            last_tv = backend.submit_graph(context.backend_handle(), graph_cmds)?;
+        } else {
+            let cmds = &cache_ref.partitioned_commands.as_ref().unwrap()[part_idx];
+            last_tv = backend.submit_standalone(context.backend_handle(), cmds)?;
+        }
     }
     Ok(last_tv)
 }
@@ -485,12 +606,13 @@ pub(crate) fn submit_resolved_ir_and_retain(
         })
         .collect();
 
-    // Ensure the partition_retention_keys vec is sized correctly.
+    // Ensure the partition retention key vecs are sized correctly.
     // On a topology change (fp miss) the schedule was just rebuilt; reset keys.
     {
         let entry = cache.as_mut().unwrap();
         if entry.partition_retention_keys.len() != wave_ranges.len() {
             entry.partition_retention_keys = vec![None; wave_ranges.len()];
+            entry.partition_slot_keys = vec![None; wave_ranges.len()];
         }
     }
 
@@ -511,9 +633,10 @@ pub(crate) fn submit_resolved_ir_and_retain(
 
         if !can_retain {
             // Upload/copy partition: always submit standalone, never retain.
-            let cmds = &cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap()[part_idx];
+            let cache_entry = cache.as_ref().unwrap();
+            let cmds = partition_standalone_commands(ir, cache_entry, waves, part_idx, has_render, false, None)?;
             let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(ctx, cmds)?;
+            last_tv = backend.submit_standalone(ctx, &cmds)?;
             // Leave partition_retention_keys[part_idx] as None.
             continue;
         }
@@ -529,14 +652,171 @@ pub(crate) fn submit_resolved_ir_and_retain(
         }
 
         // Re-record this partition.
-        let cmds = &cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap()[part_idx];
-        let graph_cmds: Vec<GraphCommand> = if has_render {
-            // Render partitions must go through `emit_graph_commands` to get RenderCommands.
-            let waves = &cache.as_ref().unwrap().schedule.waves[range];
-            analysis::emit_graph_commands_for_waves(ir, waves, None)
-        } else {
-            cmds.iter().cloned().map(GraphCommand::Compute).collect()
-        };
+        let cache_entry = cache.as_ref().unwrap();
+        let graph_cmds = partition_graph_commands_for_retain(ir, cache_entry, waves, part_idx, has_render, None);
+        let _tz = crate::tracy_zone!("goldy.submit_partition");
+        last_tv = backend.submit_graph_and_retain(ctx, &graph_cmds, part_fp)?;
+        cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
+        result.records += 1;
+    }
+
+    Ok((last_tv, result))
+}
+
+/// Resolved swapchain drawable for one present lease at submit time.
+pub(crate) struct ResolvedPresentSlot {
+    pub lease_id: u32,
+    pub slot_id: u32,
+    pub handle: crate::backend::TextureHandle,
+    pub uav_index: u32,
+}
+
+/// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
+/// bindings through `present_slots` and retains present-touching partitions per
+/// backing slot (immutable CB per swapchain image index).
+pub(crate) fn submit_resolved_ir_and_retain_with_presents(
+    cache: &mut Option<CompiledCacheEntry>,
+    context: &crate::Context,
+    backend: &mut dyn GpuBackend,
+    ir: &GraphIR,
+    present_slots: &[ResolvedPresentSlot],
+) -> Result<(TimelineValue, PartitionSubmitResult)> {
+    use super::{ResolvedSwapchain, SlotResolver};
+
+    let fp = binding_fingerprint(ir);
+    TaskGraph::get_or_build_schedule(cache, ir, fp);
+
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+    let schedule = &cache.as_ref().unwrap().schedule;
+    let partition_fps: Vec<u64> = wave_ranges
+        .iter()
+        .enumerate()
+        .map(|(part_idx, range)| {
+            let waves = &schedule.waves[range.clone()];
+            let raw_fp = partition_fingerprint(ir, schedule, waves);
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            raw_fp.hash(&mut h);
+            part_idx.hash(&mut h);
+            h.finish()
+        })
+        .collect();
+
+    {
+        let entry = cache.as_mut().unwrap();
+        if entry.partition_retention_keys.len() != wave_ranges.len() {
+            entry.partition_retention_keys = vec![None; wave_ranges.len()];
+            entry.partition_slot_keys = vec![None; wave_ranges.len()];
+        }
+    }
+
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+
+    let mut resolver = SlotResolver::new();
+    for slot in present_slots {
+        resolver.present_leases.insert(
+            slot.lease_id,
+            ResolvedSwapchain {
+                handle: slot.handle,
+                uav_index: slot.uav_index,
+            },
+        );
+    }
+
+    let ctx = context.backend_handle();
+    let mut last_tv = backend.gpu_progress(ctx);
+    let mut result = PartitionSubmitResult::default();
+
+    for part_idx in 0..wave_ranges.len() {
+        let part_fp = partition_fps[part_idx];
+        let range = wave_ranges[part_idx].clone();
+        let waves = &cache.as_ref().unwrap().schedule.waves[range.clone()];
+        let can_retain = partition_waves_can_retain(ir, waves);
+        let has_render = partition_waves_have_render(ir, waves);
+        let has_present = analysis::partition_waves_have_present(ir, waves);
+
+        if !can_retain {
+            let cache_entry = cache.as_ref().unwrap();
+            let cmds = partition_standalone_commands(
+                ir,
+                cache_entry,
+                waves,
+                part_idx,
+                has_render,
+                has_present,
+                if has_present { Some(&resolver) } else { None },
+            )?;
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend.submit_standalone(ctx, &cmds)?;
+            continue;
+        }
+
+        if has_present {
+            if present_slots.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "present partition requires at least one resolved present slot"
+                ));
+            }
+            // Derive a single retention key from ALL present-slot assignments so that
+            // multi-grant schemes produce distinct keys for each (slot_A, slot_B, …)
+            // combination, rather than colliding on the first slot only.
+            let slot_key = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                part_fp.hash(&mut h);
+                for slot in present_slots {
+                    slot.lease_id.hash(&mut h);
+                    slot.slot_id.hash(&mut h);
+                }
+                h.finish()
+            };
+
+            let already_retained = cache.as_ref().unwrap().partition_slot_keys[part_idx]
+                .as_ref()
+                .map(|s| s.contains(&slot_key))
+                .unwrap_or(false);
+
+            if already_retained {
+                if let Some(tv) = backend.try_resubmit_retained(ctx, slot_key)? {
+                    last_tv = tv;
+                    result.resubmit_hits += 1;
+                    continue;
+                }
+            }
+
+            let graph_cmds = partition_graph_commands_for_retain(
+                ir,
+                cache.as_ref().unwrap(),
+                waves,
+                part_idx,
+                has_render,
+                Some(&resolver),
+            );
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend.submit_graph_and_retain(ctx, &graph_cmds, slot_key)?;
+            {
+                let entry = cache.as_mut().unwrap();
+                entry.partition_slot_keys[part_idx]
+                    .get_or_insert_with(std::collections::HashSet::new)
+                    .insert(slot_key);
+            }
+            result.records += 1;
+            continue;
+        }
+
+        let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+        if cached_key == Some(part_fp) {
+            if let Some(tv) = backend.try_resubmit_retained(ctx, part_fp)? {
+                last_tv = tv;
+                result.resubmit_hits += 1;
+                continue;
+            }
+        }
+
+        let graph_cmds =
+            partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), waves, part_idx, has_render, None);
         let _tz = crate::tracy_zone!("goldy.submit_partition");
         last_tv = backend.submit_graph_and_retain(ctx, &graph_cmds, part_fp)?;
         cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
@@ -579,17 +859,24 @@ impl IrSubmitState {
         apply_stamp_targets(&self.stamp_targets, ctx, submit_device, tv);
     }
 
+    /// Clear compiled schedule cache and stamp targets for in-place scheme re-record.
+    pub fn reset(&mut self) {
+        self.schedule_cache = None;
+        self.stamp_targets.clear();
+    }
+
     /// Record and retain the command list for `ir` on `ctx`.
     ///
-    /// Returns the final timeline value and a [`PartitionSubmitResult`] describing
-    /// how many partitions were re-recorded versus resubmitted from cache.
-    pub fn submit_pipelined_and_retain(
+    /// When `present_slots` is empty, every partition uses the standard single-key
+    /// retention path. Present leases are resolved through `present_slots` at emit time.
+    pub fn submit_pipelined_and_retain_with_presents(
         &mut self,
         ctx: &crate::Context,
         ir: &GraphIR,
+        present_slots: &[ResolvedPresentSlot],
     ) -> Result<(TimelineValue, PartitionSubmitResult)> {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
-        submit_resolved_ir_and_retain(&mut self.schedule_cache, ctx, backend.as_mut(), ir)
+        submit_resolved_ir_and_retain_with_presents(&mut self.schedule_cache, ctx, backend.as_mut(), ir, present_slots)
     }
 }
 
@@ -605,15 +892,31 @@ pub(crate) struct CompiledCacheEntry {
     upload_remap: Vec<(usize, usize)>,
     /// Cached partitioned emission output.  Populated on first call to
     /// `get_or_build_partitioned_commands`.
+    ///
+    /// For pure-compute partitions, the entry holds the compute `GpuCommand` list.
+    /// For render-pass partitions, the entry is an empty `Vec` — the `GraphCommand`
+    /// form is stored in `partitioned_graph_commands` instead.
     partitioned_commands: Option<Vec<Vec<GpuCommand>>>,
     /// `(partition_idx, cmd_idx, ir_node_idx)` for upload commands across partitions.
     partitioned_upload_remap: Vec<(usize, usize, usize)>,
+    /// Cached `GraphCommand` lists for render-pass partitions.
+    ///
+    /// Indexed in parallel with `partitioned_commands`.  `Some(cmds)` when partition
+    /// `i` has render-pass nodes; `None` when partition `i` is pure-compute.
+    partitioned_graph_commands: Vec<Option<Vec<GraphCommand>>>,
     /// Per-partition retention keys for slice-aware retention.
     ///
     /// `Some(key)` when partition `i` was last successfully retained with that key;
     /// `None` when the partition has not yet been retained (e.g. it contains upload
     /// nodes and is submitted standalone rather than retained).
     partition_retention_keys: Vec<Option<u64>>,
+    /// Per-partition set of slot-combination keys for present-aware retention.
+    ///
+    /// Each entry is the set of `slot_key` values (derived from all present lease
+    /// slot assignments for that frame) that have been successfully retained.
+    /// A cache hit occurs when the current frame's `slot_key` is already in the set
+    /// and the backend can resubmit the retained command buffer.
+    partition_slot_keys: Vec<Option<std::collections::HashSet<u64>>>,
 }
 
 /// Per-page cache of a fully-lowered [`GraphIR`].
@@ -1539,6 +1842,8 @@ impl TaskGraph {
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
             partition_retention_keys: Vec::new(),
+            partition_slot_keys: Vec::new(),
+            partitioned_graph_commands: Vec::new(),
         });
         &cache.as_ref().unwrap().schedule
     }
@@ -1597,20 +1902,22 @@ impl TaskGraph {
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
             partition_retention_keys: Vec::new(),
+            partition_slot_keys: Vec::new(),
+            partitioned_graph_commands: Vec::new(),
         });
         cache.as_ref().unwrap().commands.as_deref().unwrap()
     }
 
     /// Return cached partitioned commands for `ir`, building them if necessary.
     ///
-    /// Like [`Self::get_or_build_compute_commands`] but returns a partitioned
-    /// `Vec<Vec<GpuCommand>>` suitable for multi-submission.  On cache hit only
-    /// the upload `Arc<[u8]>` payloads are refreshed.
-    fn get_or_build_partitioned_commands<'c>(
-        cache: &'c mut Option<CompiledCacheEntry>,
-        ir: &GraphIR,
-        fp: u64,
-    ) -> &'c [Vec<GpuCommand>] {
+    /// Partitions that contain only compute nodes are stored as `Vec<GpuCommand>`.
+    /// Partitions that contain render-pass nodes are stored as `Vec<GraphCommand>` in
+    /// `CompiledCacheEntry::partitioned_graph_commands` and represented by an empty
+    /// `Vec` in the parallel `partitioned_commands` slot.
+    ///
+    /// On cache hit only upload `Arc<[u8]>` payloads in the compute slots are refreshed;
+    /// render-pass commands are immutable (data arrives via bound parcels, not uploads).
+    fn get_or_build_partitioned_commands(cache: &mut Option<CompiledCacheEntry>, ir: &GraphIR, fp: u64) {
         let _tz = crate::tracy_zone!("goldy.compile_partitioned");
 
         // Ensure schedule exists.
@@ -1629,6 +1936,8 @@ impl TaskGraph {
                 partitioned_commands: None,
                 partitioned_upload_remap: Vec::new(),
                 partition_retention_keys: Vec::new(),
+                partition_slot_keys: Vec::new(),
+                partitioned_graph_commands: Vec::new(),
             });
         }
 
@@ -1637,7 +1946,7 @@ impl TaskGraph {
         tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "partitioned_commands");
 
         if !needs_build {
-            // Hit: refresh upload payloads.
+            // Hit: refresh upload payloads in compute-only partitions.
             let entry = cache.as_mut().unwrap();
             if let Some(parts) = entry.partitioned_commands.as_mut() {
                 for &(part_idx, cmd_idx, node_idx) in &entry.partitioned_upload_remap {
@@ -1657,16 +1966,47 @@ impl TaskGraph {
                     }
                 }
             }
-            return cache.as_ref().unwrap().partitioned_commands.as_deref().unwrap();
+            return;
         }
 
-        // Miss: emit partitioned commands from the cached schedule.
+        // Miss: emit each partition with the correct emitter.
+        //
+        // Present partitions are skipped — their commands are always re-emitted at
+        // submit time with a concrete SlotResolver (the drawable handle isn't known
+        // until the OS grants the swapchain image).  An empty Vec placeholder is
+        // stored so the slot indices remain aligned with wave_ranges.
         let entry = cache.as_mut().unwrap();
-        let partitions = analysis::emit_partitioned_commands(ir, &entry.schedule, None);
-        let remap = build_partitioned_upload_remap(ir, &partitions);
-        entry.partitioned_commands = Some(partitions);
+        let wave_ranges = analysis::partition_wave_ranges(ir, &entry.schedule);
+
+        let mut compute_partitions: Vec<Vec<GpuCommand>> = Vec::with_capacity(wave_ranges.len());
+        let mut graph_partitions: Vec<Option<Vec<GraphCommand>>> = Vec::with_capacity(wave_ranges.len());
+
+        for range in &wave_ranges {
+            let waves = &entry.schedule.waves[range.clone()];
+            let has_present = analysis::partition_waves_have_present(ir, waves);
+            let has_render = waves.iter().any(|w| {
+                w.node_indices
+                    .iter()
+                    .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
+            });
+
+            if has_present {
+                // Deferred: commands emitted fresh at submit time with a resolver.
+                compute_partitions.push(Vec::new());
+                graph_partitions.push(None);
+            } else if has_render {
+                compute_partitions.push(Vec::new());
+                graph_partitions.push(Some(analysis::emit_graph_commands_for_waves(ir, waves, None)));
+            } else {
+                compute_partitions.push(analysis::emit_waves_to_commands(ir, waves, None));
+                graph_partitions.push(None);
+            }
+        }
+
+        let remap = build_partitioned_upload_remap(ir, &compute_partitions);
+        entry.partitioned_commands = Some(compute_partitions);
         entry.partitioned_upload_remap = remap;
-        cache.as_ref().unwrap().partitioned_commands.as_deref().unwrap()
+        entry.partitioned_graph_commands = graph_partitions;
     }
 
     /// Compile the graph into a flat command stream.
@@ -3683,7 +4023,7 @@ mod slice_retention_tests {
     }
 
     fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR) {
-        state.submit_pipelined_and_retain(ctx, ir).unwrap();
+        state.submit_pipelined_and_retain_with_presents(ctx, ir, &[]).unwrap();
     }
 
     // ------------------------------------------------------------------
@@ -3990,5 +4330,601 @@ mod slice_retention_tests {
             1,
             "compute partition resubmits on second submit"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partitioning tests (no GPU submit)
+//
+// These tests operate at the *logical partition* level using
+// `analysis::describe_logical_partitions`.  They assert invariants that must
+// hold regardless of the actualized split count or heuristic tuning:
+//
+//  • Present-boundary invariant: all pre-present logical partitions have
+//    has_present == false; the present partition (if any) comes last.
+//  • Render-kind invariant: every render-pass logical partition has
+//    has_render == true; pure-compute ones have has_render == false.
+//  • Cache-kind invariant: render partitions use the graph-command cache slot;
+//    compute partitions use the GpuCommand cache slot; present partitions use
+//    neither (deferred to submit time).
+//  • Upload-remap invariant: every WriteBuffer/WriteTexture node in the IR
+//    appears exactly once in the upload remap across all compute partitions.
+//  • Cache-stability invariant: repeated calls with the same fingerprint
+//    reuse the same allocated Vecs; a fingerprint change causes a rebuild.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod partitioning_tests {
+    use super::*;
+    use crate::backend::GpuCommand;
+    use crate::task_graph::analysis::{self, LogicalPartition};
+    use std::sync::Arc;
+
+    // ------------------------------------------------------------------
+    // IR construction helpers
+    // ------------------------------------------------------------------
+
+    fn buf(id: u64) -> ResourceId {
+        ResourceId::Buffer(id)
+    }
+
+    fn dispatch_node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: bindings
+                .into_iter()
+                .map(|(resource, access)| ResourceBinding { resource, access })
+                .collect(),
+            kind: NodeKind::Dispatch {
+                pipeline,
+                resource_slots: Vec::new(),
+                user_slots: Vec::new(),
+                dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
+            },
+        }
+    }
+
+    fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![ResourceBinding {
+                resource: buffer,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer: buf_handle,
+                offset: 0,
+                data: Arc::from(vec![0u8; 4]),
+            },
+        }
+    }
+
+    fn render_pass_node(label: &'static str, target: RenderTargetHandle) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![],
+            kind: NodeKind::RenderPass {
+                target,
+                commands: Vec::new(),
+            },
+        }
+    }
+
+    fn copy_to_dst_node(label: &'static str, src: RenderTargetHandle, dst: ResourceId) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(src),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget { src, dst },
+        }
+    }
+
+    fn grant_present_node(label: &'static str, grant_id: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![],
+            kind: NodeKind::GrantPresent { grant_id },
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Analysis helpers — logical partitions and actualized cache
+    // ------------------------------------------------------------------
+
+    fn logical_partitions(ir: &GraphIR) -> Vec<LogicalPartition> {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        analysis::describe_logical_partitions(ir, &schedule)
+    }
+
+    fn build_cache(ir: &GraphIR) -> CompiledCacheEntry {
+        let mut cache: Option<CompiledCacheEntry> = None;
+        let fp = binding_fingerprint(ir);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, ir, fp);
+        cache.unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // Logical-partition invariant helpers
+    // ------------------------------------------------------------------
+
+    /// Assert the present-boundary invariant:
+    ///   - At most one logical partition has has_present == true.
+    ///   - The present partition (if any) must be the last one.
+    fn assert_present_boundary_invariant(parts: &[LogicalPartition]) {
+        let present_indices: Vec<usize> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.has_present)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            present_indices.len() <= 1,
+            "at most one present partition expected, got indices {:?}",
+            present_indices
+        );
+        if let Some(&pi) = present_indices.first() {
+            assert_eq!(
+                pi,
+                parts.len() - 1,
+                "present partition must be the last logical partition"
+            );
+        }
+    }
+
+    /// Assert the render-kind invariant:
+    ///   - No partition mixes render and present.
+    ///   - Each partition's has_render flag matches whether it actually
+    ///     contains render-pass waves.
+    fn assert_render_kind_invariant(parts: &[LogicalPartition]) {
+        for (i, p) in parts.iter().enumerate() {
+            assert!(
+                !(p.has_render && p.has_present),
+                "partition {i} must not mix render and present"
+            );
+        }
+    }
+
+    /// Assert the cache-kind invariant against an actualized CompiledCacheEntry:
+    ///   - Render partitions: compute slot empty, graph slot Some.
+    ///   - Present partitions: both slots empty/None (deferred to submit time).
+    ///   - Pure-compute partitions: compute slot non-empty, graph slot None.
+    fn assert_cache_kind_invariant(ir: &GraphIR, entry: &CompiledCacheEntry) {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        let ranges = analysis::partition_wave_ranges(ir, &schedule);
+        let parts = entry.partitioned_commands.as_ref().unwrap();
+
+        for (i, range) in ranges.iter().enumerate() {
+            let waves = &entry.schedule.waves[range.clone()];
+            let has_render = partition_waves_have_render(ir, waves);
+            let has_present = analysis::partition_waves_have_present(ir, waves);
+
+            if has_present {
+                assert!(
+                    parts[i].is_empty(),
+                    "present partition {i}: compute slot must be empty (deferred)"
+                );
+                assert!(
+                    entry.partitioned_graph_commands[i].is_none(),
+                    "present partition {i}: graph slot must be None (deferred)"
+                );
+            } else if has_render {
+                assert!(parts[i].is_empty(), "render partition {i}: compute slot must be empty");
+                assert!(
+                    entry.partitioned_graph_commands[i].is_some(),
+                    "render partition {i}: graph slot must be Some"
+                );
+                assert!(
+                    entry.partitioned_graph_commands[i]
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|c| matches!(c, GraphCommand::Render { .. })),
+                    "render partition {i}: graph slot must contain a Render command"
+                );
+            } else {
+                assert!(
+                    !parts[i].is_empty(),
+                    "compute partition {i}: compute slot must be non-empty"
+                );
+                assert!(
+                    entry.partitioned_graph_commands[i].is_none(),
+                    "compute partition {i}: graph slot must be None"
+                );
+            }
+        }
+    }
+
+    /// Assert upload-remap invariant: every WriteBuffer/WriteTexture/WriteTextureRegion
+    /// node in the IR appears exactly once in the remap table.
+    fn assert_upload_remap_invariant(ir: &GraphIR, entry: &CompiledCacheEntry) {
+        let upload_node_indices: Vec<usize> = ir
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                matches!(
+                    n.kind,
+                    NodeKind::WriteBuffer { .. } | NodeKind::WriteTexture { .. } | NodeKind::WriteTextureRegion { .. }
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut remap_node_indices: Vec<usize> = entry.partitioned_upload_remap.iter().map(|&(_, _, ni)| ni).collect();
+        remap_node_indices.sort_unstable();
+
+        let mut expected = upload_node_indices.clone();
+        expected.sort_unstable();
+
+        assert_eq!(
+            remap_node_indices, expected,
+            "upload remap must cover every upload node exactly once"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Group 1: logical partitions — pure-compute schemes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn single_dispatch_one_pure_compute_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 4)],
+        };
+        let parts = logical_partitions(&ir);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_pure_compute());
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn independent_dispatches_share_wave_one_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 4),
+                dispatch_node("b", 2, vec![(buf(1), NodeAccess::Write)], 4),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        // Two independent dispatches land in the same wave → one logical partition.
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_pure_compute());
+        assert_present_boundary_invariant(&parts);
+    }
+
+    #[test]
+    fn linear_chain_stays_one_pure_compute_logical_partition() {
+        // A→B→C linear chain: 3 waves, no render, no present.
+        // The barrier-cost split is an *actualized* concern; logically it is one unit.
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                dispatch_node("c", 3, vec![(buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        assert_eq!(parts.len(), 1, "pure-compute linear chain is one logical partition");
+        assert!(parts[0].is_pure_compute());
+        assert_present_boundary_invariant(&parts);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 2: logical partitions — render-pass schemes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_pass_alone_one_render_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![render_pass_node("draw", 10)],
+        };
+        let parts = logical_partitions(&ir);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].has_render);
+        assert!(!parts[0].has_present);
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn render_then_copy_present_two_logical_partitions() {
+        // RenderPass → CopyRenderTarget(PresentLease) → GrantPresent
+        // Logical split: render partition | present partition.
+        let ir = GraphIR {
+            nodes: vec![
+                render_pass_node("draw", 10),
+                copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        // Must have at least: one render partition + one present partition.
+        assert!(parts.len() >= 2, "render→present must produce ≥ 2 logical partitions");
+        let render_count = parts.iter().filter(|p| p.has_render).count();
+        let present_count = parts.iter().filter(|p| p.has_present).count();
+        assert_eq!(render_count, 1);
+        assert_eq!(present_count, 1);
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn compute_then_render_two_logical_partitions() {
+        // The render pass reads from a buffer that the dispatch writes, so it lands
+        // in a later wave — a render-kind boundary then forces a logical split.
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![ResourceBinding {
+                        resource: buf(0),
+                        access: NodeAccess::Read,
+                    }],
+                    kind: NodeKind::RenderPass {
+                        target: 10,
+                        commands: Vec::new(),
+                    },
+                },
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        assert!(parts.len() >= 2, "compute→render must produce ≥ 2 logical partitions");
+        let has_pure_compute = parts.iter().any(|p| p.is_pure_compute());
+        let has_render = parts.iter().any(|p| p.has_render);
+        assert!(has_pure_compute, "must have at least one pure-compute partition");
+        assert!(has_render, "must have at least one render partition");
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 3: logical partitions — present-lease schemes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn present_lease_copy_only_has_present_partition() {
+        let ir = GraphIR {
+            nodes: vec![copy_to_dst_node("copy", 5, ResourceId::PresentLease(0))],
+        };
+        let parts = logical_partitions(&ir);
+        let present_count = parts.iter().filter(|p| p.has_present).count();
+        assert_eq!(present_count, 1, "must have exactly one present logical partition");
+        assert!(!parts.iter().any(|p| p.has_render), "no render partitions expected");
+        assert_present_boundary_invariant(&parts);
+    }
+
+    #[test]
+    fn compute_then_present_present_is_last_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("post", 2, vec![(buf(0), NodeAccess::Read)], 1),
+                copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        assert!(parts.last().unwrap().has_present, "present partition must be last");
+        assert!(parts.iter().take(parts.len() - 1).all(|p| !p.has_present));
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn render_then_compute_then_present_ordering() {
+        // A richer scheme: render pass → compute post-process → present.
+        let ir = GraphIR {
+            nodes: vec![
+                render_pass_node("draw", 10),
+                dispatch_node("post", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        // Whatever the exact count, the present partition must be last.
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+        assert!(parts.iter().any(|p| p.has_render));
+        assert!(parts.last().unwrap().has_present);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 4: actualized cache — kind correctness
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cache_kind_invariant_pure_compute() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn cache_kind_invariant_render_only() {
+        let ir = GraphIR {
+            nodes: vec![render_pass_node("draw", 10)],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn cache_kind_invariant_present_deferred() {
+        // Present partitions must have both cache slots empty after build_cache.
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn cache_kind_invariant_mixed_render_and_present() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                render_pass_node("draw", 10),
+                copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 5: upload remap coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn write_then_dispatch_upload_remap_covers_all_uploads() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("upload", buf(0), 0),
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_upload_remap_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn two_uploads_remap_covers_both() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("upload_a", buf(0), 0),
+                write_node("upload_b", buf(1), 1),
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_upload_remap_invariant(&ir, &entry);
+        assert_eq!(entry.partitioned_upload_remap.len(), 2);
+    }
+
+    #[test]
+    fn no_uploads_remap_is_empty() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_eq!(entry.partitioned_upload_remap.len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 6: cache stability
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cache_hit_reuses_allocated_vecs() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                dispatch_node("c", 3, vec![(buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+        let mut cache: Option<CompiledCacheEntry> = None;
+        let fp = binding_fingerprint(&ir);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        let ptr_before = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
+
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        let ptr_after = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
+        assert_eq!(
+            ptr_before, ptr_after,
+            "cache hit must not reallocate the partitioned_commands Vec"
+        );
+    }
+
+    #[test]
+    fn fingerprint_change_rebuilds_cache() {
+        // Changing the binding structure (different buffer id) changes the fingerprint.
+        let ir_v1 = GraphIR {
+            nodes: vec![dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1)],
+        };
+        let ir_v2 = GraphIR {
+            nodes: vec![dispatch_node("a", 1, vec![(buf(1), NodeAccess::Write)], 1)],
+        };
+        let fp1 = binding_fingerprint(&ir_v1);
+        let fp2 = binding_fingerprint(&ir_v2);
+        assert_ne!(fp1, fp2, "test requires distinct binding fingerprints");
+
+        let mut cache: Option<CompiledCacheEntry> = None;
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1);
+        assert_eq!(cache.as_ref().unwrap().fp, fp1);
+
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2);
+        assert_eq!(
+            cache.as_ref().unwrap().fp,
+            fp2,
+            "cache must rebuild on fingerprint change"
+        );
+        assert!(cache.as_ref().unwrap().partitioned_commands.is_some());
+    }
+
+    #[test]
+    fn upload_payload_refreshes_on_cache_hit() {
+        let mut ir = GraphIR {
+            nodes: vec![
+                write_node("upload", buf(0), 0),
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let mut cache: Option<CompiledCacheEntry> = None;
+        let fp = binding_fingerprint(&ir);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+
+        let ptr_before = {
+            let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
+            match &parts[0][0] {
+                GpuCommand::WriteBuffer { data, .. } => Arc::as_ptr(data),
+                other => panic!("expected WriteBuffer, got {other:?}"),
+            }
+        };
+
+        // Mutate the upload payload — same fingerprint, different Arc.
+        if let NodeKind::WriteBuffer { data, .. } = &mut ir.nodes[0].kind {
+            *data = Arc::from(vec![9u8; 4]);
+        }
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+
+        let ptr_after = {
+            let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
+            match &parts[0][0] {
+                GpuCommand::WriteBuffer { data, .. } => Arc::as_ptr(data),
+                other => panic!("expected WriteBuffer, got {other:?}"),
+            }
+        };
+        assert_ne!(
+            ptr_before, ptr_after,
+            "upload payload Arc must be refreshed on cache hit"
+        );
+        // Partition count must not change.
+        assert_eq!(cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().len(), 1);
     }
 }

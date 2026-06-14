@@ -566,6 +566,8 @@ impl GpuBackend for MetalBackend {
                 surface,
                 image,
                 context: ctx,
+                // Metal bindless slot and returned image index both use current_frame.
+                frame_slot: image as u32,
             },
             tex,
         ))

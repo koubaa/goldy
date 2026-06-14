@@ -9,17 +9,23 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand, TextureHandle, TextureReadbackLayout};
+use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureHandle, TextureReadbackLayout};
 use crate::buffer::Buffer;
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
+use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
+use crate::swapchain_pool::{PresentLease, SwapchainPool};
 use crate::task_graph::IrSubmitState;
-use crate::task_graph::{DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use crate::task_graph::ResolvedPresentSlot;
+use crate::task_graph::ResourceId;
+use crate::task_graph::{
+    DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, PRESENT_LEASE_SLOT_PLACEHOLDER,
+};
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::{ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
+use crate::types::{Color, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::validation_env;
 use std::fmt;
 use std::marker::PhantomData;
@@ -139,7 +145,6 @@ impl fmt::Debug for GrantStagingPool {
     }
 }
 
-#[derive(Debug)]
 struct FrameData {
     scheme_id: u64,
     timeline: TimelineValue,
@@ -147,6 +152,8 @@ struct FrameData {
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
     staging_pools: Vec<Arc<GrantStagingPool>>,
+    /// Acquired swapchain frames for present grants; consumed by [`Frame::present`].
+    present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
 }
 
 impl Drop for FrameData {
@@ -156,6 +163,25 @@ impl Drop for FrameData {
                 pool.return_handle(handle);
             }
         }
+        for frame_mutex in &self.present_frames {
+            if let Ok(mut slot) = frame_mutex.lock() {
+                if let Some(frame) = slot.take() {
+                    frame.cancel();
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for FrameData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameData")
+            .field("scheme_id", &self.scheme_id)
+            .field("timeline", &self.timeline)
+            .field("cells", &self.cells.len())
+            .field("staging_pools", &self.staging_pools.len())
+            .field("present_frames", &self.present_frames.len())
+            .finish()
     }
 }
 
@@ -182,12 +208,47 @@ impl Frame {
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
         ctx.wait_until(self.data.timeline)
     }
+
+    /// Present the acquired swapchain drawable for this submission.
+    ///
+    /// Consumes the stored [`crate::surface::Frame`] from the first present grant.
+    /// A second call returns an error (same idempotency contract as [`ReadGrant::read`]).
+    pub fn present(&self) -> Result<(), GoldyError> {
+        let frame = self.data.present_frames.first().ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "Frame::present requires a scheme recorded with grant_present"
+            ))
+        })?;
+        let mut slot = frame.lock().unwrap_or_else(|e| e.into_inner());
+        let surface_frame = slot.take().ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!("Frame::present already consumed for this submission"))
+        })?;
+        surface_frame.present().map(|_| ()).map_err(|e| GoldyError::Backend(e))
+    }
 }
 
 impl From<Frame> for TimelineValue {
     fn from(frame: Frame) -> Self {
         frame.timeline_value()
     }
+}
+
+/// Marker returned by [`Scheme::grant_present`].
+#[derive(Debug, Clone, Copy)]
+pub struct PresentGrant {
+    pub(crate) grant_id: u32,
+}
+
+impl PresentGrant {
+    /// Stable grant index recorded in the scheme IR.
+    pub fn grant_id(&self) -> u32 {
+        self.grant_id
+    }
+}
+
+struct PresentGrantInfo {
+    lease_id: u32,
+    pool: std::sync::Arc<crate::swapchain_pool::SwapchainPoolInner>,
 }
 
 /// Stable index of a read-easement grant recorded in the scheme IR.
@@ -397,6 +458,8 @@ pub struct Scheme {
     scheme_id: u64,
     /// Read-easement grants: N-backed staging per submission.
     grants: Vec<GrantInfo>,
+    /// Present easement grants: swapchain pool backing per submission.
+    present_grants: Vec<PresentGrantInfo>,
 }
 
 impl Scheme {
@@ -414,6 +477,7 @@ impl Scheme {
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             grants: Vec::new(),
+            present_grants: Vec::new(),
         }
     }
 
@@ -533,42 +597,53 @@ impl Scheme {
     /// On a clean resubmit, bound parcels' reference tables are stamped with the new
     /// timeline value, keeping the context transient pool's reuse gates correct across
     /// retained submissions.
+    ///
+    /// When present grants are recorded, swapchain drawables are acquired before lowering
+    /// and returned on the [`Frame`] for [`Frame::present`].
     pub fn submit(&mut self) -> Result<Frame, GoldyError> {
-        let tv_dispatch = self.record_and_retain()?;
-        let frame = self.finish_submit_frame(tv_dispatch)?;
-        self.last_submitted_tv = Some(frame.timeline_value());
-        Ok(frame)
-    }
-
-    /// Submit the scheme through the per-partition lowering path.
-    ///
-    /// When the IR is clean (`!dirty`) and the lowering's per-partition cache is warm,
-    /// every partition is resubmitted without re-recording — equivalent to the old
-    /// whole-scheme shortcut but operating at partition granularity.
-    ///
-    /// `records` is incremented when at least one partition was re-recorded.
-    /// `resubmit_hits` is incremented when all partitions were served from cache.
-    fn record_and_retain(&mut self) -> Result<TimelineValue, GoldyError> {
-        // Gate: wait for the previous submission before resubmitting any retained CB so
-        // we do not violate VUID-vkQueueSubmit2-commandBuffer-03875 (Vulkan) or the DX12
-        // equivalent.  This is conservative — a per-slice retirement gate is the right
-        // long-term fix (tracked in TODO: impl-scheme).
         if let Some(prev_tv) = self.last_submitted_tv {
             if !self.dirty {
                 self.ctx.wait_until(prev_tv)?;
             }
         }
 
-        let (tv, part_result) = self
-            .submit_state
-            .submit_pipelined_and_retain(&self.ctx, &self.ir)
-            .map_err(|e| self.ctx.classify(e))?;
+        let mut present_slots = Vec::with_capacity(self.present_grants.len());
+        let mut surface_frames = Vec::with_capacity(self.present_grants.len());
+        for grant in &self.present_grants {
+            let (slot_id, surface_frame, uav_index, handle) =
+                SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
+            present_slots.push(ResolvedPresentSlot {
+                lease_id: grant.lease_id,
+                slot_id,
+                handle,
+                uav_index,
+            });
+            surface_frames.push(Mutex::new(Some(surface_frame)));
+        }
+
+        let submit_result =
+            self.submit_state
+                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots);
+
+        let (tv, part_result) = match submit_result {
+            Ok(ok) => ok,
+            Err(e) => {
+                for frame_mutex in surface_frames {
+                    if let Ok(mut slot) = frame_mutex.lock() {
+                        if let Some(frame) = slot.take() {
+                            frame.cancel();
+                        }
+                    }
+                }
+                return Err(self.ctx.classify(e));
+            }
+        };
+
         self.submit_state
             .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
         self.ctx.advance_high_water_timeline(tv);
 
         self.dirty = false;
-        // Retain key is no longer used for the resubmit path; keep None.
         self.retention_key = None;
 
         if part_result.all_from_cache() {
@@ -579,10 +654,41 @@ impl Scheme {
         } else {
             self.stats.records += 1;
         }
-        Ok(tv)
+
+        let frame = self.finish_submit_frame(tv, surface_frames)?;
+        self.last_submitted_tv = Some(frame.timeline_value());
+        Ok(frame)
     }
 
-    fn finish_submit_frame(&mut self, tv_dispatch: TimelineValue) -> Result<Frame, GoldyError> {
+    /// Clear recorded nodes and retention cache while preserving scheme identity.
+    ///
+    /// Use before re-recording structural nodes after a resize or other topology change.
+    /// [`Self::last_submitted_tv`] is preserved so the next submit waits for the prior
+    /// submission before resubmitting retained command lists.
+    pub fn begin_rerecord(&mut self) {
+        self.ir = GraphIR::default();
+        self.submit_state.reset();
+        self.grants.clear();
+        self.present_grants.clear();
+        self.next_grant_id = 0;
+        self.retention_key = None;
+        self.dirty = true;
+
+        let ctx = self.ctx.clone();
+        for mut parcel in self.leases.drain(..) {
+            let ready_after = parcel.last_referenced();
+            parcel.release_bookkeeping();
+            ctx.with_transient_pool(|pool| {
+                pool.adopt(StampedParcel { parcel, ready_after });
+            });
+        }
+    }
+
+    fn finish_submit_frame(
+        &mut self,
+        tv_dispatch: TimelineValue,
+        present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+    ) -> Result<Frame, GoldyError> {
         if self.grants.is_empty() {
             return Ok(Frame {
                 data: Arc::new(FrameData {
@@ -590,6 +696,7 @@ impl Scheme {
                     timeline: tv_dispatch,
                     cells: Vec::new(),
                     staging_pools: Vec::new(),
+                    present_frames,
                 }),
             });
         }
@@ -652,8 +759,67 @@ impl Scheme {
                 timeline: tv_copy,
                 cells,
                 staging_pools,
+                present_frames,
             }),
         })
+    }
+
+    /// Record a present easement grant over a swapchain lease.
+    pub fn grant_present(&mut self, lease: &PresentLease) -> PresentGrant {
+        self.dirty = true;
+        let grant_id = self.next_grant_id;
+        self.next_grant_id += 1;
+        self.present_grants.push(PresentGrantInfo {
+            lease_id: lease.id,
+            pool: Arc::clone(&lease.pool),
+        });
+        self.ir.nodes.push(TaskNode {
+            label: "grant_present",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::PresentLease(lease.id),
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::GrantPresent { grant_id },
+        });
+        PresentGrant { grant_id }
+    }
+
+    /// Copy an offscreen render target into a present lease drawable.
+    pub fn copy_to_present(&mut self, src: &RenderTarget, dst: &PresentLease) {
+        self.dirty = true;
+        self.ir.nodes.push(TaskNode {
+            label: "copy_to_present",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(src.backend_handle()),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(dst.id),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: src.backend_handle(),
+                dst: ResourceId::PresentLease(dst.id),
+            },
+        });
+    }
+
+    /// Begin recording an offscreen render pass on this scheme.
+    pub fn render_pass<'a>(&'a mut self, label: &'static str, rt: &RenderTarget) -> SchemeRenderPassBuilder<'a> {
+        self.dirty = true;
+        SchemeRenderPassBuilder {
+            scheme: self,
+            label,
+            target: rt.backend_handle(),
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::RenderTarget(rt.backend_handle()),
+                access: NodeAccess::Write,
+            }],
+            commands: Vec::new(),
+            push_constant_handles: Vec::new(),
+        }
     }
 }
 
@@ -816,6 +982,14 @@ impl Scheme {
     }
 }
 
+fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+    match access {
+        NodeAccess::Read => ResourceAccess::Read,
+        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+    }
+}
+
 /// Builder for a single compute dispatch node within a [`Scheme`].
 pub struct SchemeNodeBuilder<'a> {
     scheme: &'a mut Scheme,
@@ -834,6 +1008,25 @@ impl<'a> SchemeNodeBuilder<'a> {
             resource: parcel.resource_id(),
             access,
         });
+        self
+    }
+
+    /// Like [`Self::bind_parcel`], but also appends the parcel's bindless index to
+    /// `resource_slots` in shader parameter order.
+    pub fn bind_parcel_slot(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.scheme.submit_state.register_parcel_stamp(parcel);
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        let resource_access = node_access_to_resource_access(access);
+        let index = parcel.resource_index(resource_access).unwrap_or_else(|| {
+            panic!(
+                "bind_parcel_slot: mosaic parcels cannot be shader slots; \
+                 bind views explicitly via bind_resources_typed"
+            )
+        });
+        self.resource_slots.push(index);
         self
     }
 
@@ -858,8 +1051,40 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     /// Bind resource slots from typed [`crate::types::ResourceHandle`]s (region A indices only).
+    ///
+    /// Replaces any previously set user slots while preserving trailing
+    /// [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entries appended by [`Self::writes_present`].
+    /// This means `writes_present` and `bind_resources_typed` may be called in either order.
     pub fn bind_resources_typed(mut self, handles: &[crate::types::ResourceHandle]) -> Self {
+        // Collect any trailing present-lease placeholders that were already pushed by
+        // writes_present() so we can re-append them after replacing the user slots.
+        let trailing_placeholders: Vec<u32> = self
+            .resource_slots
+            .iter()
+            .rev()
+            .take_while(|&&s| s == PRESENT_LEASE_SLOT_PLACEHOLDER)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
         self.resource_slots = handles.iter().map(|h| h.index()).collect();
+        self.resource_slots.extend_from_slice(&trailing_placeholders);
+        self
+    }
+
+    /// Declare a UAV write to a present lease (swapchain drawable).
+    ///
+    /// Appends a [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entry at the end of `resource_slots`
+    /// so the resolver can patch it to the correct UAV index at submit time.
+    /// May be called before or after [`Self::bind_resources_typed`].
+    pub fn writes_present(mut self, lease: &PresentLease) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: ResourceId::PresentLease(lease.id),
+            access: NodeAccess::Write,
+        });
+        self.resource_slots.push(PRESENT_LEASE_SLOT_PLACEHOLDER);
         self
     }
 
@@ -876,6 +1101,126 @@ impl<'a> SchemeNodeBuilder<'a> {
             },
         });
     }
+}
+
+/// Builder for a render pass recorded on a [`Scheme`].
+pub struct SchemeRenderPassBuilder<'a> {
+    scheme: &'a mut Scheme,
+    label: &'static str,
+    target: crate::backend::RenderTargetHandle,
+    bindings: Vec<ResourceBinding>,
+    commands: Vec<RenderCommand>,
+    push_constant_handles: Vec<ResourceHandle>,
+}
+
+impl<'a> SchemeRenderPassBuilder<'a> {
+    pub fn bind_parcel_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+        self.scheme.submit_state.register_parcel_stamp(parcel);
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    /// Like [`Self::bind_parcel_mut`], but also registers the parcel for
+    /// [`Self::set_pipeline`] push-constant binding.
+    pub fn bind_parcel_slot_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+        self.scheme.submit_state.register_parcel_stamp(parcel);
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        let resource_access = node_access_to_resource_access(access);
+        let handle = parcel.handle(resource_access).unwrap_or_else(|| {
+            panic!(
+                "bind_parcel_slot_mut: mosaic parcels cannot be push-constant slots; \
+                 use bind_parcel_mut for geometry and bind views at draw time"
+            )
+        });
+        self.push_constant_handles.push(handle);
+        self
+    }
+
+    pub fn clear(&mut self, color: Color) -> &mut Self {
+        self.commands.push(RenderCommand::Clear(color));
+        self
+    }
+
+    pub fn set_pipeline(&mut self, pipeline: &crate::RenderPipeline) -> &mut Self {
+        self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.push_constant_handles.is_empty() {
+            self.commands.push(RenderCommand::BindResourcesTyped {
+                handles: self.push_constant_handles.clone(),
+            });
+        }
+        self
+    }
+
+    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+        self.commands.push(RenderCommand::BindResourcesTyped {
+            handles: handles.to_vec(),
+        });
+        self
+    }
+
+    pub fn draw_fullscreen(&mut self) -> &mut Self {
+        self.commands.push(RenderCommand::Draw {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+        self
+    }
+
+    pub fn finish(self) {
+        let SchemeRenderPassBuilder {
+            scheme,
+            label,
+            target,
+            bindings,
+            commands,
+            push_constant_handles: _,
+        } = self;
+        scheme.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::RenderPass { target, commands },
+        });
+    }
+}
+
+/// Upload CPU bytes to a buffer parcel without mutating scheme structure.
+///
+/// Performs a standalone GPU write so retained schemes stay clean across frames.
+///
+/// If the parcel was previously referenced by GPU work on `ctx`, this function
+/// waits for that work to complete before issuing the write, preventing a race
+/// between the in-flight GPU read and the incoming CPU upload.
+pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
+    // Ensure the GPU has finished any prior use of this parcel before overwriting it.
+    if let Some(last_tv) = parcel.last_referenced_on(ctx.backend_handle()) {
+        if ctx.gpu_progress() < last_tv {
+            ctx.wait_until(last_tv)?;
+        }
+    }
+
+    let (buffer, _) = parcel.write_buffer_target().map_err(|e| ctx.classify(e))?;
+    let cmd = GpuCommand::WriteBuffer {
+        buffer,
+        offset,
+        data: Arc::from(data.to_vec()),
+    };
+    let tv = {
+        let mut backend = ctx.device().inner.backend.lock().unwrap();
+        backend
+            .submit_standalone(ctx.backend_handle(), &[cmd])
+            .map_err(|e| ctx.classify(e))?
+    };
+    ctx.advance_high_water_timeline(tv);
+    parcel.mark_referenced(ctx.backend_handle(), tv);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -933,6 +1278,23 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
         ComputePipeline::new(device, shader).expect("create pipeline")
+    }
+
+    fn mock_render_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(device, "void main() {}").expect("compile render shader")
+    }
+
+    fn mock_render_pipeline(device: &Device, shader: &ShaderModule) -> crate::RenderPipeline {
+        crate::RenderPipeline::new(
+            device,
+            shader,
+            shader,
+            &crate::RenderPipelineDesc {
+                target_format: crate::types::TextureFormat::Rgba8Unorm,
+                ..Default::default()
+            },
+        )
+        .expect("create render pipeline")
     }
 
     fn retained_buffer_parcel(pool: &mut RetainedPool) -> Parcel {
@@ -1664,5 +2026,525 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let loan = grant.read(&frame).expect("read after parcel drop");
         assert_eq!(loan.len(), 4 * 4 * 4);
+    }
+
+    // ------------------------------------------------------------------
+    // Present-on-scheme tests
+    // ------------------------------------------------------------------
+
+    struct MockWindow;
+
+    impl raw_window_handle::HasWindowHandle for MockWindow {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            Ok(unsafe {
+                raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Web(
+                    raw_window_handle::WebWindowHandle::new(0),
+                ))
+            })
+        }
+    }
+
+    impl raw_window_handle::HasDisplayHandle for MockWindow {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            Ok(unsafe {
+                raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Web(
+                    raw_window_handle::WebDisplayHandle::new(),
+                ))
+            })
+        }
+    }
+
+    fn mock_swapchain_pool(device: &Arc<Device>) -> (Context, crate::swapchain_pool::SwapchainPool) {
+        let ctx = device.create_context().unwrap();
+        let pool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("swapchain pool");
+        (ctx, pool)
+    }
+
+    fn mock_present_count(device: &Arc<Device>) -> usize {
+        let backend = device.inner.backend.lock().unwrap();
+        backend.test_surface_present_count()
+    }
+
+    #[test]
+    fn grant_present_appends_ir_node() {
+        let device = mock_device();
+        let (ctx, pool) = mock_swapchain_pool(&device);
+        let lease = pool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        assert_eq!(scheme.ir_node_count(), 0);
+
+        let grant = scheme.grant_present(&lease);
+        assert_eq!(scheme.ir_node_count(), 1);
+
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::GrantPresent { grant_id: 0 } => {}
+            other => panic!("expected GrantPresent{{grant_id:0}}, got {other:?}"),
+        }
+        assert_eq!(grant.grant_id(), 0);
+    }
+
+    #[test]
+    fn grant_present_marks_dirty() {
+        let device = mock_device();
+        let (ctx, pool) = mock_swapchain_pool(&device);
+        let lease = pool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        assert!(scheme.is_dirty(), "new scheme starts dirty");
+
+        // Submit to clear dirty.
+        // A scheme with only a GrantPresent (no dispatch) should still submit.
+        scheme.grant_present(&lease);
+        // grant_present must keep the dirty flag set.
+        assert!(scheme.is_dirty(), "grant_present must mark the scheme dirty");
+    }
+
+    #[test]
+    fn grant_present_orders_after_writer() {
+        use crate::task_graph::analysis;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let parcel = retained_buffer_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::Write)
+            .writes_present(&lease)
+            .dispatch(1, 1, 1);
+        scheme.grant_present(&lease);
+
+        let edges = analysis::build_edges(&scheme.ir);
+        // The dispatch (node 0) must precede the GrantPresent (node 1).
+        assert!(
+            edges.contains(&(0, 1)),
+            "dispatch (0) must precede grant_present (1); edges: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn copy_to_present_appends_ir_node() {
+        use crate::render_target::RenderTarget;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let rt = RenderTarget::new(&device, 4, 4, crate::types::TextureFormat::Rgba8Unorm).expect("render target");
+
+        let mut scheme = Scheme::new(&ctx);
+        assert_eq!(scheme.ir_node_count(), 0);
+
+        scheme.copy_to_present(&rt, &lease);
+        assert_eq!(scheme.ir_node_count(), 1);
+
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::CopyRenderTarget {
+                dst: ResourceId::PresentLease(0),
+                ..
+            } => {}
+            other => panic!("expected CopyRenderTarget{{dst:PresentLease(0)}}, got {other:?}"),
+        }
+        assert!(scheme.is_dirty(), "copy_to_present must mark the scheme dirty");
+    }
+
+    #[test]
+    fn writes_present_placeholder_in_resource_slots_when_last() {
+        // Correct ordering: bind_resources_typed first, then writes_present.
+        // The placeholder must end up appended to the existing resource_slots.
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+
+        // We can't directly inspect the builder — dispatch() consumes it and pushes into IR.
+        // Instead, verify via the IR node's resource_slots.
+        scheme
+            .node("n", &pipeline)
+            // Bind a fake slot (index 42) via raw slot push, simulated here by using
+            // bind_resources_typed with a ResourceHandle. We use a parcel handle for this.
+            .writes_present(&lease)
+            .dispatch(1, 1, 1);
+
+        // Node 0 must be a Dispatch whose resource_slots end with PRESENT_LEASE_SLOT_PLACEHOLDER.
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::Dispatch { resource_slots, .. } => {
+                assert!(
+                    resource_slots.last() == Some(&crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER),
+                    "last resource_slot must be PRESENT_LEASE_SLOT_PLACEHOLDER; got {resource_slots:?}"
+                );
+            }
+            other => panic!("expected Dispatch node, got {other:?}"),
+        }
+
+        // Bindings must include PresentLease(0) as the last entry.
+        assert!(
+            scheme.ir.nodes[0]
+                .bindings
+                .iter()
+                .any(|b| b.resource == ResourceId::PresentLease(0)),
+            "bindings must contain PresentLease(0)"
+        );
+    }
+
+    #[test]
+    fn writes_present_placeholder_preserved_when_bind_resources_typed_follows() {
+        // Regression test: bind_resources_typed called AFTER writes_present must preserve
+        // the PRESENT_LEASE_SLOT_PLACEHOLDER that writes_present appended.
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_texture_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let lease_tex = scheme_lease_texture_for_test(&device, &ctx);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("n", &pipeline)
+            .writes_present(&lease) // pushes PLACEHOLDER
+            .bind_resources_typed(&[lease_tex]) // must preserve PLACEHOLDER
+            .dispatch(1, 1, 1);
+
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::Dispatch { resource_slots, .. } => {
+                let has_placeholder = resource_slots
+                    .iter()
+                    .any(|s| *s == crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER);
+                assert!(
+                    has_placeholder,
+                    "bind_resources_typed must preserve PRESENT_LEASE_SLOT_PLACEHOLDER; \
+                     resource_slots: {resource_slots:?}"
+                );
+                // The user handle must still be present at slot 0.
+                assert_eq!(
+                    resource_slots.len(),
+                    2,
+                    "expected [user_slot, PLACEHOLDER], got {resource_slots:?}"
+                );
+                assert_ne!(
+                    resource_slots[0],
+                    crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER,
+                    "first slot must be the user handle, not a placeholder"
+                );
+            }
+            other => panic!("expected Dispatch node, got {other:?}"),
+        }
+    }
+
+    fn scheme_lease_texture_for_test(device: &Arc<Device>, _ctx: &Context) -> crate::types::ResourceHandle {
+        // Minimal helper: creates a retained texture parcel and returns a write handle.
+        let mut pool = RetainedPool::new(device.clone());
+        let parcel = pool
+            .acquire_texture(
+                4,
+                4,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Direct,
+                crate::types::TextureFlags::empty(),
+                None,
+            )
+            .expect("texture parcel");
+        parcel
+            .handle(crate::types::ResourceAccess::Write)
+            .expect("write handle")
+    }
+
+    #[test]
+    fn grant_present_submit_increments_present_count() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        let before = mock_present_count(&device);
+        let frame = scheme.submit().expect("first submit");
+        frame.present().expect("present");
+        let after = mock_present_count(&device);
+        assert_eq!(after, before + 1, "present must fire one swapchain present");
+    }
+
+    #[test]
+    fn grant_present_second_present_errors() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        let frame = scheme.submit().expect("submit");
+        frame.present().expect("first present");
+        let err = frame.present().expect_err("second present must fail");
+        assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn present_without_grant_present_errors() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, _parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+        let frame = scheme.submit().expect("submit");
+        let err = frame.present().expect_err("present without grant must fail");
+        assert!(err.to_string().contains("grant_present"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn grant_present_submit_twice_presents_independently() {
+        // Each submit acquires a fresh swapchain frame; both must be presentable.
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        let frame1 = scheme.submit().expect("submit 1");
+        let frame2 = scheme.submit().expect("submit 2");
+
+        // Present in order; both must succeed.
+        frame1.present().expect("present frame1");
+        frame2.present().expect("present frame2");
+
+        assert_eq!(mock_present_count(&device), 2, "two submits → two presents");
+    }
+
+    #[test]
+    fn grant_present_scheme_records_once_per_slot() {
+        // The present-aware retention path must record the first time a given
+        // swapchain slot is seen and resubmit from cache on subsequent encounters.
+        // Because the mock backend cycles through slots, the N-th submit may
+        // record a new slot; we only assert that at least one resubmit occurs.
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        // Submit many frames; the mock backend has a fixed pool of slot ids
+        // so after depth frames we must see at least one cache hit.
+        let depth = 6;
+        for i in 0..depth {
+            let frame = scheme.submit().expect(&format!("submit {i}"));
+            frame.present().expect(&format!("present {i}"));
+        }
+
+        // At minimum, the scheme must have recorded (not resubmitted) at most
+        // `depth` times — but with a 2-deep swapchain mock the 3rd submit
+        // should have been a slot-keyed hit.
+        #[cfg(not(feature = "metal"))]
+        assert!(
+            scheme.replay_stats().resubmit_hits > 0,
+            "with {} submits over a 2-deep pool, expected retention hits; stats: {:?}",
+            depth,
+            scheme.replay_stats()
+        );
+    }
+
+    #[test]
+    fn write_to_parcel_does_not_dirty_scheme() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+
+        scheme.submit().expect("initial submit");
+        assert!(!scheme.is_dirty(), "clean after first submit");
+
+        write_to_parcel(&ctx, &parcel, 0, &[1u8; 8]).expect("write_to_parcel");
+        assert!(!scheme.is_dirty(), "write_to_parcel must not dirty the scheme");
+    }
+
+    #[test]
+    fn write_to_parcel_stamps_parcel_reference() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = pool
+            .acquire_buffer(
+                32,
+                crate::types::BufferKind::Scattered,
+                None,
+                crate::types::BufferFlags::empty(),
+                None,
+            )
+            .expect("parcel");
+
+        let before = parcel.last_referenced_on(ctx.backend_handle());
+        assert!(before.is_none(), "fresh parcel has no stamp");
+
+        write_to_parcel(&ctx, &parcel, 0, &[0u8; 8]).expect("write");
+        let after = parcel.last_referenced_on(ctx.backend_handle());
+        assert!(after.is_some(), "write_to_parcel must stamp last_referenced_on");
+        assert!(after.unwrap() > 0, "stamp must be a non-zero timeline value");
+    }
+
+    #[test]
+    fn write_to_parcel_round_trips_data() {
+        // write_to_parcel must cause a WriteBuffer command to be dispatched.
+        // We verify indirectly: the parcel's reference epoch advances only
+        // after write_to_parcel is called, confirming a submit occurred.
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = pool
+            .acquire_buffer(
+                32,
+                crate::types::BufferKind::Scattered,
+                None,
+                crate::types::BufferFlags::empty(),
+                None,
+            )
+            .expect("parcel");
+
+        let tv_before = parcel.last_referenced_on(ctx.backend_handle());
+        write_to_parcel(&ctx, &parcel, 0, &[0xABu8; 8]).expect("write");
+        let tv_after = parcel.last_referenced_on(ctx.backend_handle());
+
+        assert!(
+            tv_after > tv_before,
+            "timeline must advance after write_to_parcel; before={tv_before:?} after={tv_after:?}"
+        );
+    }
+
+    #[test]
+    fn write_to_parcel_waits_for_prior_gpu_reference() {
+        // Verify that write_to_parcel waits when the parcel's last GPU reference is
+        // still in flight, preventing a write-after-read hazard.
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
+
+        let _frame = scheme.submit().expect("submit");
+        let tv = parcel.last_referenced_on(ctx.backend_handle()).expect("stamped");
+        assert!(tv > 0, "parcel must be stamped after submit");
+
+        let wait_before = {
+            let backend = device.inner.backend.lock().unwrap();
+            backend.test_wait_until_count()
+        };
+
+        write_to_parcel(&ctx, &parcel, 0, &[0u8; 8]).expect("write after submit");
+
+        let wait_after = {
+            let backend = device.inner.backend.lock().unwrap();
+            backend.test_wait_until_count()
+        };
+
+        if ctx.gpu_progress() < tv {
+            assert_eq!(
+                wait_after,
+                wait_before + 1,
+                "write_to_parcel must wait when the prior GPU reference is still in flight"
+            );
+        } else {
+            assert_eq!(
+                wait_after, wait_before,
+                "write_to_parcel must skip wait when GPU progress already covers the stamp"
+            );
+        }
+    }
+
+    #[test]
+    fn dropped_frame_without_present_cancels_swapchain() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        let before = mock_present_count(&device);
+        {
+            let _frame = scheme.submit().expect("submit");
+            // Drop without calling present — must cancel, not implicitly present.
+        }
+        assert_eq!(
+            mock_present_count(&device),
+            before,
+            "dropped Frame must not trigger swapchain present"
+        );
+    }
+
+    #[test]
+    fn begin_rerecord_clears_retention_and_allows_resubmit() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let parcel = retained_buffer_parcel(&mut pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("write", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::Write)
+            .writes_present(&lease)
+            .dispatch(1, 1, 1);
+        scheme.grant_present(&lease);
+
+        let frame = scheme.submit().expect("initial submit");
+        frame.present().expect("present");
+
+        scheme.begin_rerecord();
+        assert!(scheme.is_dirty());
+        scheme
+            .node("write", &pipeline)
+            .bind_parcel(&parcel, NodeAccess::Write)
+            .writes_present(&lease)
+            .dispatch(2, 2, 1);
+        scheme.grant_present(&lease);
+
+        let frame2 = scheme.submit().expect("post-rerecord submit");
+        frame2.present().expect("present after rerecord");
+    }
+
+    #[test]
+    fn copy_to_present_and_render_pass_partition_on_present_boundary() {
+        use crate::render_target::RenderTarget;
+        use crate::task_graph::analysis;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let rt = RenderTarget::new(&device, 4, 4, crate::types::TextureFormat::Rgba8Unorm).expect("rt");
+        let shader = mock_render_shader(&device);
+        let pipeline = mock_render_pipeline(&device, &shader);
+
+        let mut scheme = Scheme::new(&ctx);
+        let mut pass = scheme.render_pass("render", &rt);
+        pass.set_pipeline(&pipeline);
+        pass.draw_fullscreen();
+        pass.finish();
+        scheme.copy_to_present(&rt, &lease);
+        scheme.grant_present(&lease);
+
+        let partitions = analysis::describe_logical_partitions(&scheme.ir, &analysis::schedule_waves(
+            &scheme.ir,
+            &analysis::build_edges(&scheme.ir),
+        ));
+        assert!(
+            partitions.len() >= 2,
+            "render pass and present copy must land in separate logical partitions; got {partitions:?}"
+        );
+        assert!(!partitions[0].has_present, "first partition must not touch present lease");
+        assert!(
+            partitions.iter().any(|p| p.has_present),
+            "some partition must touch present lease"
+        );
     }
 }

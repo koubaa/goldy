@@ -88,7 +88,7 @@ mod graph;
 mod ir;
 pub mod record;
 
-pub(crate) use graph::{apply_stamp_targets, IrSubmitState};
+pub(crate) use graph::{apply_stamp_targets, IrSubmitState, ResolvedPresentSlot};
 pub use graph::{NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph};
 pub use ir::{BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
@@ -109,6 +109,11 @@ pub struct TransientTextureId(pub u32);
 /// of a `SwapchainOutput` binding.  Replaced by the real UAV bindless index in
 /// `TaskGraph::lower_swapchain_output` after `surface.begin()`.
 pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
+
+/// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
+/// of a [`ResourceId::PresentLease`] binding. Replaced by the real UAV bindless
+/// index when the swapchain pool resolves backing at submit time.
+pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
 
 /// Opaque handle returned by [`TaskGraph::declare_swapchain_output`].
 ///
@@ -190,6 +195,11 @@ pub(crate) enum ResourceId {
     /// swapchain image.  Lowered to [`ResourceId::Texture`] after
     /// `surface.begin()` runs between early and final partition submission.
     SwapchainOutput,
+    /// Present lease: scheme-scoped name for a swapchain-pool drawable.
+    ///
+    /// Lowered to [`ResourceId::Texture`] when the pool acquires a backing slot
+    /// at [`crate::Scheme::submit`] time.
+    PresentLease(u32),
 }
 
 impl ResourceId {
@@ -206,6 +216,7 @@ impl ResourceId {
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
             ResourceId::SwapchainOutput => None,
+            ResourceId::PresentLease(_) => None,
         }
     }
 }
@@ -249,6 +260,8 @@ pub(crate) struct SlotResolver {
     pub buffers: std::collections::HashMap<u32, ResolvedTransientBuffer>,
     pub textures: std::collections::HashMap<u32, ResolvedTransientTexture>,
     pub swapchain: Option<ResolvedSwapchain>,
+    /// Per [`ResourceId::PresentLease`] id, resolved at scheme submit time.
+    pub present_leases: std::collections::HashMap<u32, ResolvedSwapchain>,
 }
 
 impl SlotResolver {
@@ -276,6 +289,13 @@ impl SlotResolver {
                     .expect("SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired");
                 ResourceId::Texture(sc.handle)
             }
+            ResourceId::PresentLease(id) => {
+                let sc = self
+                    .present_leases
+                    .get(&id)
+                    .expect("SlotResolver::resolve: PresentLease accessed before pool acquire");
+                ResourceId::Texture(sc.handle)
+            }
             other => other,
         }
     }
@@ -299,6 +319,13 @@ impl SlotResolver {
                         .swapchain
                         .as_ref()
                         .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
+                    out[i] = sc.uav_index;
+                }
+                ResourceId::PresentLease(id) if out[i] == PRESENT_LEASE_SLOT_PLACEHOLDER => {
+                    let sc = self
+                        .present_leases
+                        .get(&id)
+                        .expect("SlotResolver::resolve_slots: PresentLease before pool acquire");
                     out[i] = sc.uav_index;
                 }
                 _ => {}

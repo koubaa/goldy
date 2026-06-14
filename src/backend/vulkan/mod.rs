@@ -794,6 +794,8 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
         let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
+        let frame_slot = surface::current_frame_slot(&self.state.surfaces, surface_handle)
+            .context("begin_frame: surface frame slot unavailable")?;
         let tex = surface::frame_texture(&self.state.surfaces, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
@@ -801,6 +803,7 @@ impl GpuBackend for VulkanBackend {
                 surface: surface_handle,
                 image,
                 context: ctx,
+                frame_slot,
             },
             tex,
         ))

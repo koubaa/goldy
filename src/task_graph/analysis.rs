@@ -108,6 +108,7 @@ pub(crate) fn resources_alias(a: ResourceId, b: ResourceId) -> bool {
         (ResourceId::TransientBuffer(x), ResourceId::TransientBuffer(y)) => x == y,
         (ResourceId::TransientTexture(x), ResourceId::TransientTexture(y)) => x == y,
         (ResourceId::SwapchainOutput, ResourceId::SwapchainOutput) => true,
+        (ResourceId::PresentLease(a), ResourceId::PresentLease(b)) => a == b,
         _ => false,
     }
 }
@@ -121,6 +122,9 @@ fn resolve_copy_destination(id: ResourceId, resolver: Option<&SlotResolver>) -> 
         ResourceId::Texture(h) => h,
         ResourceId::SwapchainOutput => {
             panic!("copy destination SwapchainOutput emitted before surface acquire")
+        }
+        ResourceId::PresentLease(_) => {
+            panic!("copy destination PresentLease emitted before pool acquire")
         }
         other => panic!("copy destination resolved to non-texture resource: {other:?}"),
     }
@@ -193,6 +197,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         TransientBuffer(u32),
         TransientTexture(u32),
         SwapchainOutput,
+        PresentLease(u32),
     }
 
     fn group_key(r: &ResourceId) -> GroupKey {
@@ -204,6 +209,7 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
             ResourceId::TransientBuffer(t) => GroupKey::TransientBuffer(t.0),
             ResourceId::TransientTexture(t) => GroupKey::TransientTexture(t.0),
             ResourceId::SwapchainOutput => GroupKey::SwapchainOutput,
+            ResourceId::PresentLease(id) => GroupKey::PresentLease(id),
         }
     }
 
@@ -420,10 +426,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        // GrantRead participates in ordering edges but emits no GPU work in the IR.
-        // Device→host copy is emitted out-of-band by [`crate::Scheme::finish_submit_frame`]
-        // via `submit_standalone` after the dispatch timeline completes.
-        NodeKind::GrantRead { .. } => UsageKindFlags::empty(),
+        // GrantRead/GrantPresent participate in ordering edges but emit no GPU work in the IR.
+        NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. } => UsageKindFlags::empty(),
     }
 }
 
@@ -483,8 +487,10 @@ fn compute_barriers(
             // GrantRead emits no GPU work in this command stream (copy is out-of-band in
             // `Scheme::finish_submit_frame`).  Skip it for barrier semantics so recording
             // grant before dispatch does not emit bogus COMMON→UAV global barriers on WARP.
-            if matches!(from_node.kind, NodeKind::GrantRead { .. })
-                || matches!(to_node.kind, NodeKind::GrantRead { .. })
+            if matches!(
+                from_node.kind,
+                NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }
+            ) || matches!(to_node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. })
             {
                 continue;
             }
@@ -647,7 +653,10 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GpuCommand::CopyRenderTarget { src: *src, dst });
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
+                NodeKind::Dispatch { .. }
+                | NodeKind::RenderPass { .. }
+                | NodeKind::GrantRead { .. }
+                | NodeKind::GrantPresent { .. } => {}
             }
         }
 
@@ -852,113 +861,192 @@ pub fn emit_partitioned_commands(
     schedule: &CompiledSchedule,
     resolver: Option<&SlotResolver>,
 ) -> Vec<Vec<GpuCommand>> {
-    let waves = &schedule.waves;
-
-    // Hard constraint: if the graph has a SwapchainOutput binding, find the
-    // earliest wave containing a node that binds it and split there.
-    // All waves before that index contain no SwapchainOutput references and
-    // can be submitted before the surface is acquired.  The swapchain wave and
-    // everything after forms the final partition, submitted after
-    // `surface.begin()` resolves the concrete TextureHandle.
-    let swapchain_wave: Option<usize> = waves
-        .iter()
-        .enumerate()
-        .find(|(_, w)| {
-            w.node_indices.iter().any(|&ni| {
-                ir.nodes[ni]
-                    .bindings
-                    .iter()
-                    .any(|b| b.resource == ResourceId::SwapchainOutput)
-            })
+    partition_wave_ranges(ir, schedule)
+        .into_iter()
+        .map(|range| {
+            let waves = &schedule.waves[range];
+            emit_waves_to_commands(ir, waves, resolver)
         })
-        .map(|(idx, _)| idx);
-
-    if let Some(split_wave) = swapchain_wave {
-        if split_wave > 0 {
-            let early = emit_waves_to_commands(ir, &waves[..split_wave], resolver);
-            let late = emit_waves_to_commands(ir, &waves[split_wave..], resolver);
-            return vec![early, late];
-        }
-        // SwapchainOutput is in wave 0 — cannot split before it; single partition.
-        return vec![emit_waves_to_commands(ir, waves, resolver)];
-    }
-
-    // Not enough waves to benefit from splitting.
-    if waves.len() < 3 {
-        return vec![emit_waves_to_commands(ir, waves, resolver)];
-    }
-
-    // Choose the wave boundary (index ≥ 1) with the highest barrier cost.
-    let (split_wave, max_cost) = waves
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(idx, w)| (idx, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
-        .max_by_key(|&(_, cost)| cost)
-        .unwrap(); // safe: waves.len() >= 3
-
-    // No cross-wave dependencies at any boundary — splitting adds overhead with
-    // no benefit.
-    if max_cost == 0 {
-        return vec![emit_waves_to_commands(ir, waves, resolver)];
-    }
-
-    let early = emit_waves_to_commands(ir, &waves[..split_wave], resolver);
-    let late = emit_waves_to_commands(ir, &waves[split_wave..], resolver);
-    vec![early, late]
+        .collect()
 }
 
-/// Compute the wave-index ranges for each partition of a compiled schedule.
+/// Logical partition — a semantically coherent slice of the schedule.
 ///
-/// Returns a `Vec<std::ops::Range<usize>>` using the same split algorithm as
-/// [`emit_partitioned_commands`].  Callers can use these ranges to compute
-/// per-partition fingerprints without re-running the full command-emission pass.
+/// Logical partitions are defined by two hard split rules:
 ///
-/// This function always returns at least one range covering all waves.
-pub(crate) fn partition_wave_ranges(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<std::ops::Range<usize>> {
+/// 1. **Present boundary**: any wave that references a [`ResourceId::PresentLease`] or
+///    [`ResourceId::SwapchainOutput`] begins a new logical partition.  Work that touches
+///    the swapchain drawable must not be submitted until the OS grants that image, so it
+///    must be a distinct unit from all earlier, drawable-independent work.
+///
+/// 2. **Render-kind boundary**: any wave that is the first wave containing a
+///    [`NodeKind::RenderPass`] when the preceding waves contained none — or vice versa —
+///    begins a new logical partition.  Render-pass waves must be emitted as
+///    [`GraphCommand::Render`] records and cannot be mixed into a pure-compute
+///    `GpuCommand` cache slot.
+///
+/// Both rules are checked per-wave; split points from either rule are collected and
+/// merged into a monotone list before forming ranges.
+///
+/// The two Boolean flags tag each partition so callers can choose the right
+/// emitter without re-scanning the wave slice:
+///
+/// - `has_render`   — the slice contains at least one [`NodeKind::RenderPass`] node.
+/// - `has_present`  — the slice binds at least one [`ResourceId::PresentLease`] or
+///                    [`ResourceId::SwapchainOutput`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalPartition {
+    /// Wave-index range `start..end` into [`CompiledSchedule::waves`].
+    pub wave_range: std::ops::Range<usize>,
+    /// True when the slice contains at least one offscreen render-pass node.
+    pub has_render: bool,
+    /// True when the slice references a present-lease or swapchain-output resource.
+    pub has_present: bool,
+}
+
+impl LogicalPartition {
+    /// True when the partition contains only compute/blit nodes (no render, no present).
+    pub fn is_pure_compute(&self) -> bool {
+        !self.has_render && !self.has_present
+    }
+}
+
+/// Decompose a compiled schedule into [`LogicalPartition`]s.
+///
+/// Rules applied, in priority order:
+///
+/// 1. If a wave is the first to contain a present binding, it opens a new partition
+///    (unless it is wave 0, in which case there can be no pre-present partition).
+/// 2. If a wave changes the render-kind of its predecessor (compute→render or
+///    render→compute), it opens a new partition.
+///
+/// The result always covers every wave exactly once.
+pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<LogicalPartition> {
     let waves = &schedule.waves;
     let n = waves.len();
     if n == 0 {
-        return vec![0..0];
+        return vec![LogicalPartition {
+            wave_range: 0..0,
+            has_render: false,
+            has_present: false,
+        }];
     }
 
-    let swapchain_wave: Option<usize> = waves
-        .iter()
-        .enumerate()
-        .find(|(_, w)| {
-            w.node_indices.iter().any(|&ni| {
-                ir.nodes[ni]
-                    .bindings
-                    .iter()
-                    .any(|b| b.resource == ResourceId::SwapchainOutput)
-            })
-        })
-        .map(|(idx, _)| idx);
+    // Collect split points: indices of waves that begin a new logical partition.
+    let mut splits: Vec<usize> = vec![0]; // always start with wave 0
+    let mut seen_present = false;
 
-    if let Some(split_wave) = swapchain_wave {
-        if split_wave > 0 {
-            return vec![0..split_wave, split_wave..n];
+    for (i, wave) in waves.iter().enumerate() {
+        let is_present = wave_has_present_binding(ir, wave);
+        let is_render = wave
+            .node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }));
+
+        if i == 0 {
+            seen_present = is_present;
+            continue;
         }
-        return vec![0..n];
+
+        let prev_render = waves[i - 1]
+            .node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }));
+
+        // Present boundary: first wave that touches the swapchain/lease.
+        if is_present && !seen_present {
+            splits.push(i);
+            seen_present = true;
+            continue; // don't also split on render-kind here
+        }
+
+        // Render-kind boundary: render→compute or compute→render transition.
+        if is_render != prev_render {
+            if !splits.contains(&i) {
+                splits.push(i);
+            }
+        }
     }
 
-    if n < 3 {
-        return vec![0..n];
+    splits.sort_unstable();
+    splits.dedup();
+
+    // Build partition descriptors from the split-point list.
+    let mut result = Vec::with_capacity(splits.len());
+    for (k, &start) in splits.iter().enumerate() {
+        let end = if k + 1 < splits.len() { splits[k + 1] } else { n };
+        let slice = &waves[start..end];
+        let has_present = slice.iter().any(|w| wave_has_present_binding(ir, w));
+        let has_render = slice.iter().any(|w| {
+            w.node_indices
+                .iter()
+                .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
+        });
+        result.push(LogicalPartition {
+            wave_range: start..end,
+            has_render,
+            has_present,
+        });
+    }
+    result
+}
+
+/// Compute the wave-index ranges for each actualized partition of a compiled schedule.
+///
+/// Actualized partitions refine the logical partition layout produced by
+/// [`describe_logical_partitions`] with an optional barrier-cost heuristic: large
+/// pure-compute logical partitions (≥ 3 waves, nonzero barrier cost) are subdivided
+/// at their heaviest wave boundary to expose GPU-pipeline overlap between submissions.
+///
+/// The present-boundary and render-kind splits from the logical layer are always
+/// respected; the heuristic is applied only *within* pure-compute non-present partitions.
+///
+/// This function always returns at least one range covering all waves.
+pub(crate) fn partition_wave_ranges(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<std::ops::Range<usize>> {
+    let logical = describe_logical_partitions(ir, schedule);
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(logical.len());
+
+    for lp in &logical {
+        let waves = &schedule.waves[lp.wave_range.clone()];
+        let len = waves.len();
+
+        // Only apply the barrier-cost heuristic to pure-compute, non-present logical
+        // partitions that are large enough to benefit from splitting.
+        if lp.is_pure_compute() && len >= 3 {
+            let (split_offset, max_cost) = waves
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, w)| (i, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
+                .max_by_key(|&(_, cost)| cost)
+                .unwrap(); // safe: len >= 3
+
+            if max_cost > 0 {
+                let abs_split = lp.wave_range.start + split_offset;
+                ranges.push(lp.wave_range.start..abs_split);
+                ranges.push(abs_split..lp.wave_range.end);
+                continue;
+            }
+        }
+
+        ranges.push(lp.wave_range.clone());
     }
 
-    let (split_wave, max_cost) = waves
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(idx, w)| (idx, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
-        .max_by_key(|&(_, cost)| cost)
-        .unwrap();
+    ranges
+}
 
-    if max_cost == 0 {
-        return vec![0..n];
-    }
+/// Returns true if any node in `waves` references a present lease or swapchain output.
+pub(crate) fn partition_waves_have_present(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| wave_has_present_binding(ir, w))
+}
 
-    vec![0..split_wave, split_wave..n]
+fn wave_has_present_binding(ir: &GraphIR, wave: &Wave) -> bool {
+    wave.node_indices.iter().any(|&ni| {
+        ir.nodes[ni]
+            .bindings
+            .iter()
+            .any(|b| matches!(b.resource, ResourceId::SwapchainOutput | ResourceId::PresentLease(_)))
+    })
 }
 
 /// Returns true if any node in `waves` is an offscreen [`NodeKind::RenderPass`].
@@ -1055,7 +1143,10 @@ pub(crate) fn emit_graph_commands_for_waves(
                     let dst = resolve_copy_destination(*dst, resolver);
                     commands.push(GraphCommand::Compute(GpuCommand::CopyRenderTarget { src: *src, dst }));
                 }
-                NodeKind::Dispatch { .. } | NodeKind::RenderPass { .. } | NodeKind::GrantRead { .. } => {}
+                NodeKind::Dispatch { .. }
+                | NodeKind::RenderPass { .. }
+                | NodeKind::GrantRead { .. }
+                | NodeKind::GrantPresent { .. } => {}
             }
         }
 
