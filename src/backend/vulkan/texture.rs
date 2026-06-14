@@ -781,6 +781,30 @@ pub(super) fn record_copy_texture_to_readback(
             staging_buffer,
             std::slice::from_ref(&region),
         );
+
+        // Restore layout so retained resubmits can reuse the texture as a compute UAV.
+        let restore_barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(old_layout)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let restore_dep =
+            vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&restore_barrier));
+        logical_device.device.cmd_pipeline_barrier2(cmd, &restore_dep);
+    }
+
+    if let Some(tex) = textures.get(&src) {
+        tex.set_image_layout(old_layout);
     }
     Ok(())
 }
