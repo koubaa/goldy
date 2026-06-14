@@ -214,6 +214,90 @@ pub(super) fn create(
     Ok(handle)
 }
 
+/// Create a per-surface-slot scratch texture bound to a pre-reserved storage-image slot.
+///
+/// Scratch textures are stable across frames (same `TextureHandle` per slot) so retained
+/// scheme partitions can bake the handle into cached command streams. The drawable is
+/// acquired and copied at `present()` time only.
+pub(super) fn create_scratch_for_surface_slot(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    bindless_slot: u32,
+) -> Result<TextureHandle> {
+    let handle = state.next_texture_handle;
+    state.next_texture_handle += 1;
+
+    let descriptor = TextureDescriptor::new();
+    descriptor.set_width(width.max(1) as u64);
+    descriptor.set_height(height.max(1) as u64);
+    descriptor.set_pixel_format(format_to_mtl(format));
+    descriptor.set_usage(
+        MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite | MTLTextureUsage::RenderTarget,
+    );
+    // Must match the device texture heap (Shared). Private textures use
+    // `device.new_texture` directly (see render_target.rs), not heap allocation.
+    descriptor.set_storage_mode(MTLStorageMode::Shared);
+
+    let texture = allocate_mtl_texture(state, device_handle, &descriptor)?;
+
+    let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
+
+    logical_device
+        .ledger
+        .lock()
+        .unwrap()
+        .resource_registry
+        .bind_storage_image_slot(handle, bindless_slot);
+    let global = ResourceRegistry::storage_image_global_index(bindless_slot);
+
+    let encoded_length = logical_device.storage_image_encoder.encoded_length();
+    let offset = (global as u64) * encoded_length;
+    if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
+        logical_device
+            .storage_image_encoder
+            .set_argument_buffer(&logical_device.argument_buffer, offset);
+        logical_device
+            .storage_image_encoder
+            .set_texture(0, &texture);
+    } else {
+        tracing::error!(
+            "create_scratch_for_surface_slot: argument buffer overflow — \
+             offset {offset} + encoded_length {encoded_length} exceeds \
+             ARGUMENT_BUFFER_SIZE {ARGUMENT_BUFFER_SIZE}"
+        );
+    }
+
+    state.textures.insert(
+        handle,
+        TextureState {
+            device_handle,
+            width,
+            height,
+            format,
+            texture,
+            arg_buffer_index: bindless_slot,
+            sampled_arg_buffer_index: None,
+            is_storage_image: true,
+            slot_owned_externally: true,
+            is_heap_allocated: true,
+        },
+    );
+
+    tracing::debug!(
+        "Created surface scratch texture {} ({}x{}, bindless local={}, global={})",
+        handle,
+        width,
+        height,
+        bindless_slot,
+        global,
+    );
+
+    Ok(handle)
+}
+
 /// Write data to a texture.
 pub(super) fn write(
     state: &MetalState,

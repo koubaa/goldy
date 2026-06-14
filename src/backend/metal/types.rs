@@ -19,7 +19,7 @@ use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 // Use explicit crate path to avoid collision with our module name
 use ::metal as mtl;
 use mtl::{
@@ -33,23 +33,6 @@ use mtl::{
 /// Categories: storageBuffers(0..4K), uniformBuffers(4K..8K), textures(8K..12K),
 ///             storageImages(12K..16K), samplers(16K..20K).
 pub const ARGUMENT_BUFFER_SIZE: u64 = 20 * 1024 * 8; // 5 × MAX_RESOURCES_PER_CATEGORY × 8
-
-/// Stable in-process epoch for cross-thread nanosecond timestamps.
-/// Initialized once on first call; all `metal_instant_ns()` values are
-/// relative to this epoch, so subtracting two values gives a duration.
-static METAL_INSTANT_EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
-
-/// Returns nanoseconds elapsed since a fixed in-process epoch.
-///
-/// Cheap: reads a monotonic clock and subtracts a once-initialized reference.
-/// Used to compare CPU timestamps across the driver callback thread and
-/// TID_RENDER without converting to wall-clock time.
-pub(super) fn metal_instant_ns() -> u64 {
-    METAL_INSTANT_EPOCH
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_nanos() as u64
-}
 
 /// Buffer slot for resource binding indices in shaders.
 /// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
@@ -541,21 +524,11 @@ impl DeletionQueue {
 /// The inner `Mutex<u64>` tracks the highest timeline value confirmed complete by the GPU.
 /// The `Condvar` is signaled from the Metal shared-event listener callback so that
 /// `wait_until` can sleep with zero polling overhead.
-///
-/// `last_signal_instant_ns` is a secondary diagnostic field: it records the CPU
-/// timestamp (`metal_instant_ns()`) of the most recent `signal()` call so that
-/// TID_RENDER can measure how stale the last GPU completion is relative to the
-/// next `nextDrawable` call, distinguishing compute-bound stalls from compositor
-/// throttle.  Written from the driver callback thread, read from TID_RENDER —
-/// `Release`/`Acquire` ordering ensures visibility.
 #[derive(Clone)]
 pub(crate) struct TimelineWaiter {
     inner: Arc<(Mutex<u64>, Condvar)>,
     signal_queue: Option<Arc<crate::signal::SignalQueue>>,
     last_emitted: Arc<AtomicU64>,
-    /// Nanoseconds since `METAL_INSTANT_EPOCH` of the most recent `signal()` call.
-    /// 0 until the first GPU completion fires.
-    last_signal_instant_ns: Arc<AtomicU64>,
 }
 
 impl TimelineWaiter {
@@ -564,16 +537,11 @@ impl TimelineWaiter {
             inner: Arc::new((Mutex::new(0), Condvar::new())),
             signal_queue: Some(signal_queue),
             last_emitted: Arc::new(AtomicU64::new(0)),
-            last_signal_instant_ns: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Called from command-buffer completion handlers when the GPU signals a timeline value.
     pub fn signal(&self, value: u64) {
-        // Stamp CPU time first so TID_RENDER sees a timestamp that is never
-        // newer than the condvar wake-up it will observe.
-        self.last_signal_instant_ns.store(metal_instant_ns(), Ordering::Release);
-
         if let Some(queue) = &self.signal_queue {
             let mut last = self.last_emitted.load(Ordering::Acquire);
             while last < value {
@@ -588,16 +556,6 @@ impl TimelineWaiter {
             *signaled = value;
         }
         cvar.notify_all();
-    }
-
-    /// Clone of the raw `Arc<AtomicU64>` holding the CPU timestamp (nanos since
-    /// in-process epoch) of the most recent GPU signal (0 until the first fires).
-    ///
-    /// Callers that need to read the value from a context where borrowing the
-    /// device is not possible (e.g. after a mutable surface borrow has started)
-    /// can clone this arc once, then read it freely across the borrow boundary.
-    pub fn last_signal_ns_arc(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.last_signal_instant_ns)
     }
 
     /// Block until the signaled value reaches at least `target`, or timeout.
@@ -1253,8 +1211,11 @@ pub(crate) struct SurfaceState {
     pub layer: *mut std::ffi::c_void,
     /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
     pub current_drawable: Option<*mut std::ffi::c_void>,
-    /// Texture handle for the current drawable's texture (registered for bindless access)
+    /// Texture handle for the current frame's scratch texture (registered for bindless access).
     pub current_texture_handle: Option<TextureHandle>,
+    /// Per-in-flight-slot scratch textures — stable handles for scheme retention.
+    /// Compute/render targets write here; `present()` blits to the drawable.
+    pub scratch_texture_handles: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT],
     /// Triple-buffered storage-image LOCAL indices reserved at surface create.
     /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never
     /// re-encodes a slot that the GPU is still reading from a previous frame.

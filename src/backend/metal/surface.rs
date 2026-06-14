@@ -1,8 +1,9 @@
 //! Surface (window presentation) management logic.
 //!
 //! The acquire/render/present cycle is decoupled:
-//! - `acquire()` calls `nextDrawable` and registers the drawable's texture for bindless access
-//! - `frame_texture()` returns the registered texture handle
+//! - `acquire()` ensures the per-slot scratch texture and returns its bindless handle
+//! - `frame_texture()` returns the scratch texture handle for the current slot
+//! - `present()` acquires a drawable, blits scratch → drawable, then presents
 //!
 //! ## Deprecation note
 //! This file uses `cocoa::base::id`, `NSRect`, and related types from the
@@ -10,23 +11,17 @@
 //! `objc2` crate. Migration is deferred until the `metal` and `cocoa` crates
 //! offer stable `objc2`-compatible bindings for `CAMetalLayer`.
 #![allow(deprecated)]
-//! - `render()` uses the already-acquired drawable (does NOT call `nextDrawable` again)
-//! - `present()` presents the drawable and unregisters the temporary texture
+//! - `render()` targets the scratch texture for the current in-flight slot
+//! - `present()` calls `nextDrawable`, blits scratch → drawable, then presents
 //!
 //! # Argument-buffer race avoidance (triple-buffered bindless slots)
 //!
 //! The renderer uses a pipelined frame loop:
 //!
 //! ```text
-//! Frame N:   acquire() → render_to_texture() { wait(N-1); submit(N) } → present()
-//! Frame N+1: acquire() → render_to_texture() { wait(N);   submit(N+1) } → present()
+//! Frame N:   acquire() → render/copy to scratch → present() { nextDrawable; blit; present }
+//! Frame N+1: acquire() → …
 //! ```
-//!
-//! `acquire()` re-encodes the drawable's `MTLTexture` GPU resource ID into the
-//! global argument buffer. Because `acquire()` runs BEFORE `wait(prev_frame)`,
-//! the CPU can overwrite a bindless slot that the GPU is still reading from the
-//! previous frame's fine rasterization dispatch. On Apple Silicon this manifests
-//! as `kIOGPUCommandBufferCallbackErrorPageFault` on the last compute encoder.
 //!
 //! The fix: reserve `MAX_FRAMES_IN_FLIGHT` (3) storage-image slots per surface
 //! and rotate through them. Frame N writes to slot `N % 3` while the GPU reads
@@ -37,16 +32,14 @@ use super::super::{
 };
 use super::compute;
 use super::render_commands::{create_render_pass, record};
-use super::types::{
-    MetalState, ResourceRegistry, SurfaceState, TextureState, ARGUMENT_BUFFER_SIZE, MAX_FRAMES_IN_FLIGHT,
-};
+use super::types::{MetalState, SurfaceState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::depth_format_to_mtl;
 use crate::types::{DepthFormat, PresentMode, TextureFormat};
 use ::metal as mtl;
 use anyhow::{Context, Result};
 use cocoa::base::{id, nil, NO, YES};
 use core_graphics_types::geometry::CGSize;
-use foreign_types::{ForeignType, ForeignTypeRef};
+use foreign_types::ForeignTypeRef;
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
@@ -135,6 +128,7 @@ pub(super) fn create(
             layer: layer as *mut std::ffi::c_void,
             current_drawable: None,
             current_texture_handle: None,
+            scratch_texture_handles: [None; MAX_FRAMES_IN_FLIGHT],
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
             frame_pending_gpu_commands: Vec::new(),
@@ -152,14 +146,22 @@ pub(super) fn create(
 
 /// Destroy a surface.
 pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
-    let (device_handle, slots) = match state.surfaces.get(&surface) {
-        Some(s) => (Some(s.device_handle), Some(s.bindless_storage_slots)),
-        None => (None, None),
+    let (device_handle, slots, scratch_handles, drawable) = match state.surfaces.get(&surface) {
+        Some(s) => (
+            Some(s.device_handle),
+            Some(s.bindless_storage_slots),
+            s.scratch_texture_handles.iter().filter_map(|h| *h).collect::<Vec<_>>(),
+            s.current_drawable,
+        ),
+        None => (None, None, Vec::new(), None),
     };
 
-    if let Some(surface_state) = state.surfaces.get(&surface) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
-            unregister_surface_texture(state, tex_handle);
+    for tex_handle in scratch_handles {
+        super::texture::destroy(state, tex_handle);
+    }
+    if let Some(drawable) = drawable {
+        unsafe {
+            let (): () = msg_send![drawable as id, release];
         }
     }
 
@@ -186,142 +188,60 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     state.surfaces.remove(&surface);
 }
 
-/// Acquire the next swapchain image.
+/// Acquire the next in-flight frame slot.
 ///
-/// Calls `nextDrawable` on the CAMetalLayer and registers the drawable's
-/// texture in the bindless descriptor set. The texture handle is available
-/// via `frame_texture()` until `present()` is called.
+/// Ensures the per-slot scratch texture exists and registers it in the bindless
+/// descriptor set. The drawable is acquired at `present()` time; until then the
+/// scheme writes to the stable scratch handle for this slot.
 pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
     ctx: super::ContextHandle,
 ) -> Result<SwapchainImageHandle> {
     let _tz = crate::tracy_zone!("mtl.surface.acquire");
-    // Clean up any previously acquired drawable that wasn't presented
-    if let Some(surface_state) = state.surfaces.get(&surface) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
-            tracing::warn!("Previous drawable was not presented; cleaning up");
-            unregister_surface_texture(state, tex_handle);
-        }
-    }
 
-    // Clone the GPU-signal timestamp arc before taking a mutable surface borrow.
-    // This lets us read the value after nextDrawable without conflicting borrows.
-    let gpu_signal_arc = state.surfaces.get(&surface).and_then(|ss| {
-        let dev = ss.device_handle;
-        state.contexts.values().find_map(|sc_arc| {
-            let sc = sc_arc.lock().unwrap();
-            if sc.device == dev {
-                Some(sc.timeline_waiter.last_signal_ns_arc())
-            } else {
-                None
-            }
-        })
-    });
+    let (device_handle, width, height, format, bindless_slot, frame_slot) = {
+        let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
 
-    let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+        let layer = surface_state.layer as id;
+        let size: CGSize = unsafe { msg_send![layer, drawableSize] };
+        surface_state.width = (size.width as u32).max(1);
+        surface_state.height = (size.height as u32).max(1);
 
-    let layer = surface_state.layer as id;
+        surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        let frame_slot = surface_state.current_frame;
 
-    let size: CGSize = unsafe { msg_send![layer, drawableSize] };
-    surface_state.width = (size.width as u32).max(1);
-    surface_state.height = (size.height as u32).max(1);
-
-    surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-    // Snapshot the GPU-signal timestamp and CPU clock before blocking on the compositor.
-    // gpu_signal_before: when did the GPU last fire a completion handler?
-    // t_pre: CPU time just before nextDrawable (= when we enter the potential stall).
-    let gpu_signal_before_ns = gpu_signal_arc
-        .as_ref()
-        .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
-        .unwrap_or(0);
-    let t_pre_drawable_ns = super::types::metal_instant_ns();
-
-    // Get the next drawable from the layer
-    let drawable: id = {
-        let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
-        unsafe { msg_send![layer, nextDrawable] }
+        (
+            surface_state.device_handle,
+            surface_state.width,
+            surface_state.height,
+            surface_state.format,
+            surface_state.bindless_storage_slots[frame_slot],
+            frame_slot,
+        )
     };
 
-    // ── nextDrawable latency diagnostics ────────────────────────────────────
-    //
-    //  drawable_wait_us  : time spent blocked inside nextDrawable.
-    //  gpu_signal_age_us : age of the last GPU completion signal at the moment
-    //                      we entered nextDrawable.
-    //    • Large age + large wait → compositor throttle (GPU idle, compositor
-    //      hasn't released a drawable yet).
-    //    • Small age + large wait → GPU pacing (GPU was still running when we
-    //      called nextDrawable; both GPU and compositor contributed to the stall).
-    //    • gpu_fired_during_wait → GPU completion fired *inside* nextDrawable,
-    //      proving compute was on the critical path for this frame.
+    let tex_handle = ensure_scratch_texture_slot(
+        state,
+        surface,
+        device_handle,
+        frame_slot,
+        width,
+        height,
+        format,
+        bindless_slot,
+    )?;
+
+    let image_index = frame_slot as u32;
     {
-        let t_post_drawable_ns = super::types::metal_instant_ns();
-        let gpu_signal_after_ns = gpu_signal_arc
-            .as_ref()
-            .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
-            .unwrap_or(0);
-
-        let drawable_wait_us = t_post_drawable_ns.saturating_sub(t_pre_drawable_ns) / 1000;
-        let gpu_signal_age_us = if gpu_signal_before_ns > 0 {
-            t_pre_drawable_ns.saturating_sub(gpu_signal_before_ns) / 1000
-        } else {
-            u64::MAX
-        };
-        let gpu_fired_during_wait = gpu_signal_after_ns > gpu_signal_before_ns && gpu_signal_before_ns > 0;
-
-        if gpu_signal_age_us == u64::MAX {
-            tracing::debug!(
-                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
-                 (no prior gpu signal — first frame?)"
-            );
-        } else {
-            tracing::debug!(
-                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
-                 gpu_signal_age={gpu_signal_age_us}µs \
-                 gpu_fired_during_wait={gpu_fired_during_wait}"
-            );
-        }
-
-        crate::tracy_plot!("nextDrawable_wait_us", drawable_wait_us as f64);
-        if gpu_signal_age_us != u64::MAX {
-            crate::tracy_plot!("gpu_signal_age_us", gpu_signal_age_us as f64);
-        }
-    }
-    // ────────────────────────────────────────────────────────────────────────
-
-    if drawable == nil {
-        anyhow::bail!("Failed to get next drawable from CAMetalLayer");
-    }
-    unsafe {
-        let () = msg_send![drawable, retain];
-    }
-    surface_state.current_drawable = Some(drawable as *mut std::ffi::c_void);
-
-    // Get the drawable's texture and register it for bindless access
-    let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-    let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
-
-    let device_handle = surface_state.device_handle;
-    let width = surface_state.width;
-    let height = surface_state.height;
-    let format = surface_state.format;
-    // Use the frame-indexed slot to avoid overwriting a slot the GPU is still reading.
-    let bindless_slot = surface_state.bindless_storage_slots[surface_state.current_frame];
-
-    let tex_handle = register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
-
-    let image_index = {
         let surface_state = state
             .surfaces
             .get_mut(&surface)
             .expect("surface must be registered before acquiring a frame");
-        let image_index = surface_state.current_frame as u32;
         surface_state.current_texture_handle = Some(tex_handle);
         surface_state.last_acquired_image_index = Some(image_index);
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
-        image_index
-    };
+    }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         sc_arc
@@ -353,21 +273,36 @@ pub(super) fn frame_texture(state: &MetalState, surface: SurfaceHandle) -> Optio
     state.surfaces.get(&surface).and_then(|s| s.current_texture_handle)
 }
 
-/// Render commands to the swapchain using the already-acquired drawable.
+/// Render commands to the swapchain scratch texture for the current in-flight slot.
 pub(super) fn render(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
     commands: &[RenderCommand],
 ) -> Result<()> {
-    let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
+    let (device_handle, width, height, depth_texture, scratch_handle) = {
+        let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
+        let frame_slot = surface_state.current_frame;
+        let scratch = surface_state
+            .scratch_texture_handles[frame_slot]
+            .or(surface_state.current_texture_handle)
+            .context("No scratch texture acquired — call surface_acquire first")?;
+        (
+            surface_state.device_handle,
+            surface_state.width,
+            surface_state.height,
+            surface_state.depth_texture.clone(),
+            scratch,
+        )
+    };
 
-    let drawable_ptr = surface_state
-        .current_drawable
-        .context("No drawable acquired — call surface_acquire first")?;
-    let drawable = drawable_ptr as id;
+    let scratch_tex = state
+        .textures
+        .get(&scratch_handle)
+        .context("Surface scratch texture not found")?
+        .texture
+        .clone();
 
-    let device_handle = surface_state.device_handle;
     let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
     let (staging_data, lowered_commands, has_bindings) =
@@ -386,9 +321,6 @@ pub(super) fn render(
         None
     };
 
-    let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
-    let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
-
     let mut clear_color = None;
     let mut clear_depth = None;
     for cmd in commands {
@@ -399,8 +331,8 @@ pub(super) fn render(
         }
     }
     let render_pass = create_render_pass(
-        texture,
-        surface_state.depth_texture.as_deref(),
+        scratch_tex.as_ref(),
+        depth_texture.as_deref(),
         clear_color,
         clear_depth,
     );
@@ -440,16 +372,16 @@ pub(super) fn render(
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,
         originY: 0.0,
-        width: surface_state.width as f64,
-        height: surface_state.height as f64,
+        width: width as f64,
+        height: height as f64,
         znear: 0.0,
         zfar: 1.0,
     });
     encoder.set_scissor_rect(mtl::MTLScissorRect {
         x: 0,
         y: 0,
-        width: surface_state.width as u64,
-        height: surface_state.height as u64,
+        width: width as u64,
+        height: height as u64,
     });
 
     record(
@@ -477,41 +409,37 @@ pub(super) fn render(
     Ok(())
 }
 
-/// Present the acquired drawable and unregister its temporary texture.
+/// Present the current frame: acquire a drawable, blit scratch → drawable, present.
 ///
-/// This is the sole place where `presentDrawable:` is called. A lightweight
-/// command buffer is created to schedule the presentation. If `render()` was
-/// called first, Metal's serial queue ordering guarantees the render commands
-/// complete before the present is scheduled by the GPU.
+/// The scratch texture handle is cleared but the per-slot scratch texture persists
+/// across frames for retained scheme resubmission.
 pub(super) fn present(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
     ctx: ContextHandle,
 ) -> Result<crate::timeline::TimelineValue> {
-    let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
-
-    let device_handle = surface_state.device_handle;
-
-    let drawable_ptr = match surface_state.current_drawable {
-        Some(d) => d,
-        None => {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                sc.deletion_queue.process_up_to(ctx_signaled);
-            }
-            let retired = super::context::device_retired(state, device_handle);
-            let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
-            ld.process_deletion_queue_up_to(retired);
-            return Ok(state
-                .contexts
-                .get(&ctx)
-                .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
-                .unwrap_or(retired));
-        }
+    let (device_handle, width, height, scratch_handle, layer, return_image) = {
+        let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
+        let scratch = surface_state
+            .current_texture_handle
+            .context("No frame acquired — call surface_acquire first")?;
+        (
+            surface_state.device_handle,
+            surface_state.width,
+            surface_state.height,
+            scratch,
+            surface_state.layer as id,
+            surface_state.last_acquired_image_index,
+        )
     };
-    let tex_handle = surface_state.current_texture_handle;
+
+    let scratch_mtl = state
+        .textures
+        .get(&scratch_handle)
+        .context("Surface scratch texture not found")?
+        .texture
+        .clone();
 
     let signal_value = {
         let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
@@ -522,8 +450,42 @@ pub(super) fn present(
 
     let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
+    let drawable: id = {
+        let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
+        unsafe { msg_send![layer, nextDrawable] }
+    };
+    if drawable == nil {
+        anyhow::bail!("Failed to get next drawable from CAMetalLayer");
+    }
+    unsafe {
+        let () = msg_send![drawable, retain];
+    }
+
+    let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
+    let drawable_tex: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
+
     let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
     let command_buffer = owned_command_buffer.as_ref();
+
+    let blit = command_buffer.new_blit_command_encoder();
+    let w = width.max(1) as u64;
+    let h = height.max(1) as u64;
+    blit.copy_from_texture(
+        scratch_mtl.as_ref(),
+        0,
+        0,
+        mtl::MTLOrigin { x: 0, y: 0, z: 0 },
+        mtl::MTLSize {
+            width: w,
+            height: h,
+            depth: 1,
+        },
+        drawable_tex,
+        0,
+        0,
+        mtl::MTLOrigin { x: 0, y: 0, z: 0 },
+    );
+    blit.end_encoding();
 
     let (timeline_event, waiter, signal_queue_present, return_pending) = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
@@ -537,13 +499,9 @@ pub(super) fn present(
     };
     command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
 
-    let return_image = state.surfaces.get(&surface).and_then(|s| s.last_acquired_image_index);
     let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
         waiter.signal(signal_value);
         if let Some(idx) = return_image {
-            // Metal has no WSI timeline to poll: push SwapchainReturned here from the
-            // completion handler. Vulkan/DX12 defer this signal until poll_signals when
-            // gpu_progress crosses the copy/fence value.
             signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
             if let Ok(mut pending) = return_pending.lock() {
                 pending.push((surface, idx));
@@ -553,22 +511,14 @@ pub(super) fn present(
     .copy();
     command_buffer.add_completed_handler(&handler);
 
-    let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);
     command_buffer.commit();
 
-    // Release the retained drawable
     unsafe {
         let (): () = msg_send![drawable, release];
     }
 
-    // Unregister the temporary surface texture
-    if let Some(th) = tex_handle {
-        unregister_surface_texture(state, th);
-    }
-
-    // Clear the drawable state
     let surface_state = state
         .surfaces
         .get_mut(&surface)
@@ -583,8 +533,6 @@ pub(super) fn present(
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
     }
-    // Drain per-context deletion queue on the context's own clock (hot path),
-    // then the device-level queue as the async GC safety net (see issue #190).
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
@@ -662,42 +610,58 @@ pub(super) fn present_mode(state: &MetalState, surface: SurfaceHandle) -> Presen
 
 /// Resize the surface.
 pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
-    let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+    let (device_handle, scratch_handles) = {
+        let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
 
-    surface_state.width = width;
-    surface_state.height = height;
+        surface_state.width = width;
+        surface_state.height = height;
 
-    // Recreate depth texture if present
-    if let Some(df) = surface_state.depth_format {
-        let logical_device = state
-            .devices
-            .get(&surface_state.device_handle)
-            .context("Device no longer valid")?;
+        // Recreate depth texture if present
+        if let Some(df) = surface_state.depth_format {
+            let logical_device = state
+                .devices
+                .get(&surface_state.device_handle)
+                .context("Device no longer valid")?;
 
-        let w = width.max(1);
-        let h = height.max(1);
-        let depth_desc = TextureDescriptor::new();
-        depth_desc.set_width(w as u64);
-        depth_desc.set_height(h as u64);
-        depth_desc.set_pixel_format(depth_format_to_mtl(df));
-        depth_desc.set_usage(MTLTextureUsage::RenderTarget);
-        depth_desc.set_storage_mode(MTLStorageMode::Private);
-        surface_state.depth_texture = Some(logical_device.device.new_texture(&depth_desc));
+            let w = width.max(1);
+            let h = height.max(1);
+            let depth_desc = TextureDescriptor::new();
+            depth_desc.set_width(w as u64);
+            depth_desc.set_height(h as u64);
+            depth_desc.set_pixel_format(depth_format_to_mtl(df));
+            depth_desc.set_usage(MTLTextureUsage::RenderTarget);
+            depth_desc.set_storage_mode(MTLStorageMode::Private);
+            surface_state.depth_texture = Some(logical_device.device.new_texture(&depth_desc));
+        }
+
+        let size = CGSize::new(width as f64, height as f64);
+        unsafe {
+            let () = msg_send![surface_state.layer as id, setDrawableSize: size];
+        }
+
+        let scratch_handles: Vec<TextureHandle> = surface_state
+            .scratch_texture_handles
+            .iter()
+            .filter_map(|h| *h)
+            .collect();
+        surface_state.scratch_texture_handles = [None; MAX_FRAMES_IN_FLIGHT];
+        surface_state.current_texture_handle = None;
+        surface_state.pending_acquire_count = 0;
+
+        (
+            surface_state.device_handle,
+            scratch_handles,
+        )
+    };
+
+    for tex_handle in scratch_handles {
+        super::texture::destroy(state, tex_handle);
     }
 
-    let layer = surface_state.layer as id;
-    let size = CGSize::new(width as f64, height as f64);
-    unsafe {
-        let () = msg_send![layer, setDrawableSize: size];
-    }
-
-    surface_state.pending_acquire_count = 0;
-    if let Some(device_handle) = state.surfaces.get(&surface).map(|s| s.device_handle) {
-        for sc_arc in state.contexts.values() {
-            let sc = sc_arc.lock().unwrap();
-            if sc.device == device_handle {
-                sc.pending_swapchain_returns.lock().unwrap().clear();
-            }
+    for sc_arc in state.contexts.values() {
+        let sc = sc_arc.lock().unwrap();
+        if sc.device == device_handle {
+            sc.pending_swapchain_returns.lock().unwrap().clear();
         }
     }
 
@@ -724,117 +688,52 @@ pub(super) fn format(state: &MetalState, surface: SurfaceHandle) -> TextureForma
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers for transient surface texture management
+// Internal helpers for per-slot scratch texture management
 // ---------------------------------------------------------------------------
 
-/// Register the current drawable's MTLTexture at the surface's pre-reserved
-/// bindless storage-image slot, so it's visible to compute shaders via
-/// `goldy_direct_spatial<T>(n)` and to the public API via
-/// [`crate::surface::Frame::texture`].
+/// Ensure the per-in-flight-slot scratch texture exists at the current surface size.
 ///
-/// The slot (`bindless_slot`) is one of MAX_FRAMES_IN_FLIGHT rotating slots
-/// allocated in `create()` and released in `destroy()`. Only the *texture
-/// object* at offset `storage_image_global_index(bindless_slot) * encoded_length`
-/// is rewritten per frame. This is the "transient allocation path that doesn't
-/// leak indices" anticipated by `abstract-gpu-surface.md` (risk #2).
-///
-/// The drawable `MTLTexture` is owned via [`ForeignType::from_ptr`] after an
-/// explicit `retain` (never cast `&TextureRef` → `&Texture` and `clone()` —
-/// that was UB / PAC faults).
-fn register_surface_texture(
+/// Returns a stable `TextureHandle` for `frame_slot` so retained scheme partitions
+/// can bake the destination into cached command streams (Vulkan/DX12 parity).
+fn ensure_scratch_texture_slot(
     state: &mut MetalState,
+    surface: SurfaceHandle,
     device_handle: DeviceHandle,
-    texture: &mtl::TextureRef,
+    frame_slot: usize,
     width: u32,
     height: u32,
     format: TextureFormat,
     bindless_slot: u32,
 ) -> Result<TextureHandle> {
-    let handle = state.next_texture_handle;
-    state.next_texture_handle += 1;
-
-    let raw = texture.as_ptr();
-    unsafe {
-        let () = msg_send![raw as id, retain];
-    }
-    let texture_owned = unsafe { mtl::Texture::from_ptr(raw) };
-
-    let global_idx = {
-        let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
-
-        logical_device
-            .ledger
-            .lock()
-            .unwrap()
-            .resource_registry
-            .bind_storage_image_slot(handle, bindless_slot);
-        let global = ResourceRegistry::storage_image_global_index(bindless_slot);
-
-        // Surface drawable is used as a storage image (RWTexture2D write target),
-        // so encode with the ReadWrite storage image encoder.
-        let encoded_length = logical_device.storage_image_encoder.encoded_length();
-        let offset = (global as u64) * encoded_length;
-        if offset + encoded_length <= ARGUMENT_BUFFER_SIZE {
-            logical_device
-                .storage_image_encoder
-                .set_argument_buffer(&logical_device.argument_buffer, offset);
-            logical_device
-                .storage_image_encoder
-                .set_texture(0, texture_owned.as_ref());
-        } else {
-            tracing::error!(
-                "register_surface_texture: argument buffer overflow — \
-                 offset {offset} + encoded_length {encoded_length} exceeds \
-                 ARGUMENT_BUFFER_SIZE {ARGUMENT_BUFFER_SIZE}; \
-                 drawable will not be encoded and compute shaders may see a stale binding"
-            );
+    if let Some(handle) = state
+        .surfaces
+        .get(&surface)
+        .and_then(|s| s.scratch_texture_handles[frame_slot])
+    {
+        if let Some(ts) = state.textures.get(&handle) {
+            if ts.width == width && ts.height == height {
+                return Ok(handle);
+            }
         }
+    }
 
-        global
-    };
+    if let Some(old) = state
+        .surfaces
+        .get_mut(&surface)
+        .and_then(|s| s.scratch_texture_handles[frame_slot].take())
+    {
+        super::texture::destroy(state, old);
+    }
 
-    state.textures.insert(
-        handle,
-        TextureState {
-            device_handle,
-            width,
-            height,
-            format,
-            texture: texture_owned,
-            arg_buffer_index: bindless_slot,
-            sampled_arg_buffer_index: None,
-            is_storage_image: true,
-            slot_owned_externally: true,
-            is_heap_allocated: false,
-        },
-    );
-
-    tracing::debug!(
-        "Encoded surface drawable into texture {} ({}x{}, bindless storage local={}, global={})",
-        handle,
+    let handle = super::texture::create_scratch_for_surface_slot(
+        state,
+        device_handle,
         width,
         height,
+        format,
         bindless_slot,
-        global_idx,
-    );
+    )?;
 
+    state.surfaces.get_mut(&surface).unwrap().scratch_texture_handles[frame_slot] = Some(handle);
     Ok(handle)
-}
-
-/// Unregister the per-frame TextureHandle for the drawable, releasing the
-/// owned `MTLTexture` (via `Drop` → `release`) and clearing the handle→slot
-/// map entry. The surface's bindless slot itself is NOT released here — it
-/// stays reserved across frames until the surface is destroyed.
-fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle) {
-    if let Some(tex_state) = state.textures.remove(&tex_handle) {
-        if let Some(device) = state.devices.get(&tex_state.device_handle) {
-            device
-                .ledger
-                .lock()
-                .unwrap()
-                .resource_registry
-                .unregister_texture(tex_handle);
-        }
-        tracing::debug!("Unregistered surface drawable texture {}", tex_handle);
-    }
 }
