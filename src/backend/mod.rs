@@ -1087,6 +1087,15 @@ pub trait GpuBackend: Send + Sync {
         Ok(None)
     }
 
+    /// Whether the backend can retain present-touching partitions across submits.
+    ///
+    /// Backends that resolve the drawable to a fresh [`TextureHandle`] each frame
+    /// (Metal) return `false` so the present partition is re-resolved and re-recorded
+    /// each submit rather than resubmitting a stale cached command list.
+    fn retains_present_partitions(&self) -> bool {
+        true
+    }
+
     /// Drop the retained command list associated with `key`, marking its allocator slot
     /// as available for re-use.  No-op if no retained list exists.
     fn evict_retained(&mut self, _ctx: ContextHandle, _key: u64) {}

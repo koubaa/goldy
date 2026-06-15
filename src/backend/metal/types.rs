@@ -1211,11 +1211,8 @@ pub(crate) struct SurfaceState {
     pub layer: *mut std::ffi::c_void,
     /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
     pub current_drawable: Option<*mut std::ffi::c_void>,
-    /// Texture handle for the current frame's scratch texture (registered for bindless access).
+    /// Texture handle for the current frame's drawable (registered for bindless access).
     pub current_texture_handle: Option<TextureHandle>,
-    /// Per-in-flight-slot scratch textures — stable handles for scheme retention.
-    /// Compute/render targets write here; `present()` blits to the drawable.
-    pub scratch_texture_handles: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT],
     /// Triple-buffered storage-image LOCAL indices reserved at surface create.
     /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never
     /// re-encodes a slot that the GPU is still reading from a previous frame.

@@ -825,6 +825,10 @@ impl GpuBackend for MetalBackend {
         compute::try_resubmit_retained(&mut self.state, ctx, key)
     }
 
+    fn retains_present_partitions(&self) -> bool {
+        false
+    }
+
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
         compute::evict_retained(&mut self.state, ctx, key);
     }

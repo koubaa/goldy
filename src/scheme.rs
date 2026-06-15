@@ -468,12 +468,19 @@ pub struct Scheme {
     retention_key: Option<u64>,
     /// Timeline value from the most recent successful [`Self::submit`].
     ///
-    /// Before resubmitting a retained command list, we [`Context::wait_until`] this value so
-    /// the backend CB is no longer pending (Vulkan VUID-vkQueueSubmit2-commandBuffer-03875).
-    /// This is conservative: a lowered scheme may become multiple queue submissions (A1, A2,
-    /// A3), and another scheme's B1 need only wait for the slice it depends on — not A3. A
-    /// per-slice retirement gate belongs in the IR lowering path; until then, whole-scheme
-    /// `last_submitted_tv` is the correctness stopgap.
+    /// On Vulkan, retained partitions are resubmitted as live `VkCommandBuffer` objects
+    /// (VUID-vkQueueSubmit2-commandBuffer-03875 forbids submitting a CB that is still
+    /// pending).  Before resubmitting on the clean path we wait on this value to ensure all
+    /// prior partitions have retired.
+    ///
+    /// On Metal, `try_resubmit_retained` always re-encodes a fresh `MTLCommandBuffer` from
+    /// the cached `GraphCommand` list, so there is no pending CB to wait for and the wait is
+    /// omitted (`#[cfg(not(feature = "metal"))]`).
+    ///
+    /// This is still conservative: a lowered scheme may become multiple queue submissions
+    /// (A1, A2, A3) and another scheme's B1 need only wait for the slice it depends on —
+    /// not A3.  A per-slice retirement gate belongs in the IR lowering path; until then,
+    /// whole-scheme `last_submitted_tv` is the correctness stopgap.
     last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
     next_grant_id: u32,
@@ -624,6 +631,13 @@ impl Scheme {
     /// When present grants are recorded, swapchain drawables are acquired before lowering
     /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
+        // Vulkan retained partitions reuse a live VkCommandBuffer — wait until the prior
+        // submission retires before resubmitting on the clean path to satisfy
+        // VUID-vkQueueSubmit2-commandBuffer-03875.
+        //
+        // Metal always re-encodes a fresh MTLCommandBuffer from the cached GraphCommand
+        // list, so no pending CB exists and this wait is skipped.
+        #[cfg(not(feature = "metal"))]
         if let Some(prev_tv) = self.last_submitted_tv {
             if !self.dirty {
                 self.ctx.wait_until(prev_tv)?;
