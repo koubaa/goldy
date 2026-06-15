@@ -1,13 +1,15 @@
 //! Scheme render fixtures for FLIP screenshot tests and scheme render integration.
 
 use goldy::{
-    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, Device, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ShaderModule, TextureFormat, Vertex2D, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    types::ResourceAccess, BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device,
+    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    Scheme, ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 use std::sync::Arc;
 
 use super::scheme_render::{acquire_readback_texture, scheme_render_and_readback};
+use crate::render_fixtures::{create_gol_initial_state, GOL_GRID_HEIGHT, GOL_GRID_WIDTH};
 
 pub fn create_device() -> Option<Device> {
     let instance = Instance::new().ok()?;
@@ -189,6 +191,84 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
         pass.set_vertex_buffer(0, &red_vb);
         pass.draw(0..3, 0..1);
         pass.set_vertex_buffer(0, &green_vb);
+        pass.draw(0..3, 0..1);
+    })
+}
+
+pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
+    let ctx = device.create_context().expect("context");
+    const RENDER_WIDTH: u32 = 512;
+    const RENDER_HEIGHT: u32 = 512;
+
+    let compute_shader = ShaderModule::from_slang(device, include_str!("../../shaders/game_of_life.slang"))
+        .expect("Failed to load compute shader");
+    let render_shader = ShaderModule::from_slang(device, include_str!("../../shaders/game_of_life_render.slang"))
+        .expect("Failed to load render shader");
+
+    let initial_state = create_gol_initial_state();
+    let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
+    let buffer_a = pool
+        .acquire_buffer_with_data(&initial_state, BufferKind::Scattered)
+        .expect("buffer_a");
+    let buffer_b = pool
+        .acquire_buffer_with_data(&initial_state, BufferKind::Scattered)
+        .expect("buffer_b");
+
+    let compute_pipeline = ComputePipeline::new(device, &compute_shader).expect("Failed to create compute pipeline");
+    let render_pipeline = RenderPipeline::new(
+        device,
+        &render_shader,
+        &render_shader,
+        &RenderPipelineDesc {
+            vertex_layout: VertexBufferLayout::default(),
+            topology: PrimitiveTopology::TriangleList,
+            target_format: TextureFormat::Rgba8Unorm,
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create render pipeline");
+
+    let workgroups_x = GOL_GRID_WIDTH.div_ceil(8);
+    let workgroups_y = GOL_GRID_HEIGHT.div_ceil(8);
+    let mut use_buffer_a = true;
+
+    for _ in 0..updates {
+        let mut scheme = Scheme::new(&ctx);
+        if use_buffer_a {
+            let read = buffer_a.handle(ResourceAccess::ReadWrite).expect("buffer_a read");
+            let write = buffer_b.handle(ResourceAccess::Write).expect("buffer_b write");
+            scheme
+                .node("gol_update", &compute_pipeline)
+                .bind_parcel(&buffer_a, NodeAccess::Read)
+                .bind_parcel(&buffer_b, NodeAccess::Write)
+                .bind_views(&[read, write])
+                .dispatch(workgroups_x, workgroups_y, 1);
+        } else {
+            let read = buffer_b.handle(ResourceAccess::ReadWrite).expect("buffer_b read");
+            let write = buffer_a.handle(ResourceAccess::Write).expect("buffer_a write");
+            scheme
+                .node("gol_update", &compute_pipeline)
+                .bind_parcel(&buffer_b, NodeAccess::Read)
+                .bind_parcel(&buffer_a, NodeAccess::Write)
+                .bind_views(&[read, write])
+                .dispatch(workgroups_x, workgroups_y, 1);
+        }
+        scheme.submit().expect("compute submit");
+        use_buffer_a = !use_buffer_a;
+    }
+
+    let target = RenderTarget::new(device, RENDER_WIDTH, RENDER_HEIGHT, TextureFormat::Rgba8Unorm)
+        .expect("Failed to create render target");
+    let readback = acquire_readback_texture(&mut pool, RENDER_WIDTH, RENDER_HEIGHT, TextureFormat::Rgba8Unorm);
+
+    scheme_render_and_readback(&ctx, &target, &readback, "gol_render", |pass| {
+        let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
+        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: cells,
+            access: NodeAccess::Read,
+        }]);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(&render_pipeline);
         pass.draw(0..3, 0..1);
     })
 }

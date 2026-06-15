@@ -69,6 +69,7 @@ struct RenderState {
     scheme: Scheme,
     scene_rt: RenderTarget,
     compute_pipeline: ComputePipeline,
+    render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
     instance_buffer: Parcel,
@@ -82,6 +83,24 @@ impl RenderState {
     fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> Result<RenderTarget> {
         let (width, height) = swapchain.size();
         RenderTarget::new(device, width.max(1), height.max(1), swapchain.format()).map_err(Into::into)
+    }
+
+    fn create_render_pipeline(
+        device: &goldy::Device,
+        render_shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            render_shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: VertexBufferLayout::empty(),
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+        )
+        .map_err(Into::into)
     }
 
     fn record_scheme(
@@ -171,17 +190,7 @@ impl RenderState {
             retained_pool.acquire_buffer_sized::<AnimParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
-        let render_pipeline = RenderPipeline::new(
-            &device,
-            &render_shader,
-            &render_shader,
-            &RenderPipelineDesc {
-                vertex_layout: VertexBufferLayout::empty(),
-                topology: PrimitiveTopology::TriangleList,
-                target_format: swapchain.format(),
-                ..Default::default()
-            },
-        )?;
+        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &swapchain)?;
 
         let mut scheme = Scheme::new(&ctx);
         let present = Self::record_scheme(
@@ -209,6 +218,7 @@ impl RenderState {
             scheme,
             scene_rt,
             compute_pipeline,
+            render_shader,
             render_pipeline,
             _retained_pool: retained_pool,
             instance_buffer,
@@ -304,6 +314,13 @@ impl ApplicationHandler for App {
                         state.swapchain.resize(size.width, size.height).ok();
                         if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.swapchain) {
                             state.scene_rt = rt;
+                            if let Ok(pipeline) = RenderState::create_render_pipeline(
+                                &state.device,
+                                &state.render_shader,
+                                &state.swapchain,
+                            ) {
+                                state.render_pipeline = pipeline;
+                            }
                             state.rerecord_scheme();
                         }
                     }

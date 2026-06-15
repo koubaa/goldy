@@ -28,7 +28,26 @@ pub fn read_grant_texture(grant: &ReadGrant<GrantTexture>, submission: &Submissi
     grant.consume(submission).expect("grant consume").to_vec()
 }
 
-/// Record one render pass, copy to `readback`, grant-read, submit, and return pixels.
+/// Record render pass → copy-to-texture → grant-read once on a new scheme.
+pub fn scheme_record_readback(
+    ctx: &Context,
+    target: &RenderTarget,
+    readback: &Parcel,
+    label: &'static str,
+    record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
+) -> (Scheme, ReadGrant<GrantTexture>) {
+    let mut scheme = Scheme::new(ctx);
+    {
+        let mut pass = scheme.render_pass(label, target);
+        record(&mut pass);
+        pass.finish();
+    }
+    scheme.copy_to_texture(target, readback).expect("copy_to_texture");
+    let grant = scheme.grant_read_texture(readback).expect("grant_read_texture");
+    (scheme, grant)
+}
+
+/// Record once, submit once, consume grant, and return pixels.
 pub fn scheme_render_and_readback(
     ctx: &Context,
     target: &RenderTarget,
@@ -36,31 +55,9 @@ pub fn scheme_render_and_readback(
     label: &'static str,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> Vec<u8> {
-    let mut scheme = Scheme::new(ctx);
-    {
-        let mut pass = scheme.render_pass(label, target);
-        record(&mut pass);
-        pass.finish();
-    }
-    scheme.copy_to_texture(target, readback);
-    let grant = scheme.grant_read_texture(readback).expect("grant_read_texture");
+    let (mut scheme, grant) = scheme_record_readback(ctx, target, readback, label, record);
     let frame = scheme.submit().expect("submit");
     read_grant_texture(&grant, &frame)
-}
-
-/// Record one render pass and submit without CPU readback.
-pub fn scheme_render_pass_only(
-    ctx: &Context,
-    target: &RenderTarget,
-    label: &'static str,
-    record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
-) -> Scheme {
-    let mut scheme = Scheme::new(ctx);
-    let mut pass = scheme.render_pass(label, target);
-    record(&mut pass);
-    pass.finish();
-    scheme.submit().expect("submit");
-    scheme
 }
 
 pub fn make_device() -> Option<Device> {

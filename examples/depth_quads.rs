@@ -71,6 +71,7 @@ struct App {
     ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
+    shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
     warm_parcel: Option<Parcel>,
     cool_parcel: Option<Parcel>,
@@ -91,6 +92,7 @@ impl App {
             ctx: None,
             device: None,
             pipeline: None,
+            shader: None,
             _retained_pool: None,
             warm_parcel: None,
             cool_parcel: None,
@@ -113,6 +115,27 @@ impl App {
             height.max(1),
             swapchain.format(),
             Some(DepthFormat::Depth32Float),
+        )
+    }
+
+    fn create_pipeline(
+        device: &goldy::Device,
+        shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> anyhow::Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: depth_vertex_layout(),
+                depth_stencil: Some(DepthStencilState {
+                    format: DepthFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: CompareFunction::Less,
+                }),
+                ..Default::default()
+            },
         )
     }
 
@@ -150,21 +173,7 @@ impl App {
         let screen = swapchain.lease();
 
         let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                vertex_layout: depth_vertex_layout(),
-                target_format: swapchain.format(),
-                depth_stencil: Some(DepthStencilState {
-                    format: DepthFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: CompareFunction::Less,
-                }),
-                ..Default::default()
-            },
-        )?;
+        let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
 
         let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
 
@@ -179,6 +188,7 @@ impl App {
 
         self.ctx = Some(ctx);
         self.device = Some(device);
+        self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.warm_parcel = Some(warm_parcel);
@@ -239,20 +249,23 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain)) = (&self.device, &self.swapchain) {
+            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
                 if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
-                    if let (Some(scheme), Some(pipeline), Some(warm), Some(cool), Some(screen)) = (
-                        self.scheme.as_mut(),
-                        self.pipeline.as_ref(),
-                        self.warm_parcel.as_ref(),
-                        self.cool_parcel.as_ref(),
-                        self.screen.as_ref(),
-                    ) {
-                        scheme.begin_rerecord();
-                        let present = Self::record_scheme(scheme, pipeline, warm, cool, &rt, screen);
-                        self.present = Some(present);
+                    if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                        self.pipeline = Some(pipeline);
+                        if let (Some(scheme), Some(pipeline), Some(warm), Some(cool), Some(screen)) = (
+                            self.scheme.as_mut(),
+                            self.pipeline.as_ref(),
+                            self.warm_parcel.as_ref(),
+                            self.cool_parcel.as_ref(),
+                            self.screen.as_ref(),
+                        ) {
+                            scheme.begin_rerecord();
+                            let present = Self::record_scheme(scheme, pipeline, warm, cool, &rt, screen);
+                            self.present = Some(present);
+                        }
+                        self.scene_rt = Some(rt);
                     }
-                    self.scene_rt = Some(rt);
                 }
             }
         }

@@ -401,7 +401,15 @@ fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 | NodeKind::WriteTexture { .. }
                 | NodeKind::WriteTextureRegion { .. }
                 | NodeKind::CopyTexture { .. } => return false,
-                NodeKind::CopyRenderTarget { dst, .. } if !matches!(dst, ResourceId::PresentLease(_)) => {
+                // CopyRenderTarget → PresentLease is retainable via the slot-key
+                // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.
+                // CopyRenderTarget → Texture is also retainable: the texture handle
+                // is stable across submissions, so the blit CB can be reused as-is.
+                // All other destinations (SwapchainOutput, etc.) are not stable and
+                // must be submitted standalone.
+                NodeKind::CopyRenderTarget { dst, .. }
+                    if !matches!(dst, ResourceId::PresentLease(_) | ResourceId::Texture(_)) =>
+                {
                     return false;
                 }
                 _ => {}
@@ -556,9 +564,11 @@ impl PartitionSubmitResult {
 /// two wave groups depending on barrier cost or swapchain presence.  Each
 /// partition is treated independently:
 ///
-/// - **Upload partition** (contains `WriteBuffer`/`WriteTexture`/copy nodes):
-///   submitted via `submit_standalone` on every call — data is staged fresh
-///   each frame and cannot be retained.
+/// - **Upload partition** (contains `WriteBuffer`/`WriteTexture`/`CopyTexture`
+///   nodes, or `CopyRenderTarget` to a present-lease): submitted via
+///   `submit_standalone` on every call — data is staged fresh each frame and
+///   cannot be retained. `CopyRenderTarget` to a stable texture parcel
+///   (`ResourceId::Texture`) is retainable and does **not** force standalone.
 /// - **Render partition** (contains `RenderPass` nodes):
 ///   submitted via `submit_graph_and_retain`; the backend retains the closed
 ///   list and can resubmit it on cache hit.
@@ -4893,6 +4903,75 @@ mod partitioning_tests {
             "cache must rebuild on fingerprint change"
         );
         assert!(cache.as_ref().unwrap().partitioned_commands.is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // Group 7: copy_to_texture retainability
+    //
+    // CopyRenderTarget → Texture must be retainable (the texture handle is
+    // stable across submissions; the staging readback blit runs standalone
+    // separately via finish_submit_frame).
+    // CopyRenderTarget → PresentLease must also be retainable (slot-key path).
+    // Other destinations (e.g. SwapchainOutput) must NOT be retainable.
+    // ------------------------------------------------------------------
+
+    fn grant_read_node(label: &'static str, resource: ResourceId, grant_id: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::GrantRead { grant_id },
+        }
+    }
+
+    /// Call `partition_waves_can_retain` for a single-wave IR built from `nodes`.
+    fn can_retain_single_wave(nodes: Vec<TaskNode>) -> bool {
+        let ir = GraphIR { nodes };
+        let edges = analysis::build_edges(&ir);
+        let schedule = analysis::schedule_waves(&ir, &edges);
+        partition_waves_can_retain(&ir, &schedule.waves)
+    }
+
+    #[test]
+    fn copy_render_target_to_texture_is_retainable() {
+        // RenderPass → CopyRenderTarget(Texture) → GrantRead
+        // All in one chain; CopyRenderTarget → Texture must not force standalone.
+        let nodes = vec![
+            render_pass_node("rp", 10),
+            copy_to_dst_node("copy", 10, ResourceId::Texture(42)),
+            grant_read_node("grant", ResourceId::Texture(42), 0),
+        ];
+        assert!(
+            can_retain_single_wave(nodes),
+            "CopyRenderTarget → Texture must be retainable"
+        );
+    }
+
+    #[test]
+    fn copy_render_target_to_present_lease_is_retainable() {
+        let nodes = vec![
+            render_pass_node("rp", 10),
+            copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+            grant_present_node("grant", 0),
+        ];
+        assert!(
+            can_retain_single_wave(nodes),
+            "CopyRenderTarget → PresentLease must be retainable (slot-key path)"
+        );
+    }
+
+    #[test]
+    fn copy_render_target_to_swapchain_output_is_not_retainable() {
+        let nodes = vec![
+            render_pass_node("rp", 10),
+            copy_to_dst_node("copy", 10, ResourceId::SwapchainOutput),
+        ];
+        assert!(
+            !can_retain_single_wave(nodes),
+            "CopyRenderTarget → SwapchainOutput must NOT be retainable"
+        );
     }
 
     #[test]

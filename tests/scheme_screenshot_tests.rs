@@ -5,6 +5,8 @@
 
 mod common;
 
+#[path = "common/render_fixtures.rs"]
+mod render_fixtures;
 #[path = "common/scheme_render.rs"]
 mod scheme_render;
 #[path = "common/scheme_render_fixtures.rs"]
@@ -15,7 +17,9 @@ use std::path::Path;
 use common::image::{compare_images, ComparisonType, ImageComparisonError};
 use goldy::Color;
 use goldy::Vertex2D;
-use scheme_render_fixtures::{scheme_render_clear, scheme_render_depth_occlusion, scheme_render_triangle};
+use scheme_render_fixtures::{
+    scheme_render_clear, scheme_render_depth_occlusion, scheme_render_game_of_life, scheme_render_triangle,
+};
 
 fn run_screenshot_test(
     name: &str,
@@ -126,6 +130,42 @@ fn scheme_white_triangle() {
         128,
         128,
         &[ComparisonType::Mean(0.01)],
+        pixels,
+    );
+}
+
+#[test]
+fn scheme_game_of_life_update_50() {
+    let Some(device) = scheme_render_fixtures::create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    let pixels = scheme_render_game_of_life(&device, 50);
+    run_screenshot_test(
+        "game_of_life_50",
+        "tests/screenshots/game_of_life_50.png",
+        512,
+        512,
+        &[ComparisonType::Mean(0.012)],
+        pixels,
+    );
+}
+
+#[test]
+fn scheme_game_of_life_update_100() {
+    let Some(device) = scheme_render_fixtures::create_device() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+
+    let pixels = scheme_render_game_of_life(&device, 100);
+    run_screenshot_test(
+        "game_of_life_100",
+        "tests/screenshots/game_of_life_100.png",
+        512,
+        512,
+        &[ComparisonType::Mean(0.012)],
         pixels,
     );
 }

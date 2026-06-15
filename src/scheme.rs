@@ -26,7 +26,9 @@ use crate::task_graph::{
 };
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::{BackendType, Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
+use crate::types::{
+    BackendType, Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
+};
 use crate::validation_env;
 use std::fmt;
 use std::marker::PhantomData;
@@ -843,7 +845,44 @@ impl Scheme {
 
     /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
     /// [`Self::grant_read_texture`]).
-    pub fn copy_to_texture(&mut self, src: &RenderTarget, dst: &Parcel) {
+    ///
+    /// The destination must be a texture parcel with [`TextureFlags::COPY_DST`], homed on
+    /// this scheme's context, and matching the render target's width, height, and format.
+    pub fn copy_to_texture(&mut self, src: &RenderTarget, dst: &Parcel) -> Result<(), GoldyError> {
+        if !dst.is_homed_on(&self.ctx) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "parcel home device does not match scheme context"
+            )));
+        }
+        dst.texture_handle()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_to_texture requires texture parcel")))?;
+        let (width, height, format, _, flags) = dst
+            .texture_descriptor()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_to_texture requires texture parcel")))?;
+        if !flags.contains(TextureFlags::COPY_DST) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_to_texture requires TextureFlags::COPY_DST"
+            )));
+        }
+        if width == 0 || height == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_to_texture requires non-zero texture dimensions"
+            )));
+        }
+        if width != src.width() || height != src.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_to_texture: texture {width}x{height} does not match render target {}x{}",
+                src.width(),
+                src.height()
+            )));
+        }
+        if format != src.format() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_to_texture: texture format {format:?} does not match render target {:?}",
+                src.format()
+            )));
+        }
+
         self.dirty = true;
         self.submit_state.register_parcel_stamp(dst);
         let dst_resource = dst.resource_id();
@@ -864,6 +903,7 @@ impl Scheme {
                 dst: dst_resource,
             },
         });
+        Ok(())
     }
 
     /// Begin recording an offscreen render pass on this scheme.
@@ -2314,7 +2354,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         assert_eq!(scheme.ir_node_count(), 0);
 
-        scheme.copy_to_texture(&rt, &tex);
+        scheme.copy_to_texture(&rt, &tex).expect("copy_to_texture");
         assert_eq!(scheme.ir_node_count(), 1);
 
         match &scheme.ir.nodes[0].kind {
@@ -2325,6 +2365,117 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             other => panic!("expected CopyRenderTarget{{dst:Texture}}, got {other:?}"),
         }
         assert!(scheme.is_dirty(), "copy_to_texture must mark the scheme dirty");
+    }
+
+    #[test]
+    fn copy_to_texture_rejects_buffer_parcel() {
+        use crate::render_target::RenderTarget;
+        use crate::types::{BufferKind, TextureFormat};
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().expect("context");
+        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
+        let buffer = pool
+            .acquire_buffer_sized::<u32>(4, BufferKind::Scattered, crate::types::BufferFlags::empty())
+            .expect("buffer");
+
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .copy_to_texture(&rt, &buffer)
+            .expect_err("buffer parcel must fail");
+        assert!(err.to_string().contains("texture parcel"), "unexpected error: {err}");
+        assert_eq!(scheme.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn copy_to_texture_rejects_missing_copy_dst_flag() {
+        use crate::render_target::RenderTarget;
+        use crate::types::{TextureFlags, TextureFormat, TextureKind};
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().expect("context");
+        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
+        let texture = pool
+            .acquire_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC,
+                None,
+            )
+            .expect("texture");
+
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .copy_to_texture(&rt, &texture)
+            .expect_err("missing COPY_DST must fail");
+        assert!(err.to_string().contains("COPY_DST"), "unexpected error: {err}");
+        assert_eq!(scheme.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn copy_to_texture_rejects_dimension_mismatch() {
+        use crate::render_target::RenderTarget;
+        use crate::types::{TextureFlags, TextureFormat, TextureKind};
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().expect("context");
+        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
+        let texture = pool
+            .acquire_texture(
+                8,
+                8,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_DST,
+                None,
+            )
+            .expect("texture");
+
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .copy_to_texture(&rt, &texture)
+            .expect_err("dimension mismatch must fail");
+        assert!(
+            err.to_string().contains("does not match render target"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(scheme.ir_node_count(), 0);
+    }
+
+    #[test]
+    fn copy_to_texture_rejects_format_mismatch() {
+        use crate::render_target::RenderTarget;
+        use crate::types::{TextureFlags, TextureFormat, TextureKind};
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().expect("context");
+        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
+        let texture = pool
+            .acquire_texture(
+                4,
+                4,
+                TextureFormat::Bgra8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_DST,
+                None,
+            )
+            .expect("texture");
+
+        let mut scheme = Scheme::new(&ctx);
+        let err = scheme
+            .copy_to_texture(&rt, &texture)
+            .expect_err("format mismatch must fail");
+        assert!(
+            err.to_string().contains("does not match render target"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(scheme.ir_node_count(), 0);
     }
 
     #[test]

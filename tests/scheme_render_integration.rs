@@ -10,12 +10,15 @@ mod scheme_render;
 mod submission;
 
 use goldy::{
-    shader::builtins, types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureKind}, BufferKind, Color,
-    CompareFunction, DepthFormat, DepthStencilState, IndexFormat, NodeAccess, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, Sampler, Scheme, ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D,
-    Vertex2DUv, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shader::builtins,
+    types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureKind},
+    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, IndexFormat, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RenderTarget, Sampler, Scheme, ShaderModule, ShaderResourceSlot, TextureFormat,
+    Vertex2D, Vertex2DUv, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use scheme_render::{acquire_readback_texture, device_and_pool, scheme_render_and_readback};
+use scheme_render::{
+    acquire_readback_texture, device_and_pool, read_grant_texture, scheme_record_readback, scheme_render_and_readback,
+};
 use submission::submission_context;
 
 #[test]
@@ -189,7 +192,7 @@ fn scheme_render_target_clear_only() {
         pass.clear(clear_color);
         pass.finish();
     }
-    scheme.copy_to_texture(&target, &readback2);
+    scheme.copy_to_texture(&target, &readback2).expect("copy_to_texture");
     let _grant = scheme.grant_read_texture(&readback2).expect("grant");
     let frame0 = scheme.submit().expect("submit 0");
     assert_eq!(scheme.replay_stats().records, 1);
@@ -198,6 +201,46 @@ fn scheme_render_target_clear_only() {
     assert_eq!(scheme.replay_stats().resubmit_hits, 1);
     drop(frame0);
     drop(frame1);
+}
+
+#[test]
+fn scheme_steady_state_readback_loop() {
+    let Some((device, mut pool)) = device_and_pool() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+    let ctx = submission_context(&device);
+
+    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
+    let readback = acquire_readback_texture(&mut pool, 4, 4, TextureFormat::Rgba8Unorm);
+    let clear_color = Color::from_rgb(128, 64, 32);
+
+    let (mut scheme, grant) = scheme_record_readback(&ctx, &target, &readback, "clear", |pass| {
+        pass.clear(clear_color);
+    });
+
+    let frame0 = scheme.submit().expect("submit 0");
+    let pixels0 = read_grant_texture(&grant, &frame0);
+    let frame1 = scheme.submit().expect("submit 1");
+    let pixels1 = read_grant_texture(&grant, &frame1);
+
+    for chunk in pixels0.chunks(4) {
+        assert_eq!(chunk[0], 128);
+        assert_eq!(chunk[1], 64);
+        assert_eq!(chunk[2], 32);
+        assert_eq!(chunk[3], 255);
+    }
+    assert_eq!(
+        pixels0, pixels1,
+        "steady-state resubmit must produce identical readback"
+    );
+    assert_eq!(scheme.replay_stats().records, 1, "topology recorded once");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "second submit resubmits retained render pass"
+    );
 }
 
 #[test]

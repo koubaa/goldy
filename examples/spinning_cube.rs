@@ -108,6 +108,23 @@ impl App {
         RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
     }
 
+    fn create_pipeline(
+        device: &goldy::Device,
+        shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> anyhow::Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                topology: PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+        )
+    }
+
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
@@ -142,17 +159,7 @@ impl App {
         let screen = swapchain.lease();
 
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                vertex_layout: Vertex2D::layout(),
-                target_format: swapchain.format(),
-                topology: PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-        )?;
+        let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
         let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
@@ -233,19 +240,22 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain)) = (&self.device, &self.swapchain) {
+            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
                 if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
-                    if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(screen)) = (
-                        self.scheme.as_mut(),
-                        self.pipeline.as_ref(),
-                        self.vertex_parcel.as_ref(),
-                        self.screen.as_ref(),
-                    ) {
-                        scheme.begin_rerecord();
-                        let present = Self::record_scheme(scheme, pipeline, vertex_parcel, &rt, screen);
-                        self.present = Some(present);
+                    if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                        self.pipeline = Some(pipeline);
+                        if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(screen)) = (
+                            self.scheme.as_mut(),
+                            self.pipeline.as_ref(),
+                            self.vertex_parcel.as_ref(),
+                            self.screen.as_ref(),
+                        ) {
+                            scheme.begin_rerecord();
+                            let present = Self::record_scheme(scheme, pipeline, vertex_parcel, &rt, screen);
+                            self.present = Some(present);
+                        }
+                        self.scene_rt = Some(rt);
                     }
-                    self.scene_rt = Some(rt);
                 }
             }
         }

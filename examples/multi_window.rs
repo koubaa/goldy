@@ -230,6 +230,7 @@ struct WindowState {
     scheme: Scheme,
     scene_rt: RenderTarget,
     pipeline: RenderPipeline,
+    shader: ShaderModule,
     effect_type: EffectType,
     start_time: Instant,
     paused: bool,
@@ -244,6 +245,22 @@ impl WindowState {
     fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
         let (width, height) = swapchain.size();
         RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
+    }
+
+    fn create_pipeline(
+        device: &goldy::Device,
+        shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> anyhow::Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: QuadVertex::layout(),
+                ..Default::default()
+            },
+        )
     }
 
     fn record_scheme(
@@ -287,16 +304,7 @@ impl WindowState {
         let screen = swapchain.lease();
         let scene_rt = Self::create_scene_rt(device, &swapchain)?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
-        let pipeline = RenderPipeline::new(
-            device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                vertex_layout: QuadVertex::layout(),
-                target_format: swapchain.format(),
-                ..Default::default()
-            },
-        )?;
+        let pipeline = Self::create_pipeline(device, &shader, &swapchain)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let vertex_parcel =
@@ -320,6 +328,7 @@ impl WindowState {
             scheme,
             scene_rt,
             pipeline,
+            shader,
             effect_type,
             start_time: Instant::now(),
             paused: false,
@@ -392,7 +401,13 @@ impl WindowState {
             match Self::create_scene_rt(device, &self.swapchain) {
                 Ok(rt) => {
                     self.scene_rt = rt;
-                    self.rerecord_scheme();
+                    match Self::create_pipeline(device, &self.shader, &self.swapchain) {
+                        Ok(pipeline) => {
+                            self.pipeline = pipeline;
+                            self.rerecord_scheme();
+                        }
+                        Err(e) => tracing::error!("[{}] Failed to recreate pipeline: {}", self.effect_type.title(), e),
+                    }
                 }
                 Err(e) => tracing::error!("[{}] Failed to recreate scene RT: {}", self.effect_type.title(), e),
             }
