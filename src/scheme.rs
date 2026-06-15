@@ -10,7 +10,7 @@
 //! when clean.
 
 use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureHandle, TextureReadbackLayout};
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
@@ -21,11 +21,12 @@ use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
 use crate::task_graph::{
-    DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, PRESENT_LEASE_SLOT_PLACEHOLDER,
+    DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
+    PRESENT_LEASE_SLOT_PLACEHOLDER,
 };
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::{Color, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
+use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::validation_env;
 use std::fmt;
 use std::marker::PhantomData;
@@ -1173,8 +1174,46 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self.bind_parcel_mut(parcel, access)
     }
 
+    /// Declare push-constant slots in shader parameter order and register graph bindings.
+    ///
+    /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
+    /// handles before each pipeline bind.
+    pub fn bind_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
+        for slot in slots {
+            match slot {
+                ShaderResourceSlot::Parcel { parcel, access } => {
+                    let resource_access = node_access_to_resource_access(*access);
+                    self.scheme.submit_state.register_parcel_stamp(parcel);
+                    self.bindings.push(ResourceBinding {
+                        resource: parcel.resource_id(),
+                        access: *access,
+                    });
+                    let handle = parcel.handle(resource_access).unwrap_or_else(|| {
+                        panic!(
+                            "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
+                             use bind_parcel_mut for geometry and bind views at draw time"
+                        )
+                    });
+                    self.push_constant_handles.push(handle);
+                }
+                ShaderResourceSlot::Sampler(sampler) => {
+                    let handle = sampler
+                        .handle(ResourceAccess::Read)
+                        .expect("ShaderResourceSlot::Sampler: missing bindless sampler index");
+                    self.push_constant_handles.push(handle);
+                }
+            }
+        }
+        self
+    }
+
     pub fn clear(&mut self, color: Color) -> &mut Self {
         self.commands.push(RenderCommand::Clear(color));
+        self
+    }
+
+    pub fn clear_depth(&mut self, depth: f32) -> &mut Self {
+        self.commands.push(RenderCommand::ClearDepth(depth));
         self
     }
 
@@ -1200,6 +1239,40 @@ impl<'a> SchemeRenderPassBuilder<'a> {
     #[allow(dead_code)]
     pub(crate) fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
         self.bind_views(handles)
+    }
+
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) -> &mut Self {
+        self.commands.push(RenderCommand::SetVertexBuffer {
+            slot,
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
+        });
+        self
+    }
+
+    pub fn set_index_buffer(&mut self, buffer: &impl BufferSource, format: IndexFormat) -> &mut Self {
+        self.commands.push(RenderCommand::SetIndexBuffer {
+            buffer: buffer.source_handle(),
+            offset: buffer.source_offset(),
+            format,
+        });
+        self
+    }
+
+    pub fn draw_indexed(
+        &mut self,
+        indices: std::ops::Range<u32>,
+        base_vertex: i32,
+        instances: std::ops::Range<u32>,
+    ) -> &mut Self {
+        self.commands.push(RenderCommand::DrawIndexed {
+            index_count: indices.end - indices.start,
+            instance_count: instances.end - instances.start,
+            first_index: indices.start,
+            base_vertex,
+            first_instance: instances.start,
+        });
+        self
     }
 
     pub fn draw_fullscreen(&mut self) -> &mut Self {
