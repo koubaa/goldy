@@ -23,7 +23,7 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, Parcel,
+    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
     ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags, TextureFormat,
     TextureKind,
 };
@@ -32,7 +32,7 @@ use submission::submission_context;
 use upload::write_to_parcel;
 
 fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
-    let loan = grant.read(frame).expect("grant read");
+    let loan = grant.consume(frame).expect("grant consume");
     assert_eq!(loan.len(), count * 4, "grant readback size");
     bytemuck::cast_slice(&loan).to_vec()
 }
@@ -431,7 +431,7 @@ fn grant_read_concurrent_frames_distinct_backings() {
     let frame2 = scheme.submit().expect("submit K+1 without waiting on K");
 
     for frame in [&frame1, &frame2] {
-        let loan = grant.read(frame).expect("grant read");
+        let loan = grant.consume(frame).expect("grant consume");
         assert_eq!(loan.len(), 64 * 4);
         for chunk in loan.chunks_exact(4) {
             assert_eq!(u32::from_le_bytes(chunk.try_into().unwrap()), 42);
@@ -499,7 +499,7 @@ fn grant_read_texture_concurrent_frames_distinct_backings() {
     let frame2 = scheme.submit().expect("submit K+1 without waiting on K");
 
     for frame in [&frame1, &frame2] {
-        let loan = grant.read(frame).expect("grant read");
+        let loan = grant.consume(frame).expect("grant consume");
         assert!(loan.len() > 0, "texture readback empty");
         assert_eq!(loan[0], 255, "R channel");
         assert_eq!(loan[1], 0, "G channel");
@@ -530,7 +530,7 @@ fn fill_42_scheme(ctx: &Context, pipe: &ComputePipeline, buf: &Parcel) -> Scheme
     scheme
 }
 
-/// Second `grant.read` on the same frame must fail (staging cell is single-consume).
+/// Second `grant.consume` on the same submission must fail (staging cell is single-consume).
 #[test]
 fn grant_read_double_read_same_frame_errors() {
     let device = make_device();
@@ -546,8 +546,8 @@ fn grant_read_double_read_same_frame_errors() {
     let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().expect("submit");
 
-    let _loan = grant.read(&frame).expect("first read");
-    let err = grant.read(&frame).expect_err("second read must fail");
+    let _loan = grant.consume(&frame).expect("first read");
+    let err = grant.consume(&frame).expect_err("second read must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
@@ -568,10 +568,10 @@ fn grant_read_cloned_frame_double_read_errors() {
     let frame = scheme.submit().expect("submit");
     let frame_clone = frame.clone();
 
-    let _loan = grant.read(&frame).expect("first read");
+    let _loan = grant.consume(&frame).expect("first read");
     let err = grant
-        .read(&frame_clone)
-        .expect_err("cloned frame second read must fail");
+        .consume(&frame_clone)
+        .expect_err("cloned frame second consume must fail");
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
@@ -702,7 +702,7 @@ fn grant_read_texture_sequential_resubmit_correct_data() {
     // must have the correct last_layout going into the copy barrier each time.
     for round in 0..3u32 {
         let frame = scheme.submit().expect("submit");
-        let loan = grant.read(&frame).expect("grant read");
+        let loan = grant.consume(&frame).expect("grant read");
         assert!(loan.len() > 0, "texture readback empty on round {round}");
         assert_eq!(loan[0], 255, "R channel, round {round}");
         assert_eq!(loan[1], 0, "G channel, round {round}");

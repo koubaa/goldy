@@ -1,13 +1,13 @@
 //! Compute-to-Surface example — pure compute rendering without a graphics pipeline.
 //!
 //! Demonstrates present-on-scheme: a retained [`Scheme`] writes directly to a
-//! [`PresentLease`] from [`SwapchainPool`], then presents via [`PresentGrant::present`].
+//! [`PresentLease`] from [`SwapchainPool`], then presents via [`PresentGrant::consume`].
 //!
 //! Run with: cargo run --example compute_to_surface
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, write_to_parcel, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel,
+    task_graph::NodeAccess, write_to_parcel, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance, Parcel,
     PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
 };
 use std::sync::Arc;
@@ -307,7 +307,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     write_to_parcel(&state.ctx, &state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))?;
 
     let submission = state.scheme.submit()?;
-    state.present.present(&submission)?;
+    state.present.consume(&submission)?;
 
     Ok(())
 }

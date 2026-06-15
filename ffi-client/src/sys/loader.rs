@@ -120,7 +120,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_grant_read: FnGoldySchemeGrantRead,
     pub goldy_read_grant_destroy: FnGoldyReadGrantDestroy,
     pub goldy_read_grant_byte_size: FnGoldyReadGrantByteSize,
-    pub goldy_read_grant_read: FnGoldyReadGrantRead,
+    pub goldy_read_grant_consume: FnGoldyReadGrantConsume,
 }
 
 impl GoldyFfi {
@@ -340,7 +340,7 @@ impl GoldyFfi {
             goldy_scheme_grant_read: sym!("goldy_scheme_grant_read", FnGoldySchemeGrantRead),
             goldy_read_grant_destroy: sym!("goldy_read_grant_destroy", FnGoldyReadGrantDestroy),
             goldy_read_grant_byte_size: sym!("goldy_read_grant_byte_size", FnGoldyReadGrantByteSize),
-            goldy_read_grant_read: sym!("goldy_read_grant_read", FnGoldyReadGrantRead),
+            goldy_read_grant_consume: sym!("goldy_read_grant_consume", FnGoldyReadGrantConsume),
             _library: library,
         })
     }

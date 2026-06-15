@@ -199,7 +199,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     ).dispatch(1, 1, 1)
     grant = scheme.grant_read(parcel)
     frame = scheme.submit()
-    values = np.frombuffer(grant.read(frame), dtype=np.uint32)
+    values = np.frombuffer(grant.consume(frame), dtype=np.uint32)
     assert values.shape == (64,)
     assert np.all(values == 42)
 

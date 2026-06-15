@@ -1349,9 +1349,9 @@ public:
         return goldy_read_grant_byte_size(ptr_.get());
     }
 
-    [[nodiscard]] std::vector<uint8_t> read(const SchemeFrame& frame) const {
+    [[nodiscard]] std::vector<uint8_t> consume(const SchemeFrame& frame) const {
         std::vector<uint8_t> output(byte_size());
-        detail::throw_on_result(goldy_read_grant_read(
+        detail::throw_on_result(goldy_read_grant_consume(
             ptr_.get(), frame.get(), output.data(), output.size()));
         return output;
     }

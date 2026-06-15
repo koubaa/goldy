@@ -8,7 +8,7 @@ use crate::types::{GoldyNodeAccess, GoldyResourceAccess};
 use goldy::scheme::{ReadGrant, Scheme};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess};
 use goldy::types::ResourceAccess;
-use goldy::{GrantBuffer, GrantTexture, MosaicSlot, ParcelType};
+use goldy::{Grant, GrantBuffer, GrantTexture, MosaicSlot, ParcelType};
 use std::ffi::CStr;
 
 /// Opaque per-submission frame token returned by [`goldy_scheme_submit`].
@@ -38,14 +38,14 @@ impl ReadGrantInner {
         }
     }
 
-    fn read_copy(&self, frame: &goldy::SchemeFrame, output: &mut [u8]) -> Result<(), goldy::GoldyError> {
+    fn consume_copy(&self, frame: &goldy::SchemeFrame, output: &mut [u8]) -> Result<(), goldy::GoldyError> {
         match self {
             ReadGrantInner::Buffer(g) => {
-                let loan = g.read(frame)?;
+                let loan = g.consume(frame)?;
                 output.copy_from_slice(&loan);
             }
             ReadGrantInner::Texture(g) => {
-                let loan = g.read(frame)?;
+                let loan = g.consume(frame)?;
                 output.copy_from_slice(&loan);
             }
         }
@@ -302,7 +302,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_dispatch(
 ///
 /// Does not block. The caller owns `*out_frame` and must call
 /// [`goldy_scheme_frame_destroy`]. To read bytes from a recorded grant, use
-/// [`goldy_read_grant_read`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
+/// [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
 ///
 /// # Safety
 /// `scheme` and `out_frame` must be valid; `*out_frame` is written on success.
@@ -355,7 +355,7 @@ pub unsafe extern "C" fn goldy_scheme_frame_timeline_value(frame: *const GoldySc
 
 /// Block until the GPU work for `frame` has completed.
 ///
-/// Prefer [`goldy_read_grant_read`] when verifying compute output through a grant.
+/// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
 ///
 /// # Safety
 /// `ctx` and `frame` must be valid.
@@ -441,16 +441,16 @@ pub unsafe extern "C" fn goldy_read_grant_byte_size(grant: *const GoldyReadGrant
     (*grant).inner.byte_size()
 }
 
-/// Read bytes for the `(grant × frame)` cell into `output`.
+/// Consume bytes for the `(grant × submission)` cell into `output`.
 ///
 /// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
-/// Each frame may be read at most once per grant. Drop the frame when done if you
+/// Each submission may be consumed at most once per grant. Drop the submission when done if you
 /// rely on staging-buffer reuse.
 ///
 /// # Safety
 /// All pointers must be valid. `output` must point to at least `output_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_read_grant_read(
+pub unsafe extern "C" fn goldy_read_grant_consume(
     grant: *const GoldyReadGrant,
     frame: *const GoldySchemeFrame,
     output: *mut u8,
@@ -467,7 +467,7 @@ pub unsafe extern "C" fn goldy_read_grant_read(
         ));
         return GoldyResult::InvalidArgument;
     }
-    match (*grant).inner.read_copy(&(*frame).inner, out) {
+    match (*grant).inner.consume_copy(&(*frame).inner, out) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));

@@ -283,8 +283,7 @@ pub(super) fn render(
     let (device_handle, width, height, depth_texture, scratch_handle) = {
         let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
         let frame_slot = surface_state.current_frame;
-        let scratch = surface_state
-            .scratch_texture_handles[frame_slot]
+        let scratch = surface_state.scratch_texture_handles[frame_slot]
             .or(surface_state.current_texture_handle)
             .context("No scratch texture acquired — call surface_acquire first")?;
         (
@@ -330,12 +329,7 @@ pub(super) fn render(
             _ => {}
         }
     }
-    let render_pass = create_render_pass(
-        scratch_tex.as_ref(),
-        depth_texture.as_deref(),
-        clear_color,
-        clear_depth,
-    );
+    let render_pass = create_render_pass(scratch_tex.as_ref(), depth_texture.as_deref(), clear_color, clear_depth);
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(render_pass);
@@ -648,10 +642,7 @@ pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32,
         surface_state.current_texture_handle = None;
         surface_state.pending_acquire_count = 0;
 
-        (
-            surface_state.device_handle,
-            scratch_handles,
-        )
+        (surface_state.device_handle, scratch_handles)
     };
 
     for tex_handle in scratch_handles {
@@ -725,14 +716,8 @@ fn ensure_scratch_texture_slot(
         super::texture::destroy(state, old);
     }
 
-    let handle = super::texture::create_scratch_for_surface_slot(
-        state,
-        device_handle,
-        width,
-        height,
-        format,
-        bindless_slot,
-    )?;
+    let handle =
+        super::texture::create_scratch_for_surface_slot(state, device_handle, width, height, format, bindless_slot)?;
 
     state.surfaces.get_mut(&surface).unwrap().scratch_texture_handles[frame_slot] = Some(handle);
     Ok(handle)

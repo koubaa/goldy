@@ -39,7 +39,7 @@ public class SchemeTests
 
             using var grant = scheme.GrantRead(parcel);
             using var frame = scheme.Submit();
-            var bytes = grant.Read(frame);
+            var bytes = grant.Consume(frame);
             var values = MemoryMarshal.Cast<byte, uint>(bytes);
             foreach (var v in values)
                 Assert.Equal(42u, v);
@@ -93,7 +93,7 @@ public class SchemeTests
 
             using var grant = scheme.GrantReadTexture(parcel);
             using var frame = scheme.Submit();
-            var bytes = grant.Read(frame);
+            var bytes = grant.Consume(frame);
             Assert.True(bytes.Length > 0);
             Assert.Equal(255, bytes[0]);
             Assert.Equal(0, bytes[1]);

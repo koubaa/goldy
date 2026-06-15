@@ -43,7 +43,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     node.dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buffer)?;
     let frame = scheme.submit()?;
-    let bytes = grant.read(&frame)?;
+    let bytes = grant.consume(&frame)?;
     let values: &[f32] = bytemuck::cast_slice(&bytes);
     for (i, &v) in values.iter().enumerate().take(64) {
         let expected = i as f32 * 2.0;

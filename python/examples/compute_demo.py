@@ -58,7 +58,7 @@ def main():
     ).dispatch(4, 1, 1)
     grant = scheme.grant_read(parcel)
     frame = scheme.submit()
-    output = np.frombuffer(grant.read(frame), dtype=np.float32)
+    output = np.frombuffer(grant.consume(frame), dtype=np.float32)
     print("Dispatched compute shader")
 
     expected = input_data * 2.0

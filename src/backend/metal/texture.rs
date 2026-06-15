@@ -234,9 +234,7 @@ pub(super) fn create_scratch_for_surface_slot(
     descriptor.set_width(width.max(1) as u64);
     descriptor.set_height(height.max(1) as u64);
     descriptor.set_pixel_format(format_to_mtl(format));
-    descriptor.set_usage(
-        MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite | MTLTextureUsage::RenderTarget,
-    );
+    descriptor.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite | MTLTextureUsage::RenderTarget);
     // Must match the device texture heap (Shared). Private textures use
     // `device.new_texture` directly (see render_target.rs), not heap allocation.
     descriptor.set_storage_mode(MTLStorageMode::Shared);
@@ -259,9 +257,7 @@ pub(super) fn create_scratch_for_surface_slot(
         logical_device
             .storage_image_encoder
             .set_argument_buffer(&logical_device.argument_buffer, offset);
-        logical_device
-            .storage_image_encoder
-            .set_texture(0, &texture);
+        logical_device.storage_image_encoder.set_texture(0, &texture);
     } else {
         tracing::error!(
             "create_scratch_for_surface_slot: argument buffer overflow — \

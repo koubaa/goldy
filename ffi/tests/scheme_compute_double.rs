@@ -8,7 +8,7 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
     goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy, goldy_read_grant_byte_size,
-    goldy_read_grant_destroy, goldy_read_grant_read, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
+    goldy_read_grant_consume, goldy_read_grant_destroy, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
     goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_declare_parcel,
     goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_frame_destroy,
     goldy_scheme_grant_read, goldy_scheme_len, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
@@ -143,7 +143,7 @@ fn scheme_compute_double_then_add_ten() {
 
         let mut readback = vec![0u8; goldy_read_grant_byte_size(grant) as usize];
         assert_eq!(
-            goldy_read_grant_read(grant, frame, readback.as_mut_ptr(), readback.len()),
+            goldy_read_grant_consume(grant, frame, readback.as_mut_ptr(), readback.len()),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

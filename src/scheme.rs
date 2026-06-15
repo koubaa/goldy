@@ -148,11 +148,11 @@ impl fmt::Debug for GrantStagingPool {
 struct SubmissionData {
     scheme_id: u64,
     timeline: TimelineValue,
-    /// Per-grant staging buffer for this submission; taken by [`ReadGrant::read`].
+    /// Per-grant staging buffer for this submission; taken by [`ReadGrant::consume`].
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
     staging_pools: Vec<Arc<GrantStagingPool>>,
-    /// Acquired swapchain frames for present grants; consumed by [`PresentGrant::present`].
+    /// Acquired swapchain frames for present grants; consumed by [`PresentGrant::consume`].
     present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
 }
 
@@ -219,6 +219,20 @@ impl From<Submission> for TimelineValue {
     }
 }
 
+/// A scheme easement — exclusive access to a resource recorded at topology time.
+///
+/// Call [`Grant::consume`] once per submission to revoke that submission's granted
+/// access and obtain the grant's product.
+pub trait Grant {
+    /// Product yielded when this grant's access is consumed for one submission.
+    type Output;
+    /// Consume the granted access for `submission`, yielding its product.
+    ///
+    /// `submission` must come from the same [`Scheme`] that recorded this grant.
+    /// Each submission may be consumed at most once per grant.
+    fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError>;
+}
+
 /// Marker returned by [`Scheme::grant_present`].
 #[derive(Debug, Clone)]
 pub struct PresentGrant {
@@ -231,13 +245,12 @@ impl PresentGrant {
     pub fn grant_id(&self) -> u32 {
         self.grant_id
     }
+}
 
-    /// Scan out the swapchain drawable acquired for `submission`.
-    ///
-    /// `submission` must come from the same [`Scheme`] that recorded this grant.
-    /// Each submission may be presented at most once per grant (same idempotency
-    /// contract as [`ReadGrant::read`]).
-    pub fn present(&self, submission: &Submission) -> Result<(), GoldyError> {
+impl Grant for PresentGrant {
+    type Output = ();
+
+    fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
         if submission.data.scheme_id != self.scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "PresentGrant belongs to a different scheme than this submission"
@@ -252,9 +265,9 @@ impl PresentGrant {
             ))
         })?;
         let mut slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        let surface_frame = slot.take().ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!("present grant already consumed for this submission"))
-        })?;
+        let surface_frame = slot
+            .take()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
         surface_frame.present().map(|_| ()).map_err(GoldyError::Backend)
     }
 }
@@ -299,7 +312,7 @@ struct GrantInfo {
     staging_pool: Arc<GrantStagingPool>,
 }
 
-/// Readable bytes for one `(grant × frame)` cell — returned by [`ReadGrant::read`].
+/// Readable bytes for one `(grant × submission)` cell — returned by [`ReadGrant::consume`].
 ///
 /// Dropping the loan returns the staging buffer to the grant's reuse pool while the
 /// owning [`Scheme`] is alive; otherwise the buffer is freed immediately.
@@ -336,7 +349,7 @@ impl<T> Drop for Loan<T> {
 /// A read easement over a scheme parcel — recorded once via [`Scheme::grant_read`].
 ///
 /// Obtain readable bytes for a submission by coordinating this handle with a
-/// [`Frame`] from the **same** [`Scheme`]: `grant.read(&frame)`.
+/// [`Submission`] from the **same** [`Scheme`]: `grant.consume(&submission)`.
 pub struct ReadGrant<T> {
     grant_id: GrantId,
     scheme_id: u64,
@@ -352,15 +365,12 @@ impl<T> ReadGrant<T> {
     pub fn byte_size(&self) -> u64 {
         self.byte_size
     }
+}
 
-    /// Readable bytes for `submission`'s GPU work (full logical buffer size).
-    ///
-    /// `submission` must come from the same [`Scheme`] that created this grant.
-    /// Blocks until this submission's GPU work (dispatch + grant staging copy) completes,
-    /// then reads from that submission's dedicated staging buffer. Each submission may be
-    /// read at most once per grant. Drop any unconsumed [`Submission`] tokens before dropping
-    /// the scheme if you rely on staging-buffer reuse rather than immediate free.
-    pub fn read(&self, submission: &Submission) -> Result<Loan<T>, GoldyError> {
+impl<T> Grant for ReadGrant<T> {
+    type Output = Loan<T>;
+
+    fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
         if submission.data.scheme_id != self.scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "ReadGrant belongs to a different scheme than this submission"
@@ -389,7 +399,7 @@ impl<T> ReadGrant<T> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant already consumed for this submission")))?;
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
         let byte_size = usize::try_from(self.byte_size)
             .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
         let mut bytes = vec![0u8; byte_size];
@@ -612,7 +622,7 @@ impl Scheme {
     /// retained submissions.
     ///
     /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`PresentGrant::present`].
+    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
         if let Some(prev_tv) = self.last_submitted_tv {
             if !self.dirty {
@@ -869,7 +879,7 @@ impl Drop for Scheme {
 impl Scheme {
     /// Record a read easement grant over a buffer deed parcel.
     ///
-    /// Returns a stable [`ReadGrant`] handle; call [`ReadGrant::read`] with a
+    /// Returns a stable [`ReadGrant`] handle; call [`ReadGrant::consume`] with a
     /// [`Submission`] from [`Self::submit`] to obtain that submission's bytes.
     /// Record after the producing dispatch node(s). The parcel's backing buffer is
     /// retained for the scheme's lifetime so resubmits remain valid after the
@@ -1673,7 +1683,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         drop(parcel);
         drop(pool);
 
-        let loan = grant.read(&frame).expect("read after parcel drop");
+        let loan = grant.consume(&frame).expect("read after parcel drop");
         assert_eq!(loan.len(), 32, "reads full logical buffer size");
     }
 
@@ -1688,8 +1698,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         drop(parcel);
         drop(pool);
         let frame2 = scheme.submit().expect("submit 2 after parcel drop");
-        let loan1 = grant.read(&frame1).expect("read frame1");
-        let loan2 = grant.read(&frame2).expect("read frame2");
+        let loan1 = grant.consume(&frame1).expect("read frame1");
+        let loan2 = grant.consume(&frame2).expect("read frame2");
         assert_eq!(loan1.len(), 32);
         assert_eq!(loan2.len(), 32);
     }
@@ -1707,8 +1717,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame1 = scheme.submit().expect("first submit");
         let frame2 = scheme.submit().expect("second submit without waiting on frame1");
 
-        let loan1 = grant.read(&frame1).expect("read frame1");
-        let loan2 = grant.read(&frame2).expect("read frame2");
+        let loan1 = grant.consume(&frame1).expect("read frame1");
+        let loan2 = grant.consume(&frame2).expect("read frame2");
         assert_eq!(loan1.len(), 32);
         assert_eq!(loan2.len(), 32);
         for chunk in loan1.chunks_exact(4) {
@@ -1726,8 +1736,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
         let grant = scheme.grant_read(&parcel).expect("grant_read");
         let frame = scheme.submit().expect("submit");
-        let _loan = grant.read(&frame).expect("first read");
-        let err = match grant.read(&frame) {
+        let _loan = grant.consume(&frame).expect("first read");
+        let err = match grant.consume(&frame) {
             Ok(_) => panic!("second read must fail"),
             Err(e) => e,
         };
@@ -1747,11 +1757,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let frame1 = scheme.submit().expect("submit 1");
         {
-            let loan = grant.read(&frame1).expect("read frame1");
+            let loan = grant.consume(&frame1).expect("read frame1");
             assert_eq!(loan.len(), 32);
         }
         let frame2 = scheme.submit().expect("submit 2 after loan drop");
-        let loan2 = grant.read(&frame2).expect("read frame2 after pool recycle");
+        let loan2 = grant.consume(&frame2).expect("read frame2 after pool recycle");
         assert_eq!(loan2.len(), 32);
         let (allocs, _) = mock_readback_counts(&device);
         assert_eq!(allocs, 1, "pool recycles staging buffer on loan drop");
@@ -1788,7 +1798,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _grant_b = scheme_b.grant_read(&parcel).expect("grant_b");
         let frame_b = scheme_b.submit().expect("submit b");
 
-        let err = match grant_a.read(&frame_b) {
+        let err = match grant_a.consume(&frame_b) {
             Ok(_) => panic!("cross-scheme read must fail"),
             Err(e) => e,
         };
@@ -1861,7 +1871,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
         let frame = scheme.submit().expect("submit");
 
-        let loan = grant.read(&frame).expect("read texture grant");
+        let loan = grant.consume(&frame).expect("read texture grant");
         assert_eq!(loan.len(), 4 * 4 * 4, "Rgba8Unorm 4×4 = 64 bytes");
     }
 
@@ -1898,7 +1908,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(allocs_before, 1, "one staging alloc per submit");
         assert_eq!(frees_before, 0, "not freed yet");
 
-        let loan = grant.read(&frame).expect("read");
+        let loan = grant.consume(&frame).expect("read");
         drop(loan);
 
         // After loan drop the handle returns to pool (scheme alive) — no free yet.
@@ -1909,7 +1919,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame2 = scheme.submit().expect("resubmit");
         let (allocs_after_resubmit, _) = mock_readback_counts(&device);
         assert_eq!(allocs_after_resubmit, 1, "recycled: no new alloc");
-        let _loan2 = grant.read(&frame2).expect("read frame2");
+        let _loan2 = grant.consume(&frame2).expect("read frame2");
 
         // Drop scheme — pool drains and frees all handles.
         drop(_loan2);
@@ -1931,8 +1941,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
         let frame = scheme.submit().expect("submit");
 
-        let _loan = grant.read(&frame).expect("first read");
-        let err = grant.read(&frame).expect_err("second read must fail");
+        let _loan = grant.consume(&frame).expect("first read");
+        let err = grant.consume(&frame).expect_err("second read must fail");
         assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
     }
 
@@ -1948,8 +1958,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let frame1 = scheme.submit().expect("first submit");
         let frame2 = scheme.submit().expect("second submit without waiting on frame1");
 
-        let loan1 = grant.read(&frame1).expect("read frame1");
-        let loan2 = grant.read(&frame2).expect("read frame2");
+        let loan1 = grant.consume(&frame1).expect("read frame1");
+        let loan2 = grant.consume(&frame2).expect("read frame2");
         assert_eq!(loan1.len(), loan2.len());
 
         let (allocs, _) = mock_readback_counts(&device);
@@ -2024,7 +2034,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _grant_b = scheme_b.grant_read_texture(&texture).expect("grant_b");
         let frame_b = scheme_b.submit().expect("submit b");
 
-        let err = grant_a.read(&frame_b).expect_err("cross-scheme read must fail");
+        let err = grant_a.consume(&frame_b).expect_err("cross-scheme read must fail");
         assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
     }
 
@@ -2041,7 +2051,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         drop(texture);
         drop(pool);
 
-        let loan = grant.read(&frame).expect("read after parcel drop");
+        let loan = grant.consume(&frame).expect("read after parcel drop");
         assert_eq!(loan.len(), 4 * 4 * 4);
     }
 
@@ -2286,7 +2296,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let before = mock_present_count(&device);
         let submission = scheme.submit().expect("first submit");
-        present.present(&submission).expect("present");
+        present.consume(&submission).expect("present");
         let after = mock_present_count(&device);
         assert_eq!(after, before + 1, "present must fire one swapchain present");
     }
@@ -2301,8 +2311,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let present = scheme.grant_present(&lease);
 
         let submission = scheme.submit().expect("submit");
-        present.present(&submission).expect("first present");
-        let err = present.present(&submission).expect_err("second present must fail");
+        present.consume(&submission).expect("first present");
+        let err = present.consume(&submission).expect_err("second present must fail");
         assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
     }
 
@@ -2320,7 +2330,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let submission_b = scheme_b.submit().expect("submit b");
 
         let err = present_a
-            .present(&submission_b)
+            .consume(&submission_b)
             .expect_err("cross-scheme present must fail");
         assert!(err.to_string().contains("different scheme"), "unexpected error: {err}");
     }
@@ -2339,8 +2349,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let submission2 = scheme.submit().expect("submit 2");
 
         // Present in order; both must succeed.
-        present.present(&submission1).expect("present submission1");
-        present.present(&submission2).expect("present submission2");
+        present.consume(&submission1).expect("present submission1");
+        present.consume(&submission2).expect("present submission2");
 
         assert_eq!(mock_present_count(&device), 2, "two submits → two presents");
     }
@@ -2363,7 +2373,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let depth = 6;
         for i in 0..depth {
             let submission = scheme.submit().expect(&format!("submit {i}"));
-            present.present(&submission).expect(&format!("present {i}"));
+            present.consume(&submission).expect(&format!("present {i}"));
         }
 
         // At minimum, the scheme must have recorded (not resubmitted) at most
@@ -2523,7 +2533,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let present = scheme.grant_present(&lease);
 
         let submission = scheme.submit().expect("initial submit");
-        present.present(&submission).expect("present");
+        present.consume(&submission).expect("present");
 
         scheme.begin_rerecord();
         assert!(scheme.is_dirty());
@@ -2535,7 +2545,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let present2 = scheme.grant_present(&lease);
 
         let submission2 = scheme.submit().expect("post-rerecord submit");
-        present2.present(&submission2).expect("present after rerecord");
+        present2.consume(&submission2).expect("present after rerecord");
     }
 
     #[test]
@@ -2558,15 +2568,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme.copy_to_present(&rt, &lease);
         scheme.grant_present(&lease);
 
-        let partitions = analysis::describe_logical_partitions(&scheme.ir, &analysis::schedule_waves(
+        let partitions = analysis::describe_logical_partitions(
             &scheme.ir,
-            &analysis::build_edges(&scheme.ir),
-        ));
+            &analysis::schedule_waves(&scheme.ir, &analysis::build_edges(&scheme.ir)),
+        );
         assert!(
             partitions.len() >= 2,
             "render pass and present copy must land in separate logical partitions; got {partitions:?}"
         );
-        assert!(!partitions[0].has_present, "first partition must not touch present lease");
+        assert!(
+            !partitions[0].has_present,
+            "first partition must not touch present lease"
+        );
         assert!(
             partitions.iter().any(|p| p.has_present),
             "some partition must touch present lease"

@@ -41,10 +41,10 @@ impl ReadGrant {
         unsafe { sys::goldy_read_grant_byte_size(self.ptr) }
     }
 
-    /// Readable bytes for `frame`'s submission (full logical buffer size).
-    pub fn read(&self, frame: &SchemeFrame) -> Result<Vec<u8>> {
+    /// Consumable bytes for `frame`'s submission (full logical buffer size).
+    pub fn consume(&self, frame: &SchemeFrame) -> Result<Vec<u8>> {
         let mut output = vec![0u8; self.byte_size() as usize];
-        check(unsafe { sys::goldy_read_grant_read(self.ptr, frame.ptr, output.as_mut_ptr(), output.len()) })?;
+        check(unsafe { sys::goldy_read_grant_consume(self.ptr, frame.ptr, output.as_mut_ptr(), output.len()) })?;
         Ok(output)
     }
 }

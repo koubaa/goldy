@@ -37,7 +37,7 @@ pub type FnGoldySchemeFrameWait = unsafe extern "C" fn(*const GoldyContext, *con
 pub type FnGoldySchemeGrantRead = unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel) -> *mut GoldyReadGrant;
 pub type FnGoldyReadGrantDestroy = unsafe extern "C" fn(*mut GoldyReadGrant);
 pub type FnGoldyReadGrantByteSize = unsafe extern "C" fn(*const GoldyReadGrant) -> u64;
-pub type FnGoldyReadGrantRead =
+pub type FnGoldyReadGrantConsume =
     unsafe extern "C" fn(*const GoldyReadGrant, *const GoldySchemeFrame, *mut u8, usize) -> GoldyResult;
 
 pub type FnGoldyDeviceAdapterId = unsafe extern "C" fn(*const GoldyDevice) -> u32;

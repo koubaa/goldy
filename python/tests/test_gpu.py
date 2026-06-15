@@ -177,7 +177,7 @@ class TestComputePipeline:
         ).dispatch(1, 1, 1)
         grant = scheme.grant_read(parcel)
         frame = scheme.submit()
-        values = np.frombuffer(grant.read(frame), dtype=np.uint32)
+        values = np.frombuffer(grant.consume(frame), dtype=np.uint32)
         assert np.all(values == 42)
 
     def test_grant_read_texture(self, device):
@@ -214,7 +214,7 @@ class TestComputePipeline:
         ).dispatch(2, 2, 1)
         grant = scheme.grant_read_texture(parcel)
         frame = scheme.submit()
-        pixels = grant.read(frame)
+        pixels = grant.consume(frame)
         assert len(pixels) > 0
         assert pixels[0] == 255
         assert pixels[1] == 0

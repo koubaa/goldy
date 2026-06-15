@@ -5,7 +5,7 @@ use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::types::{PyNodeAccess, PyResourceAccess};
 use goldy::task_graph::ComputeNodeRecord;
-use goldy::{GrantBuffer, GrantTexture, ReadGrant, Scheme, SchemeFrame};
+use goldy::{Grant, GrantBuffer, GrantTexture, ReadGrant, Scheme, SchemeFrame};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::cell::RefCell;
@@ -70,15 +70,15 @@ impl PyReadGrant {
         self.inner.byte_size()
     }
 
-    /// Readable bytes for `frame`'s submission.
-    fn read<'py>(&self, py: Python<'py>, frame: &PySchemeFrame) -> PyResult<Bound<'py, PyBytes>> {
+    /// Consumable bytes for `frame`'s submission.
+    fn consume<'py>(&self, py: Python<'py>, frame: &PySchemeFrame) -> PyResult<Bound<'py, PyBytes>> {
         match &self.inner {
             PyReadGrantInner::Buffer(grant) => {
-                let loan = grant.read(&frame.inner).into_py_result()?;
+                let loan = grant.consume(&frame.inner).into_py_result()?;
                 Ok(PyBytes::new(py, &loan))
             }
             PyReadGrantInner::Texture(grant) => {
-                let loan = grant.read(&frame.inner).into_py_result()?;
+                let loan = grant.consume(&frame.inner).into_py_result()?;
                 Ok(PyBytes::new(py, &loan))
             }
         }

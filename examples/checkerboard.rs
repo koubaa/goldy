@@ -7,9 +7,9 @@
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example checkerboard`
 
 use goldy::{
-    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, LayoutCheckable, NodeAccess,
-    Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SwapchainPool, VertexBufferLayout,
+    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, LayoutCheckable,
+    NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -162,7 +162,7 @@ impl App {
 
         let present = self.present.as_ref().unwrap();
         let submission = scheme.submit()?;
-        present.present(&submission)?;
+        present.consume(&submission)?;
         Ok(())
     }
 

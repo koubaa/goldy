@@ -58,7 +58,7 @@ int main() {
         }
         auto grant = scheme.grant_read(buffer);
         auto frame = scheme.submit();
-        const auto bytes = grant.read(frame);
+        const auto bytes = grant.consume(frame);
 
         if (bytes.size() < 64 * sizeof(float)) {
             throw std::runtime_error("readback too small");

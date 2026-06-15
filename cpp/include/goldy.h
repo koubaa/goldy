@@ -501,24 +501,24 @@ uint64_t goldy_parcel_mosaic_view_size(const struct GoldyParcel *parcel, uint32_
 // `grant` must be valid.
 uint64_t goldy_read_grant_byte_size(const struct GoldyReadGrant *grant);
 
+// Consume bytes for the `(grant × submission)` cell into `output`.
+//
+// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
+// Each submission may be consumed at most once per grant. Drop the submission when done if you
+// rely on staging-buffer reuse.
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_read_grant_consume(const struct GoldyReadGrant *grant,
+                                          const struct GoldySchemeFrame *frame,
+                                          uint8_t *output,
+                                          size_t output_size);
+
 // Destroy a read grant from [`goldy_scheme_grant_read`].
 //
 // # Safety
 // `grant` must be valid and not used after this call.
 void goldy_read_grant_destroy(struct GoldyReadGrant *grant);
-
-// Read bytes for the `(grant × frame)` cell into `output`.
-//
-// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
-// Each frame may be read at most once per grant. Drop the frame when done if you
-// rely on staging-buffer reuse.
-//
-// # Safety
-// All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_read_grant_read(const struct GoldyReadGrant *grant,
-                                       const struct GoldySchemeFrame *frame,
-                                       uint8_t *output,
-                                       size_t output_size);
 
 // Create a new render pipeline.
 //
@@ -738,7 +738,7 @@ uint64_t goldy_scheme_frame_timeline_value(const struct GoldySchemeFrame *frame)
 
 // Block until the GPU work for `frame` has completed.
 //
-// Prefer [`goldy_read_grant_read`] when verifying compute output through a grant.
+// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
 //
 // # Safety
 // `ctx` and `frame` must be valid.
@@ -778,7 +778,7 @@ enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
 //
 // Does not block. The caller owns `*out_frame` and must call
 // [`goldy_scheme_frame_destroy`]. To read bytes from a recorded grant, use
-// [`goldy_read_grant_read`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
+// [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
 //
 // # Safety
 // `scheme` and `out_frame` must be valid; `*out_frame` is written on success.

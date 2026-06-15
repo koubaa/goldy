@@ -569,11 +569,11 @@ pub unsafe fn goldy_read_grant_byte_size(grant: *const GoldyReadGrant) -> u64 {
     (lib().goldy_read_grant_byte_size)(grant)
 }
 
-pub unsafe fn goldy_read_grant_read(
+pub unsafe fn goldy_read_grant_consume(
     grant: *const GoldyReadGrant,
     frame: *const GoldySchemeFrame,
     output: *mut u8,
     output_size: usize,
 ) -> GoldyResult {
-    (lib().goldy_read_grant_read)(grant, frame, output, output_size)
+    (lib().goldy_read_grant_consume)(grant, frame, output, output_size)
 }

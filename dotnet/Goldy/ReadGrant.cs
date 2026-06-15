@@ -21,9 +21,9 @@ public sealed class ReadGrant : IDisposable
     }
 
     /// <summary>
-    /// Readable bytes for <paramref name="frame"/>'s submission.
+    /// Consumable bytes for <paramref name="frame"/>'s submission.
     /// </summary>
-    public byte[] Read(SchemeFrame frame)
+    public byte[] Consume(SchemeFrame frame)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(frame);
@@ -33,9 +33,9 @@ public sealed class ReadGrant : IDisposable
         {
             fixed (byte* p = output)
             {
-                var result = Native.NativeMethods.ReadGrantRead(Handle, frame.Handle, (nint)p, (nuint)output.Length);
+                var result = Native.NativeMethods.ReadGrantConsume(Handle, frame.Handle, (nint)p, (nuint)output.Length);
                 if (result != Native.GoldyResult.Ok)
-                    throw GoldyException.FromLastError("ReadGrant read");
+                    throw GoldyException.FromLastError("ReadGrant consume");
             }
         }
         return output;

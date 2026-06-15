@@ -14,7 +14,7 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
+    BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
     RequestAdapterOptions, RetainedPool, Sampler, Scheme, SchemeFrame, ShaderModule, StructuredBufferElement,
 };
 use std::sync::Arc;
@@ -44,7 +44,7 @@ fn make_device() -> Device {
 }
 
 fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
-    let loan = grant.read(frame).expect("grant read");
+    let loan = grant.consume(frame).expect("grant consume");
     assert_eq!(loan.len(), count * 4, "grant readback size");
     bytemuck::cast_slice(&loan).to_vec()
 }
@@ -1515,7 +1515,7 @@ fn scheme_scattered_typed_variable_assignment() {
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    let loan = grant.read(&frame).expect("grant read");
+    let loan = grant.consume(&frame).expect("grant read");
     let result: &[Pair] = bytemuck::cast_slice(&loan);
 
     for i in 0..8u32 {
@@ -1560,7 +1560,7 @@ fn scheme_compute_write_to_texture() {
         .dispatch(wg_x, wg_y, 1);
     let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
     let frame = scheme.submit().expect("submit");
-    let loan = grant.read(&frame).expect("grant read");
+    let loan = grant.consume(&frame).expect("grant read");
 
     let output = &*loan;
     let nonzero = output.iter().filter(|&&b| b != 0).count();
@@ -1718,7 +1718,7 @@ fn scheme_texture_dual_view_round_trip() {
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    let loan = grant.read(&frame).expect("grant read");
+    let loan = grant.consume(&frame).expect("grant read");
     let result: &[u32] = bytemuck::cast_slice(&loan);
 
     for y in 0..H as usize {

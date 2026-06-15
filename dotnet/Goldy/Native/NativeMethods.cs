@@ -305,8 +305,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_read_grant_byte_size")]
     internal static partial ulong ReadGrantByteSize(nint grant);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_read")]
-    internal static partial GoldyResult ReadGrantRead(
+    [LibraryImport(LibName, EntryPoint = "goldy_read_grant_consume")]
+    internal static partial GoldyResult ReadGrantConsume(
         nint grant, nint frame, nint output, nuint outputSize);
 
     // ========================================================================
