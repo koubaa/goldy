@@ -206,10 +206,10 @@ typedef struct GoldySampler GoldySampler;
 // Opaque handle to a retained Goldy scheme.
 typedef struct GoldyScheme GoldyScheme;
 
-// Opaque per-submission frame token returned by [`goldy_scheme_submit`].
+// Opaque per-submission token returned by [`goldy_scheme_submit`].
 //
-// Heap-allocated; destroy with [`goldy_scheme_frame_destroy`].
-typedef struct GoldySchemeFrame GoldySchemeFrame;
+// Heap-allocated; destroy with [`goldy_scheme_submission_destroy`].
+typedef struct GoldySchemeSubmission GoldySchemeSubmission;
 
 // Opaque handle to a Goldy ShaderModule.
 typedef struct GoldyShaderModule GoldyShaderModule;
@@ -510,7 +510,7 @@ uint64_t goldy_read_grant_byte_size(const struct GoldyReadGrant *grant);
 // # Safety
 // All pointers must be valid. `output` must point to at least `output_size` bytes.
 enum GoldyResult goldy_read_grant_consume(const struct GoldyReadGrant *grant,
-                                          const struct GoldySchemeFrame *frame,
+                                          const struct GoldySchemeSubmission *submission,
                                           uint8_t *output,
                                           size_t output_size);
 
@@ -724,27 +724,6 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
 
-// Destroy a frame token from [`goldy_scheme_submit`].
-//
-// # Safety
-// `frame` must be valid and not used after this call.
-void goldy_scheme_frame_destroy(struct GoldySchemeFrame *frame);
-
-// Timeline value for this submission (for debugging only).
-//
-// # Safety
-// `frame` must be valid.
-uint64_t goldy_scheme_frame_timeline_value(const struct GoldySchemeFrame *frame);
-
-// Block until the GPU work for `frame` has completed.
-//
-// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
-//
-// # Safety
-// `ctx` and `frame` must be valid.
-enum GoldyResult goldy_scheme_frame_wait(const struct GoldyContext *ctx,
-                                         const struct GoldySchemeFrame *frame);
-
 // Record a read-easement grant over a buffer parcel (once per scheme).
 //
 // Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
@@ -774,16 +753,37 @@ uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
 enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
                                            struct GoldyReplayStats *out_stats);
 
-// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeFrame`].
+// Destroy a submission token from [`goldy_scheme_submit`].
 //
-// Does not block. The caller owns `*out_frame` and must call
-// [`goldy_scheme_frame_destroy`]. To read bytes from a recorded grant, use
+// # Safety
+// `submission` must be valid and not used after this call.
+void goldy_scheme_submission_destroy(struct GoldySchemeSubmission *submission);
+
+// Timeline value for this submission (for debugging only).
+//
+// # Safety
+// `submission` must be valid.
+uint64_t goldy_scheme_submission_timeline_value(const struct GoldySchemeSubmission *submission);
+
+// Block until the GPU work for `submission` has completed.
+//
+// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
+//
+// # Safety
+// `ctx` and `submission` must be valid.
+enum GoldyResult goldy_scheme_submission_wait(const struct GoldyContext *ctx,
+                                              const struct GoldySchemeSubmission *submission);
+
+// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
+//
+// Does not block. The caller owns `*out_submission` and must call
+// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded grant, use
 // [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
 //
 // # Safety
-// `scheme` and `out_frame` must be valid; `*out_frame` is written on success.
+// `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
 enum GoldyResult goldy_scheme_submit(struct GoldyScheme *scheme,
-                                     struct GoldySchemeFrame **out_frame);
+                                     struct GoldySchemeSubmission **out_submission);
 
 // Get the built-in vertex color 2D shader source.
 //

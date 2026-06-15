@@ -761,15 +761,8 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
             if !backend.retains_present_partitions() {
                 let cache_entry = cache.as_ref().unwrap();
-                let cmds = partition_standalone_commands(
-                    ir,
-                    cache_entry,
-                    waves,
-                    part_idx,
-                    has_render,
-                    true,
-                    Some(&resolver),
-                )?;
+                let cmds =
+                    partition_standalone_commands(ir, cache_entry, waves, part_idx, has_render, true, Some(&resolver))?;
                 let _tz = crate::tracy_zone!("goldy.submit_partition");
                 last_tv = backend.submit_standalone(ctx, &cmds)?;
                 continue;

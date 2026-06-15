@@ -3,12 +3,12 @@ namespace Goldy;
 /// <summary>
 /// Per-submission identity returned by <see cref="Scheme.Submit"/>.
 /// </summary>
-public sealed class SchemeFrame : IDisposable
+public sealed class SchemeSubmission : IDisposable
 {
     internal nint Handle;
     private bool _disposed;
 
-    internal SchemeFrame(nint handle) => Handle = handle;
+    internal SchemeSubmission(nint handle) => Handle = handle;
 
     /// <summary>Timeline value for this submission (debug only).</summary>
     public ulong TimelineValue
@@ -16,7 +16,7 @@ public sealed class SchemeFrame : IDisposable
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return Native.NativeMethods.SchemeFrameTimelineValue(Handle);
+            return Native.NativeMethods.SchemeSubmissionTimelineValue(Handle);
         }
     }
 
@@ -25,16 +25,16 @@ public sealed class SchemeFrame : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ctx.ThrowIfDisposed();
-        var result = Native.NativeMethods.SchemeFrameWait(ctx.Handle, Handle);
+        var result = Native.NativeMethods.SchemeSubmissionWait(ctx.Handle, Handle);
         if (result != Native.GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme frame wait");
+            throw GoldyException.FromLastError("Scheme submission wait");
     }
 
     public void Dispose()
     {
         if (!_disposed)
         {
-            Native.NativeMethods.SchemeFrameDestroy(Handle);
+            Native.NativeMethods.SchemeSubmissionDestroy(Handle);
             Handle = nint.Zero;
             _disposed = true;
         }

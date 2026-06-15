@@ -285,16 +285,16 @@ internal static partial class NativeMethods
         nint scheme, uint workgroupsX, uint workgroupsY, uint workgroupsZ);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_submit")]
-    internal static partial GoldyResult SchemeSubmit(nint scheme, out nint outFrame);
+    internal static partial GoldyResult SchemeSubmit(nint scheme, out nint outSubmission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_destroy")]
-    internal static partial void SchemeFrameDestroy(nint frame);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_destroy")]
+    internal static partial void SchemeSubmissionDestroy(nint submission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_timeline_value")]
-    internal static partial ulong SchemeFrameTimelineValue(nint frame);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_timeline_value")]
+    internal static partial ulong SchemeSubmissionTimelineValue(nint submission);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_frame_wait")]
-    internal static partial GoldyResult SchemeFrameWait(nint ctx, nint frame);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_submission_wait")]
+    internal static partial GoldyResult SchemeSubmissionWait(nint ctx, nint submission);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_grant_read")]
     internal static partial nint SchemeGrantRead(nint scheme, nint parcel);
@@ -307,7 +307,7 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_read_grant_consume")]
     internal static partial GoldyResult ReadGrantConsume(
-        nint grant, nint frame, nint output, nuint outputSize);
+        nint grant, nint submission, nint output, nuint outputSize);
 
     // ========================================================================
     // RetainedPool / Parcel

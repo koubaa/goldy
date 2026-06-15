@@ -256,8 +256,8 @@ struct SchemeDeleter {
     void operator()(GoldyScheme* p) const { if (p) goldy_scheme_destroy(p); }
 };
 
-struct SchemeFrameDeleter {
-    void operator()(GoldySchemeFrame* p) const { if (p) goldy_scheme_frame_destroy(p); }
+struct SchemeSubmissionDeleter {
+    void operator()(GoldySchemeSubmission* p) const { if (p) goldy_scheme_submission_destroy(p); }
 };
 
 struct ReadGrantDeleter {
@@ -1306,29 +1306,29 @@ private:
 /**
  * @brief Per-submission identity returned by Scheme::submit().
  */
-class SchemeFrame {
+class SchemeSubmission {
 public:
-    SchemeFrame() = default;
+    SchemeSubmission() = default;
 
-    explicit SchemeFrame(GoldySchemeFrame* frame) : ptr_(frame) {}
+    explicit SchemeSubmission(GoldySchemeSubmission* submission) : ptr_(submission) {}
 
-    SchemeFrame(const SchemeFrame&) = delete;
-    SchemeFrame& operator=(const SchemeFrame&) = delete;
-    SchemeFrame(SchemeFrame&&) = default;
-    SchemeFrame& operator=(SchemeFrame&&) = default;
+    SchemeSubmission(const SchemeSubmission&) = delete;
+    SchemeSubmission& operator=(const SchemeSubmission&) = delete;
+    SchemeSubmission(SchemeSubmission&&) = default;
+    SchemeSubmission& operator=(SchemeSubmission&&) = default;
 
     [[nodiscard]] uint64_t timeline_value() const {
-        return goldy_scheme_frame_timeline_value(ptr_.get());
+        return goldy_scheme_submission_timeline_value(ptr_.get());
     }
 
     void wait(const Context& ctx) const {
-        detail::throw_on_result(goldy_scheme_frame_wait(ctx.get(), ptr_.get()));
+        detail::throw_on_result(goldy_scheme_submission_wait(ctx.get(), ptr_.get()));
     }
 
-    GoldySchemeFrame* get() const { return ptr_.get(); }
+    GoldySchemeSubmission* get() const { return ptr_.get(); }
 
 private:
-    std::unique_ptr<GoldySchemeFrame, detail::SchemeFrameDeleter> ptr_;
+    std::unique_ptr<GoldySchemeSubmission, detail::SchemeSubmissionDeleter> ptr_;
 };
 
 /**
@@ -1349,10 +1349,10 @@ public:
         return goldy_read_grant_byte_size(ptr_.get());
     }
 
-    [[nodiscard]] std::vector<uint8_t> consume(const SchemeFrame& frame) const {
+    [[nodiscard]] std::vector<uint8_t> consume(const SchemeSubmission& submission) const {
         std::vector<uint8_t> output(byte_size());
         detail::throw_on_result(goldy_read_grant_consume(
-            ptr_.get(), frame.get(), output.data(), output.size()));
+            ptr_.get(), submission.get(), output.data(), output.size()));
         return output;
     }
 
@@ -1394,10 +1394,10 @@ public:
         return ReadGrant{grant};
     }
 
-    [[nodiscard]] SchemeFrame submit() {
-        GoldySchemeFrame* frame = nullptr;
-        detail::throw_on_result(goldy_scheme_submit(ptr_.get(), &frame));
-        return SchemeFrame{frame};
+    [[nodiscard]] SchemeSubmission submit() {
+        GoldySchemeSubmission* submission = nullptr;
+        detail::throw_on_result(goldy_scheme_submit(ptr_.get(), &submission));
+        return SchemeSubmission{submission};
     }
 
     [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);

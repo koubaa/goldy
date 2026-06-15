@@ -24,15 +24,15 @@ mod upload;
 use goldy::{
     types::{BufferFlags, ResourceAccess},
     BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, SchemeFrame, ShaderModule, TextureFlags, TextureFormat,
+    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
     TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
 use upload::write_to_parcel;
 
-fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
-    let loan = grant.consume(frame).expect("grant consume");
+fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
+    let loan = grant.consume(submission).expect("grant consume");
     assert_eq!(loan.len(), count * 4, "grant readback size");
     bytemuck::cast_slice(&loan).to_vec()
 }

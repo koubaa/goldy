@@ -59,15 +59,15 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
-    /// Submit the scheme and return a per-submission frame token.
+    /// Submit the scheme and return a per-submission token.
     /// </summary>
-    public SchemeFrame Submit()
+    public SchemeSubmission Submit()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var result = NativeMethods.SchemeSubmit(Handle, out var frame);
+        var result = NativeMethods.SchemeSubmit(Handle, out var submission);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme submit");
-        return new SchemeFrame(frame);
+        return new SchemeSubmission(submission);
     }
 
     internal void ThrowIfDisposed()

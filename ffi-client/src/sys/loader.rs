@@ -114,9 +114,9 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_compute_node_declare_parcel_view: FnGoldySchemeComputeNodeDeclareParcelView,
     pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
     pub goldy_scheme_submit: FnGoldySchemeSubmit,
-    pub goldy_scheme_frame_destroy: FnGoldySchemeFrameDestroy,
-    pub goldy_scheme_frame_timeline_value: FnGoldySchemeFrameTimelineValue,
-    pub goldy_scheme_frame_wait: FnGoldySchemeFrameWait,
+    pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
+    pub goldy_scheme_submission_timeline_value: FnGoldySchemeSubmissionTimelineValue,
+    pub goldy_scheme_submission_wait: FnGoldySchemeSubmissionWait,
     pub goldy_scheme_grant_read: FnGoldySchemeGrantRead,
     pub goldy_read_grant_destroy: FnGoldyReadGrantDestroy,
     pub goldy_read_grant_byte_size: FnGoldyReadGrantByteSize,
@@ -331,12 +331,12 @@ impl GoldyFfi {
                 FnGoldySchemeComputeNodeDispatch
             ),
             goldy_scheme_submit: sym!("goldy_scheme_submit", FnGoldySchemeSubmit),
-            goldy_scheme_frame_destroy: sym!("goldy_scheme_frame_destroy", FnGoldySchemeFrameDestroy),
-            goldy_scheme_frame_timeline_value: sym!(
-                "goldy_scheme_frame_timeline_value",
-                FnGoldySchemeFrameTimelineValue
+            goldy_scheme_submission_destroy: sym!("goldy_scheme_submission_destroy", FnGoldySchemeSubmissionDestroy),
+            goldy_scheme_submission_timeline_value: sym!(
+                "goldy_scheme_submission_timeline_value",
+                FnGoldySchemeSubmissionTimelineValue
             ),
-            goldy_scheme_frame_wait: sym!("goldy_scheme_frame_wait", FnGoldySchemeFrameWait),
+            goldy_scheme_submission_wait: sym!("goldy_scheme_submission_wait", FnGoldySchemeSubmissionWait),
             goldy_scheme_grant_read: sym!("goldy_scheme_grant_read", FnGoldySchemeGrantRead),
             goldy_read_grant_destroy: sym!("goldy_read_grant_destroy", FnGoldyReadGrantDestroy),
             goldy_read_grant_byte_size: sym!("goldy_read_grant_byte_size", FnGoldyReadGrantByteSize),

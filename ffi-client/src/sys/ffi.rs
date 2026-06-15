@@ -30,15 +30,16 @@ pub type FnGoldySchemeComputeNodeDeclareParcelView = unsafe extern "C" fn(
     GoldyResourceAccess,
 ) -> GoldyResult;
 pub type FnGoldySchemeComputeNodeDispatch = unsafe extern "C" fn(*mut GoldyScheme, u32, u32, u32) -> GoldyResult;
-pub type FnGoldySchemeSubmit = unsafe extern "C" fn(*mut GoldyScheme, *mut *mut GoldySchemeFrame) -> GoldyResult;
-pub type FnGoldySchemeFrameDestroy = unsafe extern "C" fn(*mut GoldySchemeFrame);
-pub type FnGoldySchemeFrameTimelineValue = unsafe extern "C" fn(*const GoldySchemeFrame) -> u64;
-pub type FnGoldySchemeFrameWait = unsafe extern "C" fn(*const GoldyContext, *const GoldySchemeFrame) -> GoldyResult;
+pub type FnGoldySchemeSubmit = unsafe extern "C" fn(*mut GoldyScheme, *mut *mut GoldySchemeSubmission) -> GoldyResult;
+pub type FnGoldySchemeSubmissionDestroy = unsafe extern "C" fn(*mut GoldySchemeSubmission);
+pub type FnGoldySchemeSubmissionTimelineValue = unsafe extern "C" fn(*const GoldySchemeSubmission) -> u64;
+pub type FnGoldySchemeSubmissionWait =
+    unsafe extern "C" fn(*const GoldyContext, *const GoldySchemeSubmission) -> GoldyResult;
 pub type FnGoldySchemeGrantRead = unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel) -> *mut GoldyReadGrant;
 pub type FnGoldyReadGrantDestroy = unsafe extern "C" fn(*mut GoldyReadGrant);
 pub type FnGoldyReadGrantByteSize = unsafe extern "C" fn(*const GoldyReadGrant) -> u64;
 pub type FnGoldyReadGrantConsume =
-    unsafe extern "C" fn(*const GoldyReadGrant, *const GoldySchemeFrame, *mut u8, usize) -> GoldyResult;
+    unsafe extern "C" fn(*const GoldyReadGrant, *const GoldySchemeSubmission, *mut u8, usize) -> GoldyResult;
 
 pub type FnGoldyDeviceAdapterId = unsafe extern "C" fn(*const GoldyDevice) -> u32;
 pub type FnGoldyDeviceDestroy = unsafe extern "C" fn(*mut GoldyDevice);

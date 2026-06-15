@@ -10,9 +10,10 @@ use goldy_ffi::{
     goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy, goldy_read_grant_byte_size,
     goldy_read_grant_consume, goldy_read_grant_destroy, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
     goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_declare_parcel,
-    goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_frame_destroy,
-    goldy_scheme_grant_read, goldy_scheme_len, goldy_scheme_replay_stats, goldy_scheme_submit, goldy_shader_create,
-    goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyReplayStats, GoldyResourceAccess, GoldyResult,
+    goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read,
+    goldy_scheme_len, goldy_scheme_replay_stats, goldy_scheme_submission_destroy, goldy_scheme_submit,
+    goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyReplayStats, GoldyResourceAccess,
+    GoldyResult,
 };
 use std::ffi::CString;
 
@@ -80,18 +81,18 @@ fn scheme_compute_node_fills_buffer_with_42() {
         assert!(!grant.is_null(), "{}", last_ffi_message());
         assert_eq!(goldy_read_grant_byte_size(grant), 64 * 4);
 
-        let mut frame = std::ptr::null_mut();
+        let mut submission = std::ptr::null_mut();
         assert_eq!(
-            goldy_scheme_submit(scheme, &mut frame),
+            goldy_scheme_submit(scheme, &mut submission),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
-        assert!(!frame.is_null());
+        assert!(!submission.is_null());
 
         let mut readback = vec![0u8; goldy_read_grant_byte_size(grant) as usize];
         assert_eq!(
-            goldy_read_grant_consume(grant, frame, readback.as_mut_ptr(), readback.len()),
+            goldy_read_grant_consume(grant, submission, readback.as_mut_ptr(), readback.len()),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -105,15 +106,15 @@ fn scheme_compute_node_fills_buffer_with_42() {
             assert_eq!(v, 42, "index {i}: got {v}");
         }
 
-        goldy_scheme_frame_destroy(frame);
+        goldy_scheme_submission_destroy(submission);
 
         assert_eq!(
-            goldy_scheme_submit(scheme, &mut frame),
+            goldy_scheme_submit(scheme, &mut submission),
             GoldyResult::Ok,
             "second submit: {}",
             last_ffi_message()
         );
-        goldy_scheme_frame_destroy(frame);
+        goldy_scheme_submission_destroy(submission);
 
         let mut stats = GoldyReplayStats::default();
         assert_eq!(

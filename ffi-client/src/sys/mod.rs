@@ -541,20 +541,26 @@ pub unsafe fn goldy_scheme_compute_node_dispatch(
     (lib().goldy_scheme_compute_node_dispatch)(scheme, workgroups_x, workgroups_y, workgroups_z)
 }
 
-pub unsafe fn goldy_scheme_submit(scheme: *mut GoldyScheme, out_frame: *mut *mut GoldySchemeFrame) -> GoldyResult {
-    (lib().goldy_scheme_submit)(scheme, out_frame)
+pub unsafe fn goldy_scheme_submit(
+    scheme: *mut GoldyScheme,
+    out_submission: *mut *mut GoldySchemeSubmission,
+) -> GoldyResult {
+    (lib().goldy_scheme_submit)(scheme, out_submission)
 }
 
-pub unsafe fn goldy_scheme_frame_destroy(frame: *mut GoldySchemeFrame) {
-    (lib().goldy_scheme_frame_destroy)(frame)
+pub unsafe fn goldy_scheme_submission_destroy(submission: *mut GoldySchemeSubmission) {
+    (lib().goldy_scheme_submission_destroy)(submission)
 }
 
-pub unsafe fn goldy_scheme_frame_timeline_value(frame: *const GoldySchemeFrame) -> u64 {
-    (lib().goldy_scheme_frame_timeline_value)(frame)
+pub unsafe fn goldy_scheme_submission_timeline_value(submission: *const GoldySchemeSubmission) -> u64 {
+    (lib().goldy_scheme_submission_timeline_value)(submission)
 }
 
-pub unsafe fn goldy_scheme_frame_wait(ctx: *const GoldyContext, frame: *const GoldySchemeFrame) -> GoldyResult {
-    (lib().goldy_scheme_frame_wait)(ctx, frame)
+pub unsafe fn goldy_scheme_submission_wait(
+    ctx: *const GoldyContext,
+    submission: *const GoldySchemeSubmission,
+) -> GoldyResult {
+    (lib().goldy_scheme_submission_wait)(ctx, submission)
 }
 
 pub unsafe fn goldy_scheme_grant_read(scheme: *mut GoldyScheme, parcel: *const GoldyParcel) -> *mut GoldyReadGrant {
@@ -571,9 +577,9 @@ pub unsafe fn goldy_read_grant_byte_size(grant: *const GoldyReadGrant) -> u64 {
 
 pub unsafe fn goldy_read_grant_consume(
     grant: *const GoldyReadGrant,
-    frame: *const GoldySchemeFrame,
+    submission: *const GoldySchemeSubmission,
     output: *mut u8,
     output_size: usize,
 ) -> GoldyResult {
-    (lib().goldy_read_grant_consume)(grant, frame, output, output_size)
+    (lib().goldy_read_grant_consume)(grant, submission, output, output_size)
 }

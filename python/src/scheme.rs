@@ -5,7 +5,7 @@ use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::types::{PyNodeAccess, PyResourceAccess};
 use goldy::task_graph::ComputeNodeRecord;
-use goldy::{Grant, GrantBuffer, GrantTexture, ReadGrant, Scheme, SchemeFrame};
+use goldy::{Grant, GrantBuffer, GrantTexture, ReadGrant, Scheme, Submission};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::cell::RefCell;
@@ -24,13 +24,13 @@ impl PyContext {
 }
 
 /// Per-submission identity returned by [`PyScheme::submit`].
-#[pyclass(name = "SchemeFrame", module = "goldy", unsendable)]
-pub struct PySchemeFrame {
-    pub(crate) inner: SchemeFrame,
+#[pyclass(name = "SchemeSubmission", module = "goldy", unsendable)]
+pub struct PySchemeSubmission {
+    pub(crate) inner: Submission,
 }
 
 #[pymethods]
-impl PySchemeFrame {
+impl PySchemeSubmission {
     fn timeline_value(&self) -> u64 {
         self.inner.timeline_value()
     }
@@ -40,7 +40,7 @@ impl PySchemeFrame {
     }
 
     fn __repr__(&self) -> String {
-        format!("SchemeFrame(timeline_value={})", self.inner.timeline_value())
+        format!("SchemeSubmission(timeline_value={})", self.inner.timeline_value())
     }
 }
 
@@ -70,15 +70,15 @@ impl PyReadGrant {
         self.inner.byte_size()
     }
 
-    /// Consumable bytes for `frame`'s submission.
-    fn consume<'py>(&self, py: Python<'py>, frame: &PySchemeFrame) -> PyResult<Bound<'py, PyBytes>> {
+    /// Consumable bytes for `submission`'s cell.
+    fn consume<'py>(&self, py: Python<'py>, submission: &PySchemeSubmission) -> PyResult<Bound<'py, PyBytes>> {
         match &self.inner {
             PyReadGrantInner::Buffer(grant) => {
-                let loan = grant.consume(&frame.inner).into_py_result()?;
+                let loan = grant.consume(&submission.inner).into_py_result()?;
                 Ok(PyBytes::new(py, &loan))
             }
             PyReadGrantInner::Texture(grant) => {
-                let loan = grant.consume(&frame.inner).into_py_result()?;
+                let loan = grant.consume(&submission.inner).into_py_result()?;
                 Ok(PyBytes::new(py, &loan))
             }
         }
@@ -159,15 +159,15 @@ impl PyScheme {
         })
     }
 
-    /// Submit the scheme and return a per-submission frame token.
-    fn submit(&self) -> PyResult<PySchemeFrame> {
+    /// Submit the scheme and return a per-submission token.
+    fn submit(&self) -> PyResult<PySchemeSubmission> {
         if self.active_compute.borrow().is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot submit while recording a compute node",
             ));
         }
-        let frame = self.inner.borrow_mut().submit().into_py_result()?;
-        Ok(PySchemeFrame { inner: frame })
+        let submission = self.inner.borrow_mut().submit().into_py_result()?;
+        Ok(PySchemeSubmission { inner: submission })
     }
 
     fn __repr__(&self) -> String {
@@ -254,11 +254,11 @@ impl Drop for PySchemeComputeNode {
 /// Upload CPU bytes into a retained buffer parcel via a property-only dispatch.
 #[pyfunction]
 #[pyo3(signature = (ctx, parcel, data))]
-pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyResult<PySchemeFrame> {
+pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyResult<PySchemeSubmission> {
     let mut upload = Scheme::new(&ctx.inner);
     upload
         .commit_write_parcel(parcel.inner.as_ref(), 0, data.to_vec())
         .into_py_result()?;
-    let frame = upload.submit().into_py_result()?;
-    Ok(PySchemeFrame { inner: frame })
+    let submission = upload.submit().into_py_result()?;
+    Ok(PySchemeSubmission { inner: submission })
 }

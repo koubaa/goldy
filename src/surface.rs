@@ -375,11 +375,8 @@ impl Surface {
                     backend.submit_graph(self.ctx_handle, &early_g)?;
                 }
             } else {
-                let early_cmds = crate::task_graph::analysis::emit_waves_to_commands(
-                    graph.ir(),
-                    early_waves,
-                    Some(&full_resolver),
-                );
+                let early_cmds =
+                    crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, Some(&full_resolver));
                 if !early_cmds.is_empty() {
                     backend.record_gpu_work(&frame.token, &early_cmds)?;
                 }

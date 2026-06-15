@@ -225,7 +225,7 @@ pub struct GoldyTextureFlags {
 }
 
 #[repr(C)]
-pub struct GoldySchemeFrame {
+pub struct GoldySchemeSubmission {
     _private: [u8; 0],
 }
 

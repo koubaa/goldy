@@ -15,7 +15,7 @@ mod upload;
 use goldy::{
     types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
     BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
-    RequestAdapterOptions, RetainedPool, Sampler, Scheme, SchemeFrame, ShaderModule, StructuredBufferElement,
+    RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -43,8 +43,8 @@ fn make_device() -> Device {
         .expect("Failed to create device")
 }
 
-fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, frame: &SchemeFrame, count: usize) -> Vec<u32> {
-    let loan = grant.consume(frame).expect("grant consume");
+fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
+    let loan = grant.consume(submission).expect("grant consume");
     assert_eq!(loan.len(), count * 4, "grant readback size");
     bytemuck::cast_slice(&loan).to_vec()
 }
@@ -977,7 +977,7 @@ fn scheme_write_to_parcel_zeros_between_submissions() {
     }
 }
 
-/// Cross-scheme ordering: an upload micro-scheme may return its [`SchemeFrame`] without
+/// Cross-scheme ordering: an upload micro-scheme may return its [`Submission`] without
 /// waiting; the next worker [`Scheme::submit`] on the same context still sees the upload.
 #[test]
 fn scheme_upload_frame_unwaited_serializes_before_worker_submit() {

@@ -187,8 +187,7 @@ impl fmt::Debug for SubmissionData {
 
 /// Per-submission identity returned by [`Scheme::submit`].
 ///
-/// Not [`crate::surface::Frame`] (the swapchain acquire/present token). Also exported
-/// as [`Frame`] for backward compatibility and at the crate root as [`SchemeFrame`](crate::SchemeFrame).
+/// Not [`crate::surface::Frame`] (the swapchain acquire/present token).
 ///
 /// A lightweight token. The timeline value identifies which submission this represents;
 /// use [`Self::wait`] to block until that submission's GPU work completes (including
@@ -197,9 +196,6 @@ impl fmt::Debug for SubmissionData {
 pub struct Submission {
     data: Arc<SubmissionData>,
 }
-
-/// Backward-compatible alias for [`Submission`].
-pub type Frame = Submission;
 
 impl Submission {
     /// Timeline value for this submission — pass to [`Context::wait_until`](crate::Context::wait_until).
@@ -484,7 +480,7 @@ pub struct Scheme {
     last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
     next_grant_id: u32,
-    /// Process-unique identity for cross-scheme [`Frame`] / [`ReadGrant`] pairing.
+    /// Process-unique identity for cross-scheme [`Submission`] / [`ReadGrant`] pairing.
     scheme_id: u64,
     /// Read-easement grants: N-backed staging per submission.
     grants: Vec<GrantInfo>,
@@ -2524,7 +2520,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(
             mock_present_count(&device),
             before,
-            "dropped Frame must not trigger swapchain present"
+            "dropped Submission must not trigger swapchain present"
         );
     }
 

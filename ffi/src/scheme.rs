@@ -11,11 +11,11 @@ use goldy::types::ResourceAccess;
 use goldy::{Grant, GrantBuffer, GrantTexture, MosaicSlot, ParcelType};
 use std::ffi::CStr;
 
-/// Opaque per-submission frame token returned by [`goldy_scheme_submit`].
+/// Opaque per-submission token returned by [`goldy_scheme_submit`].
 ///
-/// Heap-allocated; destroy with [`goldy_scheme_frame_destroy`].
-pub struct GoldySchemeFrame {
-    pub(crate) inner: goldy::SchemeFrame,
+/// Heap-allocated; destroy with [`goldy_scheme_submission_destroy`].
+pub struct GoldySchemeSubmission {
+    pub(crate) inner: goldy::Submission,
 }
 
 /// Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
@@ -38,14 +38,14 @@ impl ReadGrantInner {
         }
     }
 
-    fn consume_copy(&self, frame: &goldy::SchemeFrame, output: &mut [u8]) -> Result<(), goldy::GoldyError> {
+    fn consume_copy(&self, submission: &goldy::Submission, output: &mut [u8]) -> Result<(), goldy::GoldyError> {
         match self {
             ReadGrantInner::Buffer(g) => {
-                let loan = g.consume(frame)?;
+                let loan = g.consume(submission)?;
                 output.copy_from_slice(&loan);
             }
             ReadGrantInner::Texture(g) => {
-                let loan = g.consume(frame)?;
+                let loan = g.consume(submission)?;
                 output.copy_from_slice(&loan);
             }
         }
@@ -298,20 +298,20 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_dispatch(
     GoldyResult::Ok
 }
 
-/// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeFrame`].
+/// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 ///
-/// Does not block. The caller owns `*out_frame` and must call
-/// [`goldy_scheme_frame_destroy`]. To read bytes from a recorded grant, use
+/// Does not block. The caller owns `*out_submission` and must call
+/// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded grant, use
 /// [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
 ///
 /// # Safety
-/// `scheme` and `out_frame` must be valid; `*out_frame` is written on success.
+/// `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
 #[no_mangle]
 pub unsafe extern "C" fn goldy_scheme_submit(
     scheme: *mut GoldyScheme,
-    out_frame: *mut *mut GoldySchemeFrame,
+    out_submission: *mut *mut GoldySchemeSubmission,
 ) -> GoldyResult {
-    if scheme.is_null() || out_frame.is_null() {
+    if scheme.is_null() || out_submission.is_null() {
         return GoldyResult::NullPointer;
     }
     if (*scheme).has_active_recorder() {
@@ -319,8 +319,8 @@ pub unsafe extern "C" fn goldy_scheme_submit(
         return GoldyResult::InvalidArgument;
     }
     match (*scheme).inner.submit() {
-        Ok(frame) => {
-            *out_frame = Box::into_raw(Box::new(GoldySchemeFrame { inner: frame }));
+        Ok(submission) => {
+            *out_submission = Box::into_raw(Box::new(GoldySchemeSubmission { inner: submission }));
             GoldyResult::Ok
         }
         Err(e) => {
@@ -330,44 +330,44 @@ pub unsafe extern "C" fn goldy_scheme_submit(
     }
 }
 
-/// Destroy a frame token from [`goldy_scheme_submit`].
+/// Destroy a submission token from [`goldy_scheme_submit`].
 ///
 /// # Safety
-/// `frame` must be valid and not used after this call.
+/// `submission` must be valid and not used after this call.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_frame_destroy(frame: *mut GoldySchemeFrame) {
-    if !frame.is_null() {
-        drop(Box::from_raw(frame));
+pub unsafe extern "C" fn goldy_scheme_submission_destroy(submission: *mut GoldySchemeSubmission) {
+    if !submission.is_null() {
+        drop(Box::from_raw(submission));
     }
 }
 
 /// Timeline value for this submission (for debugging only).
 ///
 /// # Safety
-/// `frame` must be valid.
+/// `submission` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_frame_timeline_value(frame: *const GoldySchemeFrame) -> u64 {
-    if frame.is_null() {
+pub unsafe extern "C" fn goldy_scheme_submission_timeline_value(submission: *const GoldySchemeSubmission) -> u64 {
+    if submission.is_null() {
         return 0;
     }
-    (*frame).inner.timeline_value()
+    (*submission).inner.timeline_value()
 }
 
-/// Block until the GPU work for `frame` has completed.
+/// Block until the GPU work for `submission` has completed.
 ///
 /// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
 ///
 /// # Safety
-/// `ctx` and `frame` must be valid.
+/// `ctx` and `submission` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_frame_wait(
+pub unsafe extern "C" fn goldy_scheme_submission_wait(
     ctx: *const GoldyContext,
-    frame: *const GoldySchemeFrame,
+    submission: *const GoldySchemeSubmission,
 ) -> GoldyResult {
-    if ctx.is_null() || frame.is_null() {
+    if ctx.is_null() || submission.is_null() {
         return GoldyResult::NullPointer;
     }
-    match (*frame).inner.wait(&(*ctx).inner) {
+    match (*submission).inner.wait(&(*ctx).inner) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));
@@ -452,11 +452,11 @@ pub unsafe extern "C" fn goldy_read_grant_byte_size(grant: *const GoldyReadGrant
 #[no_mangle]
 pub unsafe extern "C" fn goldy_read_grant_consume(
     grant: *const GoldyReadGrant,
-    frame: *const GoldySchemeFrame,
+    submission: *const GoldySchemeSubmission,
     output: *mut u8,
     output_size: usize,
 ) -> GoldyResult {
-    if grant.is_null() || frame.is_null() || output.is_null() {
+    if grant.is_null() || submission.is_null() || output.is_null() {
         return GoldyResult::NullPointer;
     }
     let out = std::slice::from_raw_parts_mut(output, output_size);
@@ -467,7 +467,7 @@ pub unsafe extern "C" fn goldy_read_grant_consume(
         ));
         return GoldyResult::InvalidArgument;
     }
-    match (*grant).inner.consume_copy(&(*frame).inner, out) {
+    match (*grant).inner.consume_copy(&(*submission).inner, out) {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
             set_last_error(format!("{e}"));

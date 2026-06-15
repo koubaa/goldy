@@ -3,29 +3,29 @@ use crate::context::Context;
 use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::retained_pool::MosaicSlot;
-use crate::sys::{self, GoldyReadGrant, GoldyReplayStats, GoldyScheme, GoldySchemeFrame};
+use crate::sys::{self, GoldyReadGrant, GoldyReplayStats, GoldyScheme, GoldySchemeSubmission};
 use crate::types::{NodeAccess, ResourceAccess};
 use std::ffi::CString;
 
 /// Per-submission identity returned by [`Scheme::submit`].
-pub struct SchemeFrame {
-    ptr: *mut GoldySchemeFrame,
+pub struct SchemeSubmission {
+    ptr: *mut GoldySchemeSubmission,
 }
 
-impl SchemeFrame {
+impl SchemeSubmission {
     pub fn timeline_value(&self) -> u64 {
-        unsafe { sys::goldy_scheme_frame_timeline_value(self.ptr) }
+        unsafe { sys::goldy_scheme_submission_timeline_value(self.ptr) }
     }
 
     pub fn wait(&self, ctx: &Context) -> Result<()> {
-        check(unsafe { sys::goldy_scheme_frame_wait(ctx.as_ptr(), self.ptr) })
+        check(unsafe { sys::goldy_scheme_submission_wait(ctx.as_ptr(), self.ptr) })
     }
 }
 
-impl Drop for SchemeFrame {
+impl Drop for SchemeSubmission {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { sys::goldy_scheme_frame_destroy(self.ptr) };
+            unsafe { sys::goldy_scheme_submission_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }
@@ -41,10 +41,10 @@ impl ReadGrant {
         unsafe { sys::goldy_read_grant_byte_size(self.ptr) }
     }
 
-    /// Consumable bytes for `frame`'s submission (full logical buffer size).
-    pub fn consume(&self, frame: &SchemeFrame) -> Result<Vec<u8>> {
+    /// Consumable bytes for `submission`'s cell (full logical buffer size).
+    pub fn consume(&self, submission: &SchemeSubmission) -> Result<Vec<u8>> {
         let mut output = vec![0u8; self.byte_size() as usize];
-        check(unsafe { sys::goldy_read_grant_consume(self.ptr, frame.ptr, output.as_mut_ptr(), output.len()) })?;
+        check(unsafe { sys::goldy_read_grant_consume(self.ptr, submission.ptr, output.as_mut_ptr(), output.len()) })?;
         Ok(output)
     }
 }
@@ -92,10 +92,10 @@ impl Scheme {
         Ok(ReadGrant { ptr })
     }
 
-    pub fn submit(&mut self) -> Result<SchemeFrame> {
-        let mut frame = std::ptr::null_mut();
-        check(unsafe { sys::goldy_scheme_submit(self.ptr, &mut frame) })?;
-        Ok(SchemeFrame { ptr: frame })
+    pub fn submit(&mut self) -> Result<SchemeSubmission> {
+        let mut submission = std::ptr::null_mut();
+        check(unsafe { sys::goldy_scheme_submit(self.ptr, &mut submission) })?;
+        Ok(SchemeSubmission { ptr: submission })
     }
 
     pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
