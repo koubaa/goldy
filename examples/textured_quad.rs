@@ -1,16 +1,17 @@
 //! Textured quad example - demonstrates texture sampling.
 //!
-//! Creates a procedural checkerboard texture and displays it on a quad.
+//! Demonstrates retained scheme with offscreen render pass → copy-to-present.
 //!
 //! Run with: cargo run --example textured_quad
 
 use goldy::{
-    types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Sampler, ShaderModule, Surface, TaskGraph,
-    Vertex2DUv,
+    types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
+    BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, PresentGrant, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
+    ShaderResourceSlot, SwapchainPool, Vertex2DUv,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -18,57 +19,19 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
+mod common;
 
-// Simple shader that samples a texture
 const TEXTURED_SHADER: &str = r#"
 import goldy_exp;
 
-struct VertexInput {
-    float2 position : POSITION;
-    float2 uv : TEXCOORD0;
-};
-
-struct VertexOutput {
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-};
-
-// Cross-platform resource access via push constants
-#if defined(__METAL__)
-// Metal: bindless via goldy_exp (static slots 0)
-#define GET_TEXTURE() goldy_interpolated<float4>(0)
-#define GET_SAMPLER() goldy_filter(0)
-
-#elif defined(__SPIRV__)
-// Vulkan: Push constants for indices + global descriptor arrays
-struct BufferIndices { uint indices[2]; };
-[[vk::push_constant]] ConstantBuffer<BufferIndices> g_Indices;
-[[vk::binding(2, 0)]] Texture2D<float4> g_Textures[];
-[[vk::binding(4, 0)]] SamplerState g_Samplers[];
-#define GET_TEXTURE() g_Textures[g_Indices.indices[0]]
-#define GET_SAMPLER() g_Samplers[g_Indices.indices[1]]
-
-#else
-// DX12: Root constants + DescriptorHandle
-cbuffer BufferIndices : register(b0, space0) {
-    uint textureIndex;
-    uint samplerIndex;
-};
-#define GET_TEXTURE() (*DescriptorHandle<Texture2D<float4>>(uint2(textureIndex, 0)))
-#define GET_SAMPLER() (*DescriptorHandle<SamplerState>(uint2(samplerIndex, 0)))
-#endif
-
-[shader("vertex")]
-VertexOutput vs_main(VertexInput input) {
-    VertexOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.uv;
-    return output;
+[goldy_vertex]
+FullscreenVarying vs_main(FullscreenVertex input) {
+    return vs_fullscreen(input);
 }
 
-[shader("fragment")]
-float4 fs_main(VertexOutput input) : SV_Target {
-    return GET_TEXTURE().Sample(GET_SAMPLER(), input.uv);
+[goldy_fragment]
+float4 fs_main(Interpolated<float4> tex, Filter smp, FullscreenVarying input) : SV_Target {
+    return tex.Sample(smp, input.uv);
 }
 "#;
 
@@ -83,9 +46,9 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
             let is_white = (checker_x + checker_y).is_multiple_of(2);
 
             if is_white {
-                data.extend_from_slice(&[255, 255, 255, 255]); // White
+                data.extend_from_slice(&[255, 255, 255, 255]);
             } else {
-                data.extend_from_slice(&[50, 100, 200, 255]); // Blue
+                data.extend_from_slice(&[50, 100, 200, 255]);
             }
         }
     }
@@ -93,7 +56,6 @@ fn generate_checkerboard(width: u32, height: u32, checker_size: u32) -> Vec<u8> 
     data
 }
 
-// Fullscreen quad vertices
 const QUAD_VERTICES: [Vertex2DUv; 6] = [
     Vertex2DUv {
         position: [-1.0, -1.0],
@@ -123,51 +85,98 @@ const QUAD_VERTICES: [Vertex2DUv; 6] = [
 
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
     scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    scheme: Option<Scheme>,
     _retained_pool: Option<RetainedPool>,
     vertex_buffer: Option<Parcel>,
     texture: Option<Parcel>,
     sampler: Option<Sampler>,
+    start_time: Instant,
+    frame_count: u64,
 }
 
 impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
+            ctx: None,
             device: None,
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             _retained_pool: None,
             vertex_buffer: None,
             texture: None,
             sampler: None,
+            start_time: Instant::now(),
+            frame_count: 0,
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
+    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
+        let (width, height) = swapchain.size();
+        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        vertex_buffer: &Parcel,
+        texture: &Parcel,
+        sampler: &Sampler,
+        scene_rt: &RenderTarget,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        let shader_resources = [
+            ShaderResourceSlot::Parcel {
+                parcel: texture,
+                access: NodeAccess::Read,
+            },
+            ShaderResourceSlot::Sampler(sampler),
+        ];
+
+        let mut pass = scheme.render_pass("textured_quad", scene_rt);
+        pass.bind_shader_resources(&shader_resources);
+        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
+        pass.clear(Color {
+            r: 0.1,
+            g: 0.1,
+            b: 0.15,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer);
+        pass.draw(0..6, 0..1);
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = Arc::new(self.instance.request_adapter(&RequestAdapterOptions::default())?.request_device(&DeviceDescriptor::default())?);
+        let device = Arc::new(
+            self.instance
+                .request_adapter(&RequestAdapterOptions::default())?
+                .request_device(&DeviceDescriptor::default())?,
+        );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
-        // Create shader
         let shader = ShaderModule::from_slang(&device, TEXTURED_SHADER)?;
 
-        // Create texture
         let tex_width = 256u32;
         let tex_height = 256u32;
         let checker_data = generate_checkerboard(tex_width, tex_height, 32);
@@ -182,7 +191,6 @@ impl App {
             Some(&checker_data),
         )?;
 
-        // Create sampler with linear filtering and repeat addressing
         let sampler = Sampler::new(
             &device,
             &SamplerDesc {
@@ -199,32 +207,44 @@ impl App {
             },
         )?;
 
-        // Create pipeline
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
             &shader,
             &RenderPipelineDesc {
                 vertex_layout: Vertex2DUv::layout(),
-                target_format: surface.format(),
+                target_format: swapchain.format(),
                 ..Default::default()
             },
         )?;
 
         let vertex_buffer = retained_pool.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
+        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
 
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let mut scheme = Scheme::new(&ctx);
+        let present = Self::record_scheme(
+            &mut scheme,
+            &pipeline,
+            &vertex_buffer,
+            &texture,
+            &sampler,
+            &scene_rt,
+            &screen,
+        );
 
+        self.ctx = Some(ctx);
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
+        self.scheme = Some(scheme);
         self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.texture = Some(texture);
         self.sampler = Some(sampler);
-
         Ok(())
     }
 
@@ -235,54 +255,59 @@ impl App {
             return Ok(());
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
-        let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
-        let texture = self.texture.as_ref().unwrap();
-        let sampler = self.sampler.as_ref().unwrap();
-
-        let tex_handle = texture.handle(ResourceAccess::Read).unwrap();
-        let samp_handle = sampler.handle(ResourceAccess::Read).unwrap();
-
-        self.frame_graph.clear();
-
-        let mut pass = self.frame_graph.render_pass("textured_quad", scene_rt);
-        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
-        pass.bind_parcel_mut(texture, NodeAccess::Read);
-        pass.clear(Color {
-            r: 0.1,
-            g: 0.1,
-            b: 0.15,
-            a: 1.0,
-        });
-        pass.set_pipeline(pipeline);
-        pass.bind_resources_typed(&[tex_handle, samp_handle]);
-        pass.set_vertex_buffer(0, vertex_buffer);
-        pass.draw(0..6, 0..1);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let scheme = self.scheme.as_mut().unwrap();
+        let submission = scheme.submit()?;
+        self.present.as_ref().unwrap().consume(&submission)?;
+        self.frame_count += 1;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(swapchain) = &self.swapchain {
+                let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+            if let (Some(device), Some(swapchain)) = (&self.device, &self.swapchain) {
+                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
+                    if let (
+                        Some(scheme),
+                        Some(pipeline),
+                        Some(vertex_buffer),
+                        Some(texture),
+                        Some(sampler),
+                        Some(screen),
+                    ) = (
+                        self.scheme.as_mut(),
+                        self.pipeline.as_ref(),
+                        self.vertex_buffer.as_ref(),
+                        self.texture.as_ref(),
+                        self.sampler.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        scheme.begin_rerecord();
+                        let present =
+                            Self::record_scheme(scheme, pipeline, vertex_buffer, texture, sampler, &rt, screen);
+                        self.present = Some(present);
+                    }
                     self.scene_rt = Some(rt);
                 }
             }
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let fps = if elapsed > 0.0 {
+            self.frame_count as f64 / elapsed
+        } else {
+            0.0
+        };
+        println!(
+            "GOLDY_PERF: frames={} elapsed={elapsed:.2}s avg_fps={fps:.1}",
+            self.frame_count
+        );
     }
 }
 
@@ -293,7 +318,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Textured Quad")
+                            .with_title("Goldy - Textured Quad (Scheme + Present)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -302,6 +327,10 @@ impl ApplicationHandler for App {
             self.init_gpu(&window).unwrap();
             window.request_redraw();
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        common::exit_if_timed_out(event_loop, self.start_time);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -336,8 +365,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-    println!("Goldy Textured Quad Example");
-    println!("Demonstrates texture sampling with a checkerboard pattern");
+    println!("Goldy Textured Quad Example (Scheme + Present)");
     println!("Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);

@@ -2,14 +2,15 @@
 //!
 //! This example uses shared rendering code from `goldy::examples::digital_clock`,
 //! demonstrating that the same logic can be used on both native and web platforms.
-//! Now uses the Surface API for zero-copy presentation.
+//! Uses retained scheme with offscreen render pass → copy-to-present.
 //!
-//! Run with: cargo run --example digital_clock
+//! Run with: `cargo run --example digital_clock`
 
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    BufferFlags, BufferKind, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph,
+    write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
+    PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,6 +28,7 @@ const MAX_CLOCK_VERTICES: usize = 384;
 
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
@@ -34,14 +36,18 @@ struct App {
     vertex_parcel: Option<Parcel>,
 
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
     scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    scheme: Option<Scheme>,
 
     start_time: Instant,
     perf_start: Instant,
     frame_count: u32,
     clock_state: ClockState,
+    recorded_vertex_count: u32,
+    recorded_bg_color: Color,
 }
 
 impl App {
@@ -49,25 +55,77 @@ impl App {
         let instance = Instance::new()?;
         Ok(Self {
             instance,
+            ctx: None,
             device: None,
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             start_time: Instant::now(),
             perf_start: Instant::now(),
             frame_count: 0,
             clock_state: ClockState::default(),
             _retained_pool: None,
             vertex_parcel: None,
+            recorded_vertex_count: 0,
+            recorded_bg_color: Color::BLACK,
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
+        let (width, height) = swapchain.size();
+        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        vertex_parcel: &Parcel,
+        vertex_count: u32,
+        bg_color: Color,
+        scene_rt: &RenderTarget,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        let mut pass = scheme.render_pass("digital_clock", scene_rt);
+        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, vertex_parcel);
+        pass.draw(0..vertex_count, 0..1);
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
+    }
+
+    fn rerecord_scheme_if_needed(&mut self, vertex_count: u32, bg_color: Color) {
+        if vertex_count == self.recorded_vertex_count && bg_color == self.recorded_bg_color {
+            return;
+        }
+        if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(scene_rt), Some(screen)) = (
+            self.scheme.as_mut(),
+            self.pipeline.as_ref(),
+            self.vertex_parcel.as_ref(),
+            self.scene_rt.as_ref(),
+            self.screen.as_ref(),
+        ) {
+            scheme.begin_rerecord();
+            let present = Self::record_scheme(
+                scheme,
+                pipeline,
+                vertex_parcel,
+                vertex_count,
+                bg_color,
+                scene_rt,
+                screen,
+            );
+            self.present = Some(present);
+            self.recorded_vertex_count = vertex_count;
+            self.recorded_bg_color = bg_color;
+        }
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -77,20 +135,16 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
-        // Create surface first to get the correct format
-        let surface = Surface::new(&ctx, window.as_ref())?;
-
-        // Use the SHARED shader source from the examples module
         let shader = ShaderModule::from_slang(&device, SHADER_SOURCE)?;
         let pipeline_desc = RenderPipelineDesc {
-            vertex_layout: ClockVertex::layout(), // Use shared vertex type
-            target_format: surface.format(),
+            vertex_layout: ClockVertex::layout(),
+            target_format: swapchain.format(),
             ..Default::default()
         };
         let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
-
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let vertex_parcel = retained_pool.acquire_buffer_sized::<ClockVertex>(
@@ -99,14 +153,24 @@ impl App {
             BufferFlags::empty(),
         )?;
 
+        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
+        let bg_color = self.clock_state.background_color();
+        let mut scheme = Scheme::new(&ctx);
+        let present = Self::record_scheme(&mut scheme, &pipeline, &vertex_parcel, 1, bg_color, &scene_rt, &screen);
+
+        self.ctx = Some(ctx);
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
-
+        self.scheme = Some(scheme);
+        self.recorded_vertex_count = 1;
+        self.recorded_bg_color = bg_color;
         Ok(())
     }
 
@@ -121,7 +185,6 @@ impl App {
     fn toggle_pause(&mut self) {
         let current = self.elapsed_secs();
         if self.clock_state.paused {
-            // Resuming - reset start time
             self.start_time = Instant::now();
         }
         self.clock_state.toggle_pause(current);
@@ -139,48 +202,35 @@ impl App {
             return Ok(());
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
-        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
-
         let elapsed = self.elapsed_secs();
         let time = TimeData::from_elapsed_secs(elapsed);
         let color = self.clock_state.color();
         let bg_color = self.clock_state.background_color();
-
         let vertices = generate_clock_vertices(time, color, width, height);
+        let vertex_count = vertices.len() as u32;
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
+        self.rerecord_scheme_if_needed(vertex_count, bg_color);
 
-        let mut pass = self.frame_graph.render_pass("digital_clock", scene_rt);
-        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
-        pass.clear(bg_color);
-        pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, vertex_parcel);
-        pass.draw(0..vertices.len() as u32, 0..1);
-        pass.finish_recorded();
+        let ctx = self.ctx.as_ref().unwrap();
+        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
+        write_to_parcel(ctx, vertex_parcel, 0, bytemuck::cast_slice(&vertices))?;
 
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
-
+        let scheme = self.scheme.as_mut().unwrap();
+        let present = self.present.as_ref().unwrap();
+        let submission = scheme.submit()?;
+        present.consume(&submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(swapchain) = &self.swapchain {
+                let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+            if let (Some(device), Some(swapchain)) = (&self.device, &self.swapchain) {
+                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
                     self.scene_rt = Some(rt);
+                    self.recorded_vertex_count = 0;
                 }
             }
         }
@@ -206,7 +256,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let attrs = Window::default_attributes()
-                .with_title("Goldy - Clock (Surface API, Space: pause, Click: color)")
+                .with_title("Goldy - Clock (Scheme + Present, Space: pause, Click: color)")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
@@ -264,8 +314,8 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Clock Example (using shared rendering code, Surface API)");
-    println!("=============================================================");
+    println!("Goldy Clock Example (using shared rendering code, retained scheme)");
+    println!("==================================================================");
     println!("Controls:");
     println!("  Space - Toggle pause");
     println!("  Click - Change color");

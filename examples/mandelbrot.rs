@@ -1,11 +1,13 @@
 //! Mandelbrot example - interactive fractal explorer.
 //!
-//! Run with: cargo run --example mandelbrot
+//! Demonstrates retained scheme with offscreen render pass → copy-to-present.
+//!
+//! Run with: `cargo run --example mandelbrot`
 
 use goldy::{
-    shaders, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface,
-    TaskGraph,
+    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
+    PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool,
 };
 use std::sync::Arc;
 use winit::{
@@ -29,15 +31,18 @@ impl goldy::StructuredBufferElement for Uniforms {}
 
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
     uniform: Option<Parcel>,
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
     scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    scheme: Option<Scheme>,
     center: [f32; 2],
     zoom: f32,
     start_time: std::time::Instant,
@@ -48,15 +53,18 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
+            ctx: None,
             device: None,
             pipeline: None,
             shader: None,
             _retained_pool: None,
             uniform: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             center: [-0.5, 0.0],
             zoom: 1.0,
             start_time: std::time::Instant::now(),
@@ -64,9 +72,26 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
+        let (width, height) = swapchain.size();
+        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        uniform: &Parcel,
+        scene_rt: &RenderTarget,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        let mut pass = scheme.render_pass("mandelbrot", scene_rt);
+        pass.bind_parcel_mut(uniform, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(pipeline);
+        pass.draw_fullscreen();
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -76,21 +101,18 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
-        // Create surface first to get the correct format
-        let surface = Surface::new(&ctx, window.as_ref())?;
-
-        // Create shader
         let shader = ShaderModule::from_slang(&device, shaders::MANDELBROT)?;
 
-        // Create pipeline - no vertex buffer needed, shader uses SV_VertexID
         let pipeline = RenderPipeline::new(
             &device,
             &shader,
             &shader,
             &RenderPipelineDesc {
                 vertex_layout: goldy::VertexBufferLayout::empty(),
-                target_format: surface.format(),
+                target_format: swapchain.format(),
                 ..Default::default()
             },
         )?;
@@ -98,16 +120,21 @@ impl App {
         let mut retained_pool = RetainedPool::new(device.clone());
         let uniform = retained_pool.acquire_buffer_sized::<Uniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
+        let mut scheme = Scheme::new(&ctx);
+        let present = Self::record_scheme(&mut scheme, &pipeline, &uniform, &scene_rt, &screen);
 
+        self.ctx = Some(ctx);
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.uniform = Some(uniform);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
-
+        self.scheme = Some(scheme);
         Ok(())
     }
 
@@ -120,50 +147,40 @@ impl App {
             return Ok(());
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
+        let ctx = self.ctx.as_ref().unwrap();
         let uniform = self.uniform.as_ref().unwrap();
+        let scheme = self.scheme.as_mut().unwrap();
 
         let uniforms = Uniforms {
             center: self.center,
             zoom: self.zoom,
             _padding: 0.0,
         };
+        write_to_parcel(ctx, uniform, 0, bytemuck::bytes_of(&uniforms))?;
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(uniform, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
-
-        let uniform_handle = uniform
-            .handle(ResourceAccess::Read)
-            .expect("uniform parcel missing read handle");
-
-        let mut pass = self.frame_graph.render_pass("mandelbrot", scene_rt);
-        pass.bind_parcel_mut(uniform, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(pipeline);
-        pass.bind_resources_typed(&[uniform_handle]);
-        pass.draw_fullscreen();
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
-
+        let present = self.present.as_ref().unwrap();
+        let submission = scheme.submit()?;
+        present.consume(&submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(swapchain) = &self.swapchain {
+                let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+            if let (Some(device), Some(swapchain)) = (&self.device, &self.swapchain) {
+                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
+                    if let (Some(scheme), Some(pipeline), Some(uniform), Some(screen)) = (
+                        self.scheme.as_mut(),
+                        self.pipeline.as_ref(),
+                        self.uniform.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        scheme.begin_rerecord();
+                        let present = Self::record_scheme(scheme, pipeline, uniform, &rt, screen);
+                        self.present = Some(present);
+                    }
                     self.scene_rt = Some(rt);
                 }
             }
@@ -193,7 +210,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Mandelbrot (Arrows=pan, +/-=zoom, R=reset)")
+                            .with_title("Goldy - Mandelbrot (Scheme + Present, Arrows=pan, +/-=zoom, R=reset)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),

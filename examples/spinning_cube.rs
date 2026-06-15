@@ -1,12 +1,13 @@
 //! Spinning cube example - 3D wireframe cube.
 //!
-//! Demonstrates 3D projection and rotation matrices using Surface API.
+//! Demonstrates 3D projection via retained scheme with copy-to-present.
 //!
 //! Run with: cargo run --example spinning_cube
 
 use goldy::{
-    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
+    write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
+    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,32 +20,30 @@ use winit::{
 };
 mod common;
 
-// Cube vertices in 3D
 const CUBE_VERTICES: [[f32; 3]; 8] = [
-    [-1.0, -1.0, -1.0], // 0
-    [1.0, -1.0, -1.0],  // 1
-    [1.0, 1.0, -1.0],   // 2
-    [-1.0, 1.0, -1.0],  // 3
-    [-1.0, -1.0, 1.0],  // 4
-    [1.0, -1.0, 1.0],   // 5
-    [1.0, 1.0, 1.0],    // 6
-    [-1.0, 1.0, 1.0],   // 7
+    [-1.0, -1.0, -1.0],
+    [1.0, -1.0, -1.0],
+    [1.0, 1.0, -1.0],
+    [-1.0, 1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+    [1.0, -1.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [-1.0, 1.0, 1.0],
 ];
 
-// Edges of the cube (pairs of vertex indices)
 const CUBE_EDGES: [[usize; 2]; 12] = [
     [0, 1],
     [1, 2],
     [2, 3],
-    [3, 0], // Front face
+    [3, 0],
     [4, 5],
     [5, 6],
     [6, 7],
-    [7, 4], // Back face
+    [7, 4],
     [0, 4],
     [1, 5],
     [2, 6],
-    [3, 7], // Connecting edges
+    [3, 7],
 ];
 
 fn rotate_y(p: [f32; 3], angle: f32) -> [f32; 3] {
@@ -58,7 +57,7 @@ fn rotate_x(p: [f32; 3], angle: f32) -> [f32; 3] {
 }
 
 fn project(p: [f32; 3], fov: f32) -> [f32; 2] {
-    let z = p[2] + 4.0; // Push back from camera
+    let z = p[2] + 4.0;
     let scale = fov / z;
     [p[0] * scale, p[1] * scale]
 }
@@ -67,15 +66,18 @@ const MAX_LINE_VERTICES: usize = CUBE_EDGES.len() * 2;
 
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
     vertex_parcel: Option<Parcel>,
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
     scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    scheme: Option<Scheme>,
     start_time: Instant,
     frame_count: u32,
 }
@@ -84,13 +86,16 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
+            ctx: None,
             device: None,
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             start_time: Instant::now(),
             _retained_pool: None,
             vertex_parcel: None,
@@ -98,9 +103,32 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
+        let (width, height) = swapchain.size();
+        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        vertex_parcel: &Parcel,
+        scene_rt: &RenderTarget,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        let mut pass = scheme.render_pass("spinning_cube", scene_rt);
+        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
+        pass.clear(Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.05,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, vertex_parcel);
+        pass.draw(0..MAX_LINE_VERTICES as u32, 0..1);
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -110,7 +138,9 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
+
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
         let pipeline = RenderPipeline::new(
             &device,
@@ -118,12 +148,12 @@ impl App {
             &shader,
             &RenderPipelineDesc {
                 vertex_layout: Vertex2D::layout(),
-                target_format: surface.format(),
+                target_format: swapchain.format(),
                 topology: PrimitiveTopology::LineList,
                 ..Default::default()
             },
         )?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let vertex_parcel = retained_pool.acquire_buffer_sized::<Vertex2D>(
@@ -132,13 +162,20 @@ impl App {
             BufferFlags::empty(),
         )?;
 
+        let mut scheme = Scheme::new(&ctx);
+        let present = Self::record_scheme(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, &screen);
+
+        self.ctx = Some(ctx);
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.vertex_parcel = Some(vertex_parcel);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
+        self.scheme = Some(scheme);
         Ok(())
     }
 
@@ -152,24 +189,20 @@ impl App {
         }
 
         let time = self.start_time.elapsed().as_secs_f32();
-
-        // Transform cube vertices
         let transformed: Vec<[f32; 3]> = CUBE_VERTICES
             .iter()
             .map(|&v| rotate_x(rotate_y(v, time), time * 0.7))
             .collect();
 
-        // Project and create line vertices
         let mut vertices: Vec<Vertex2D> = Vec::new();
         for edge in &CUBE_EDGES {
             let p1 = project(transformed[edge[0]], 2.0);
             let p2 = project(transformed[edge[1]], 2.0);
 
-            // Color based on depth (average Z of the two points)
             let z1 = transformed[edge[0]][2];
             let z2 = transformed[edge[1]][2];
             let avg_z = (z1 + z2) / 2.0;
-            let brightness = (avg_z + 1.5) / 3.0; // Normalize to 0-1
+            let brightness = (avg_z + 1.5) / 3.0;
             let color = Color {
                 r: 0.2 + brightness * 0.8,
                 g: 0.5 + brightness * 0.5,
@@ -181,44 +214,37 @@ impl App {
             vertices.push(Vertex2D::new(p2[0], p2[1], color));
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
-        let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
+        let ctx = self.ctx.as_ref().unwrap();
+        write_to_parcel(
+            ctx,
+            self.vertex_parcel.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&vertices),
+        )?;
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
-
-        let mut pass = self.frame_graph.render_pass("spinning_cube", scene_rt);
-        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
-        pass.clear(Color {
-            r: 0.02,
-            g: 0.02,
-            b: 0.05,
-            a: 1.0,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, vertex_parcel);
-        pass.draw(0..vertices.len() as u32, 0..1);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let scheme = self.scheme.as_mut().unwrap();
+        let submission = scheme.submit()?;
+        self.present.as_ref().unwrap().consume(&submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(swapchain) = &self.swapchain {
+                let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                if let Ok(rt) = Self::create_scene_rt(device, surface) {
+            if let (Some(device), Some(swapchain)) = (&self.device, &self.swapchain) {
+                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
+                    if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(screen)) = (
+                        self.scheme.as_mut(),
+                        self.pipeline.as_ref(),
+                        self.vertex_parcel.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        scheme.begin_rerecord();
+                        let present = Self::record_scheme(scheme, pipeline, vertex_parcel, &rt, screen);
+                        self.present = Some(present);
+                    }
                     self.scene_rt = Some(rt);
                 }
             }
@@ -248,7 +274,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Spinning Cube (Surface API)")
+                            .with_title("Goldy - Spinning Cube (Scheme + Present)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .unwrap(),
@@ -295,7 +321,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-    println!("Goldy Spinning Cube Example - Press Escape to exit");
+    println!("Goldy Spinning Cube Example (Scheme + Present) - Press Escape to exit");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;

@@ -111,7 +111,7 @@ pub struct TransientTextureId(pub u32);
 pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 
 /// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
-/// of a [`ResourceId::PresentLease`] binding. Replaced by the real UAV bindless
+/// of a `ResourceId::PresentLease` binding. Replaced by the real UAV bindless
 /// index when the swapchain pool resolves backing at submit time.
 pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
 

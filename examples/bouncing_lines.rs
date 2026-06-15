@@ -1,15 +1,14 @@
 //! Bouncing lines example - animated lines bouncing off walls.
 //!
-//! Demonstrates GPU compute + graphics in a single task graph:
-//! line physics dispatch → offscreen render → swapchain blit.
+//! Demonstrates retained scheme with compute dispatch → offscreen render → copy-to-present.
 //!
 //! Run with: cargo run --example bouncing_lines
 
 use anyhow::Result;
 use goldy::{
-    BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    types::ResourceAccess, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
+    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -65,9 +64,11 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
-    surface: Surface,
+    swapchain: SwapchainPool,
+    screen: goldy::PresentLease,
+    present: PresentGrant,
+    scheme: Scheme,
     scene_rt: RenderTarget,
-    frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
     line_buffer: Parcel,
@@ -77,9 +78,54 @@ struct RenderState {
 }
 
 impl RenderState {
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> Result<RenderTarget> {
+        let (width, height) = swapchain.size();
+        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format()).map_err(Into::into)
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        compute_pipeline: &ComputePipeline,
+        render_pipeline: &RenderPipeline,
+        line_buffer: &Parcel,
+        scene_rt: &RenderTarget,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        scheme
+            .node("update_lines", compute_pipeline)
+            .bind_parcel(line_buffer, NodeAccess::ReadWrite)
+            .bind_views(&[line_buffer.handle(ResourceAccess::Write).unwrap()])
+            .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
+
+        let bg_color = Color {
+            r: 0.05,
+            g: 0.05,
+            b: 0.1,
+            a: 1.0,
+        };
+
+        let mut pass = scheme.render_pass("bouncing_lines", scene_rt);
+        pass.bind_parcel_mut(line_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(render_pipeline);
+        pass.bind_views(&[line_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
+        pass.draw(0..2, 0..NUM_LINES);
+        pass.finish();
+
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
+    }
+
+    fn rerecord_scheme(&mut self) {
+        self.scheme.begin_rerecord();
+        self.present = Self::record_scheme(
+            &mut self.scheme,
+            &self.compute_pipeline,
+            &self.render_pipeline,
+            &self.line_buffer,
+            &self.scene_rt,
+            &self.screen,
+        );
     }
 
     fn new(window: Arc<Window>) -> Result<Self> {
@@ -90,8 +136,9 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
+        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
@@ -123,19 +170,31 @@ impl RenderState {
             &RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::empty(),
                 topology: PrimitiveTopology::LineList,
-                target_format: surface.format(),
+                target_format: swapchain.format(),
                 ..Default::default()
             },
         )?;
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = Self::record_scheme(
+            &mut scheme,
+            &compute_pipeline,
+            &render_pipeline,
+            &line_buffer,
+            &scene_rt,
+            &screen,
+        );
 
         println!("Created bouncing lines with {} lines", NUM_LINES);
 
         Ok(Self {
             window,
             device,
-            surface,
+            swapchain,
+            screen,
+            present,
+            scheme,
             scene_rt,
-            frame_graph: TaskGraph::new(),
             compute_pipeline,
             _retained_pool: retained_pool,
             line_buffer,
@@ -148,36 +207,8 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .node("update_lines", &self.compute_pipeline)
-            .bind_parcel(&self.line_buffer, NodeAccess::ReadWrite)
-            .bind_resources_raw_slice(&[self.line_buffer.resource_index(ResourceAccess::Write).unwrap()])
-            .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
-
-        let bg_color = Color {
-            r: 0.05,
-            g: 0.05,
-            b: 0.1,
-            a: 1.0,
-        };
-
-        let mut pass = self.frame_graph.render_pass("bouncing_lines", &self.scene_rt);
-        pass.bind_parcel_mut(&self.line_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
-        pass.set_pipeline(&self.render_pipeline);
-        // `Scattered<Line>` in the vertex shader expects a UAV bindless slot on DX12.
-        pass.bind_resources_raw(&[self.line_buffer.resource_index(ResourceAccess::ReadWrite).unwrap()]);
-        pass.draw(0..2, 0..NUM_LINES);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
-
-        let frame = self.surface.begin()?;
-        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let submission = self.scheme.submit()?;
+        self.present.consume(&submission)?;
 
         self.window.request_redraw();
         Ok(())
@@ -244,9 +275,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        state.surface.resize(size.width, size.height).ok();
-                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
+                        state.swapchain.resize(size.width, size.height).ok();
+                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.swapchain) {
                             state.scene_rt = rt;
+                            state.rerecord_scheme();
                         }
                     }
                 }

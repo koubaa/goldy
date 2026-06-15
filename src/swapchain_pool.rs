@@ -30,7 +30,7 @@ pub struct SwapchainPool {
 /// Stable scheme-scoped name for a swapchain drawable lease.
 ///
 /// The physical backing rotates per submission; the lease id is recorded once
-/// in the scheme IR as [`crate::task_graph::ResourceId::PresentLease`].
+/// in the scheme IR as `ResourceId::PresentLease`.
 pub struct PresentLease {
     pub(crate) id: u32,
     pub(crate) pool: Arc<SwapchainPoolInner>,

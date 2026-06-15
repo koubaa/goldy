@@ -401,10 +401,8 @@ fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 | NodeKind::WriteTexture { .. }
                 | NodeKind::WriteTextureRegion { .. }
                 | NodeKind::CopyTexture { .. } => return false,
-                NodeKind::CopyRenderTarget { dst, .. } => {
-                    if !matches!(dst, ResourceId::PresentLease(_)) {
-                        return false;
-                    }
+                NodeKind::CopyRenderTarget { dst, .. } if !matches!(dst, ResourceId::PresentLease(_)) => {
+                    return false;
                 }
                 _ => {}
             }

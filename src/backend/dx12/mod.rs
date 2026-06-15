@@ -797,7 +797,6 @@ impl GpuBackend for Dx12Backend {
                 surface: surface_handle,
                 image,
                 context: ctx,
-                // DX12 scratch textures are keyed by swapchain image index.
                 frame_slot: image as u32,
             },
             tex,

@@ -26,7 +26,7 @@ use crate::task_graph::{
 };
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
-use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
+use crate::types::{BackendType, Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind};
 use crate::validation_env;
 use std::fmt;
 use std::marker::PhantomData;
@@ -472,7 +472,7 @@ pub struct Scheme {
     ///
     /// On Metal, `try_resubmit_retained` always re-encodes a fresh `MTLCommandBuffer` from
     /// the cached `GraphCommand` list, so there is no pending CB to wait for and the wait is
-    /// omitted (`#[cfg(not(feature = "metal"))]`).
+    /// skipped at runtime.
     ///
     /// This is still conservative: a lowered scheme may become multiple queue submissions
     /// (A1, A2, A3) and another scheme's B1 need only wait for the slice it depends on —
@@ -628,15 +628,13 @@ impl Scheme {
     /// When present grants are recorded, swapchain drawables are acquired before lowering
     /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
-        // Vulkan retained partitions reuse a live VkCommandBuffer — wait until the prior
-        // submission retires before resubmitting on the clean path to satisfy
-        // VUID-vkQueueSubmit2-commandBuffer-03875.
-        //
-        // Metal always re-encodes a fresh MTLCommandBuffer from the cached GraphCommand
-        // list, so no pending CB exists and this wait is skipped.
-        #[cfg(not(feature = "metal"))]
+        // Vulkan/DX12 retained partitions reuse a live command buffer — wait until the prior
+        // submission retires before resubmitting to satisfy VUID-vkQueueSubmit2-commandBuffer-03875.
+        // Skip on Metal (fresh MTLCommandBuffer each resubmit). Use a runtime backend check:
+        // the `metal` Cargo feature is enabled on all default builds, so a compile-time
+        // `#[cfg(not(feature = "metal"))]` gate would omit this wait on Vulkan too.
         if let Some(prev_tv) = self.last_submitted_tv {
-            if !self.dirty {
+            if self.ctx.device().backend_type() != BackendType::Metal {
                 self.ctx.wait_until(prev_tv)?;
             }
         }
@@ -697,7 +695,7 @@ impl Scheme {
     /// Clear recorded nodes and retention cache while preserving scheme identity.
     ///
     /// Use before re-recording structural nodes after a resize or other topology change.
-    /// [`Self::last_submitted_tv`] is preserved so the next submit waits for the prior
+    /// `last_submitted_tv` is preserved so the next submit waits for the prior
     /// submission before resubmitting retained command lists.
     pub fn begin_rerecord(&mut self) {
         self.ir = GraphIR::default();
@@ -839,6 +837,31 @@ impl Scheme {
             kind: NodeKind::CopyRenderTarget {
                 src: src.backend_handle(),
                 dst: ResourceId::PresentLease(dst.id),
+            },
+        });
+    }
+
+    /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
+    /// [`Self::grant_read_texture`]).
+    pub fn copy_to_texture(&mut self, src: &RenderTarget, dst: &Parcel) {
+        self.dirty = true;
+        self.submit_state.register_parcel_stamp(dst);
+        let dst_resource = dst.resource_id();
+        self.ir.nodes.push(TaskNode {
+            label: "copy_to_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(src.backend_handle()),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst_resource,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget {
+                src: src.backend_handle(),
+                dst: dst_resource,
             },
         });
     }
@@ -1259,6 +1282,16 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self
     }
 
+    pub fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) -> &mut Self {
+        self.commands.push(RenderCommand::Draw {
+            vertex_count: vertices.end - vertices.start,
+            instance_count: instances.end - instances.start,
+            first_vertex: vertices.start,
+            first_instance: instances.start,
+        });
+        self
+    }
+
     pub fn draw_indexed(
         &mut self,
         indices: std::ops::Range<u32>,
@@ -1276,13 +1309,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
     }
 
     pub fn draw_fullscreen(&mut self) -> &mut Self {
-        self.commands.push(RenderCommand::Draw {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
-        self
+        self.draw(0..3, 0..1)
     }
 
     pub fn finish(self) {
@@ -2261,6 +2288,43 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             other => panic!("expected CopyRenderTarget{{dst:PresentLease(0)}}, got {other:?}"),
         }
         assert!(scheme.is_dirty(), "copy_to_present must mark the scheme dirty");
+    }
+
+    #[test]
+    fn copy_to_texture_appends_ir_node() {
+        use crate::render_target::RenderTarget;
+        use crate::types::{TextureFlags, TextureFormat, TextureKind};
+
+        let device = mock_device();
+        let ctx = device.create_context().expect("context");
+        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let tex = pool
+            .acquire_texture(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureKind::Direct,
+                TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+                None,
+            )
+            .expect("texture");
+        let tex_handle = tex.texture_handle().expect("texture handle");
+
+        let mut scheme = Scheme::new(&ctx);
+        assert_eq!(scheme.ir_node_count(), 0);
+
+        scheme.copy_to_texture(&rt, &tex);
+        assert_eq!(scheme.ir_node_count(), 1);
+
+        match &scheme.ir.nodes[0].kind {
+            NodeKind::CopyRenderTarget {
+                dst: ResourceId::Texture(h),
+                ..
+            } => assert_eq!(*h, tex_handle),
+            other => panic!("expected CopyRenderTarget{{dst:Texture}}, got {other:?}"),
+        }
+        assert!(scheme.is_dirty(), "copy_to_texture must mark the scheme dirty");
     }
 
     #[test]

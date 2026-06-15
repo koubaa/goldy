@@ -893,7 +893,7 @@ pub fn emit_partitioned_commands(
 ///
 /// - `has_render`   — the slice contains at least one [`NodeKind::RenderPass`] node.
 /// - `has_present`  — the slice binds at least one [`ResourceId::PresentLease`] or
-///                    [`ResourceId::SwapchainOutput`].
+///   [`ResourceId::SwapchainOutput`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalPartition {
     /// Wave-index range `start..end` into [`CompiledSchedule::waves`].
@@ -961,10 +961,8 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
         }
 
         // Render-kind boundary: render→compute or compute→render transition.
-        if is_render != prev_render {
-            if !splits.contains(&i) {
-                splits.push(i);
-            }
+        if is_render != prev_render && !splits.contains(&i) {
+            splits.push(i);
         }
     }
 
