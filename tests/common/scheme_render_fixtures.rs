@@ -263,9 +263,10 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
 
     scheme_render_and_readback(&ctx, &target, &readback, "gol_render", |pass| {
         let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
+        // Scattered<uint> maps to a UAV slot; match TaskGraph bind_resources (ReadWrite), not SRV.
         pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
             parcel: cells,
-            access: NodeAccess::Read,
+            access: NodeAccess::ReadWrite,
         }]);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);

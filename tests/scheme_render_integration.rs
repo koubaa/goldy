@@ -727,7 +727,7 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
         pass.set_pipeline(&pipeline);
         pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
             parcel: &buffer,
-            access: NodeAccess::Read,
+            access: NodeAccess::ReadWrite,
         }]);
         pass.draw(0..3, 0..1);
     });
