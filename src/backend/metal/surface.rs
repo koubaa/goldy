@@ -518,6 +518,7 @@ pub(super) fn present(
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+        super::drain_completed_cbs(&mut sc);
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).

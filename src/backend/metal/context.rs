@@ -104,9 +104,17 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
 
     sc.staging_belt.destroy_all();
     sc.texture_staging_pool.destroy_all();
-    for (_, cb) in sc.in_flight_command_buffers.drain(..) {
-        cb.wait_until_completed();
+    // Wait once for this context's timeline (like DX12 context destroy) instead of
+    // calling waitUntilCompleted on every retained CB — the deque can hold hundreds
+    // of already-finished buffers when the app never called wait_until.
+    let last_seq = sc.last_submitted_seq;
+    let signaled = sc.timeline_event.as_ref().signaled_value();
+    if last_seq > signaled {
+        let timeout = std::time::Duration::from_secs(60);
+        let _ = sc.timeline_waiter.wait_until(last_seq, timeout);
     }
+    super::drain_completed_cbs(&mut sc);
+    sc.in_flight_command_buffers.clear();
     // All CBs have completed; flush any resources still parked in the per-context
     // deletion queue.  At this point every timeline value is retired so every
     // barrier has been passed.

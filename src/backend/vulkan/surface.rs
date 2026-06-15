@@ -439,22 +439,49 @@ impl<'a> DestroyDeviceRef<'a> {
     }
 }
 
+/// Wait only for GPU work tied to `surface_handle`, not the entire device.
+///
+/// Multi-window apps destroy surfaces one at a time while others keep rendering;
+/// `device_wait_idle` here would stall every live window on each close.
+fn wait_surface_gpu_idle(state: &super::types::VulkanState, surface_handle: SurfaceHandle) {
+    let Some(surface_state) = state.surfaces.get(&surface_handle) else {
+        return;
+    };
+    let device_handle = surface_state.device_handle;
+    let Some(ld) = state.devices.get(&device_handle) else {
+        return;
+    };
+
+    for frame in &surface_state.frame_sync {
+        if frame.fence_pending {
+            unsafe {
+                let _ = ld.device.wait_for_fences(&[frame.in_flight_fence], true, u64::MAX);
+            }
+        }
+    }
+
+    let max_timeline = surface_state
+        .frame_sync
+        .iter()
+        .flat_map(|f| f.frame_timeline_value.into_iter().chain(f.copy_timeline_value))
+        .chain(surface_state.frame_sync.iter().map(|f| f.last_compute_timeline_value))
+        .max()
+        .unwrap_or(0);
+
+    if max_timeline > 0 {
+        super::context::wait_until_device_seq_at_least(state, device_handle, max_timeline);
+    }
+}
+
 /// Destroy a surface and all associated resources.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn destroy(
-    entry: &Entry,
-    instance: &Instance,
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    surface_handle: SurfaceHandle,
-) {
+pub(super) fn destroy(state: &mut super::types::VulkanState, surface_handle: SurfaceHandle) {
+    wait_surface_gpu_idle(state, surface_handle);
     destroy_impl(
-        entry,
-        instance,
-        DestroyDeviceRef::Map(devices),
-        surfaces,
-        textures,
+        &state.entry,
+        &state.instance,
+        DestroyDeviceRef::Map(&state.devices),
+        &mut state.surfaces,
+        &mut state.textures,
         surface_handle,
     );
 }
@@ -470,7 +497,12 @@ pub(super) fn destroy_with_logical_device(
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
+    gpu_already_idle: bool,
 ) {
+    if !gpu_already_idle {
+        // During normal surface drop the caller must use [`destroy`] instead.
+        tracing::warn!("destroy_with_logical_device called without gpu_already_idle during live teardown");
+    }
     destroy_impl(
         entry,
         instance,
@@ -527,8 +559,6 @@ fn destroy_impl(
     if let Some(mut surface_state) = surfaces.remove(&surface_handle) {
         if let Some(logical_device) = device_ref.get_ld(surface_state.device_handle) {
             unsafe {
-                let _ = logical_device.device.device_wait_idle();
-
                 for frame in &mut surface_state.frame_sync {
                     frame.frame_timeline_value = None;
                     frame.copy_timeline_value = None;

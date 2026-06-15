@@ -778,14 +778,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_surface(&mut self, surface_handle: SurfaceHandle) {
-        surface::destroy(
-            &self.state.entry,
-            &self.state.instance,
-            &self.state.devices,
-            &mut self.state.surfaces,
-            &mut self.state.textures,
-            surface_handle,
-        );
+        surface::destroy(&mut self.state, surface_handle);
     }
 
     fn begin_frame(

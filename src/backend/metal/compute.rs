@@ -1172,6 +1172,7 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+        super::drain_completed_cbs(&mut sc);
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1446,6 +1447,7 @@ pub(super) fn submit_graph(
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+        super::drain_completed_cbs(&mut sc);
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {

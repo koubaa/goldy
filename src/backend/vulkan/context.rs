@@ -111,6 +111,9 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
 
+    let last_seq = sc.last_submitted_seq;
+    let timeline_semaphore = sc.timeline_semaphore;
+
     let fence_thread = sc.fence_thread.take();
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, fence_thread);
 
@@ -120,8 +123,11 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         let Some(ld) = state.devices.get(&device) else {
             return;
         };
-        unsafe {
-            let _ = ld.device.device_wait_idle();
+        if last_seq > 0 {
+            let wait = vk::SemaphoreWaitInfo::default()
+                .semaphores(std::slice::from_ref(&timeline_semaphore))
+                .values(std::slice::from_ref(&last_seq));
+            let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
         }
         if !ctx_batch.is_empty() {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);

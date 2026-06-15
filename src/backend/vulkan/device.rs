@@ -701,6 +701,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     &mut state.surfaces,
                     &mut state.textures,
                     handle,
+                    true,
                 );
             }
 
