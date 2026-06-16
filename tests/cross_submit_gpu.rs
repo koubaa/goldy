@@ -252,3 +252,191 @@ fn retained_reader_cross_context_observes_independent_writer() {
 
     assert_retained_resubmit_stats(&device, &reader, 2);
 }
+
+#[test]
+fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let parcel_p = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("parcel_p");
+    let parcel_q = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("parcel_q");
+
+    let mut reader = Scheme::new(&ctx);
+    reader
+        .node("read_p", &read_pipe)
+        .bind_parcel(&parcel_p, NodeAccess::Read)
+        .bind_views(&[parcel_p.handle(ResourceAccess::Read).expect("srv")])
+        .dispatch(1, 1, 1);
+    reader.submit().expect("reader record");
+
+    let mut writer = Scheme::new(&ctx);
+    writer
+        .node("write_q", &write_pipe)
+        .bind_parcel(&parcel_q, NodeAccess::Write)
+        .bind_views(&[parcel_q.handle(ResourceAccess::Write).expect("uav")])
+        .dispatch(1, 1, 1);
+    for _ in 0..3 {
+        writer.submit().expect("writer submit");
+    }
+
+    for _ in 0..3 {
+        reader.submit().expect("reader resubmit");
+    }
+
+    if device.backend_type() == BackendType::Metal {
+        return;
+    }
+    assert!(
+        !reader.is_topology_dirty(),
+        "unrelated writer activity must not dirty the reader"
+    );
+    assert_eq!(reader.replay_stats().records, 1);
+    assert_eq!(reader.replay_stats().topology_records, 0);
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(reader.replay_stats().resubmit_hits, 3);
+}
+
+#[test]
+fn retained_reader_dirtied_once_by_new_writer_then_stable() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = Scheme::new(&ctx);
+    reader
+        .node("read", &read_pipe)
+        .bind_parcel(&parcel, NodeAccess::Read)
+        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .dispatch(1, 1, 1);
+    reader.submit().expect("reader record");
+
+    let mut writer = Scheme::new(&ctx);
+    writer
+        .node("write", &write_pipe)
+        .bind_parcel(&parcel, NodeAccess::Write)
+        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .dispatch(1, 1, 1);
+    writer.submit().expect("writer record");
+    assert!(reader.is_topology_dirty());
+
+    reader.submit().expect("reader topology re-record");
+    assert!(!reader.is_topology_dirty());
+
+    for _ in 0..2 {
+        reader.submit().expect("reader stable resubmit");
+    }
+
+    if device.backend_type() == BackendType::Metal {
+        return;
+    }
+    assert_eq!(reader.replay_stats().records, 2);
+    assert_eq!(reader.replay_stats().topology_records, 1);
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(reader.replay_stats().resubmit_hits, 2);
+}
+
+#[test]
+fn topology_re_record_produces_correct_barriers_and_data() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = Scheme::new(&ctx);
+    reader
+        .node("read", &read_pipe)
+        .bind_parcel(&parcel, NodeAccess::Read)
+        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .dispatch(1, 1, 1);
+    let grant = reader.grant_read(&parcel).expect("grant");
+    reader.submit().expect("reader record");
+
+    let mut writer = Scheme::new(&ctx);
+    writer
+        .node("write", &write_pipe)
+        .bind_parcel(&parcel, NodeAccess::Write)
+        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .dispatch(1, 1, 1);
+    writer.submit().expect("writer record");
+
+    let submission = reader.submit().expect("reader topology re-record");
+    submission.wait(&ctx).expect("wait");
+    assert_eq!(read_u32(&grant, &submission), 42);
+}
+
+#[test]
+fn repeated_resubmit_of_b_never_dirties_a() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let inc_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let inc_pipe = ComputePipeline::new(&device, &inc_shader).expect("inc pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut worker = Scheme::new(&ctx);
+    worker
+        .node("inc", &inc_pipe)
+        .bind_parcel(&parcel, NodeAccess::ReadWrite)
+        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .dispatch(1, 1, 1);
+    worker.submit().expect("worker record");
+
+    let mut observer = Scheme::new(&ctx);
+    observer
+        .node("observe", &read_pipe)
+        .bind_parcel(&parcel, NodeAccess::Read)
+        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .dispatch(1, 1, 1);
+    observer.submit().expect("observer settle");
+    assert!(!observer.is_topology_dirty());
+
+    const RESUBMITS: u32 = 50;
+    for _ in 0..RESUBMITS {
+        worker.submit().expect("worker resubmit");
+    }
+    assert!(
+        !observer.is_topology_dirty(),
+        "repeated worker resubmits must not dirty the observer"
+    );
+
+    for _ in 0..RESUBMITS {
+        observer.submit().expect("observer resubmit");
+    }
+
+    if device.backend_type() == BackendType::Metal {
+        return;
+    }
+    assert_eq!(observer.replay_stats().records, 1);
+    assert_eq!(observer.replay_stats().topology_records, 0);
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(observer.replay_stats().resubmit_hits, RESUBMITS as u64);
+}

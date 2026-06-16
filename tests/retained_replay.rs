@@ -18,18 +18,15 @@
 
 #[path = "common/submission.rs"]
 mod submission;
-#[path = "common/upload.rs"]
-mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
-    TextureKind,
+    write_to_parcel, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance,
+    NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
+    TextureFlags, TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
-use upload::write_to_parcel;
 
 fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
     let loan = grant.consume(submission).expect("grant consume");
@@ -62,7 +59,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 ///
 /// The worker scheme (`records == 1`; `resubmit_hits == N-1` on non-Metal backends) observes each frame's
 /// data through the shared input parcel — serialized by queue order on the same context.
-/// This is the pattern `upload::write_to_parcel` packages as a property-only dispatch.
+/// This is the pattern [`goldy::write_to_parcel`] packages as a property-only dispatch.
 #[test]
 fn upload_graph_feeds_retained_worker_without_rerecord() {
     let device = make_device();
@@ -96,7 +93,7 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
     const FRAMES: u32 = 3;
     for submission in 1..=FRAMES {
         // Separate upload submission per frame via the property-only-dispatch API.
-        write_to_parcel(&ctx, &input, bytemuck::cast_slice(&[submission; 8])).expect("write_to_parcel");
+        write_to_parcel(&ctx, &input, 0, bytemuck::cast_slice(&[submission; 8])).expect("write_to_parcel");
 
         let frame = worker.submit().expect("submit worker");
         for v in read_grant_u32(&grant, &frame, 8) {

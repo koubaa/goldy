@@ -163,7 +163,10 @@ fn retention_resubmit_preserves_hits_and_dynamic_prologue() {
     for _ in 0..3 {
         worker.submit().expect("resubmit");
     }
-    assert_eq!(retained_resubmits(&device), 3);
+    // Foreign touch changes shared-parcel topology: first worker resubmit re-records the
+    // prologue, then subsequent submits are retention hits.
+    assert_eq!(retained_resubmits(&device), 2);
+    assert_eq!(worker.replay_stats().topology_records, 1);
 }
 
 #[test]
@@ -363,5 +366,195 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     assert!(
         recorded_graph_syncs(&device).last().copied().unwrap_or(false),
         "submit_graph must receive sync=Some when the epoch ledger has a tracked hazard"
+    );
+}
+
+fn upload_write_scheme(ctx: &Context, parcel: &Parcel) -> Scheme {
+    let mut s = Scheme::new(ctx);
+    s.commit_write_parcel(parcel, 0, vec![42, 0, 0, 0])
+        .expect("upload write");
+    s
+}
+
+#[test]
+fn topology_independent_parcels_do_not_cross_dirty() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel_a = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel_a");
+    let parcel_b = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel_b");
+
+    let mut reader = read_scheme(&ctx, &parcel_a, &read_pipe);
+    reader.submit().expect("reader record");
+
+    let mut writer = write_scheme(&ctx, &parcel_b, &write_pipe);
+    writer.submit().expect("writer on unrelated parcel");
+
+    assert!(
+        !reader.is_topology_dirty(),
+        "unrelated parcel writer must not dirty the reader"
+    );
+}
+
+#[test]
+fn topology_new_foreign_writer_sets_dirty_on_reader() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("reader record");
+    assert!(!reader.is_topology_dirty());
+
+    let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+    writer.submit().expect("writer record");
+
+    assert!(
+        reader.is_topology_dirty(),
+        "new writer on a shared parcel must dirty an existing reader"
+    );
+}
+
+#[test]
+fn topology_same_role_rerecord_does_not_dirty_peers() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("reader record");
+
+    let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+    writer.submit().expect("writer first record");
+    assert!(reader.is_topology_dirty());
+
+    reader.submit().expect("reader topology re-record");
+    assert!(!reader.is_topology_dirty());
+
+    writer.submit().expect("writer resubmit");
+    assert!(
+        !reader.is_topology_dirty(),
+        "identical writer resubmit must not re-dirty peers"
+    );
+}
+
+#[test]
+fn topology_dropped_scheme_edge_is_pruned() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("reader record");
+
+    {
+        let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+        writer.submit().expect("writer record");
+    }
+
+    assert!(reader.is_topology_dirty());
+    reader.submit().expect("reader topology re-record");
+    assert!(!reader.is_topology_dirty());
+
+    let mut replacement = write_scheme(&ctx, &parcel, &write_pipe);
+    replacement.submit().expect("replacement writer record");
+    assert!(
+        reader.is_topology_dirty(),
+        "replacement writer with same role still changes interaction membership"
+    );
+}
+
+#[test]
+fn topology_dirty_clears_after_rerecord() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("reader record");
+
+    let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+    writer.submit().expect("writer record");
+    assert!(reader.is_topology_dirty());
+
+    reader.submit().expect("reader topology re-record");
+    assert!(!reader.is_topology_dirty());
+    assert_eq!(reader.replay_stats().topology_records, 1);
+
+    clear_mock(&device);
+    reader.submit().expect("reader resubmit");
+    assert_eq!(retained_resubmits(&device), 1);
+    assert_eq!(reader.replay_stats().records, 2);
+}
+
+#[test]
+fn topology_kind_change_on_existing_scheme_dirties_peers() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("reader record");
+
+    let mut compute_writer = write_scheme(&ctx, &parcel, &write_pipe);
+    compute_writer.submit().expect("compute writer record");
+    assert!(reader.is_topology_dirty());
+    reader.submit().expect("reader settle after compute writer");
+    assert!(!reader.is_topology_dirty());
+
+    let mut transfer_writer = upload_write_scheme(&ctx, &parcel);
+    transfer_writer.submit().expect("transfer writer record");
+    assert!(
+        reader.is_topology_dirty(),
+        "write kind change on a shared parcel must dirty peers"
     );
 }

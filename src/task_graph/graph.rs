@@ -1066,6 +1066,22 @@ impl IrSubmitState {
         self.resource_stamps.clear();
     }
 
+    /// Drop cached retention keys so the next submit re-records retained partitions.
+    pub fn invalidate_retention(&mut self) {
+        if let Some(entry) = &mut self.schedule_cache {
+            for key in &mut entry.partition_retention_keys {
+                *key = None;
+            }
+            for keys in &mut entry.partition_slot_keys {
+                *keys = None;
+            }
+        }
+    }
+
+    pub fn resource_stamps(&self) -> &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>> {
+        &self.resource_stamps
+    }
+
     /// Record and retain the command list for `ir` on `ctx`.
     ///
     /// When `present_slots` is empty, every partition uses the standard single-key

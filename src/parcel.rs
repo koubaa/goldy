@@ -13,16 +13,38 @@ use crate::texture::Texture;
 use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue, WRITE_KINDS_TRANSFER};
 use crate::types::{ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 /// Index into a [`Parcel`] mosaic's sub-ranges (returned by [`crate::retained_pool::MosaicBuilder`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MosaicSlot(pub u32);
 
+/// How a scheme interacts with a shared parcel for cross-scheme topology tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InteractionRole {
+    Reads,
+    Writes,
+    #[allow(dead_code)]
+    WritesInaugural,
+}
+
+/// One scheme's registered interaction with a parcel.
+#[derive(Debug, Clone)]
+pub(crate) struct InteractionEdge {
+    pub scheme_id: u64,
+    pub role: InteractionRole,
+    pub kind_bits: u8,
+    pub ctx: ContextHandle,
+    pub dirty_flag: Weak<AtomicBool>,
+}
+
+pub(crate) type InteractionSet = Vec<InteractionEdge>;
+
 /// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
 pub(crate) struct ParcelStamp {
     pub(crate) sync: Arc<Mutex<ResourceSync>>,
+    pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) home_device: Weak<DeviceInner>,
 }
 
@@ -30,6 +52,7 @@ impl ParcelStamp {
     pub(crate) fn new(home_device: Weak<DeviceInner>) -> Self {
         Self {
             sync: Arc::new(Mutex::new(ResourceSync::default())),
+            interaction_set: Arc::new(Mutex::new(Vec::new())),
             home_device,
         }
     }
@@ -246,6 +269,7 @@ impl Parcel {
     pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
         Arc::new(ParcelStamp {
             sync: Arc::clone(&self.stamp.sync),
+            interaction_set: Arc::clone(&self.stamp.interaction_set),
             home_device: self.stamp.home_device.clone(),
         })
     }

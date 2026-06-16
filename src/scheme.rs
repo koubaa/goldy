@@ -20,6 +20,7 @@ use crate::swapchain_pool::{PresentLease, SwapchainPool};
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
+use crate::task_graph::cross_submit::ResourceKey;
 use crate::task_graph::{
     DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
     PRESENT_LEASE_SLOT_PLACEHOLDER,
@@ -470,6 +471,8 @@ pub struct ReplayStats {
     pub resubmit_hits: u64,
     /// Submissions that recorded (first submit, post-mutation submits, retention misses).
     pub records: u64,
+    /// Re-records caused by a foreign scheme changing shared-parcel topology.
+    pub topology_records: u64,
 }
 
 /// A retained scheme: a set of dispatches held across submissions with COW dirty tracking.
@@ -486,6 +489,10 @@ pub struct Scheme {
     leases: Vec<Parcel>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
+    /// Set by foreign schemes when shared-parcel interaction topology changes.
+    topology_dirty: Arc<AtomicBool>,
+    /// Parcels this scheme registered on at the last record (for silent edge teardown).
+    prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     /// Retention key stored at record time. `None` when the backend cannot retain `ir`.
     retention_key: Option<u64>,
     /// Timeline value from the most recent successful [`Self::submit`].
@@ -523,6 +530,8 @@ impl Scheme {
             ctx: ctx.clone(),
             leases: Vec::new(),
             dirty: true,
+            topology_dirty: Arc::new(AtomicBool::new(false)),
+            prev_topology_parcels: Vec::new(),
             retention_key: None,
             last_submitted_tv: None,
             stats: ReplayStats::default(),
@@ -536,6 +545,12 @@ impl Scheme {
     /// True when the next [`Self::submit`] must re-record.
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// True when a foreign scheme changed shared-parcel topology since the last record.
+    #[doc(hidden)]
+    pub fn is_topology_dirty(&self) -> bool {
+        self.topology_dirty.load(Ordering::Acquire)
     }
 
     /// Submission outcome counters.
@@ -664,6 +679,12 @@ impl Scheme {
             }
         }
 
+        let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
+        let structurally_dirty = self.dirty;
+        if structurally_dirty || topo_dirty {
+            self.submit_state.invalidate_retention();
+        }
+
         let mut present_slots = Vec::with_capacity(self.present_grants.len());
         let mut surface_frames = Vec::with_capacity(self.present_grants.len());
         for grant in &self.present_grants {
@@ -701,13 +722,35 @@ impl Scheme {
         self.dirty = false;
         self.retention_key = None;
 
-        if part_result.all_from_cache() {
+        let recorded = !part_result.all_from_cache();
+        let on_record_path = structurally_dirty || topo_dirty || recorded;
+
+        if on_record_path {
+            use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
+            let net = net_access_per_resource(&self.ir);
+            self.prev_topology_parcels = reregister_scheme_topology(
+                &net,
+                self.submit_state.resource_stamps(),
+                &self.prev_topology_parcels,
+                self.scheme_id,
+                self.ctx.backend_handle(),
+                &self.topology_dirty,
+            );
+        }
+
+        if recorded {
+            self.stats.records += 1;
+            if topo_dirty && !structurally_dirty {
+                self.stats.topology_records += 1;
+            }
+            if topo_dirty {
+                self.topology_dirty.store(false, Ordering::Release);
+            }
+        } else if part_result.all_from_cache() {
             #[cfg(not(feature = "metal"))]
             {
                 self.stats.resubmit_hits += 1;
             }
-        } else {
-            self.stats.records += 1;
         }
 
         let submission = self.finish_submit_frame(tv, surface_frames)?;
@@ -728,6 +771,7 @@ impl Scheme {
         self.next_grant_id = 0;
         self.retention_key = None;
         self.dirty = true;
+        self.prev_topology_parcels.clear();
 
         let ctx = self.ctx.clone();
         for mut parcel in self.leases.drain(..) {

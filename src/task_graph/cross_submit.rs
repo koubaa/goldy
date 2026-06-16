@@ -5,10 +5,11 @@
 //! ledger on [`crate::parcel::ParcelStamp`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::backend::{BufferHandle, TextureHandle};
-use crate::parcel::ParcelStamp;
+use crate::backend::{BufferHandle, ContextHandle, TextureHandle};
+use crate::parcel::{InteractionEdge, InteractionRole, ParcelStamp};
 use crate::task_graph::ir::{
     BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeKind, ResourceBinding, SlotUsageSet, UsageKindFlags,
 };
@@ -362,6 +363,145 @@ pub fn prepend_prologue(
     });
     out.extend_from_slice(commands);
     out
+}
+
+fn interaction_role_from_net(access: &NetAccess) -> InteractionRole {
+    if access.writes {
+        InteractionRole::Writes
+    } else {
+        InteractionRole::Reads
+    }
+}
+
+fn interaction_kind_bits_from_net(access: &NetAccess) -> u8 {
+    if access.writes {
+        access.write_kinds.bits()
+    } else {
+        access.read_kinds.bits()
+    }
+}
+
+fn edge_matches(edge: &InteractionEdge, role: InteractionRole, kind_bits: u8, ctx: ContextHandle) -> bool {
+    edge.role == role && edge.kind_bits == kind_bits && edge.ctx == ctx
+}
+
+fn prune_dead_edges(edges: &mut Vec<InteractionEdge>) {
+    edges.retain(|edge| edge.dirty_flag.upgrade().is_some());
+}
+
+fn dirty_foreign_schemes(edges: &mut [InteractionEdge], scheme_id: u64) {
+    for edge in edges.iter_mut() {
+        if edge.scheme_id == scheme_id {
+            continue;
+        }
+        if let Some(flag) = edge.dirty_flag.upgrade() {
+            flag.store(true, Ordering::Release);
+        }
+    }
+}
+
+type SelfTopologyEdge = (InteractionRole, u8, ContextHandle);
+
+/// Remove this scheme's edges from every parcel in `prev_parcels` without notifying peers.
+pub(crate) fn clear_scheme_topology_registration(
+    scheme_id: u64,
+    prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
+) -> HashMap<ResourceKey, SelfTopologyEdge> {
+    let mut removed = HashMap::new();
+    for (key, stamp) in prev_parcels {
+        let mut edges = stamp.interaction_set.lock().unwrap();
+        if let Some(idx) = edges.iter().position(|edge| edge.scheme_id == scheme_id) {
+            let edge = edges.remove(idx);
+            removed.insert(*key, (edge.role, edge.kind_bits, edge.ctx));
+        }
+        prune_dead_edges(&mut edges);
+    }
+    removed
+}
+
+fn topology_parcels_from_net(
+    net: &HashMap<ResourceKey, NetAccess>,
+    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
+    net.keys()
+        .filter_map(|key| resource_stamps.get(key).map(|stamp| (*key, Arc::clone(stamp))))
+        .collect()
+}
+
+/// Insert/update this scheme's edges for the current submission and dirty foreign schemes
+/// when a parcel's interaction set actually changes.
+pub(crate) fn update_scheme_topology(
+    net: &HashMap<ResourceKey, NetAccess>,
+    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    scheme_id: u64,
+    ctx: ContextHandle,
+    dirty_flag: &Arc<AtomicBool>,
+    previous_self_edges: &HashMap<ResourceKey, SelfTopologyEdge>,
+) {
+    let weak_dirty = Arc::downgrade(dirty_flag);
+
+    for (key, access) in net {
+        let Some(stamp) = resource_stamps.get(key) else {
+            continue;
+        };
+        let role = interaction_role_from_net(access);
+        let kind_bits = interaction_kind_bits_from_net(access);
+        let new_edge = (role, kind_bits, ctx);
+        let mut edges = stamp.interaction_set.lock().unwrap();
+        prune_dead_edges(&mut edges);
+
+        let existing = edges.iter().position(|edge| edge.scheme_id == scheme_id);
+        let topology_changed = match existing {
+            Some(idx) => !edge_matches(&edges[idx], role, kind_bits, ctx),
+            None => previous_self_edges.get(key) != Some(&new_edge),
+        };
+
+        if topology_changed {
+            dirty_foreign_schemes(&mut edges, scheme_id);
+            let edge = InteractionEdge {
+                scheme_id,
+                role,
+                kind_bits,
+                ctx,
+                dirty_flag: Arc::downgrade(dirty_flag),
+            };
+            match existing {
+                Some(idx) => edges[idx] = edge,
+                None => edges.push(edge),
+            }
+        } else if let Some(idx) = existing {
+            edges[idx].dirty_flag = weak_dirty.clone();
+        } else {
+            edges.push(InteractionEdge {
+                scheme_id,
+                role,
+                kind_bits,
+                ctx,
+                dirty_flag: weak_dirty.clone(),
+            });
+        }
+    }
+}
+
+/// Clear prior cross-scheme registration, register the current footprint, return the new set.
+pub(crate) fn reregister_scheme_topology(
+    net: &HashMap<ResourceKey, NetAccess>,
+    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
+    scheme_id: u64,
+    ctx: ContextHandle,
+    dirty_flag: &Arc<AtomicBool>,
+) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
+    let previous_self_edges = clear_scheme_topology_registration(scheme_id, prev_parcels);
+    update_scheme_topology(
+        net,
+        resource_stamps,
+        scheme_id,
+        ctx,
+        dirty_flag,
+        &previous_self_edges,
+    );
+    topology_parcels_from_net(net, resource_stamps)
 }
 
 #[cfg(test)]
