@@ -281,7 +281,14 @@ fn backend_submit_graph(
         }
     }
     let effective = prepended.as_deref().unwrap_or(commands);
-    let waits_only = sync_waits_only(sync);
+    // Mirror the standalone path: pass Some whenever sync is Some so the backend
+    // knows to suppress its legacy blanket-acquire barrier even when there are no
+    // cross-context waits.  sync_waits_only would return None for same-context-only
+    // hazards, leaving the render-pass path asymmetric with backend_submit_standalone.
+    let waits_only = sync.map(|s| SubmitSync {
+        prologue: Default::default(),
+        waits: s.waits.clone(),
+    });
     backend.submit_graph(ctx, effective, waits_only.as_ref())
 }
 
@@ -293,7 +300,12 @@ fn backend_submit_graph_and_retain(
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     backend_submit_dynamic_prologue(backend, ctx, sync)?;
-    let waits_only = sync_waits_only(sync);
+    // Same asymmetry fix as backend_submit_graph: preserve Some so the backend
+    // suppresses its legacy blanket-acquire barrier when sync is active.
+    let waits_only = sync.map(|s| SubmitSync {
+        prologue: Default::default(),
+        waits: s.waits.clone(),
+    });
     backend.submit_graph_and_retain(ctx, commands, key, waits_only.as_ref())
 }
 

@@ -7,8 +7,9 @@
 mod submission;
 
 use goldy::{
-    types::ResourceAccess, BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, Instance, NodeAccess,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
+    types::ResourceAccess, write_to_parcel, BackendType, BufferKind, ComputePipeline, Context, Device,
+    DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool,
+    Scheme, ShaderModule, Submission,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -43,6 +44,14 @@ import goldy_exp;
 [goldy_compute][numthreads(1,1,1)]
 void cs_main(Scattered<uint> buf, ThreadId id) {
     buf[id.x] = 42u;
+}
+"#;
+
+const COPY_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute][numthreads(1,1,1)]
+void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
+    dst[id.x] = src[id.x];
 }
 "#;
 
@@ -112,4 +121,134 @@ fn war_write_after_read_pipelined_overwrite() {
     let submission = writer.submit().expect("write");
 
     assert_eq!(read_u32(&grant, &submission), 42);
+}
+
+fn retained_copy_reader(
+    ctx: &Context,
+    pipe: &ComputePipeline,
+    src: &Parcel,
+    dst: &Parcel,
+) -> (Scheme, ReadGrant<goldy::GrantBuffer>) {
+    let mut reader = Scheme::new(ctx);
+    reader
+        .node("copy", pipe)
+        .bind_parcel(src, NodeAccess::Read)
+        .bind_parcel(dst, NodeAccess::Write)
+        .bind_views(&[
+            src.handle(ResourceAccess::Read).expect("src srv"),
+            dst.handle(ResourceAccess::Write).expect("dst uav"),
+        ])
+        .dispatch(1, 1, 1);
+    let grant = reader.grant_read(dst).expect("grant");
+    (reader, grant)
+}
+
+fn assert_retained_resubmit_stats(device: &Device, reader: &Scheme, expected_resubmit_hits: u64) {
+    // Metal re-records each submit; retention counters are Vulkan/DX12 only.
+    if device.backend_type() == BackendType::Metal {
+        return;
+    }
+    assert_eq!(reader.replay_stats().records, 1, "scheme must record exactly once");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        reader.replay_stats().resubmit_hits,
+        expected_resubmit_hits,
+        "remaining submits must be retention hits"
+    );
+    #[cfg(feature = "metal")]
+    let _ = expected_resubmit_hits;
+}
+
+#[test]
+fn retained_reader_observes_independent_writer_across_resubmits() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("shader");
+    let pipe = ComputePipeline::new(&device, &shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let src = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("src");
+    let dst = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("dst");
+
+    let (mut reader, grant) = retained_copy_reader(&ctx, &pipe, &src, &dst);
+
+    for value in [11u32, 22, 33] {
+        write_to_parcel(&ctx, &src, 0, bytemuck::bytes_of(&value)).expect("upload src");
+        let submission = reader.submit().expect("retained resubmit");
+        assert_eq!(
+            read_u32(&grant, &submission),
+            value,
+            "retained reader must observe independent upload (value={value})"
+        );
+    }
+
+    assert_retained_resubmit_stats(&device, &reader, 2);
+}
+
+#[test]
+fn retained_waw_overwrites_independent_upload() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let src = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("src");
+
+    let mut worker = Scheme::new(&ctx);
+    worker
+        .node("overwrite", &write_pipe)
+        .bind_parcel(&src, NodeAccess::Write)
+        .bind_views(&[src.handle(ResourceAccess::Write).expect("uav")])
+        .dispatch(1, 1, 1);
+    let grant = worker.grant_read(&src).expect("grant");
+
+    for upload in [99u32, 88, 77] {
+        write_to_parcel(&ctx, &src, 0, bytemuck::bytes_of(&upload)).expect("upload src");
+        let submission = worker.submit().expect("retained resubmit");
+        assert_eq!(
+            read_u32(&grant, &submission),
+            42,
+            "retained overwrite must win over upload (upload={upload})"
+        );
+    }
+
+    assert_retained_resubmit_stats(&device, &worker, 2);
+}
+
+#[test]
+fn retained_reader_cross_context_observes_independent_writer() {
+    let device = make_device();
+    let ctx_producer = device.create_context().expect("producer ctx");
+    let ctx_consumer = device.create_context().expect("consumer ctx");
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("shader");
+    let pipe = ComputePipeline::new(&device, &shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let src = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("src");
+    let dst = pool
+        .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
+        .expect("dst");
+
+    let (mut reader, grant) = retained_copy_reader(&ctx_consumer, &pipe, &src, &dst);
+
+    for value in [5u32, 15, 25] {
+        write_to_parcel(&ctx_producer, &src, 0, bytemuck::bytes_of(&value)).expect("upload src");
+        let submission = reader.submit().expect("cross-context resubmit");
+        assert_eq!(
+            read_u32(&grant, &submission),
+            value,
+            "cross-context retained reader must observe producer upload (value={value})"
+        );
+    }
+
+    assert_retained_resubmit_stats(&device, &reader, 2);
 }

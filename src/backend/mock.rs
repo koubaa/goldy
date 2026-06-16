@@ -54,6 +54,11 @@ pub struct MockBackend {
     pub compute_dispatch_count: usize,
     /// Cross-context epoch waits recorded per standalone/graph submit (mock tests).
     pub recorded_waits: Vec<Vec<crate::timeline::Epoch>>,
+    /// Whether each `submit_graph` call received `sync = Some(...)`.
+    ///
+    /// When `Some`, the backend knows to suppress its legacy blanket-acquire barrier and
+    /// rely on the scoped prologue that was folded into the command list.
+    pub recorded_graph_syncs: Vec<bool>,
     /// Retained command lists keyed by `(ctx, retention_key)`.
     retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     /// Count of zero-record resubmits served from `retained_graphs`.
@@ -205,6 +210,7 @@ impl MockBackend {
             samplers_created: 0,
             compute_dispatch_count: 0,
             recorded_waits: Vec::new(),
+            recorded_graph_syncs: Vec::new(),
             retained_graphs: HashMap::new(),
             retained_resubmit_count: 0,
             wait_until_count: 0,
@@ -298,6 +304,7 @@ impl MockBackend {
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
         self.recorded_waits.clear();
+        self.recorded_graph_syncs.clear();
         self.wait_until_count = 0;
         self.buffer_view_create_count = 0;
     }
@@ -1425,6 +1432,8 @@ impl GpuBackend for MockBackend {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
+
+        self.recorded_graph_syncs.push(sync.is_some());
 
         let mut batch: Vec<GpuCommand> = Vec::new();
         let mut last_tv;

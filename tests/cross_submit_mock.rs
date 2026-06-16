@@ -4,7 +4,10 @@ use goldy::backend::GpuCommand;
 use goldy::task_graph::BarrierUsage;
 use goldy::test_support::{mock_device, with_mock};
 use goldy::types::ResourceAccess;
-use goldy::{BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RetainedPool, Scheme, ShaderModule};
+use goldy::{
+    BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline,
+    RenderPipelineDesc, RenderTarget, RetainedPool, Scheme, ShaderModule, TextureFormat,
+};
 
 fn mock_ctx(device: &Device) -> Context {
     device.create_context().expect("context")
@@ -262,6 +265,25 @@ fn war_same_context_emits_barrier_on_write_after_read() {
     assert!(recorded_waits(&device).iter().all(|w| w.is_empty()));
 }
 
+fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
+    with_mock(device, |m| m.recorded_graph_syncs.clone())
+}
+
+/// A minimal render scheme that declares a read dependency on `parcel` via `bind_parcel_mut`.
+///
+/// The render pass itself does nothing interesting (clear + draw 0 verts), but registering
+/// the parcel is enough to put a `ResourceSync` in the ledger so the cross-submit analysis
+/// produces a non-None `SubmitSync` for the submission.
+fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline, rt: &RenderTarget) -> Scheme {
+    let mut s = Scheme::new(ctx);
+    let mut pass = s.render_pass("render_read", rt);
+    pass.bind_parcel_mut(parcel, NodeAccess::Read);
+    pass.set_pipeline(pipeline);
+    pass.draw(0..3, 0..1);
+    pass.finish();
+    s
+}
+
 #[test]
 fn stamp_monotonicity_never_regresses() {
     let device = mock_device();
@@ -283,4 +305,63 @@ fn stamp_monotonicity_never_regresses() {
     scheme.submit().expect("again");
     let later = parcel.last_referenced().get(&ctx_handle).copied().expect("stamped");
     assert!(later >= epoch);
+}
+
+#[test]
+fn compute_write_then_render_read_carries_sync_through_graph_submit() {
+    // Regression test for the standalone/graph legacy-acquire asymmetry.
+    //
+    // Before the fix, `backend_submit_graph` called `sync_waits_only(sync)` which
+    // returns None when there are no cross-context waits (same-context-only hazards).
+    // That meant `submit_graph` was called with `sync = None`, preventing real backends
+    // from suppressing the redundant legacy blanket-acquire barrier even though a
+    // scoped prologue barrier was already folded into the command list.
+    //
+    // After the fix, `backend_submit_graph` uses `sync.map(...)` to preserve `Some`
+    // whenever the epoch ledger produced a SubmitSync, so `submit_graph` always sees
+    // `sync = Some` when there is a tracked hazard.
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("write_shader");
+    let vert_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("vert");
+    let frag_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("frag");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write_pipe");
+    let render_pipe =
+        RenderPipeline::new(&device, &vert_shader, &frag_shader, &RenderPipelineDesc::default())
+            .expect("render_pipe");
+    let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("rt");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    // Establish a ledger entry: compute scheme writes the parcel.
+    let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+    writer.submit().expect("compute write");
+
+    // Now a render-pass scheme reads the same parcel on the same context.
+    // The cross-submit analysis sees a RAW hazard and produces a SubmitSync with
+    // a scoped prologue barrier.  That Some must survive into submit_graph.
+    clear_mock(&device);
+    let mut reader = render_read_scheme(&ctx, &parcel, &render_pipe, &rt);
+    reader.submit().expect("render read");
+
+    // The scoped prologue barrier must appear in the recorded compute commands
+    // (folded in as a GraphCommand::Compute before the Render command).
+    assert_eq!(
+        barrier_buffers(&device).len(),
+        1,
+        "render-read after compute-write must emit a scoped prologue barrier"
+    );
+
+    // submit_graph must have been invoked with sync = Some so that real GPU backends
+    // (Vulkan, DX12, Metal) know to suppress the legacy blanket-acquire and rely on
+    // the already-folded scoped barrier instead.
+    // Before the fix this assertion would fail (false was recorded).
+    assert!(
+        recorded_graph_syncs(&device).last().copied().unwrap_or(false),
+        "submit_graph must receive sync=Some when the epoch ledger has a tracked hazard"
+    );
 }
