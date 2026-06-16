@@ -79,7 +79,8 @@ pub(in crate::backend::metal) fn wait_device_idle(state: &MetalState, device: De
         return Ok(());
     }
     const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
-    if !context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT) {
+    let reached = context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT);
+    if !reached {
         state.device_lost.store(true, Ordering::Relaxed);
         anyhow::bail!(
             "GPU wait_device_idle timed out after {}ms waiting for timeline {target}",

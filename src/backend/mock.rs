@@ -442,7 +442,9 @@ impl GpuBackend for MockBackend {
     fn destroy_context(&mut self, ctx: ContextHandle) {
         if let Some(state) = self.contexts.remove(&ctx) {
             let floor = self.device_retired_floor.entry(state.device).or_insert(0);
-            *floor = (*floor).max(state.completed);
+            // Mirror Metal context destroy: horizon is max(signaled, last_submitted).
+            let retired_horizon = state.completed.max(state.last_submitted_seq);
+            *floor = (*floor).max(retired_horizon);
         }
     }
 
@@ -2304,5 +2306,26 @@ mod tests {
         assert!(!signals
             .iter()
             .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+    }
+
+    #[test]
+    fn destroy_context_floors_device_retired_when_signaled_lags_submitted() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let ctx = backend.create_context(device).unwrap();
+        {
+            let state = backend.context_state_mut(ctx);
+            state.completed = 7;
+            state.last_submitted_seq = 10;
+        }
+        *backend.device_timeline_next.entry(device).or_insert(0) = 10;
+
+        backend.destroy_context(ctx);
+
+        assert_eq!(
+            backend.device_retired(device),
+            10,
+            "retired floor must include last_submitted_seq after destroy removes the context"
+        );
     }
 }

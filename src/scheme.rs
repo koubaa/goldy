@@ -39,16 +39,24 @@ use std::sync::{Arc, Mutex};
 static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Per-grant staging buffer pool with scheme-lifetime ownership.
-/// TODO: this is an implementation detail of schemes for now, but eventually
-/// it makes more sense to have device-scoped, size-bucketed pools for this.
-/// That would back single schemes and multiple submissions and the reverse.
+///
+/// Returned staging buffers are stamped with the submission timeline that must retire
+/// before reuse (`ready_after`). This matches transient-pool epoch gating: dropping a
+/// [`Submission`] or [`Loan`] without consuming does not require a CPU wait, but in-flight
+/// staging is not handed to a later submit until `gpu_progress` passes that stamp.
 enum GrantStagingAllocSpec {
     Buffer { byte_size: u64 },
     Texture { layout: TextureReadbackLayout },
 }
 
+/// Staging buffer parked in a grant pool until its submission timeline retires.
+struct StampedStagingBuffer {
+    handle: BufferHandle,
+    ready_after: TimelineValue,
+}
+
 struct GrantStagingPool {
-    handles: Mutex<Vec<BufferHandle>>,
+    handles: Mutex<Vec<StampedStagingBuffer>>,
     alloc_spec: GrantStagingAllocSpec,
     ctx: Context,
     scheme_alive: AtomicBool,
@@ -78,9 +86,13 @@ impl GrantStagingPool {
         backend: &mut dyn crate::backend::GpuBackend,
         device: crate::backend::DeviceHandle,
     ) -> Result<BufferHandle, GoldyError> {
+        let ctx = self.ctx.backend_handle();
+        let progress = backend.gpu_progress(ctx);
         let handle = {
             let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-            pool.pop()
+            pool.iter()
+                .position(|entry| entry.ready_after <= progress)
+                .map(|pos| pool.swap_remove(pos).handle)
         };
         match self.alloc_spec {
             GrantStagingAllocSpec::Buffer { byte_size } => {
@@ -121,10 +133,14 @@ impl GrantStagingPool {
         }
     }
 
-    fn return_handle(&self, handle: BufferHandle) {
+    fn return_handle(&self, handle: BufferHandle, ready_after: TimelineValue) {
         if self.scheme_alive.load(Ordering::Acquire) {
-            self.handles.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
+            self.handles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(StampedStagingBuffer { handle, ready_after });
         } else {
+            let _ = self.ctx.wait_until(ready_after);
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
             backend.free_readback_buffer(handle);
         }
@@ -132,10 +148,13 @@ impl GrantStagingPool {
 
     fn mark_scheme_dropped_and_drain(&self) {
         self.scheme_alive.store(false, Ordering::Release);
-        let mut backend = self.ctx.device().inner.backend.lock().unwrap();
         let mut pool = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-        for handle in pool.drain(..) {
-            backend.free_readback_buffer(handle);
+        if let Some(max_ready) = pool.iter().map(|entry| entry.ready_after).max() {
+            let _ = self.ctx.wait_until(max_ready);
+        }
+        let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+        for entry in pool.drain(..) {
+            backend.free_readback_buffer(entry.handle);
         }
     }
 }
@@ -161,9 +180,10 @@ struct SubmissionData {
 
 impl Drop for SubmissionData {
     fn drop(&mut self) {
+        let ready_after = self.timeline;
         for (cell, pool) in self.cells.iter().zip(self.staging_pools.iter()) {
             if let Some(handle) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                pool.return_handle(handle);
+                pool.return_handle(handle, ready_after);
             }
         }
         for frame_mutex in &self.present_frames {
@@ -313,11 +333,13 @@ struct GrantInfo {
 
 /// Readable bytes for one `(grant × submission)` cell — returned by [`ReadGrant::consume`].
 ///
-/// Dropping the loan returns the staging buffer to the grant's reuse pool while the
-/// owning [`Scheme`] is alive; otherwise the buffer is freed immediately.
+/// Dropping the loan returns the staging buffer to the grant's reuse pool once its
+/// submission timeline has retired (see [`GrantStagingPool`]); otherwise the buffer
+/// is freed immediately when the owning [`Scheme`] is gone.
 pub struct Loan<T> {
     bytes: Vec<u8>,
     handle: BufferHandle,
+    ready_after: TimelineValue,
     return_pool: Arc<GrantStagingPool>,
     _marker: PhantomData<T>,
 }
@@ -341,7 +363,8 @@ impl<T> Deref for Loan<T> {
 
 impl<T> Drop for Loan<T> {
     fn drop(&mut self) {
-        self.return_pool.return_handle(self.handle);
+        self.return_pool
+            .return_handle(self.handle, self.ready_after);
     }
 }
 
@@ -416,6 +439,7 @@ impl<T> Grant for ReadGrant<T> {
         Ok(Loan {
             bytes,
             handle,
+            ready_after: submission.timeline_value(),
             return_pool: Arc::clone(&self.return_pool),
             _marker: PhantomData,
         })
