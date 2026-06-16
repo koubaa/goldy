@@ -1,4 +1,7 @@
 //! Scheme render-pass helpers for integration and screenshot tests.
+//!
+//! Included from multiple integration test binaries; not every entry point is used in each crate.
+#![allow(dead_code)]
 
 use goldy::{
     Context, Device, Grant, GrantTexture, Parcel, ReadGrant, RenderTarget, Scheme, Submission, TextureFlags,

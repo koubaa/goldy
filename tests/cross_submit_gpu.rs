@@ -38,6 +38,14 @@ void cs_main(BufRO<uint> buf, ThreadId id) {
 }
 "#;
 
+const OVERWRITE_SHADER: &str = r#"
+import goldy_exp;
+[goldy_compute][numthreads(1,1,1)]
+void cs_main(Scattered<uint> buf, ThreadId id) {
+    buf[id.x] = 42u;
+}
+"#;
+
 fn read_u32(grant: &ReadGrant<goldy::GrantBuffer>, submission: &Submission) -> u32 {
     let loan = grant.consume(submission).expect("grant");
     bytemuck::cast_slice::<u8, u32>(&loan)[0]
@@ -72,11 +80,11 @@ fn saxpy_style_chain_closed_form() {
 }
 
 #[test]
-fn war_reader_sees_old_values() {
+fn war_write_after_read_pipelined_overwrite() {
     let device = make_device();
     let ctx = submission_context(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
-    let write_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
+    let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
 
@@ -85,22 +93,23 @@ fn war_reader_sees_old_values() {
         .acquire_buffer_with_data(&[7u32; 1], BufferKind::Scattered)
         .expect("buf");
 
+    // Independent schemes, no CPU wait — writer must synchronize against the reader's epoch (WAR).
     let mut reader = Scheme::new(&ctx);
     reader
         .node("read", &read_pipe)
         .bind_parcel(&buf, NodeAccess::Read)
         .bind_views(&[buf.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
-    let grant = reader.grant_read(&buf).expect("grant");
-    let submission = reader.submit().expect("read");
+    reader.submit().expect("read");
 
     let mut writer = Scheme::new(&ctx);
     writer
         .node("write", &write_pipe)
-        .bind_parcel(&buf, NodeAccess::ReadWrite)
+        .bind_parcel(&buf, NodeAccess::Write)
         .bind_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
-    writer.submit().expect("write");
+    let grant = writer.grant_read(&buf).expect("grant");
+    let submission = writer.submit().expect("write");
 
-    assert_eq!(read_u32(&grant, &submission), 7);
+    assert_eq!(read_u32(&grant, &submission), 42);
 }

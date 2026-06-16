@@ -7,7 +7,7 @@ use super::pso_cache;
 use super::shader;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
-use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
+use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
 use anyhow::{Context, Result};
@@ -610,6 +610,32 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 // ---------------------------------------------------------------------------
 // Shared submit helpers
 // ---------------------------------------------------------------------------
+
+/// GPU-side queue waits on producer-context fences before executing consumer work.
+fn queue_wait_for_epochs(state: &Dx12State, consumer_device: DeviceHandle, sync: Option<&SubmitSync>) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.waits.is_empty() {
+        return Ok(());
+    }
+    let ld = state
+        .devices
+        .get(&consumer_device)
+        .context("queue_wait_for_epochs: invalid device")?;
+    for epoch in &s.waits {
+        let (_, producer_fence) = state
+            .context_fences
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
+        unsafe {
+            ld.command_queue
+                .Wait(producer_fence, epoch.value)
+                .context("cross-submit GPU queue Wait")?;
+        }
+    }
+    Ok(())
+}
 
 /// Acquire (or create) a compute allocator slot, reserving the next fence token.
 ///
@@ -1497,6 +1523,7 @@ fn execute_signal_and_finish(
     gpu_profile: Option<Dx12GpuProfileResources>,
     submit: SubmitFinish,
     staging_finish: StagingFinish,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let SubmitFinish {
         ctx,
@@ -1547,6 +1574,7 @@ fn execute_signal_and_finish(
         .clone();
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
+        queue_wait_for_epochs(state, device_handle, sync)?;
         unsafe { logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]) };
         unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
             .context("Failed to signal context fence")?;
@@ -1651,7 +1679,12 @@ fn execute_signal_and_finish(
 // ---------------------------------------------------------------------------
 
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
-pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<TimelineValue> {
+pub(super) fn submit(
+    state: &mut Dx12State,
+    ctx: ContextHandle,
+    commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
     let mut commands = commands.to_vec();
     crate::frame_table::lower_gpu_commands(&mut commands);
     let frame_table_staging = super::frame_table::extract_staging_from_commands(&commands);
@@ -1871,6 +1904,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
             belt_slices_len: belt_slices.len(),
             belt_idx: belt_idx_final,
         },
+        sync,
     )
 }
 
@@ -1888,6 +1922,7 @@ pub(super) fn submit_graph(
     ctx: ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let frame_table_staging = super::frame_table::extract_staging_from_graph(commands);
     let device_handle = state
@@ -2175,6 +2210,7 @@ pub(super) fn submit_graph(
             belt_slices_len: belt_slices.len(),
             belt_idx: belt_idx_final,
         },
+        sync,
     )?;
 
     for t in rendered_targets {
@@ -2195,6 +2231,7 @@ pub(super) fn try_resubmit_retained(
     state: &mut Dx12State,
     ctx: ContextHandle,
     key: u64,
+    sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
     let device_handle = state
         .contexts
@@ -2244,6 +2281,7 @@ pub(super) fn try_resubmit_retained(
     };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
+        queue_wait_for_epochs(state, device_handle, sync)?;
         unsafe {
             command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
         }

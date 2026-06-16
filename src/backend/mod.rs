@@ -484,25 +484,37 @@ impl SubmitSync {
         }
     }
 
-    /// True when the backend should emit the legacy blanket cross-submission acquire.
+    /// True when this submit should use the legacy blanket cross-submission acquire
+    /// instead of epoch-driven scoped barriers.
+    ///
+    /// Epoch-driven scheme/task-graph submits pass `Some(SubmitSync)` with a scoped
+    /// prologue and/or cross-context waits; they must not also emit the blanket acquire.
     pub fn use_legacy_acquire(&self) -> bool {
         false
     }
-}
 
-/// GPU queue-wait epochs before submit. Mock uses CPU `device_wait_until`; real backends
-/// should prefer native queue-waits and treat this as a fallback.
-pub(crate) fn apply_submit_sync_waits(
-    backend: &mut dyn GpuBackend,
-    device: DeviceHandle,
-    sync: Option<&SubmitSync>,
-) -> Result<()> {
-    if let Some(s) = sync {
-        for epoch in &s.waits {
-            backend.device_wait_until(device, epoch.value)?;
+    /// Whether `sync` selects the legacy blanket acquire path.
+    pub fn use_legacy_acquire_from(sync: Option<&SubmitSync>) -> bool {
+        match sync {
+            None => true,
+            Some(s) => s.use_legacy_acquire(),
         }
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod submit_sync_tests {
+    use super::SubmitSync;
+
+    #[test]
+    fn use_legacy_acquire_from_none_means_legacy() {
+        assert!(SubmitSync::use_legacy_acquire_from(None));
+    }
+
+    #[test]
+    fn use_legacy_acquire_from_some_means_scoped() {
+        assert!(!SubmitSync::use_legacy_acquire_from(Some(&SubmitSync::default())));
+    }
 }
 
 /// Prepend cross-submit prologue commands when executing a submit with sync info.
@@ -1058,7 +1070,8 @@ pub trait GpuBackend: Send + Sync {
     /// Submit compute (and transfer) commands on the context timeline, not tied to a surface frame.
     ///
     /// When `sync` is `Some`, the backend emits the scoped prologue barrier and GPU-side
-    /// queue-waits instead of the legacy blanket cross-submission acquire.
+    /// queue-waits instead of the legacy blanket cross-submission acquire
+    /// ([`SubmitSync::use_legacy_acquire_from`]).
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,

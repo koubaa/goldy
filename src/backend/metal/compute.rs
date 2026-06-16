@@ -1,7 +1,9 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle};
+use super::super::{
+    ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, GraphCommand, ShaderHandle, SubmitSync,
+};
 use super::staging::TextureStagingEntry;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
@@ -30,6 +32,29 @@ fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
                 | GpuCommand::ResourceBarrier { .. }
         )
     })
+}
+
+/// Encode GPU-side waits on producer-context shared events before consumer work.
+fn encode_wait_for_epochs(
+    state: &MetalState,
+    command_buffer: &mtl::CommandBufferRef,
+    sync: Option<&SubmitSync>,
+) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    for epoch in &s.waits {
+        let producer_event = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_event
+            .clone();
+        command_buffer.encode_wait_for_event(producer_event.as_ref(), epoch.value);
+    }
+    Ok(())
 }
 
 fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCategory) -> Option<u32> {
@@ -1019,7 +1044,12 @@ fn stage_uploads(
 }
 
 /// Submit compute commands without blocking. Returns the timeline value signaled when the work completes.
-pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<TimelineValue> {
+pub(super) fn submit(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit");
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
@@ -1065,6 +1095,7 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
         ld.command_queue.new_command_buffer().to_owned()
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
+    encode_wait_for_epochs(state, command_buffer_ref, sync)?;
 
     // Reclaim and pre-stage all uploads before recording.
     let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, commands)?;
@@ -1209,6 +1240,7 @@ pub(super) fn submit_graph(
     ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
     retain_key: Option<u64>,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit_graph");
     use super::super::GraphCommand;
@@ -1265,6 +1297,7 @@ pub(super) fn submit_graph(
         ld.command_queue.new_command_buffer().to_owned()
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
+    encode_wait_for_epochs(state, command_buffer_ref, sync)?;
 
     // Pre-pass: collect all compute commands across the entire graph into a flat
     // list, run the staging pre-pass once, then replay the graph using shared
@@ -1494,12 +1527,13 @@ pub(super) fn submit_graph_and_retain(
     ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
     key: u64,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     // Evict only the slot for this key; other schemes' retained graphs are unaffected.
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         sc_arc.lock().unwrap().retained_graphs.remove(&key);
     }
-    submit_graph(state, ctx, commands, Some(key)).inspect_err(|e| {
+    submit_graph(state, ctx, commands, Some(key), sync).inspect_err(|e| {
         tracing::error!(
             target: "goldy::diag::submit",
             ctx = ?ctx,
@@ -1514,6 +1548,7 @@ pub(super) fn try_resubmit_retained(
     state: &mut MetalState,
     ctx: ContextHandle,
     key: u64,
+    sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
     let commands = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
@@ -1522,7 +1557,7 @@ pub(super) fn try_resubmit_retained(
     let Some(commands) = commands else {
         return Ok(None);
     };
-    let tv = submit_graph(state, ctx, &commands, None)?;
+    let tv = submit_graph(state, ctx, &commands, None, sync)?;
     Ok(Some(tv))
 }
 

@@ -450,7 +450,7 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
     };
 
     if !pending.is_empty() {
-        return super::compute::submit(state, frame.context, &pending);
+        return super::compute::submit(state, frame.context, &pending, None);
     }
 
     let dev = state

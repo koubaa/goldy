@@ -722,13 +722,12 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     .expect("pipeline");
 
     let pixels = scheme_render_and_readback(&ctx, &target, &readback, "bindless_read", |pass| {
-        pass.bind_parcel_mut(&buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
-        pass.set_pipeline(&pipeline);
         pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
             parcel: &buffer,
             access: NodeAccess::ReadWrite,
         }]);
+        pass.set_pipeline(&pipeline);
         pass.draw(0..3, 0..1);
     });
 

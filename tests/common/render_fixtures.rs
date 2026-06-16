@@ -1,4 +1,7 @@
 //! Shared offscreen rendering helpers for FLIP screenshot tests and the `update-screenshots` tool.
+//!
+//! Included from multiple integration test binaries; not every entry point is used in each crate.
+#![allow(dead_code)]
 
 use goldy::{
     BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, DeviceDescriptor,

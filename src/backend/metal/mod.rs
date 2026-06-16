@@ -798,9 +798,7 @@ impl GpuBackend for MetalBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::submit(&mut self.state, ctx, commands)
+        compute::submit(&mut self.state, ctx, commands, sync)
     }
 
     fn submit_graph(
@@ -809,9 +807,7 @@ impl GpuBackend for MetalBackend {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::submit_graph(&mut self.state, ctx, commands, None)
+        compute::submit_graph(&mut self.state, ctx, commands, None, sync)
     }
 
     fn submit_graph_and_retain(
@@ -821,9 +817,7 @@ impl GpuBackend for MetalBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::submit_graph_and_retain(&mut self.state, ctx, commands, key)
+        compute::submit_graph_and_retain(&mut self.state, ctx, commands, key, sync)
     }
 
     fn try_resubmit_retained(
@@ -832,9 +826,7 @@ impl GpuBackend for MetalBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::try_resubmit_retained(&mut self.state, ctx, key)
+        compute::try_resubmit_retained(&mut self.state, ctx, key, sync)
     }
 
     fn retains_present_partitions(&self) -> bool {

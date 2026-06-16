@@ -546,7 +546,7 @@ pub(super) fn submit_frame(state: &mut MetalState, frame: &FrameToken) -> Result
     };
 
     if !pending.is_empty() {
-        return compute::submit(state, frame.context, &pending);
+        return compute::submit(state, frame.context, &pending, None);
     }
 
     let sc_arc = state.contexts.get(&frame.context).context("Invalid context handle")?;

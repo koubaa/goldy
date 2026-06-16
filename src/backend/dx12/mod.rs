@@ -996,9 +996,7 @@ impl GpuBackend for Dx12Backend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::submit(&mut self.state, ctx, commands)
+        compute::submit(&mut self.state, ctx, commands, sync)
     }
 
     fn submit_graph(
@@ -1007,9 +1005,7 @@ impl GpuBackend for Dx12Backend {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::submit_graph(&mut self.state, ctx, commands, None)
+        compute::submit_graph(&mut self.state, ctx, commands, None, sync)
     }
 
     fn submit_graph_and_retain(
@@ -1019,10 +1015,8 @@ impl GpuBackend for Dx12Backend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
         compute::evict_retained(&self.state, ctx, key);
-        compute::submit_graph(&mut self.state, ctx, commands, Some(key))
+        compute::submit_graph(&mut self.state, ctx, commands, Some(key), sync)
     }
 
     fn try_resubmit_retained(
@@ -1031,9 +1025,7 @@ impl GpuBackend for Dx12Backend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let device = self.context_device(ctx);
-        apply_submit_sync_waits(self, device, sync)?;
-        compute::try_resubmit_retained(&mut self.state, ctx, key)
+        compute::try_resubmit_retained(&mut self.state, ctx, key, sync)
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {

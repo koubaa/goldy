@@ -15,10 +15,6 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-fn legacy_cross_acquire(sync: Option<&SubmitSync>) -> bool {
-    sync.is_none()
-}
-
 fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Option<SlotKey> {
     use crate::types::ResourceCategory;
     match cat {
@@ -817,7 +813,7 @@ pub(super) fn submit(
         // Cross-submission acquire: make prior submit's writes visible to this
         // CB's reads. Same-queue execution ordering is guaranteed by Vulkan but
         // memory visibility is not. Skipped when epoch-driven scoped sync is active.
-        if legacy_cross_acquire(sync) {
+        if SubmitSync::use_legacy_acquire_from(sync) {
             unsafe {
                 let acquire = vk::MemoryBarrier2::default()
                     .src_stage_mask(
@@ -1761,7 +1757,7 @@ fn submit_graph_impl(
     // Cross-submission acquire: make prior submit's writes visible to this graph's
     // first reads. Render-only schemes (e.g. reading a buffer written by a prior
     // compute submit) need fragment/vertex stages here — not just compute.
-    if legacy_cross_acquire(sync) {
+    if SubmitSync::use_legacy_acquire_from(sync) {
         unsafe {
             let acquire = vk::MemoryBarrier2::default()
                 .src_stage_mask(

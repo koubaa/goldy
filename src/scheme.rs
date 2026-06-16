@@ -334,7 +334,7 @@ struct GrantInfo {
 /// Readable bytes for one `(grant × submission)` cell — returned by [`ReadGrant::consume`].
 ///
 /// Dropping the loan returns the staging buffer to the grant's reuse pool once its
-/// submission timeline has retired (see [`GrantStagingPool`]); otherwise the buffer
+/// submission timeline has retired; otherwise the buffer
 /// is freed immediately when the owning [`Scheme`] is gone.
 pub struct Loan<T> {
     bytes: Vec<u8>,
@@ -363,8 +363,7 @@ impl<T> Deref for Loan<T> {
 
 impl<T> Drop for Loan<T> {
     fn drop(&mut self) {
-        self.return_pool
-            .return_handle(self.handle, self.ready_after);
+        self.return_pool.return_handle(self.handle, self.ready_after);
     }
 }
 

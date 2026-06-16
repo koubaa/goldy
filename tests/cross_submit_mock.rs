@@ -114,7 +114,6 @@ fn ping_pong_buffers_emit_alternating_prologue() {
 fn upload_then_consumer_emits_raw_barrier() {
     let device = mock_device();
     let ctx = mock_ctx(&device);
-    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
@@ -232,6 +231,34 @@ fn same_context_raw_emits_barrier_not_wait() {
     let mut consumer = read_scheme(&ctx, &parcel, &read_pipe);
     consumer.submit().expect("same ctx");
     assert_eq!(barrier_buffers(&device).len(), 1);
+    assert!(recorded_waits(&device).iter().all(|w| w.is_empty()));
+}
+
+#[test]
+fn war_same_context_emits_barrier_on_write_after_read() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("read");
+
+    clear_mock(&device);
+    let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+    writer.submit().expect("write after read");
+    assert_eq!(
+        barrier_buffers(&device).len(),
+        1,
+        "WAR: writer after reader must emit a same-context prologue barrier"
+    );
     assert!(recorded_waits(&device).iter().all(|w| w.is_empty()));
 }
 

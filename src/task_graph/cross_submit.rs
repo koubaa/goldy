@@ -40,7 +40,7 @@ impl NetAccess {
         }
     }
 
-    fn to_consumer_dst(&self) -> SlotUsageSet {
+    fn to_consumer_dst(self) -> SlotUsageSet {
         let mut dst = SlotUsageSet::default();
         if self.reads {
             dst.merge(NodeAccess::Read, self.read_kinds | self.read_pipeline_kinds);
@@ -226,9 +226,8 @@ pub fn compute_cross_submit_sync(
         if access.reads {
             for (&ctx, &_tv) in &sync.last_write {
                 if ctx == submitting_ctx {
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&0b011),
-                    );
+                    let prev_write_kinds =
+                        UsageKindFlags::from_bits_truncate(*sync.last_write_kinds.get(&ctx).unwrap_or(&0b011));
                     let usage = BarrierUsage {
                         src: {
                             let mut s = SlotUsageSet::default();
@@ -252,9 +251,8 @@ pub fn compute_cross_submit_sync(
         if access.writes {
             for (&ctx, &tv) in &sync.last_write {
                 if ctx == submitting_ctx {
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&0b011),
-                    );
+                    let prev_write_kinds =
+                        UsageKindFlags::from_bits_truncate(*sync.last_write_kinds.get(&ctx).unwrap_or(&0b011));
                     let usage = BarrierUsage {
                         src: {
                             let mut s = SlotUsageSet::default();
@@ -403,12 +401,7 @@ mod tests {
         ledger
     }
 
-    fn ledger_with_write_kinds(
-        ctx: ContextHandle,
-        key: ResourceKey,
-        tv: u64,
-        kinds: UsageKindFlags,
-    ) -> LedgerSnapshot {
+    fn ledger_with_write_kinds(ctx: ContextHandle, key: ResourceKey, tv: u64, kinds: UsageKindFlags) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, tv, kinds.bits());
         let mut ledger = LedgerSnapshot::new();
@@ -517,10 +510,7 @@ mod tests {
 
         let sync = stamp.sync.lock().unwrap();
         assert_eq!(sync.last_write.get(&ctx), Some(&9));
-        assert_eq!(
-            sync.last_write_kinds.get(&ctx),
-            Some(&UsageKindFlags::TRANSFER.bits())
-        );
+        assert_eq!(sync.last_write_kinds.get(&ctx), Some(&UsageKindFlags::TRANSFER.bits()));
     }
 
     #[test]

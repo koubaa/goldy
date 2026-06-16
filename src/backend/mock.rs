@@ -261,11 +261,11 @@ impl MockBackend {
         self.context_state(ctx).signal_queue.push(signal);
     }
 
-    fn record_submit_sync(&mut self, device: DeviceHandle, sync: Option<&SubmitSync>) -> Result<()> {
+    fn record_submit_sync(&mut self, sync: Option<&SubmitSync>) -> Result<()> {
         if let Some(s) = sync {
             self.recorded_waits.push(s.waits.clone());
             for epoch in &s.waits {
-                self.device_wait_until(device, epoch.value)?;
+                self.wait_until(epoch.context, epoch.value)?;
             }
         } else {
             self.recorded_waits.push(Vec::new());
@@ -1383,7 +1383,7 @@ impl GpuBackend for MockBackend {
             anyhow::bail!("Invalid device handle");
         }
 
-        self.record_submit_sync(device, sync)?;
+        self.record_submit_sync(sync)?;
 
         let effective = super::commands_with_sync_prologue(commands, sync);
         self.recorded_compute_commands.push(effective.clone());
