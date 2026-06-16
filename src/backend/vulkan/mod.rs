@@ -291,7 +291,6 @@ impl VulkanBackend {
 // GpuBackend trait implementation - thin wrapper delegating to domain modules
 #[allow(clippy::manual_find)]
 impl GpuBackend for VulkanBackend {
-    #[cfg(test)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -1228,16 +1227,18 @@ impl GpuBackend for VulkanBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&self.state, ctx, commands)
+        compute::submit(&self.state, ctx, commands, sync)
     }
 
     fn submit_graph(
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&self.state, ctx, commands)
+        compute::submit_graph(&self.state, ctx, commands, sync)
     }
 
     fn submit_graph_and_retain(
@@ -1245,16 +1246,18 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph_and_retain(&self.state, ctx, commands, key)
+        compute::submit_graph_and_retain(&self.state, ctx, commands, key, sync)
     }
 
     fn try_resubmit_retained(
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        compute::try_resubmit_retained(&self.state, ctx, key)
+        compute::try_resubmit_retained(&self.state, ctx, key, sync)
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {

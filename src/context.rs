@@ -100,6 +100,12 @@ impl Context {
         self.inner.handle
     }
 
+    /// Test-only access to the backend context id.
+    #[doc(hidden)]
+    pub fn test_backend_handle(&self) -> ContextHandle {
+        self.backend_handle()
+    }
+
     /// Run `f` with exclusive access to this context's transient parcel pool.
     pub(crate) fn with_transient_pool<F, R>(&self, f: F) -> R
     where
@@ -376,10 +382,12 @@ impl Context {
 
     pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        let result = backend.try_resubmit_retained(self.inner.handle, key).map_err(|e| {
-            drop(backend);
-            self.classify(e)
-        })?;
+        let result = backend
+            .try_resubmit_retained(self.inner.handle, key, None)
+            .map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })?;
         if let Some(tv) = result {
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         }

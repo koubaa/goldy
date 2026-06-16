@@ -84,13 +84,15 @@
 //! full design rationale.
 
 pub(crate) mod analysis;
+pub(crate) mod cross_submit;
+pub(crate) use cross_submit::CrossSubmitSync;
 mod graph;
 mod ir;
 pub mod record;
 
 pub(crate) use graph::{apply_stamp_targets, IrSubmitState, ResolvedPresentSlot};
 pub use graph::{NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph};
-pub use ir::{BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+pub use ir::{BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
 

@@ -1234,7 +1234,7 @@ pub(super) fn submit_frame(
     };
 
     if !pending.is_empty() {
-        return super::compute::submit(state, frame.context, &pending);
+        return super::compute::submit(state, frame.context, &pending, None);
     }
 
     let ld = state.devices.get(&dh).context("Surface's device is invalid")?;

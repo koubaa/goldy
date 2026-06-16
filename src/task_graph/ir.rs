@@ -267,7 +267,7 @@ pub struct BarrierUsage {
 }
 
 /// Resources that need a barrier before a wave executes, with per-resource access semantics.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BarrierSet {
     pub buffers: Vec<(BufferHandle, BarrierUsage)>,
     pub textures: Vec<(TextureHandle, BarrierUsage)>,

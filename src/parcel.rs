@@ -10,7 +10,7 @@ use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
-use crate::timeline::{mark_reference, ReferenceTable, TimelineValue};
+use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue};
 use crate::types::{ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,16 +22,20 @@ pub struct MosaicSlot(pub u32);
 
 /// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
 pub(crate) struct ParcelStamp {
-    pub(crate) references: Arc<Mutex<ReferenceTable>>,
+    pub(crate) sync: Arc<Mutex<ResourceSync>>,
     pub(crate) home_device: Weak<DeviceInner>,
 }
 
 impl ParcelStamp {
     pub(crate) fn new(home_device: Weak<DeviceInner>) -> Self {
         Self {
-            references: Arc::new(Mutex::new(ReferenceTable::new())),
+            sync: Arc::new(Mutex::new(ResourceSync::default())),
             home_device,
         }
+    }
+
+    pub(crate) fn merged_references(&self) -> ReferenceTable {
+        self.sync.lock().unwrap().merged()
     }
 }
 
@@ -211,18 +215,17 @@ impl Parcel {
     ///
     /// Monotonic per context: only increases; a smaller epoch is ignored.
     pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        let mut table = self.stamp.references.lock().unwrap();
-        mark_reference(&mut table, ctx, epoch);
+        self.stamp.sync.lock().unwrap().record_any(ctx, epoch);
     }
 
     /// Context-qualified last-referencing timelines.
     pub fn last_referenced(&self) -> ReferenceTable {
-        self.stamp.references.lock().unwrap().clone()
+        self.stamp.merged_references()
     }
 
     /// Last referencing timeline for a single context, if any.
     pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
-        self.stamp.references.lock().unwrap().get(&ctx).copied()
+        self.stamp.merged_references().get(&ctx).copied()
     }
 
     /// True when no in-flight GPU work on `ctx` still references this parcel.
@@ -236,7 +239,7 @@ impl Parcel {
     /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
     pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
         Arc::new(ParcelStamp {
-            references: Arc::clone(&self.stamp.references),
+            sync: Arc::clone(&self.stamp.sync),
             home_device: self.stamp.home_device.clone(),
         })
     }

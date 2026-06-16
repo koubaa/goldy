@@ -463,6 +463,58 @@ impl TextureReadbackLayout {
     }
 }
 
+/// Cross-submission synchronization derived from the resource epoch ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubmitSync {
+    /// Same-context scoped memory barrier prepended before command execution.
+    pub prologue: crate::task_graph::BarrierSet,
+    /// Cross-context GPU queue-waits on producer timeline values.
+    pub waits: Vec<crate::timeline::Epoch>,
+}
+
+impl SubmitSync {
+    pub fn is_empty(&self) -> bool {
+        self.prologue.is_empty() && self.waits.is_empty()
+    }
+
+    pub fn from_cross_submit(cross: &crate::task_graph::CrossSubmitSync) -> Self {
+        Self {
+            prologue: cross.prologue.clone(),
+            waits: cross.waits.clone(),
+        }
+    }
+
+    /// True when the backend should emit the legacy blanket cross-submission acquire.
+    pub fn use_legacy_acquire(&self) -> bool {
+        false
+    }
+}
+
+/// GPU queue-wait epochs before submit. Mock uses CPU `device_wait_until`; real backends
+/// should prefer native queue-waits and treat this as a fallback.
+pub(crate) fn apply_submit_sync_waits(
+    backend: &mut dyn GpuBackend,
+    device: DeviceHandle,
+    sync: Option<&SubmitSync>,
+) -> Result<()> {
+    if let Some(s) = sync {
+        for epoch in &s.waits {
+            backend.device_wait_until(device, epoch.value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Prepend cross-submit prologue commands when executing a submit with sync info.
+pub(crate) fn commands_with_sync_prologue(commands: &[GpuCommand], sync: Option<&SubmitSync>) -> Vec<GpuCommand> {
+    if let Some(s) = sync {
+        if !s.prologue.is_empty() {
+            return crate::task_graph::cross_submit::prepend_prologue(commands, &s.prologue);
+        }
+    }
+    commands.to_vec()
+}
+
 /// GPU command recorded into a command buffer / task-graph submission.
 ///
 /// Includes compute dispatches, buffer upload/clear, texture uploads, and
@@ -617,9 +669,7 @@ pub type ComputeCommand = GpuCommand;
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 pub trait GpuBackend: Send + Sync {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
-    ///
-    /// Only available in `#[cfg(test)]` builds.  Implementations should return `self`.
-    #[cfg(test)]
+    #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Get the backend type.
@@ -1006,10 +1056,14 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<bool>;
 
     /// Submit compute (and transfer) commands on the context timeline, not tied to a surface frame.
+    ///
+    /// When `sync` is `Some`, the backend emits the scoped prologue barrier and GPU-side
+    /// queue-waits instead of the legacy blanket cross-submission acquire.
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue>;
 
     /// Submit an analyzed task graph with optional offscreen [`GraphCommand::Render`] segments.
@@ -1023,6 +1077,7 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let mut batch: Vec<GpuCommand> = Vec::new();
         let mut last_tv = self.gpu_progress(ctx);
@@ -1034,18 +1089,18 @@ pub trait GpuBackend: Send + Sync {
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
-                        last_tv = self.submit_standalone(ctx, &batch)?;
+                        last_tv = self.submit_standalone(ctx, &batch, sync)?;
                         self.wait_until(ctx, last_tv)?;
                         batch.clear();
                     }
                     let device = self.context_device(ctx);
                     self.render_to_target(device, *target, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[])?;
+                    last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }
         }
         if !batch.is_empty() {
-            last_tv = self.submit_standalone(ctx, &batch)?;
+            last_tv = self.submit_standalone(ctx, &batch, sync)?;
         }
         Ok(last_tv)
     }
@@ -1068,9 +1123,10 @@ pub trait GpuBackend: Send + Sync {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let _ = key;
-        self.submit_graph(ctx, commands)
+        self.submit_graph(ctx, commands, sync)
     }
 
     /// Re-execute a previously retained command list without re-recording.
@@ -1082,8 +1138,9 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let _ = (ctx, key);
+        let _ = (ctx, key, sync);
         Ok(None)
     }
 

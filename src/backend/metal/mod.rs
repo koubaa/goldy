@@ -173,7 +173,6 @@ impl Drop for MetalBackend {
 }
 
 impl GpuBackend for MetalBackend {
-    #[cfg(test)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -796,7 +795,10 @@ impl GpuBackend for MetalBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
+        let device = self.context_device(ctx);
+        apply_submit_sync_waits(self, device, sync)?;
         compute::submit(&mut self.state, ctx, commands)
     }
 
@@ -804,7 +806,10 @@ impl GpuBackend for MetalBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
+        let device = self.context_device(ctx);
+        apply_submit_sync_waits(self, device, sync)?;
         compute::submit_graph(&mut self.state, ctx, commands, None)
     }
 
@@ -813,7 +818,10 @@ impl GpuBackend for MetalBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
+        let device = self.context_device(ctx);
+        apply_submit_sync_waits(self, device, sync)?;
         compute::submit_graph_and_retain(&mut self.state, ctx, commands, key)
     }
 
@@ -821,7 +829,10 @@ impl GpuBackend for MetalBackend {
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
+        let device = self.context_device(ctx);
+        apply_submit_sync_waits(self, device, sync)?;
         compute::try_resubmit_retained(&mut self.state, ctx, key)
     }
 

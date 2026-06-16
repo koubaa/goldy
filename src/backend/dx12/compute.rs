@@ -132,7 +132,18 @@ fn collect_bindless_slots_from_graph_commands(
 ///
 /// Returns `D3D12_BARRIER_SYNC_ALL` if no kinds are recorded (empty set) so
 /// that the barrier is conservatively correct even without IR information.
-fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
+///
+/// When `for_buffer` is true, RENDER maps to `VERTEX_SHADING | PIXEL_SHADING`
+/// (shader stages that can read a buffer in a render pass) rather than the
+/// texture-only `RENDER_TARGET | DEPTH_STENCIL` stages.
+/// Lower Koubaa slot usage to a DX12 sync-stage mask for a **buffer** barrier.
+///
+/// `is_storage` is whether the buffer was created with
+/// `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. Non-storage (upload) buffers
+/// are never written by the GPU, so transfer/compute *writes* against them are
+/// nonsensical; we still clamp the access mask in
+/// [`slot_usage_to_dx12_access_for_buffer`] and keep the sync stages here valid.
+fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool) -> D3D12_BARRIER_SYNC {
     if usage.kinds.is_empty() {
         return D3D12_BARRIER_SYNC_ALL;
     }
@@ -141,10 +152,14 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
         sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        // A non-storage upload buffer can only ever be a copy *source*, but the
+        // sync stage (COPY) is identical either way.
+        let _ = is_storage;
         sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        sync.0 |= D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0;
+        // Buffer reads inside a render pass happen in vertex/pixel shader stages.
+        sync.0 |= D3D12_BARRIER_SYNC_VERTEX_SHADING.0 | D3D12_BARRIER_SYNC_PIXEL_SHADING.0;
     }
     sync
 }
@@ -158,31 +173,40 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
 /// descriptor.  A mismatch (e.g. `AccessAfter = SRV` when the shader reads
 /// via UAV) causes the driver to use the wrong cache coherence protocol,
 /// resulting in implicit full stalls on hardware.
-/// Lower Koubaa slot usage to DX12 access flags.
+/// Lower Koubaa slot usage to DX12 access flags for a **buffer** barrier.
 ///
-/// When `for_buffer` is true, read-only shader bindings omit UAV so barriers
-/// stay valid on non-UAV buffer resources.
-fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, for_buffer: bool) -> D3D12_BARRIER_ACCESS {
+/// `is_storage` reflects whether the resource was created with
+/// `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. The D3D12 debug layer rejects
+/// (ID 1332) any buffer barrier that names `UNORDERED_ACCESS` on a resource
+/// without that flag, and similarly `COPY_DEST` is invalid for an upload-heap
+/// buffer (which is read-only from the GPU's perspective). We therefore clamp
+/// the access mask for non-storage buffers to read-only accesses (SRV / copy
+/// source), which is the only thing the GPU can legally do to them.
+fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, is_storage: bool) -> D3D12_BARRIER_ACCESS {
     if usage.kinds.is_empty() {
         return D3D12_BARRIER_ACCESS_COMMON;
     }
     let mut access = D3D12_BARRIER_ACCESS(0);
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
-        if for_buffer && usage.access != NodeAccessUnion::Write {
-            access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
-        } else {
+        if is_storage && usage.access == NodeAccessUnion::Write {
             access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+        } else {
+            // Read-only compute binding, or a non-storage buffer that can only
+            // ever be bound as an SRV.
+            access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
         }
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
-        if usage.access == NodeAccessUnion::Write {
+        if usage.access == NodeAccessUnion::Write && is_storage {
             access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
         } else {
+            // Non-storage upload buffers can only ever be a copy source.
             access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0;
         }
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        access.0 |= D3D12_BARRIER_ACCESS_RENDER_TARGET.0 | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE.0;
+        // Buffer read by vertex/pixel shader inside a render pass → SHADER_RESOURCE.
+        access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
     }
     if access.0 == 0 {
         D3D12_BARRIER_ACCESS_COMMON
@@ -995,9 +1019,12 @@ fn record_gpu_command(
             // which is correct (just less precise).
             let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = Vec::new();
             if ctx.use_global_buffer_barriers {
-                for (_, usage) in buf_entries {
-                    let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, true);
-                    let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, true);
+                for (h, usage) in buf_entries {
+                    // Clamp access against the resource's real capabilities: a
+                    // non-storage (upload) buffer can never carry UAV/COPY_DEST.
+                    let is_storage = state.buffers.get(h).map(|bs| bs.is_storage).unwrap_or(false);
+                    let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, is_storage);
+                    let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, is_storage);
                     // WARP validation (ID 1331): global barriers with AccessBefore=COMMON
                     // must use AccessAfter=COMMON. Empty producer usage sets COMMON; clamp
                     // rather than emitting UAV/SRV which fails Close() on the debug layer.
@@ -1005,8 +1032,8 @@ fn record_gpu_command(
                         access_after = D3D12_BARRIER_ACCESS_COMMON;
                     }
                     let g = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: slot_usage_to_dx12_sync(&usage.src),
-                        SyncAfter: slot_usage_to_dx12_sync(&usage.dst),
+                        SyncBefore: slot_usage_to_dx12_sync(&usage.src, is_storage),
+                        SyncAfter: slot_usage_to_dx12_sync(&usage.dst, is_storage),
                         AccessBefore: access_before,
                         AccessAfter: access_after,
                     };
@@ -1019,10 +1046,10 @@ fn record_gpu_command(
                         state.buffers.get(h).map(|bs| {
                             barriers::buffer_barrier_full(
                                 &bs.resource,
-                                slot_usage_to_dx12_sync(&usage.src),
-                                slot_usage_to_dx12_sync(&usage.dst),
-                                slot_usage_to_dx12_access_for_buffer(&usage.src, true),
-                                slot_usage_to_dx12_access_for_buffer(&usage.dst, true),
+                                slot_usage_to_dx12_sync(&usage.src, bs.is_storage),
+                                slot_usage_to_dx12_sync(&usage.dst, bs.is_storage),
+                                slot_usage_to_dx12_access_for_buffer(&usage.src, bs.is_storage),
+                                slot_usage_to_dx12_access_for_buffer(&usage.dst, bs.is_storage),
                             )
                         })
                     })
@@ -2361,4 +2388,148 @@ pub(super) fn wait_fence_timeout(
 ) -> Result<bool> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     super::utils::wait_for_fence_timeout(&logical_device.fence, token, timeout_ms)
+}
+
+#[cfg(test)]
+mod barrier_lowering_tests {
+    use super::*;
+    use crate::task_graph::NodeAccess;
+
+    fn slot(access: NodeAccess, kinds: UsageKindFlags) -> SlotUsageSet {
+        let mut s = SlotUsageSet::default();
+        s.merge(access, kinds);
+        s
+    }
+
+    fn has(mask: D3D12_BARRIER_ACCESS, bit: D3D12_BARRIER_ACCESS) -> bool {
+        mask.0 & bit.0 != 0
+    }
+
+    // --- The regression that crashed goldy-doom (ID 1332) -------------------
+
+    /// A non-storage (upload/uniform) buffer must NEVER carry UAV or COPY_DEST
+    /// access bits — the D3D12 debug layer rejects (ID 1332) such barriers and
+    /// `Close()` fails. This is the exact case that only Doom exercised.
+    #[test]
+    fn non_storage_buffer_never_emits_uav_or_copy_dest() {
+        // Compute write recorded against a non-storage buffer (e.g. a uniform
+        // buffer conservatively stamped as written by parcel `record_any`).
+        let compute_write = slot(NodeAccess::Write, UsageKindFlags::COMPUTE);
+        let access = slot_usage_to_dx12_access_for_buffer(&compute_write, /*is_storage=*/ false);
+        assert!(
+            !has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS),
+            "non-storage buffer must not get UNORDERED_ACCESS"
+        );
+
+        // Transfer write against a non-storage buffer must not be COPY_DEST.
+        let transfer_write = slot(NodeAccess::Write, UsageKindFlags::TRANSFER);
+        let access = slot_usage_to_dx12_access_for_buffer(&transfer_write, false);
+        assert!(
+            !has(access, D3D12_BARRIER_ACCESS_COPY_DEST),
+            "non-storage buffer must not get COPY_DEST"
+        );
+
+        // The combined producer set that doom actually generated.
+        let mut combined = SlotUsageSet::default();
+        combined.merge(NodeAccess::Write, UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER);
+        let access = slot_usage_to_dx12_access_for_buffer(&combined, false);
+        assert!(!has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_COPY_DEST));
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+        assert!(has(access, D3D12_BARRIER_ACCESS_COPY_SOURCE));
+    }
+
+    /// A storage buffer with an actual compute write still gets UAV — clamping
+    /// must not regress the legitimate case the tests already covered.
+    #[test]
+    fn storage_buffer_compute_write_keeps_uav() {
+        let compute_write = slot(NodeAccess::Write, UsageKindFlags::COMPUTE);
+        let access = slot_usage_to_dx12_access_for_buffer(&compute_write, /*is_storage=*/ true);
+        assert!(has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS));
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+    }
+
+    /// A read-only compute binding never needs UAV, even on a storage buffer.
+    #[test]
+    fn storage_buffer_compute_read_is_srv_only() {
+        let compute_read = slot(NodeAccess::Read, UsageKindFlags::COMPUTE);
+        let access = slot_usage_to_dx12_access_for_buffer(&compute_read, true);
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS));
+    }
+
+    /// Storage transfer write -> COPY_DEST; storage transfer read -> COPY_SOURCE.
+    #[test]
+    fn storage_buffer_transfer_direction() {
+        let w = slot(NodeAccess::Write, UsageKindFlags::TRANSFER);
+        assert!(has(
+            slot_usage_to_dx12_access_for_buffer(&w, true),
+            D3D12_BARRIER_ACCESS_COPY_DEST
+        ));
+        let r = slot(NodeAccess::Read, UsageKindFlags::TRANSFER);
+        assert!(has(
+            slot_usage_to_dx12_access_for_buffer(&r, true),
+            D3D12_BARRIER_ACCESS_COPY_SOURCE
+        ));
+    }
+
+    /// Render-pass buffer read maps to SHADER_RESOURCE (vertex/pixel), never an
+    /// attachment access (which is illegal on a buffer barrier — ID 1332).
+    #[test]
+    fn render_buffer_read_is_shader_resource() {
+        let render_read = slot(NodeAccess::Read, UsageKindFlags::RENDER);
+        let access = slot_usage_to_dx12_access_for_buffer(&render_read, false);
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_RENDER_TARGET));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE));
+    }
+
+    /// Empty usage -> COMMON (caller treats this specially for WARP global barriers).
+    #[test]
+    fn empty_usage_is_common() {
+        let empty = SlotUsageSet::default();
+        assert_eq!(
+            slot_usage_to_dx12_access_for_buffer(&empty, false).0,
+            D3D12_BARRIER_ACCESS_COMMON.0
+        );
+        assert_eq!(slot_usage_to_dx12_sync(&empty, false).0, D3D12_BARRIER_SYNC_ALL.0);
+    }
+
+    // --- Sync-stage / access pairing invariant (ID 1331 / barriers.rs assert) ---
+
+    /// Every non-empty render buffer usage must produce a non-zero sync stage so
+    /// it never pairs SYNC_NONE with a non-NO_ACCESS access (the panic that hit
+    /// scheme_game_of_life_update_100).
+    #[test]
+    fn render_buffer_sync_is_non_zero() {
+        let render_read = slot(NodeAccess::Read, UsageKindFlags::RENDER);
+        let sync = slot_usage_to_dx12_sync(&render_read, false);
+        assert_ne!(sync.0, 0, "render buffer usage must have a valid sync stage");
+        assert!(sync.0 & D3D12_BARRIER_SYNC_VERTEX_SHADING.0 != 0);
+        assert!(sync.0 & D3D12_BARRIER_SYNC_PIXEL_SHADING.0 != 0);
+    }
+
+    /// Any non-empty usage that lowers to a non-COMMON access must also lower to
+    /// a non-zero sync stage (mirrors the D3D12 SyncNone/AccessNoAccess pairing rule).
+    #[test]
+    fn nonempty_usage_has_paired_sync_and_access() {
+        let cases = [
+            slot(NodeAccess::Write, UsageKindFlags::COMPUTE),
+            slot(NodeAccess::Read, UsageKindFlags::COMPUTE),
+            slot(NodeAccess::Write, UsageKindFlags::TRANSFER),
+            slot(NodeAccess::Read, UsageKindFlags::TRANSFER),
+            slot(NodeAccess::Read, UsageKindFlags::RENDER),
+        ];
+        for (storage, set) in cases.iter().flat_map(|s| [(true, s), (false, s)]) {
+            let access = slot_usage_to_dx12_access_for_buffer(set, storage);
+            let sync = slot_usage_to_dx12_sync(set, storage);
+            if access.0 != D3D12_BARRIER_ACCESS_COMMON.0 {
+                assert_ne!(
+                    sync.0, 0,
+                    "non-COMMON access {:#x} (storage={storage}) must have a sync stage",
+                    access.0
+                );
+            }
+        }
+    }
 }

@@ -262,13 +262,13 @@ impl Surface {
                     resolver.as_ref(),
                 );
                 if !early_g.is_empty() {
-                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                    backend.submit_graph(self.ctx_handle, &early_g, None)?;
                 }
             } else {
                 let early_cmds =
                     crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
                 if !early_cmds.is_empty() {
-                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                    backend.submit_standalone(self.ctx_handle, &early_cmds, None)?;
                 }
             }
         }
@@ -372,7 +372,7 @@ impl Surface {
                     Some(&full_resolver),
                 );
                 if !early_g.is_empty() {
-                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                    backend.submit_graph(self.ctx_handle, &early_g, None)?;
                 }
             } else {
                 let early_cmds =

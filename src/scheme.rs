@@ -673,8 +673,6 @@ impl Scheme {
             }
         };
 
-        self.submit_state
-            .apply_reference_stamps(self.ctx.backend_handle(), &self.ctx.device().inner, tv);
         self.ctx.advance_high_water_timeline(tv);
 
         self.dirty = false;
@@ -782,7 +780,7 @@ impl Scheme {
         let tv_copy = {
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
             backend
-                .submit_standalone(self.ctx.backend_handle(), &copy_cmds)
+                .submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
                 .map_err(|e| self.ctx.classify(e))?
         };
         self.ctx.advance_high_water_timeline(tv_copy);
@@ -1393,7 +1391,7 @@ pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, offset: u64, data: &[u8])
     let tv = {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         backend
-            .submit_standalone(ctx.backend_handle(), &[cmd])
+            .submit_standalone(ctx.backend_handle(), &[cmd], None)
             .map_err(|e| ctx.classify(e))?
     };
     ctx.advance_high_water_timeline(tv);

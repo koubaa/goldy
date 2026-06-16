@@ -50,8 +50,10 @@ pub struct MockBackend {
     pub textures_created: usize,
     /// Count of samplers created
     pub samplers_created: usize,
-    /// Count of compute dispatches performed
+    /// Count of compute/graph submits performed
     pub compute_dispatch_count: usize,
+    /// Cross-context epoch waits recorded per standalone/graph submit (mock tests).
+    pub recorded_waits: Vec<Vec<crate::timeline::Epoch>>,
     /// Retained command lists keyed by `(ctx, retention_key)`.
     retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     /// Count of zero-record resubmits served from `retained_graphs`.
@@ -202,6 +204,7 @@ impl MockBackend {
             textures_created: 0,
             samplers_created: 0,
             compute_dispatch_count: 0,
+            recorded_waits: Vec::new(),
             retained_graphs: HashMap::new(),
             retained_resubmit_count: 0,
             wait_until_count: 0,
@@ -258,6 +261,18 @@ impl MockBackend {
         self.context_state(ctx).signal_queue.push(signal);
     }
 
+    fn record_submit_sync(&mut self, device: DeviceHandle, sync: Option<&SubmitSync>) -> Result<()> {
+        if let Some(s) = sync {
+            self.recorded_waits.push(s.waits.clone());
+            for epoch in &s.waits {
+                self.device_wait_until(device, epoch.value)?;
+            }
+        } else {
+            self.recorded_waits.push(Vec::new());
+        }
+        Ok(())
+    }
+
     /// Set the default surface format for testing different GPU preferences.
     ///
     /// Use this to verify that your code correctly uses `Surface::format()`
@@ -282,6 +297,7 @@ impl MockBackend {
         self.textures_created = 0;
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
+        self.recorded_waits.clear();
         self.wait_until_count = 0;
         self.buffer_view_create_count = 0;
     }
@@ -344,7 +360,6 @@ impl Default for MockBackend {
 }
 
 impl GpuBackend for MockBackend {
-    #[cfg(test)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -1359,16 +1374,20 @@ impl GpuBackend for MockBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&super::SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let device = self.context_device(ctx);
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
 
-        self.recorded_compute_commands.push(commands.to_vec());
+        self.record_submit_sync(device, sync)?;
+
+        let effective = super::commands_with_sync_prologue(commands, sync);
+        self.recorded_compute_commands.push(effective.clone());
         self.compute_dispatch_count += 1;
 
-        for cmd in commands {
+        for cmd in &effective {
             match cmd {
                 GpuCommand::CopyBuffer { src, dst, size } => {
                     self.execute_copy_buffer(*src, *dst, *size)?;
@@ -1398,6 +1417,7 @@ impl GpuBackend for MockBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&super::SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let device = self.context_device(ctx);
         if !self.devices.contains_key(&device) {
@@ -1405,7 +1425,8 @@ impl GpuBackend for MockBackend {
         }
 
         let mut batch: Vec<GpuCommand> = Vec::new();
-        let mut last_tv = self.gpu_progress(ctx);
+        let mut last_tv;
+        last_tv = self.gpu_progress(ctx);
         for cmd in commands {
             match cmd {
                 GraphCommand::Compute(c) => batch.push(c.clone()),
@@ -1414,16 +1435,19 @@ impl GpuBackend for MockBackend {
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
-                        self.submit_standalone(ctx, &batch)?;
+                        #[allow(unused_assignments)]
+                        {
+                            last_tv = self.submit_standalone(ctx, &batch, sync)?;
+                        }
                         batch.clear();
                     }
                     self.render_to_target(device, *target, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[])?;
+                    last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }
         }
         if !batch.is_empty() {
-            last_tv = self.submit_standalone(ctx, &batch)?;
+            last_tv = self.submit_standalone(ctx, &batch, sync)?;
         }
         Ok(last_tv)
     }
@@ -1433,23 +1457,23 @@ impl GpuBackend for MockBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&super::SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        // Per-slice retention: each key is an independent retained entry.
-        // Overwrite any prior entry for the same (ctx, key) but leave other entries intact.
         self.retained_graphs.insert((ctx, key), commands.to_vec());
-        self.submit_graph(ctx, commands)
+        self.submit_graph(ctx, commands, sync)
     }
 
     fn try_resubmit_retained(
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&super::SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
         let Some(commands) = self.retained_graphs.get(&(ctx, key)).cloned() else {
             return Ok(None);
         };
         self.retained_resubmit_count += 1;
-        self.submit_graph(ctx, &commands).map(Some)
+        self.submit_graph(ctx, &commands, sync).map(Some)
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
@@ -2106,7 +2130,7 @@ mod tests {
         ];
 
         let ctx = backend.create_context(device).unwrap();
-        let tv = backend.submit_standalone(ctx, &commands).unwrap();
+        let tv = backend.submit_standalone(ctx, &commands, None).unwrap();
         backend.wait_until(ctx, tv).unwrap();
 
         assert_eq!(backend.recorded_compute_commands.len(), 1);
@@ -2151,7 +2175,7 @@ mod tests {
 
         assert_eq!(backend.wait_until_count, 0);
         let ctx = backend.create_context(device).unwrap();
-        backend.submit_graph(ctx, &commands).unwrap();
+        backend.submit_graph(ctx, &commands, None).unwrap();
         assert_eq!(
             backend.wait_until_count, 0,
             "submit_graph should not call wait_until (no CPU waits)"

@@ -117,3 +117,19 @@ mod boundary_reclamation;
 
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub use backend::dx12::WARP_ADAPTER_ID;
+
+/// Mock-backend helpers for integration tests (`tests/cross_submit_mock.rs`, etc.).
+#[doc(hidden)]
+pub mod test_support {
+    use crate::backend::mock::MockBackend;
+    use crate::Device;
+    use std::sync::Arc;
+
+    pub fn mock_device() -> Arc<Device> {
+        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    pub fn with_mock<R>(device: &Device, f: impl FnOnce(&mut MockBackend) -> R) -> R {
+        device.with_mock_backend(f)
+    }
+}

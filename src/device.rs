@@ -1003,7 +1003,7 @@ impl Device {
     }
 
     /// Create a device from a backend for testing purposes.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub(crate) fn from_backend(backend: Box<dyn GpuBackend>) -> anyhow::Result<Self> {
         let backend = Arc::new(Mutex::new(backend));
         let adapter_info = {
@@ -1044,17 +1044,23 @@ impl Device {
         })
     }
 
+    #[doc(hidden)]
+    pub fn with_mock_backend<R>(&self, f: impl FnOnce(&mut crate::backend::mock::MockBackend) -> R) -> R {
+        let mut guard = self.inner.backend.lock().unwrap();
+        let mock = guard
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<crate::backend::mock::MockBackend>()
+            .expect("Device::with_mock_backend: backend is not MockBackend");
+        f(mock)
+    }
+
     /// Access the inner [`MockBackend`] for test introspection.
     ///
     /// Panics if the device was not created with `Device::from_backend(Box::new(MockBackend::new()))`.
     #[cfg(test)]
     pub(crate) fn with_mock<R>(&self, f: impl FnOnce(&mut crate::backend::mock::MockBackend) -> R) -> R {
-        let mut guard = self.inner.backend.lock().unwrap();
-        let mock = guard
-            .as_any_mut()
-            .downcast_mut::<crate::backend::mock::MockBackend>()
-            .expect("Device::with_mock: backend is not MockBackend");
-        f(mock)
+        self.with_mock_backend(f)
     }
 }
 

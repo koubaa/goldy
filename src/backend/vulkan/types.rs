@@ -706,6 +706,9 @@ pub(crate) struct RetainedVkCb {
     pub used_slots: Vec<SlotKey>,
     /// Frame-table staging row pinned while this CB may re-copy from upload staging.
     pub frame_table_row: Option<u32>,
+    /// Timeline value signalled by the most recent submission of this CB.
+    /// Used to defer free-listing until the GPU has retired the CB.
+    pub last_signal_value: u64,
 }
 
 impl LogicalDevice {
