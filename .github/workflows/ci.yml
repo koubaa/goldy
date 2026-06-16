@@ -189,23 +189,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-metal-
 
-      # Parallel libtest threads in one process can intermittently SIGSEGV on Metal
-      # (e.g. scheme_render_integration). cargo nextest with --test-threads=1 runs
-      # one integration test worker at a time, matching the DX12 CI workaround.
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - name: Run all tests
+        env:
+          # Point to downloaded Slang library
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          # DYLD_LIBRARY_PATH for macOS dynamic library loading
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test
 
-      - name: Run tests (Metal)
+      - name: Run integration tests
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-        run: cargo nextest run --test-threads=1
+        run: cargo test --test '*'
 
-      - name: Run goldy-ffi integration tests (Metal)
+      - name: Run goldy-ffi integration tests
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-        run: cargo nextest run -p goldy-ffi --test-threads=1
+        run: cargo test -p goldy-ffi
 
   # Build documentation
   docs:
