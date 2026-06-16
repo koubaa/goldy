@@ -22,8 +22,8 @@ mod submission;
 use goldy::{
     types::{BufferFlags, ResourceAccess},
     write_to_parcel, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance,
-    NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
-    TextureFlags, TextureFormat, TextureKind,
+    NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags,
+    TextureFormat, TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;

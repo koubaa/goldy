@@ -8,8 +8,8 @@ mod submission;
 
 use goldy::{
     types::ResourceAccess, write_to_parcel, BackendType, BufferKind, ComputePipeline, Context, Device,
-    DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool,
-    Scheme, ShaderModule, Submission,
+    DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, Submission,
 };
 use std::sync::Arc;
 use submission::submission_context;

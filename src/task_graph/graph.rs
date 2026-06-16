@@ -234,25 +234,32 @@ fn backend_submit_standalone(
     backend.submit_standalone(ctx, &cmds, waits_only.as_ref())
 }
 
-/// Emit a dynamic cross-submit prologue outside a retained command buffer body.
-fn backend_submit_dynamic_prologue(
-    backend: &mut dyn GpuBackend,
-    ctx: crate::backend::ContextHandle,
+/// Fold a same-context cross-submit prologue into the graph command list.
+///
+/// Barrier-only standalone submits trigger D3D12 warning 1356; the prologue belongs
+/// in the graph body. On the retained path the topology dirty bit forces re-record
+/// before any topology-driven prologue change, so the baked barrier stays current.
+fn graph_commands_with_sync_prologue<'a>(
+    commands: &'a [crate::backend::GraphCommand],
     sync: Option<&SubmitSync>,
-) -> Result<()> {
-    let Some(s) = sync else {
-        return Ok(());
-    };
-    if s.prologue.is_empty() {
-        return Ok(());
+) -> std::borrow::Cow<'a, [crate::backend::GraphCommand]> {
+    if let Some(s) = sync {
+        if !s.prologue.is_empty() {
+            let barrier = crate::backend::GpuCommand::ResourceBarrier {
+                buffers: s.prologue.buffers.clone(),
+                textures: s.prologue.textures.clone(),
+            };
+            let mut v = Vec::with_capacity(1 + commands.len());
+            v.push(crate::backend::GraphCommand::Compute(barrier));
+            v.extend_from_slice(commands);
+            return std::borrow::Cow::Owned(v);
+        }
     }
-    let cmds = prepend_prologue(&[], &s.prologue);
-    backend.submit_standalone(ctx, &cmds, None)?;
-    Ok(())
+    std::borrow::Cow::Borrowed(commands)
 }
 
-fn sync_waits_only(sync: Option<&SubmitSync>) -> Option<SubmitSync> {
-    sync.filter(|s| !s.waits.is_empty()).map(|s| SubmitSync {
+fn submit_sync_waits_only(sync: Option<&SubmitSync>) -> Option<SubmitSync> {
+    sync.map(|s| SubmitSync {
         prologue: Default::default(),
         waits: s.waits.clone(),
     })
@@ -264,32 +271,11 @@ fn backend_submit_graph(
     commands: &[crate::backend::GraphCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    // Fold the prologue barrier into the first graph command rather than
-    // submitting a barrier-only command list (which triggers D3D12 warning 1356
-    // and is semantically wrong on all backends).
-    let mut prepended: Option<Vec<crate::backend::GraphCommand>> = None;
-    if let Some(s) = sync {
-        if !s.prologue.is_empty() {
-            let barrier = crate::backend::GpuCommand::ResourceBarrier {
-                buffers: s.prologue.buffers.clone(),
-                textures: s.prologue.textures.clone(),
-            };
-            let mut v = Vec::with_capacity(1 + commands.len());
-            v.push(crate::backend::GraphCommand::Compute(barrier));
-            v.extend_from_slice(commands);
-            prepended = Some(v);
-        }
-    }
-    let effective = prepended.as_deref().unwrap_or(commands);
+    let effective = graph_commands_with_sync_prologue(commands, sync);
     // Mirror the standalone path: pass Some whenever sync is Some so the backend
     // knows to suppress its legacy blanket-acquire barrier even when there are no
-    // cross-context waits.  sync_waits_only would return None for same-context-only
-    // hazards, leaving the render-pass path asymmetric with backend_submit_standalone.
-    let waits_only = sync.map(|s| SubmitSync {
-        prologue: Default::default(),
-        waits: s.waits.clone(),
-    });
-    backend.submit_graph(ctx, effective, waits_only.as_ref())
+    // cross-context waits.
+    backend.submit_graph(ctx, &effective, submit_sync_waits_only(sync).as_ref())
 }
 
 fn backend_submit_graph_and_retain(
@@ -299,14 +285,8 @@ fn backend_submit_graph_and_retain(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    backend_submit_dynamic_prologue(backend, ctx, sync)?;
-    // Same asymmetry fix as backend_submit_graph: preserve Some so the backend
-    // suppresses its legacy blanket-acquire barrier when sync is active.
-    let waits_only = sync.map(|s| SubmitSync {
-        prologue: Default::default(),
-        waits: s.waits.clone(),
-    });
-    backend.submit_graph_and_retain(ctx, commands, key, waits_only.as_ref())
+    let effective = graph_commands_with_sync_prologue(commands, sync);
+    backend.submit_graph_and_retain(ctx, &effective, key, submit_sync_waits_only(sync).as_ref())
 }
 
 fn backend_try_resubmit_retained(
@@ -315,9 +295,8 @@ fn backend_try_resubmit_retained(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
-    backend_submit_dynamic_prologue(backend, ctx, sync)?;
-    let waits_only = sync_waits_only(sync);
-    backend.try_resubmit_retained(ctx, key, waits_only.as_ref())
+    // Prologue is baked into the retained body; only cross-context waits are live.
+    backend.try_resubmit_retained(ctx, key, submit_sync_waits_only(sync).as_ref())
 }
 
 // ---- Free functions over GraphIR -------------------------------------------

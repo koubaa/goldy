@@ -271,7 +271,12 @@ pub(super) fn write(
         },
     )?;
 
-    tracing::debug!("Wrote {}x{} texture data ({} bytes, sync blit upload)", width, height, data.len());
+    tracing::debug!(
+        "Wrote {}x{} texture data ({} bytes, sync blit upload)",
+        width,
+        height,
+        data.len()
+    );
     Ok(())
 }
 

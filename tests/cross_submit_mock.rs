@@ -5,8 +5,8 @@ use goldy::task_graph::BarrierUsage;
 use goldy::test_support::{mock_device, with_mock};
 use goldy::types::ResourceAccess;
 use goldy::{
-    BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RetainedPool, Scheme, ShaderModule, TextureFormat,
+    BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RenderTarget,
+    RetainedPool, Scheme, ShaderModule, TextureFormat,
 };
 
 fn mock_ctx(device: &Device) -> Context {
@@ -40,6 +40,14 @@ fn barrier_buffers(device: &Device) -> Vec<(u64, BarrierUsage)> {
 
 fn retained_resubmits(device: &Device) -> usize {
     with_mock(device, |m| m.retained_resubmit_count)
+}
+
+fn compute_submits(device: &Device) -> usize {
+    with_mock(device, |m| m.compute_dispatch_count)
+}
+
+fn all_graph_syncs_some(device: &Device) -> bool {
+    with_mock(device, |m| m.recorded_graph_syncs.iter().all(|&s| s))
 }
 
 const WRITE_SHADER: &str = r#"
@@ -139,7 +147,7 @@ fn upload_then_consumer_emits_raw_barrier() {
 }
 
 #[test]
-fn retention_resubmit_preserves_hits_and_dynamic_prologue() {
+fn retention_resubmit_bakes_prologue_no_extra_standalone_cb() {
     let device = mock_device();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
@@ -157,16 +165,25 @@ fn retention_resubmit_preserves_hits_and_dynamic_prologue() {
     clear_mock(&device);
     let mut touch = write_scheme(&ctx, &parcel, &write_pipe);
     touch.submit().expect("touch ledger");
-    assert_eq!(barrier_buffers(&device).len(), 1, "dynamic prologue on hazard");
+    assert_eq!(barrier_buffers(&device).len(), 1, "foreign writer emits hazard barrier");
 
     clear_mock(&device);
     for _ in 0..3 {
         worker.submit().expect("resubmit");
     }
-    // Foreign touch changes shared-parcel topology: first worker resubmit re-records the
-    // prologue, then subsequent submits are retention hits.
+    // Foreign touch dirties topology: first resubmit re-records (baked prologue), then retention hits.
     assert_eq!(retained_resubmits(&device), 2);
     assert_eq!(worker.replay_stats().topology_records, 1);
+    // No barrier-only standalone CB on retained resubmits — one graph submit per resubmit.
+    assert_eq!(
+        compute_submits(&device),
+        3,
+        "retained path must not emit an extra standalone prologue CB per resubmit"
+    );
+    assert!(
+        all_graph_syncs_some(&device),
+        "all retained-path graph submits must suppress the legacy blanket acquire"
+    );
 }
 
 #[test]
@@ -331,8 +348,7 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     let frag_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("frag");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write_pipe");
     let render_pipe =
-        RenderPipeline::new(&device, &vert_shader, &frag_shader, &RenderPipelineDesc::default())
-            .expect("render_pipe");
+        RenderPipeline::new(&device, &vert_shader, &frag_shader, &RenderPipelineDesc::default()).expect("render_pipe");
     let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("rt");
 
     let mut pool = RetainedPool::new(device.clone());
@@ -526,6 +542,15 @@ fn topology_dirty_clears_after_rerecord() {
     reader.submit().expect("reader resubmit");
     assert_eq!(retained_resubmits(&device), 1);
     assert_eq!(reader.replay_stats().records, 2);
+    assert_eq!(
+        compute_submits(&device),
+        1,
+        "retained resubmit must not emit a standalone prologue CB"
+    );
+    assert!(
+        all_graph_syncs_some(&device),
+        "retained resubmit must pass sync=Some to suppress legacy acquire"
+    );
 }
 
 #[test]

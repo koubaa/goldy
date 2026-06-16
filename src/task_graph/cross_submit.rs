@@ -493,14 +493,7 @@ pub(crate) fn reregister_scheme_topology(
     dirty_flag: &Arc<AtomicBool>,
 ) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
     let previous_self_edges = clear_scheme_topology_registration(scheme_id, prev_parcels);
-    update_scheme_topology(
-        net,
-        resource_stamps,
-        scheme_id,
-        ctx,
-        dirty_flag,
-        &previous_self_edges,
-    );
+    update_scheme_topology(net, resource_stamps, scheme_id, ctx, dirty_flag, &previous_self_edges);
     topology_parcels_from_net(net, resource_stamps)
 }
 
