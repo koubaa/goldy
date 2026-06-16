@@ -15,6 +15,33 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+/// Build GPU-side timeline-semaphore waits for cross-context [`SubmitSync::waits`].
+fn build_cross_submit_wait_infos(
+    state: &super::types::VulkanState,
+    sync: Option<&SubmitSync>,
+) -> Result<Vec<vk::SemaphoreSubmitInfo<'static>>> {
+    let Some(s) = sync else {
+        return Ok(Vec::new());
+    };
+    let mut wait_infos = Vec::with_capacity(s.waits.len());
+    for epoch in &s.waits {
+        let sem = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_semaphore;
+        wait_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(sem)
+                .value(epoch.value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        );
+    }
+    Ok(wait_infos)
+}
+
 fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Option<SlotKey> {
     use crate::types::ResourceCategory;
     match cat {
@@ -676,24 +703,7 @@ pub(super) fn submit(
             .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let mut wait_infos = Vec::new();
-        if let Some(s) = sync {
-            for epoch in &s.waits {
-                let sem = state
-                    .contexts
-                    .get(&epoch.context)
-                    .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
-                    .lock()
-                    .unwrap()
-                    .timeline_semaphore;
-                wait_infos.push(
-                    vk::SemaphoreSubmitInfo::default()
-                        .semaphore(sem)
-                        .value(epoch.value)
-                        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-                );
-            }
-        }
+        let wait_infos = build_cross_submit_wait_infos(state, sync)?;
         let submit_info2 = if wait_infos.is_empty() {
             vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info))
         } else {
@@ -1418,29 +1428,12 @@ pub(super) fn submit(
         .timeline_semaphore;
     let submit_device_core = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device_core.queue_lock);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let mut wait_infos = Vec::new();
-    if let Some(s) = sync {
-        for epoch in &s.waits {
-            let sem = state
-                .contexts
-                .get(&epoch.context)
-                .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
-                .lock()
-                .unwrap()
-                .timeline_semaphore;
-            wait_infos.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(sem)
-                    .value(epoch.value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
-        }
-    }
+    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let submit_info2 = if wait_infos.is_empty() {
         vk::SubmitInfo2::default()
             .command_buffer_infos(std::slice::from_ref(&cmd_info))
@@ -2441,29 +2434,12 @@ fn submit_graph_impl(
         .timeline_semaphore;
     let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let mut wait_infos = Vec::new();
-    if let Some(s) = sync {
-        for epoch in &s.waits {
-            let sem = state
-                .contexts
-                .get(&epoch.context)
-                .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
-                .lock()
-                .unwrap()
-                .timeline_semaphore;
-            wait_infos.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(sem)
-                    .value(epoch.value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
-        }
-    }
+    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let submit_info2 = if wait_infos.is_empty() {
         vk::SubmitInfo2::default()
             .command_buffer_infos(std::slice::from_ref(&cmd_info))
@@ -2656,29 +2632,12 @@ pub(super) fn try_resubmit_retained(
     };
     let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let mut wait_infos = Vec::new();
-    if let Some(s) = sync {
-        for epoch in &s.waits {
-            let sem = state
-                .contexts
-                .get(&epoch.context)
-                .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
-                .lock()
-                .unwrap()
-                .timeline_semaphore;
-            wait_infos.push(
-                vk::SemaphoreSubmitInfo::default()
-                    .semaphore(sem)
-                    .value(epoch.value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            );
-        }
-    }
+    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let submit_info2 = if wait_infos.is_empty() {
         vk::SubmitInfo2::default()
             .command_buffer_infos(std::slice::from_ref(&cmd_info))

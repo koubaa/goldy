@@ -10,7 +10,7 @@ use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
-use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue};
+use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue, WRITE_KINDS_TRANSFER};
 use crate::types::{ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -214,8 +214,14 @@ impl Parcel {
     /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
     ///
     /// Monotonic per context: only increases; a smaller epoch is ignored.
+    /// Records a transfer write only (no synthetic read/compute kinds) so cross-submit
+    /// barrier analysis stays precise for upload paths like [`crate::write_to_parcel`].
     pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        self.stamp.sync.lock().unwrap().record_any(ctx, epoch);
+        self.stamp
+            .sync
+            .lock()
+            .unwrap()
+            .record_write(ctx, epoch, WRITE_KINDS_TRANSFER);
     }
 
     /// Context-qualified last-referencing timelines.

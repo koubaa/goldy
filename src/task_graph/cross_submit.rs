@@ -39,17 +39,6 @@ impl NetAccess {
             self.write_kinds |= barrier_kind;
         }
     }
-
-    fn to_consumer_dst(self) -> SlotUsageSet {
-        let mut dst = SlotUsageSet::default();
-        if self.reads {
-            dst.merge(NodeAccess::Read, self.read_kinds | self.read_pipeline_kinds);
-        }
-        if self.writes {
-            dst.merge(NodeAccess::Write, self.write_kinds);
-        }
-        dst
-    }
 }
 
 /// Canonical resource key for whole-resource v1 ledger (parent buffer / texture).
@@ -220,7 +209,6 @@ pub fn compute_cross_submit_sync(
             continue;
         };
         let sync = &entry.sync;
-        let _dst = access.to_consumer_dst();
 
         // RAW: this reads -> hazard vs last_write
         if access.reads {

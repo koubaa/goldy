@@ -20,6 +20,9 @@ use std::collections::HashMap;
 
 pub type TimelineValue = u64;
 
+/// `UsageKindFlags::TRANSFER` bits for [`ResourceSync::record_write`] without a `task_graph` dependency.
+pub const WRITE_KINDS_TRANSFER: u8 = 0b010;
+
 /// A context-qualified timeline stamp: which context's semaphore must reach `value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Epoch {
