@@ -1,12 +1,29 @@
 //! Texture management logic.
 
-use super::super::{DeviceHandle, TextureHandle};
+use super::super::{DeviceHandle, GpuCommand, TextureHandle};
 use super::types::{MetalState, ResourceRegistry, TextureState, ARGUMENT_BUFFER_SIZE};
 use super::utils::format_to_mtl;
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use ::metal as mtl;
 use anyhow::{bail, Context, Result};
-use mtl::{MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+use mtl::{MTLOrigin, MTLSize, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+use std::sync::Arc;
+use std::time::Duration;
+
+const UPLOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn submit_texture_upload_sync(state: &mut MetalState, device_handle: DeviceHandle, command: GpuCommand) -> Result<()> {
+    let ctx = super::context::create(state, device_handle)?;
+    let result = (|| {
+        let signal = super::compute::submit(state, ctx, std::slice::from_ref(&command), None)?;
+        if !super::context::wait_until_device_seq_at_least(state, device_handle, signal, UPLOAD_WAIT_TIMEOUT) {
+            anyhow::bail!("Timed out waiting for texture upload to complete");
+        }
+        Ok(())
+    })();
+    super::context::destroy(state, ctx);
+    result
+}
 
 /// Texture heap allocation with drain-and-retry self-regulation.
 ///
@@ -214,39 +231,53 @@ pub(super) fn create(
     Ok(handle)
 }
 
-/// Write data to a texture.
+/// Write data to a texture (synchronous: staging buffer + blit, then wait).
 pub(super) fn write(
-    state: &MetalState,
+    state: &mut MetalState,
     texture_handle: TextureHandle,
     data: &[u8],
     width: u32,
     height: u32,
 ) -> Result<()> {
+    let device_handle = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?
+        .device_handle;
     let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
-
     let bytes_per_pixel = texture.format.bytes_per_pixel();
-    let bytes_per_row = width * bytes_per_pixel;
+    let expected = (width as usize) * (height as usize) * (bytes_per_pixel as usize);
+    anyhow::ensure!(
+        data.len() == expected,
+        "WriteTexture: expected {} bytes for {}x{}, got {}",
+        expected,
+        width,
+        height,
+        data.len()
+    );
+    anyhow::ensure!(
+        width == texture.width && height == texture.height,
+        "WriteTexture: dimension mismatch"
+    );
 
-    let region = MTLRegion {
-        origin: MTLOrigin { x: 0, y: 0, z: 0 },
-        size: MTLSize {
-            width: width as u64,
-            height: height as u64,
-            depth: 1,
+    submit_texture_upload_sync(
+        state,
+        device_handle,
+        GpuCommand::WriteTexture {
+            texture: texture_handle,
+            data: Arc::from(data),
+            width,
+            height,
         },
-    };
+    )?;
 
-    texture
-        .texture
-        .replace_region(region, 0, data.as_ptr() as *const _, bytes_per_row as u64);
-
-    tracing::debug!("Wrote {}x{} texture data ({} bytes)", width, height, data.len());
+    tracing::debug!("Wrote {}x{} texture data ({} bytes, sync blit upload)", width, height, data.len());
     Ok(())
 }
 
-/// Write data to a subregion of a texture.
+/// Write data to a subregion of a texture (synchronous: staging buffer + blit, then wait).
 pub(super) fn write_region(
-    state: &MetalState,
+    state: &mut MetalState,
     texture_handle: TextureHandle,
     x: u32,
     y: u32,
@@ -254,30 +285,40 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
+    let device_handle = state
+        .textures
+        .get(&texture_handle)
+        .context("Invalid texture handle")?
+        .device_handle;
     let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
-
     let bytes_per_pixel = texture.format.bytes_per_pixel();
-    let bytes_per_row = width * bytes_per_pixel;
+    let expected = (width as usize) * (height as usize) * (bytes_per_pixel as usize);
+    anyhow::ensure!(
+        data.len() == expected,
+        "WriteTextureRegion: expected {} bytes, got {}",
+        expected,
+        data.len()
+    );
+    anyhow::ensure!(
+        x + width <= texture.width && y + height <= texture.height,
+        "WriteTextureRegion: region out of bounds"
+    );
 
-    let region = MTLRegion {
-        origin: MTLOrigin {
-            x: x as u64,
-            y: y as u64,
-            z: 0,
+    submit_texture_upload_sync(
+        state,
+        device_handle,
+        GpuCommand::WriteTextureRegion {
+            texture: texture_handle,
+            x,
+            y,
+            width,
+            height,
+            data: Arc::from(data),
         },
-        size: MTLSize {
-            width: width as u64,
-            height: height as u64,
-            depth: 1,
-        },
-    };
-
-    texture
-        .texture
-        .replace_region(region, 0, data.as_ptr() as *const _, bytes_per_row as u64);
+    )?;
 
     tracing::debug!(
-        "Wrote {}x{} region at ({},{}) ({} bytes)",
+        "Wrote {}x{} region at ({},{}) ({} bytes, sync blit upload)",
         width,
         height,
         x,

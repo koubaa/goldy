@@ -505,7 +505,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
-        texture::write(&self.state, texture, data, width, height)
+        texture::write(&mut self.state, texture, data, width, height)
     }
 
     fn write_texture_region(
@@ -517,7 +517,7 @@ impl GpuBackend for MetalBackend {
         height: u32,
         data: &[u8],
     ) -> Result<()> {
-        texture::write_region(&self.state, texture, x, y, width, height, data)
+        texture::write_region(&mut self.state, texture, x, y, width, height, data)
     }
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
