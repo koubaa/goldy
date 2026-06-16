@@ -102,6 +102,8 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
     Ok(())
 }
 
+static METAL_VALIDATION_INIT: std::sync::Once = std::sync::Once::new();
+
 /// Metal backend for macOS.
 pub struct MetalBackend {
     state: MetalState,
@@ -113,12 +115,15 @@ impl MetalBackend {
         let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
 
-        // Runtime Metal shader validation reads `MTL_SHADER_VALIDATION` before the first
-        // device is created when GPU API validation is on (`GOLDY_VALIDATION=1`, `api`, `all`, …).
-        if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
-            std::env::set_var("MTL_SHADER_VALIDATION", "1");
-            tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION); was unset");
-        }
+        // `MTL_SHADER_VALIDATION` must be set before the first MTLDevice is created.
+        // Use a process-wide Once so parallel test threads do not race on `setenv`.
+        METAL_VALIDATION_INIT.call_once(|| {
+            if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
+                // SAFETY: called exactly once per process, before `Device::all()` below.
+                unsafe { std::env::set_var("MTL_SHADER_VALIDATION", "1") };
+                tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION api)");
+            }
+        });
 
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 

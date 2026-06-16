@@ -7,8 +7,9 @@
 //!   case-insensitive):
 //!   - `layout` / `layouts` — layout + stride checks
 //!   - `api` — graphics API validation (Vulkan validation layer + `VK_EXT_debug_utils` where
-//!     built; Metal `MTL_SHADER_VALIDATION` when applicable). For loader-only Vulkan layers, set
-//!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
+//!     built; Metal `MTL_SHADER_VALIDATION=1` when `GOLDY_VALIDATION` includes `api` and the
+//!     variable is unset — set once before the first device is enumerated). For loader-only
+//!     Vulkan layers, set `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
 //!   - `scheme` / `readback` — retained-scheme grant readback invariants (staging pool, frame pairing)
 //!   - `all` — layout, GPU API, timeline, and scheme
