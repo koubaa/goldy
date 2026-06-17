@@ -412,10 +412,6 @@ mod tests {
                 offset: 0,
             }
         }
-
-        fn written_bytes(&self) -> &[u8] {
-            &self.backing[..self.offset as usize]
-        }
     }
 
     impl BeltChunk for MockChunk {
