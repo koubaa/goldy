@@ -3,8 +3,7 @@
 use super::analysis;
 use super::cross_submit::{
     apply_resource_sync_updates, apply_stamp_targets_legacy, build_ledger_snapshot, compute_cross_submit_sync,
-    net_access_for_waves, net_access_per_resource, prepend_prologue, resource_stamps_from_ir, CrossSubmitSync,
-    ResourceKey,
+    net_access_for_waves, prepend_prologue, resource_stamps_from_ir, CrossSubmitSync, ResourceKey,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
@@ -202,8 +201,9 @@ fn plan_cross_submit(
     ir: &GraphIR,
     resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
     submitting_ctx: crate::backend::ContextHandle,
+    waves: &[Wave],
 ) -> CrossSubmitSync {
-    let net = net_access_per_resource(ir);
+    let net = net_access_for_waves(ir, waves);
     let registry = resource_stamps_from_ir(ir, resource_stamps);
     let ledger = build_ledger_snapshot(&registry);
     compute_cross_submit_sync(&net, &ledger, submitting_ctx)
@@ -647,12 +647,12 @@ pub(crate) fn submit_resolved_ir(
     let ctx = context.backend_handle();
 
     if has_render {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
         let g = compile_graph_commands_for_ir(ir);
-        let sync = cross_sync_for_ir(submit_state, ir, ctx, 0);
+        let sync = cross_sync_for_ir(submit_state, ir, ctx, &schedule.waves);
         let tv = backend_submit_graph(backend, ctx, &g, sync.as_ref())?;
         if let Some(state) = submit_state {
-            let edges = analysis::build_edges(ir);
-            let schedule = analysis::schedule_waves(ir, &edges);
             state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &schedule.waves, tv);
         }
         return Ok(tv);
@@ -665,7 +665,7 @@ pub(crate) fn submit_resolved_ir(
     for (part_idx, range) in wave_ranges.iter().enumerate() {
         let _tz = crate::tracy_zone!("goldy.submit_partition");
         let waves = cache.as_ref().unwrap().schedule.waves[range.clone()].to_vec();
-        let sync = cross_sync_for_ir(submit_state, ir, ctx, part_idx);
+        let sync = cross_sync_for_ir(submit_state, ir, ctx, &waves);
         let cache_ref = cache.as_ref().unwrap();
         if let Some(graph_cmds) = cache_ref
             .partitioned_graph_commands
@@ -688,15 +688,12 @@ fn cross_sync_for_stamps(
     resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
     ir: &GraphIR,
     submitting_ctx: crate::backend::ContextHandle,
-    part_idx: usize,
+    waves: &[Wave],
 ) -> Option<SubmitSync> {
-    if part_idx != 0 {
-        return None;
-    }
     if resource_stamps.is_empty() {
         return None;
     }
-    let cross = plan_cross_submit(ir, resource_stamps, submitting_ctx);
+    let cross = plan_cross_submit(ir, resource_stamps, submitting_ctx, waves);
     Some(submit_sync_from_cross(&cross))
 }
 
@@ -704,13 +701,10 @@ fn cross_sync_for_ir(
     submit_state: Option<&IrSubmitState>,
     ir: &GraphIR,
     submitting_ctx: crate::backend::ContextHandle,
-    part_idx: usize,
+    waves: &[Wave],
 ) -> Option<SubmitSync> {
-    if part_idx != 0 {
-        return None;
-    }
     let state = submit_state?;
-    cross_sync_for_stamps(&state.resource_stamps, ir, submitting_ctx, part_idx)
+    cross_sync_for_stamps(&state.resource_stamps, ir, submitting_ctx, waves)
 }
 
 /// Outcome of [`submit_resolved_ir_and_retain`]: how many partitions were re-recorded
@@ -811,7 +805,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
         let can_retain = partition_waves_can_retain(ir, &waves);
         let has_render = partition_waves_have_render(ir, &waves);
-        let sync = cross_sync_for_ir(submit_state, ir, ctx, part_idx);
+        let sync = cross_sync_for_ir(submit_state, ir, ctx, &waves);
 
         if !can_retain {
             // Upload/copy partition: always submit standalone, never retain.
@@ -926,7 +920,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
         let can_retain = partition_waves_can_retain(ir, &waves);
         let has_render = partition_waves_have_render(ir, &waves);
         let has_present = analysis::partition_waves_have_present(ir, &waves);
-        let sync = cross_sync_for_stamps(resource_stamps, ir, ctx, part_idx);
+        let sync = cross_sync_for_stamps(resource_stamps, ir, ctx, &waves);
 
         if !can_retain {
             let cache_entry = cache.as_ref().unwrap();

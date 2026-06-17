@@ -11,10 +11,10 @@ mod submission;
 
 use goldy::{
     shader::builtins,
-    types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureKind},
-    BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, IndexFormat, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, Sampler, ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D, Vertex2DUv,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureKind},
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, IndexFormat, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, Sampler, Scheme, ShaderModule, ShaderResourceSlot,
+    TextureFormat, Vertex2D, Vertex2DUv, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use scheme_render::{
     acquire_readback_texture, device_and_pool, read_grant_texture, scheme_record_readback, scheme_render_and_readback,
@@ -942,5 +942,165 @@ float4 fs_main(Interpolated<float4> tex, Filter smp, FullscreenVarying input) : 
         r > 20 || g > 20 || b > 20,
         "center pixel should show sampled checkerboard, got rgba=({r},{g},{b},{})",
         pixels[center + 3]
+    );
+}
+
+/// Cross-partition cross-submit synchronization: a resource written by an independent
+/// scheme must be visible to a **render partition** (partition 1) of a hybrid
+/// compute+render scheme.
+///
+/// The consumer scheme has two logical partitions:
+///   - Partition 0: dummy compute node on an unrelated buffer (forces compute→render split).
+///   - Partition 1: render pass that reads the sentinel buffer via `bind_shader_resources`.
+///
+/// Without the fix, `cross_sync_for_stamps` returns `None` for any partition > 0, so
+/// partition 1 relies on the legacy blanket-acquire barrier (Vulkan) or on the barrier
+/// that `net_access_per_resource` incidentally places in partition 0's prologue (DX12).
+/// After the fix, each partition computes its own scoped prologue from its own wave set,
+/// so the sentinel barrier is correctly placed in partition 1's commands and the legacy
+/// barrier is properly suppressed.
+///
+/// Note: the test passes on all current backends even without the fix, because the
+/// legacy barrier (Vulkan) and the whole-IR prologue in partition 0 (DX12) happen to
+/// provide sufficient protection.  The test exists to verify the correct semantics and
+/// to guard against regressions when the legacy barrier path is eventually removed.
+#[test]
+fn cross_scheme_write_observed_in_render_partition() {
+    let Some((device, mut pool)) = device_and_pool() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+    let ctx = submission_context(&device);
+
+    const W: u32 = 4;
+    const H: u32 = 4;
+
+    // Sentinel buffer starts at 0; the writer scheme will set it to 42.
+    let sentinel = pool
+        .acquire_buffer_with_data(&[0u32], BufferKind::Scattered)
+        .expect("sentinel buffer");
+
+    // Unrelated buffer: only accessed by the dummy compute node in partition 0.
+    let dummy_buf = pool
+        .acquire_buffer_with_data(&[0u32], BufferKind::Scattered)
+        .expect("dummy buffer");
+
+    // Writer compute shader: sentinel[0] = 42.
+    let write_shader_src = r#"
+import goldy_exp;
+[goldy_compute][numthreads(1,1,1)]
+void cs_main(Scattered<uint> buf, ThreadId id) {
+    buf[id.x] = 42u;
+}
+"#;
+
+    // Dummy compute shader: reads the unrelated buffer so the partition-0 node has a
+    // real resource binding and the scheduler can create a genuine compute wave.
+    let dummy_cs_src = r#"
+import goldy_exp;
+[goldy_compute][numthreads(1,1,1)]
+void cs_main(BufRO<uint> buf, ThreadId id) {
+    let _ = buf[id.x];
+}
+"#;
+
+    // Fragment shader: reads sentinel[0] via bind_shader_resources.
+    // Green  → value is 42 (correct); red → value is stale / 0 (sync failure).
+    let render_shader_src = r#"
+import goldy_exp;
+static const float2 kPositions[3] = {
+    float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)
+};
+struct VSOut { float4 pos : SV_Position; };
+[goldy_vertex]
+VSOut vs_main(VertexId id) {
+    VSOut o;
+    o.pos = float4(kPositions[id.value], 0.0, 1.0);
+    return o;
+}
+[goldy_fragment]
+float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
+    uint val = sentinel[0];
+    return (val == 42u) ? float4(0.0, 1.0, 0.0, 1.0) : float4(1.0, 0.0, 0.0, 1.0);
+}
+"#;
+
+    let write_shader = ShaderModule::from_slang(&device, write_shader_src).expect("write shader");
+    let dummy_shader = ShaderModule::from_slang(&device, dummy_cs_src).expect("dummy shader");
+    let render_shader = ShaderModule::from_slang(&device, render_shader_src).expect("render shader");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
+    let dummy_pipeline = ComputePipeline::new(&device, &dummy_shader).expect("dummy pipeline");
+    let render_pipeline = RenderPipeline::new(
+        &device,
+        &render_shader,
+        &render_shader,
+        &RenderPipelineDesc {
+            vertex_layout: VertexBufferLayout {
+                attributes: vec![],
+                stride: 0,
+            },
+            topology: PrimitiveTopology::TriangleList,
+            target_format: TextureFormat::Rgba8Unorm,
+            ..Default::default()
+        },
+    )
+    .expect("render pipeline");
+
+    let readback = acquire_readback_texture(&mut pool, W, H, TextureFormat::Rgba8Unorm);
+
+    // --- Writer scheme: writes 42 into the sentinel buffer (independent submission). ---
+    let mut writer = Scheme::new(&ctx);
+    writer
+        .node("write_sentinel", &write_pipeline)
+        .bind_parcel(&sentinel, NodeAccess::Write)
+        .bind_views(&[sentinel.handle(ResourceAccess::Write).expect("sentinel uav")])
+        .dispatch(1, 1, 1);
+    writer.submit().expect("writer submit");
+
+    // --- Consumer scheme: two logical partitions separated by a compute→render boundary.
+    //
+    //   Partition 0: dummy compute on `dummy_buf`   (does NOT touch `sentinel`)
+    //   Partition 1: render pass reading `sentinel` via bind_shader_resources
+    //
+    // The render-kind boundary between the compute node and the render_pass node makes the
+    // scheduler split the scheme into two wave groups / submit partitions. ---
+    let mut consumer = Scheme::new(&ctx);
+    consumer
+        .node("dummy_compute", &dummy_pipeline)
+        .bind_parcel(&dummy_buf, NodeAccess::Read)
+        .bind_views(&[dummy_buf.handle(ResourceAccess::Read).expect("dummy srv")])
+        .dispatch(1, 1, 1);
+    let rt = consumer
+        .lease_render_target(W, H, TextureFormat::Rgba8Unorm, None)
+        .expect("render target lease");
+    {
+        let mut pass = consumer.render_pass("sentinel_render", &rt);
+        pass.clear(Color::RED); // red clear exposes missing draw or stale read
+        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &sentinel,
+            access: NodeAccess::Read,
+        }]);
+        pass.set_pipeline(&render_pipeline);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    consumer.copy_to_texture(&rt, &readback).expect("copy to readback");
+    let grant = consumer.grant_read_texture(&readback).expect("grant read texture");
+
+    let submission = consumer.submit().expect("consumer submit");
+    let pixels = read_grant_texture(&grant, &submission);
+
+    assert_eq!(pixels.len(), (W * H * 4) as usize);
+
+    // Every pixel should be green: the fragment shader saw sentinel == 42.
+    // A red pixel means the shader read 0 (stale) — cross-submit barrier missing from
+    // the render partition.
+    let all_green = pixels.chunks(4).all(|p| p[1] > 200 && p[0] < 50);
+    assert!(
+        all_green,
+        "render partition must see sentinel value 42 written by the independent writer scheme; \
+         red pixels indicate stale data (cross-submit barrier missing from partition 1). \
+         First pixel: {:?}",
+        &pixels[..4]
     );
 }
