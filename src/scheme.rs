@@ -1502,6 +1502,17 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 /// If the parcel was previously referenced by GPU work on `ctx`, this function
 /// waits for that work to complete before issuing the write, preventing a race
 /// between the in-flight GPU read and the incoming CPU upload.
+///
+/// # Deprecation
+///
+/// This function is obsolete. Parcel writes should be expressed as
+/// [`Scheme::commit_write_parcel`] nodes inside the scheme that consumes them.
+/// Schemes do not CPU-stall on submission; the staging belt handles cross-
+/// submission hazards without a blocking wait.
+#[deprecated(
+    since = "0.0.0",
+    note = "use Scheme::commit_write_parcel instead; parcel writes belong inside the scheme that consumes them"
+)]
 pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
     // Ensure the GPU has finished any prior use of this parcel before overwriting it.
     if let Some(last_tv) = parcel.last_referenced_on(ctx.backend_handle()) {
@@ -1528,6 +1539,7 @@ pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, offset: u64, data: &[u8])
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;

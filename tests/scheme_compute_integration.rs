@@ -1808,3 +1808,71 @@ fn scheme_two_contexts_reclaim_independently() {
         "ctx_a must reclaim without waiting for ctx_b (no device-global horizon)"
     );
 }
+
+/// Two back-to-back non-blocking scheme submissions each write different data to
+/// the **same** parcel then copy it to a distinct output.
+///
+/// This is the Scheme-API migration of `test_write_buffer_reuse_across_submissions`.
+/// Each scheme uses [`Scheme::commit_write_parcel`] so the write node is part of
+/// the same GPU submission as the compute node that reads it.  Both schemes are
+/// submitted without any CPU-side wait between them; correctness relies entirely
+/// on the staging belt handing out independent staging regions for the two uploads
+/// (tagged with each scheme's timeline value) and not recycling the first region
+/// until the first submission's GPU work has completed.
+#[test]
+fn scheme_write_parcel_reuse_across_submissions() {
+    const N: usize = 16;
+
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let pipeline =
+        ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).expect("shader"))
+            .expect("pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mid = pool
+        .acquire_buffer((N * core::mem::size_of::<u32>()) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("mid");
+    let out_a = pool
+        .acquire_buffer((N * core::mem::size_of::<u32>()) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out_a");
+    let out_b = pool
+        .acquire_buffer((N * core::mem::size_of::<u32>()) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out_b");
+
+    let mid_h = mid.handle(ResourceAccess::ReadWrite).expect("mid handle");
+    let out_a_h = out_a.handle(ResourceAccess::Write).expect("out_a handle");
+    let out_b_h = out_b.handle(ResourceAccess::Write).expect("out_b handle");
+
+    let data_a: Vec<u32> = (100..100 + N as u32).collect();
+    let data_b: Vec<u32> = (900..900 + N as u32).collect();
+
+    // Scheme 1: write data_a into mid, copy mid → out_a, then read out_a back.
+    let mut s1 = Scheme::new(&ctx);
+    s1.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_a).to_vec()).expect("commit write a");
+    s1.node("copy_a", &pipeline)
+        .bind_parcel(&mid, NodeAccess::Read)
+        .bind_parcel(&out_a, NodeAccess::Write)
+        .bind_views(&[mid_h, out_a_h])
+        .dispatch(1, 1, 1);
+    let grant_a = s1.grant_read(&out_a).expect("grant_a");
+    let sub1 = s1.submit().expect("submit 1");
+
+    // Scheme 2: submitted immediately, without waiting for sub1.
+    // The staging belt must not recycle the staging region used by s1.
+    let mut s2 = Scheme::new(&ctx);
+    s2.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_b).to_vec()).expect("commit write b");
+    s2.node("copy_b", &pipeline)
+        .bind_parcel(&mid, NodeAccess::Read)
+        .bind_parcel(&out_b, NodeAccess::Write)
+        .bind_views(&[mid_h, out_b_h])
+        .dispatch(1, 1, 1);
+    let grant_b = s2.grant_read(&out_b).expect("grant_b");
+    let sub2 = s2.submit().expect("submit 2");
+
+    let got_a = read_grant_u32(&grant_a, &sub1, N);
+    let got_b = read_grant_u32(&grant_b, &sub2, N);
+    assert_eq!(got_a, data_a, "output A corrupted (staging race?)");
+    assert_eq!(got_b, data_b, "output B wrong");
+}
