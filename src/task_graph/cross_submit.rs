@@ -14,7 +14,7 @@ use crate::task_graph::ir::{
     BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeKind, ResourceBinding, SlotUsageSet, UsageKindFlags,
 };
 use crate::task_graph::ResourceId;
-use crate::timeline::{Epoch, ResourceSync};
+use crate::timeline::{Epoch, ResourceSync, WRITE_KINDS_COMPUTE_TRANSFER};
 
 /// Aggregated access for one resource within a single submission.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -55,6 +55,12 @@ impl ResourceKey {
             ResourceId::Buffer(h) | ResourceId::BufferRange { parent: h, .. } => Some(Self::Buffer(h)),
             ResourceId::Texture(h) => Some(Self::Texture(h)),
             ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_) => None,
+            // RenderTargets are scheme-owned leases (Lease<LeaseRenderTarget> is an opaque
+            // index into the owning scheme's rt_leases Vec, with no public Clone or borrow-out
+            // path). They can never appear in a *different* scheme's IR, so cross-scheme
+            // hazard tracking at the RT level is structurally impossible and the exclusion here
+            // is safe. SwapchainOutput and PresentLease are similarly owned by the surface
+            // infrastructure and not shared as ledger-tracked resources.
             ResourceId::RenderTarget(_) | ResourceId::SwapchainOutput | ResourceId::PresentLease(_) => None,
         }
     }
@@ -124,21 +130,36 @@ fn barrier_usage_kind_for_binding(
 pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> {
     let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
     for node in &ir.nodes {
-        if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
-            continue;
-        }
-        for binding in &node.bindings {
-            let Some(key) = ResourceKey::from_resource_id(binding.resource) else {
-                continue;
-            };
-            let barrier_kind = barrier_usage_kind_for_binding(binding.resource, binding.access, node);
-            let pipeline_kind = node_usage_kind(node);
-            net.entry(key)
-                .or_default()
-                .absorb(binding.access, barrier_kind, pipeline_kind);
+        absorb_node_net_access(&mut net, node);
+    }
+    net
+}
+
+/// Union each resource's access across the nodes in `waves` (one submit partition).
+pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> HashMap<ResourceKey, NetAccess> {
+    let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
+    for wave in waves {
+        for &node_idx in &wave.node_indices {
+            absorb_node_net_access(&mut net, &ir.nodes[node_idx]);
         }
     }
     net
+}
+
+fn absorb_node_net_access(net: &mut HashMap<ResourceKey, NetAccess>, node: &super::ir::TaskNode) {
+    if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
+        return;
+    }
+    for binding in &node.bindings {
+        let Some(key) = ResourceKey::from_resource_id(binding.resource) else {
+            continue;
+        };
+        let barrier_kind = barrier_usage_kind_for_binding(binding.resource, binding.access, node);
+        let pipeline_kind = node_usage_kind(node);
+        net.entry(key)
+            .or_default()
+            .absorb(binding.access, barrier_kind, pipeline_kind);
+    }
 }
 
 fn producer_slot_from_read(read_kinds: UsageKindFlags) -> SlotUsageSet {
@@ -213,10 +234,11 @@ pub fn compute_cross_submit_sync(
 
         // RAW: this reads -> hazard vs last_write
         if access.reads {
-            for (&ctx, &_tv) in &sync.last_write {
+            for (&ctx, &tv) in &sync.last_write {
                 if ctx == submitting_ctx {
-                    let prev_write_kinds =
-                        UsageKindFlags::from_bits_truncate(*sync.last_write_kinds.get(&ctx).unwrap_or(&0b011));
+                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                    );
                     let usage = BarrierUsage {
                         src: {
                             let mut s = SlotUsageSet::default();
@@ -231,7 +253,7 @@ pub fn compute_cross_submit_sync(
                     };
                     merge_barrier(&mut result.prologue, *key, usage);
                 } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(_tv)).or_insert(_tv);
+                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
             }
         }
@@ -240,8 +262,9 @@ pub fn compute_cross_submit_sync(
         if access.writes {
             for (&ctx, &tv) in &sync.last_write {
                 if ctx == submitting_ctx {
-                    let prev_write_kinds =
-                        UsageKindFlags::from_bits_truncate(*sync.last_write_kinds.get(&ctx).unwrap_or(&0b011));
+                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                    );
                     let usage = BarrierUsage {
                         src: {
                             let mut s = SlotUsageSet::default();
@@ -503,6 +526,7 @@ mod tests {
     use crate::backend::ContextHandle;
     use crate::task_graph::ir::{GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
     use crate::task_graph::ResourceId;
+    use crate::timeline::{ResourceSync, WRITE_KINDS_COMPUTE_TRANSFER};
     use std::sync::Weak;
 
     fn buf_key(h: u64) -> ResourceKey {
@@ -515,8 +539,7 @@ mod tests {
 
     fn ledger_with_write(ctx: ContextHandle, key: ResourceKey, tv: u64) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
-        // Use COMPUTE | TRANSFER (0b011) as conservative kinds for test helpers.
-        sync.record_write(ctx, tv, (UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER).bits());
+        sync.record_write(ctx, tv, WRITE_KINDS_COMPUTE_TRANSFER);
         let mut ledger = LedgerSnapshot::new();
         ledger.insert(key, LedgerEntry { sync });
         ledger
@@ -701,12 +724,11 @@ mod tests {
     #[test]
     fn no_alias_resources_empty() {
         let ctx = 1;
-        let mut ledger = ledger_with_write(ctx, buf_key(10), 5);
+        let ledger = ledger_with_write(ctx, buf_key(10), 5);
         let ir = single_binding_ir(ResourceId::Buffer(20), NodeAccess::Read);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
         assert!(sync.is_empty());
-        let _ = &mut ledger;
     }
 
     #[test]
@@ -778,8 +800,8 @@ mod tests {
         let consumer = 3;
         let key = buf_key(10);
         let mut sync_state = ResourceSync::default();
-        sync_state.record_write(ctx_a, 3, (UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER).bits());
-        sync_state.record_write(ctx_b, 7, (UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER).bits());
+        sync_state.record_write(ctx_a, 3, WRITE_KINDS_COMPUTE_TRANSFER);
+        sync_state.record_write(ctx_b, 7, WRITE_KINDS_COMPUTE_TRANSFER);
         let mut ledger = LedgerSnapshot::new();
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Read);
@@ -831,7 +853,7 @@ mod tests {
         let ctx = 1;
         let key = buf_key(10);
         let mut sync_state = ResourceSync::default();
-        sync_state.record_write(ctx, 5, (UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER).bits());
+        sync_state.record_write(ctx, 5, WRITE_KINDS_COMPUTE_TRANSFER);
         sync_state.record_read(ctx, 3);
         let mut ledger = LedgerSnapshot::new();
         ledger.insert(key, LedgerEntry { sync: sync_state });

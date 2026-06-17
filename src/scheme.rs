@@ -1246,8 +1246,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         let idx = lease.id.0 as usize;
         let backing = &self.scheme.leases[idx];
         let resource = backing.resource_id();
-        let stamp = backing.stamp_handle();
-        self.scheme.submit_state.register_stamp(stamp);
+        self.scheme.submit_state.register_parcel_stamp(backing);
         self.bindings.push(ResourceBinding { resource, access });
         let resource_access = node_access_to_resource_access(access);
         if let Some(handle) = backing.handle(resource_access) {

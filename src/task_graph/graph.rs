@@ -3,7 +3,8 @@
 use super::analysis;
 use super::cross_submit::{
     apply_resource_sync_updates, apply_stamp_targets_legacy, build_ledger_snapshot, compute_cross_submit_sync,
-    net_access_per_resource, prepend_prologue, resource_stamps_from_ir, CrossSubmitSync, ResourceKey,
+    net_access_for_waves, net_access_per_resource, prepend_prologue, resource_stamps_from_ir, CrossSubmitSync,
+    ResourceKey,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
@@ -297,6 +298,37 @@ fn backend_try_resubmit_retained(
 ) -> Result<Option<TimelineValue>> {
     // Prologue is baked into the retained body; only cross-context waits are live.
     backend.try_resubmit_retained(ctx, key, submit_sync_waits_only(sync).as_ref())
+}
+
+/// True when `waves` include a binding with no [`ResourceKey`] (mosaic/transient/present, etc.).
+fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().flat_map(|w| &w.node_indices).any(|&ni| {
+        let node = &ir.nodes[ni];
+        if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
+            return false;
+        }
+        node.bindings
+            .iter()
+            .any(|b| ResourceKey::from_resource_id(b.resource).is_none())
+    })
+}
+
+/// Stamp parcel epochs for resources touched in one partition at that partition's timeline value.
+fn apply_partition_epoch_stamps(
+    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
+    ctx: crate::backend::ContextHandle,
+    ir: &GraphIR,
+    waves: &[Wave],
+    tv: TimelineValue,
+) {
+    let net = net_access_for_waves(ir, waves);
+    if !net.is_empty() {
+        apply_resource_sync_updates(&net, resource_stamps, ctx, tv);
+    }
+    if !stamp_targets.is_empty() && partition_has_unkeyed_bindings(ir, waves) {
+        apply_stamp_targets_legacy(stamp_targets, ctx, tv);
+    }
 }
 
 // ---- Free functions over GraphIR -------------------------------------------
@@ -619,23 +651,20 @@ pub(crate) fn submit_resolved_ir(
         let sync = cross_sync_for_ir(submit_state, ir, ctx, 0);
         let tv = backend_submit_graph(backend, ctx, &g, sync.as_ref())?;
         if let Some(state) = submit_state {
-            state.apply_reference_stamps(ctx, &context.device().inner, ir, tv);
+            let edges = analysis::build_edges(ir);
+            let schedule = analysis::schedule_waves(ir, &edges);
+            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &schedule.waves, tv);
         }
         return Ok(tv);
     }
 
     let fp = binding_fingerprint(ir);
     TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
     let mut last_tv = backend.gpu_progress(ctx);
-    let n_parts = cache
-        .as_ref()
-        .unwrap()
-        .partitioned_commands
-        .as_ref()
-        .map(|p| p.len())
-        .unwrap_or(0);
-    for part_idx in 0..n_parts {
+    for part_idx in 0..wave_ranges.len() {
         let _tz = crate::tracy_zone!("goldy.submit_partition");
+        let waves = cache.as_ref().unwrap().schedule.waves[wave_ranges[part_idx].clone()].to_vec();
         let sync = cross_sync_for_ir(submit_state, ir, ctx, part_idx);
         let cache_ref = cache.as_ref().unwrap();
         if let Some(graph_cmds) = cache_ref
@@ -648,9 +677,9 @@ pub(crate) fn submit_resolved_ir(
             let cmds = &cache_ref.partitioned_commands.as_ref().unwrap()[part_idx];
             last_tv = backend_submit_standalone(backend, ctx, cmds, sync.as_ref())?;
         }
-    }
-    if let Some(state) = submit_state {
-        state.apply_reference_stamps(ctx, &context.device().inner, ir, last_tv);
+        if let Some(state) = submit_state {
+            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+        }
     }
     Ok(last_tv)
 }
@@ -779,17 +808,20 @@ pub(crate) fn submit_resolved_ir_and_retain(
         let part_fp = partition_fps[part_idx];
         let range = wave_ranges[part_idx].clone();
         let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
-        let waves = &cache.as_ref().unwrap().schedule.waves[range.clone()];
-        let can_retain = partition_waves_can_retain(ir, waves);
-        let has_render = partition_waves_have_render(ir, waves);
+        let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
+        let can_retain = partition_waves_can_retain(ir, &waves);
+        let has_render = partition_waves_have_render(ir, &waves);
         let sync = cross_sync_for_ir(submit_state, ir, ctx, part_idx);
 
         if !can_retain {
             // Upload/copy partition: always submit standalone, never retain.
             let cache_entry = cache.as_ref().unwrap();
-            let cmds = partition_standalone_commands(ir, cache_entry, waves, part_idx, has_render, false, None)?;
+            let cmds = partition_standalone_commands(ir, cache_entry, &waves, part_idx, has_render, false, None)?;
             let _tz = crate::tracy_zone!("goldy.submit_partition");
             last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
+            if let Some(state) = submit_state {
+                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+            }
             continue;
         }
 
@@ -798,21 +830,23 @@ pub(crate) fn submit_resolved_ir_and_retain(
             if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync.as_ref())? {
                 last_tv = tv;
                 result.resubmit_hits += 1;
+                if let Some(state) = submit_state {
+                    state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+                }
                 continue;
             }
         }
 
         // Re-record this partition.
         let cache_entry = cache.as_ref().unwrap();
-        let graph_cmds = partition_graph_commands_for_retain(ir, cache_entry, waves, part_idx, has_render, None);
+        let graph_cmds = partition_graph_commands_for_retain(ir, cache_entry, &waves, part_idx, has_render, None);
         let _tz = crate::tracy_zone!("goldy.submit_partition");
         last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync.as_ref())?;
         cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
         result.records += 1;
-    }
-
-    if let Some(state) = submit_state {
-        state.apply_reference_stamps(ctx, &context.device().inner, ir, last_tv);
+        if let Some(state) = submit_state {
+            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+        }
     }
 
     Ok((last_tv, result))
@@ -888,10 +922,10 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     for part_idx in 0..wave_ranges.len() {
         let part_fp = partition_fps[part_idx];
         let range = wave_ranges[part_idx].clone();
-        let waves = &cache.as_ref().unwrap().schedule.waves[range.clone()];
-        let can_retain = partition_waves_can_retain(ir, waves);
-        let has_render = partition_waves_have_render(ir, waves);
-        let has_present = analysis::partition_waves_have_present(ir, waves);
+        let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
+        let can_retain = partition_waves_can_retain(ir, &waves);
+        let has_render = partition_waves_have_render(ir, &waves);
+        let has_present = analysis::partition_waves_have_present(ir, &waves);
         let sync = cross_sync_for_stamps(resource_stamps, ir, ctx, part_idx);
 
         if !can_retain {
@@ -899,7 +933,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let cmds = partition_standalone_commands(
                 ir,
                 cache_entry,
-                waves,
+                &waves,
                 part_idx,
                 has_render,
                 has_present,
@@ -907,6 +941,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             )?;
             let _tz = crate::tracy_zone!("goldy.submit_partition");
             last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
             continue;
         }
 
@@ -919,10 +954,18 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
             if !backend.retains_present_partitions() {
                 let cache_entry = cache.as_ref().unwrap();
-                let cmds =
-                    partition_standalone_commands(ir, cache_entry, waves, part_idx, has_render, true, Some(&resolver))?;
+                let cmds = partition_standalone_commands(
+                    ir,
+                    cache_entry,
+                    &waves,
+                    part_idx,
+                    has_render,
+                    true,
+                    Some(&resolver),
+                )?;
                 let _tz = crate::tracy_zone!("goldy.submit_partition");
                 last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
                 continue;
             }
 
@@ -947,6 +990,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 if let Some(tv) = backend_try_resubmit_retained(backend, ctx, slot_key, sync.as_ref())? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
                     continue;
                 }
             }
@@ -954,7 +998,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let graph_cmds = partition_graph_commands_for_retain(
                 ir,
                 cache.as_ref().unwrap(),
-                waves,
+                &waves,
                 part_idx,
                 has_render,
                 Some(&resolver),
@@ -968,6 +1012,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     .insert(slot_key);
             }
             result.records += 1;
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
             continue;
         }
 
@@ -976,21 +1021,19 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync.as_ref())? {
                 last_tv = tv;
                 result.resubmit_hits += 1;
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
                 continue;
             }
         }
 
         let graph_cmds =
-            partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), waves, part_idx, has_render, None);
+            partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None);
         let _tz = crate::tracy_zone!("goldy.submit_partition");
         last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync.as_ref())?;
         cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
         result.records += 1;
+        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
     }
-
-    let net = net_access_per_resource(ir);
-    apply_resource_sync_updates(&net, resource_stamps, ctx, last_tv);
-    apply_stamp_targets_legacy(stamp_targets, ctx, last_tv);
 
     Ok((last_tv, result))
 }
@@ -1028,6 +1071,34 @@ impl IrSubmitState {
         self.stamp_targets.push(stamp);
     }
 
+    pub fn apply_partition_reference_stamps(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        submit_device: &std::sync::Arc<crate::device::DeviceInner>,
+        ir: &GraphIR,
+        waves: &[Wave],
+        tv: TimelineValue,
+    ) {
+        for stamp in self.resource_stamps.values() {
+            if let Some(home) = stamp.home_device.upgrade() {
+                debug_assert!(
+                    std::sync::Arc::ptr_eq(&home, submit_device),
+                    "parcel home_device must match submitting context's device"
+                );
+            }
+        }
+        for stamp in &self.stamp_targets {
+            if let Some(home) = stamp.home_device.upgrade() {
+                debug_assert!(
+                    std::sync::Arc::ptr_eq(&home, submit_device),
+                    "parcel home_device must match submitting context's device"
+                );
+            }
+        }
+        apply_partition_epoch_stamps(&self.resource_stamps, &self.stamp_targets, ctx, ir, waves, tv);
+    }
+
+    /// Stamp every registered parcel at `tv` for a whole-IR submit (single partition).
     pub fn apply_reference_stamps(
         &self,
         ctx: crate::backend::ContextHandle,
@@ -1035,10 +1106,9 @@ impl IrSubmitState {
         ir: &GraphIR,
         tv: TimelineValue,
     ) {
-        let _ = submit_device;
-        let net = net_access_per_resource(ir);
-        apply_resource_sync_updates(&net, &self.resource_stamps, ctx, tv);
-        apply_stamp_targets_legacy(&self.stamp_targets, ctx, tv);
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        self.apply_partition_reference_stamps(ctx, submit_device, ir, &schedule.waves, tv);
     }
 
     /// Clear compiled schedule cache and stamp targets for in-place scheme re-record.

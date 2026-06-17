@@ -25,8 +25,6 @@ pub struct MosaicSlot(pub u32);
 pub(crate) enum InteractionRole {
     Reads,
     Writes,
-    #[allow(dead_code)]
-    WritesInaugural,
 }
 
 /// One scheme's registered interaction with a parcel.

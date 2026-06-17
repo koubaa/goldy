@@ -20,8 +20,17 @@ use std::collections::HashMap;
 
 pub type TimelineValue = u64;
 
-/// `UsageKindFlags::TRANSFER` bits for [`ResourceSync::record_write`] without a `task_graph` dependency.
+/// Raw `UsageKindFlags::COMPUTE` bits for [`ResourceSync::record_write`] (no `task_graph` import).
+pub const WRITE_KINDS_COMPUTE: u8 = 0b001;
+
+/// Raw `UsageKindFlags::TRANSFER` bits for [`ResourceSync::record_write`] (no `task_graph` import).
 pub const WRITE_KINDS_TRANSFER: u8 = 0b010;
+
+/// `WRITE_KINDS_COMPUTE | WRITE_KINDS_TRANSFER` — matches `UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER`.
+///
+/// Conservative default when a prior write's pipeline category is unknown (legacy stamping,
+/// missing `last_write_kinds` entry).
+pub const WRITE_KINDS_COMPUTE_TRANSFER: u8 = WRITE_KINDS_COMPUTE | WRITE_KINDS_TRANSFER;
 
 /// A context-qualified timeline stamp: which context's semaphore must reach `value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,10 +98,9 @@ impl ResourceSync {
 
     /// Conservative touch for legacy/test-only use when kinds are unknown.
     ///
-    /// Uses `0b011` (COMPUTE | TRANSFER) — the maximally conservative set for
-    /// non-render writes, matching what the barrier code previously hardcoded.
+    /// Uses [`WRITE_KINDS_COMPUTE_TRANSFER`] — the maximally conservative non-render write set.
     pub fn record_any(&mut self, ctx: ContextHandle, tv: TimelineValue) {
-        self.record_write(ctx, tv, 0b011); // COMPUTE | TRANSFER
+        self.record_write(ctx, tv, WRITE_KINDS_COMPUTE_TRANSFER);
         self.record_read(ctx, tv);
     }
 }
@@ -126,53 +134,50 @@ pub fn epochs_from(table: &ReferenceTable) -> Vec<Epoch> {
 mod tests {
     use super::*;
 
-    const COMPUTE: u8 = 0b001;
-    const TRANSFER: u8 = 0b010;
-
     #[test]
     fn record_write_tracks_kinds_per_context() {
         let mut sync = ResourceSync::default();
-        sync.record_write(1, 5, COMPUTE);
-        sync.record_write(2, 7, TRANSFER);
+        sync.record_write(1, 5, WRITE_KINDS_COMPUTE);
+        sync.record_write(2, 7, WRITE_KINDS_TRANSFER);
         assert_eq!(sync.last_write.get(&1), Some(&5));
-        assert_eq!(sync.last_write_kinds.get(&1), Some(&COMPUTE));
-        assert_eq!(sync.last_write_kinds.get(&2), Some(&TRANSFER));
+        assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_COMPUTE));
+        assert_eq!(sync.last_write_kinds.get(&2), Some(&WRITE_KINDS_TRANSFER));
     }
 
     #[test]
     fn newer_write_replaces_kinds() {
         let mut sync = ResourceSync::default();
-        sync.record_write(1, 5, COMPUTE);
-        sync.record_write(1, 9, TRANSFER);
+        sync.record_write(1, 5, WRITE_KINDS_COMPUTE);
+        sync.record_write(1, 9, WRITE_KINDS_TRANSFER);
         assert_eq!(sync.last_write.get(&1), Some(&9));
         // Newer epoch fully supersedes the kinds of the older one.
-        assert_eq!(sync.last_write_kinds.get(&1), Some(&TRANSFER));
+        assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_TRANSFER));
     }
 
     #[test]
     fn equal_epoch_writes_or_kinds() {
         let mut sync = ResourceSync::default();
-        sync.record_write(1, 5, COMPUTE);
-        sync.record_write(1, 5, TRANSFER);
+        sync.record_write(1, 5, WRITE_KINDS_COMPUTE);
+        sync.record_write(1, 5, WRITE_KINDS_TRANSFER);
         assert_eq!(sync.last_write.get(&1), Some(&5));
-        assert_eq!(sync.last_write_kinds.get(&1), Some(&(COMPUTE | TRANSFER)));
+        assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_COMPUTE_TRANSFER));
     }
 
     #[test]
     fn older_write_is_ignored() {
         let mut sync = ResourceSync::default();
-        sync.record_write(1, 9, COMPUTE);
-        sync.record_write(1, 3, TRANSFER);
+        sync.record_write(1, 9, WRITE_KINDS_COMPUTE);
+        sync.record_write(1, 3, WRITE_KINDS_TRANSFER);
         assert_eq!(sync.last_write.get(&1), Some(&9));
         // Stale write must not overwrite the newer kinds.
-        assert_eq!(sync.last_write_kinds.get(&1), Some(&COMPUTE));
+        assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_COMPUTE));
     }
 
     #[test]
     fn record_any_uses_conservative_kinds() {
         let mut sync = ResourceSync::default();
         sync.record_any(1, 4);
-        assert_eq!(sync.last_write_kinds.get(&1), Some(&(COMPUTE | TRANSFER)));
+        assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_COMPUTE_TRANSFER));
         assert_eq!(sync.last_reads.get(&1), Some(&4));
     }
 }
