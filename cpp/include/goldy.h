@@ -433,6 +433,9 @@ struct GoldyParcel *goldy_mosaic_builder_build(struct GoldyMosaicBuilder *builde
                                                struct GoldyRetainedPool *pool);
 
 // Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
+//
+// # Safety
+// No pointer arguments; caller owns the returned handle.
 struct GoldyMosaicBuilder *goldy_mosaic_builder_create(void);
 
 // Destroy a mosaic builder without building.

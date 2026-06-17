@@ -73,6 +73,10 @@ impl Scheme {
         unsafe { sys::goldy_scheme_len(self.ptr) }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn is_dirty(&self) -> bool {
         unsafe { sys::goldy_scheme_is_dirty(self.ptr) }
     }

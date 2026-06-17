@@ -1,9 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{
-    ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, GraphCommand, ShaderHandle, SubmitSync,
-};
+use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle, SubmitSync};
 use super::staging::TextureStagingEntry;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};

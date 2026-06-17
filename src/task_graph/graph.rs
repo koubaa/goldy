@@ -662,9 +662,9 @@ pub(crate) fn submit_resolved_ir(
     TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
     let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
     let mut last_tv = backend.gpu_progress(ctx);
-    for part_idx in 0..wave_ranges.len() {
+    for (part_idx, range) in wave_ranges.iter().enumerate() {
         let _tz = crate::tracy_zone!("goldy.submit_partition");
-        let waves = cache.as_ref().unwrap().schedule.waves[wave_ranges[part_idx].clone()].to_vec();
+        let waves = cache.as_ref().unwrap().schedule.waves[range.clone()].to_vec();
         let sync = cross_sync_for_ir(submit_state, ir, ctx, part_idx);
         let cache_ref = cache.as_ref().unwrap();
         if let Some(graph_cmds) = cache_ref
@@ -1096,19 +1096,6 @@ impl IrSubmitState {
             }
         }
         apply_partition_epoch_stamps(&self.resource_stamps, &self.stamp_targets, ctx, ir, waves, tv);
-    }
-
-    /// Stamp every registered parcel at `tv` for a whole-IR submit (single partition).
-    pub fn apply_reference_stamps(
-        &self,
-        ctx: crate::backend::ContextHandle,
-        submit_device: &std::sync::Arc<crate::device::DeviceInner>,
-        ir: &GraphIR,
-        tv: TimelineValue,
-    ) {
-        let edges = analysis::build_edges(ir);
-        let schedule = analysis::schedule_waves(ir, &edges);
-        self.apply_partition_reference_stamps(ctx, submit_device, ir, &schedule.waves, tv);
     }
 
     /// Clear compiled schedule cache and stamp targets for in-place scheme re-record.

@@ -183,6 +183,9 @@ pub unsafe extern "C" fn goldy_parcel_byte_size(parcel: *const GoldyParcel) -> u
 }
 
 /// Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
+///
+/// # Safety
+/// No pointer arguments; caller owns the returned handle.
 #[no_mangle]
 pub unsafe extern "C" fn goldy_mosaic_builder_create() -> *mut GoldyMosaicBuilder {
     Box::into_raw(Box::new(GoldyMosaicBuilder { specs: Vec::new() }))
