@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use goldy::{
-    Context, Device, Grant, GrantTexture, Parcel, ReadGrant, RenderTarget, Scheme, Submission, TextureFlags,
+    Context, DepthFormat, Device, Grant, GrantTexture, Parcel, ReadGrant, Scheme, Submission, TextureFlags,
     TextureFormat, TextureKind,
 };
 use std::sync::Arc;
@@ -34,18 +34,24 @@ pub fn read_grant_texture(grant: &ReadGrant<GrantTexture>, submission: &Submissi
 /// Record render pass → copy-to-texture → grant-read once on a new scheme.
 pub fn scheme_record_readback(
     ctx: &Context,
-    target: &RenderTarget,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    depth_format: Option<DepthFormat>,
     readback: &Parcel,
     label: &'static str,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> (Scheme, ReadGrant<GrantTexture>) {
     let mut scheme = Scheme::new(ctx);
+    let rt = scheme
+        .lease_render_target(width, height, format, depth_format)
+        .expect("render target lease");
     {
-        let mut pass = scheme.render_pass(label, target);
+        let mut pass = scheme.render_pass(label, &rt);
         record(&mut pass);
         pass.finish();
     }
-    scheme.copy_to_texture(target, readback).expect("copy_to_texture");
+    scheme.copy_to_texture(&rt, readback).expect("copy_to_texture");
     let grant = scheme.grant_read_texture(readback).expect("grant_read_texture");
     (scheme, grant)
 }
@@ -53,12 +59,15 @@ pub fn scheme_record_readback(
 /// Record once, submit once, consume grant, and return pixels.
 pub fn scheme_render_and_readback(
     ctx: &Context,
-    target: &RenderTarget,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    depth_format: Option<DepthFormat>,
     readback: &Parcel,
     label: &'static str,
     record: impl FnOnce(&mut goldy::SchemeRenderPassBuilder<'_>),
 ) -> Vec<u8> {
-    let (mut scheme, grant) = scheme_record_readback(ctx, target, readback, label, record);
+    let (mut scheme, grant) = scheme_record_readback(ctx, width, height, format, depth_format, readback, label, record);
     let frame = scheme.submit().expect("submit");
     read_grant_texture(&grant, &frame)
 }

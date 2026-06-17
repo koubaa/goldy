@@ -6,9 +6,9 @@
 
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
-    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    types::ResourceAccess, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -68,7 +68,7 @@ struct RenderState {
     screen: goldy::PresentLease,
     present: PresentGrant,
     scheme: Scheme,
-    scene_rt: RenderTarget,
+    scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
     line_buffer: Parcel,
@@ -79,11 +79,6 @@ struct RenderState {
 }
 
 impl RenderState {
-    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> Result<RenderTarget> {
-        let (width, height) = swapchain.size();
-        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format()).map_err(Into::into)
-    }
-
     fn create_render_pipeline(
         device: &goldy::Device,
         render_shader: &ShaderModule,
@@ -107,7 +102,7 @@ impl RenderState {
         compute_pipeline: &ComputePipeline,
         render_pipeline: &RenderPipeline,
         line_buffer: &Parcel,
-        scene_rt: &RenderTarget,
+        scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         scheme
@@ -137,14 +132,23 @@ impl RenderState {
 
     fn rerecord_scheme(&mut self) {
         self.scheme.begin_rerecord();
-        self.present = Self::record_scheme(
-            &mut self.scheme,
-            &self.compute_pipeline,
-            &self.render_pipeline,
-            &self.line_buffer,
-            &self.scene_rt,
-            &self.screen,
-        );
+        let (width, height) = self.swapchain.size();
+        if let Ok(rt) = self.scheme.lease_render_target(
+            width.max(1),
+            height.max(1),
+            self.swapchain.format(),
+            None,
+        ) {
+            self.scene_rt = rt;
+            self.present = Self::record_scheme(
+                &mut self.scheme,
+                &self.compute_pipeline,
+                &self.render_pipeline,
+                &self.line_buffer,
+                &self.scene_rt,
+                &self.screen,
+            );
+        }
     }
 
     fn new(window: Arc<Window>) -> Result<Self> {
@@ -157,7 +161,6 @@ impl RenderState {
         let ctx = device.create_context()?;
         let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
         let screen = swapchain.lease();
-        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
@@ -184,6 +187,8 @@ impl RenderState {
         let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &swapchain)?;
 
         let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
         let present = Self::record_scheme(
             &mut scheme,
             &compute_pipeline,
@@ -285,7 +290,14 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.swapchain.resize(size.width, size.height).ok();
-                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.swapchain) {
+                        state.scheme.begin_rerecord();
+                        let (width, height) = state.swapchain.size();
+                        if let Ok(rt) = state.scheme.lease_render_target(
+                            width.max(1),
+                            height.max(1),
+                            state.swapchain.format(),
+                            None,
+                        ) {
                             state.scene_rt = rt;
                             if let Ok(pipeline) = RenderState::create_render_pipeline(
                                 &state.device,

@@ -5,8 +5,8 @@ use goldy::task_graph::BarrierUsage;
 use goldy::test_support::{mock_device, with_mock};
 use goldy::types::ResourceAccess;
 use goldy::{
-    BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RenderTarget,
-    RetainedPool, Scheme, ShaderModule, TextureFormat,
+    BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RetainedPool,
+    Scheme, ShaderModule, TextureFormat,
 };
 
 fn mock_ctx(device: &Device) -> Context {
@@ -294,9 +294,12 @@ fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
 /// The render pass itself does nothing interesting (clear + draw 0 verts), but registering
 /// the parcel is enough to put a `ResourceSync` in the ledger so the cross-submit analysis
 /// produces a non-None `SubmitSync` for the submission.
-fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline, rt: &RenderTarget) -> Scheme {
+fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline) -> Scheme {
     let mut s = Scheme::new(ctx);
-    let mut pass = s.render_pass("render_read", rt);
+    let rt = s
+        .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
+        .expect("render target lease");
+    let mut pass = s.render_pass("render_read", &rt);
     pass.bind_parcel_mut(parcel, NodeAccess::Read);
     pass.set_pipeline(pipeline);
     pass.draw(0..3, 0..1);
@@ -349,7 +352,6 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write_pipe");
     let render_pipe =
         RenderPipeline::new(&device, &vert_shader, &frag_shader, &RenderPipelineDesc::default()).expect("render_pipe");
-    let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("rt");
 
     let mut pool = RetainedPool::new(device.clone());
     let parcel = pool
@@ -364,7 +366,7 @@ fn compute_write_then_render_read_carries_sync_through_graph_submit() {
     // The cross-submit analysis sees a RAW hazard and produces a SubmitSync with
     // a scoped prologue barrier.  That Some must survive into submit_graph.
     clear_mock(&device);
-    let mut reader = render_read_scheme(&ctx, &parcel, &render_pipe, &rt);
+    let mut reader = render_read_scheme(&ctx, &parcel, &render_pipe);
     reader.submit().expect("render read");
 
     // The scoped prologue barrier must appear in the recorded compute commands

@@ -13,8 +13,8 @@ use goldy::{
     shader::builtins,
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureKind},
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, IndexFormat, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, Sampler, Scheme, ShaderModule, ShaderResourceSlot, TextureFormat,
-    Vertex2D, Vertex2DUv, VertexAttribute, VertexBufferLayout, VertexFormat,
+    RenderPipeline, RenderPipelineDesc, Sampler, ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D, Vertex2DUv,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use scheme_render::{
     acquire_readback_texture, device_and_pool, read_grant_texture, scheme_record_readback, scheme_render_and_readback,
@@ -42,11 +42,10 @@ fn scheme_render_pass_triangle_readback() {
         Vertex2D::new(-0.5, 0.5, Color::GREEN),
         Vertex2D::new(0.5, 0.5, Color::BLUE),
     ];
-
-    let target = RenderTarget::new(&device, W, H, TextureFormat::Rgba8Unorm).expect("render target");
     let vertex_buffer = pool
         .acquire_buffer_with_data(&vertices, BufferKind::Scattered)
         .expect("vertex buffer");
+
     let readback = acquire_readback_texture(&mut pool, W, H, TextureFormat::Rgba8Unorm);
     let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -61,13 +60,22 @@ fn scheme_render_pass_triangle_readback() {
     )
     .expect("pipeline");
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "triangle", |pass| {
-        pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-        pass.clear(clear);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.draw(0..3, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "triangle",
+        |pass| {
+            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.clear(clear);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.draw(0..3, 0..1);
+        },
+    );
 
     let stride = (W * 4) as usize;
     let cx = (W / 2) as usize;
@@ -97,8 +105,6 @@ fn scheme_vulkan_render_and_readback() {
         return;
     };
     let ctx = submission_context(&device);
-
-    let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).expect("render target");
 
     let shader_source = r#"
         struct VertexInput {
@@ -148,13 +154,22 @@ fn scheme_vulkan_render_and_readback() {
         .expect("vertex buffer");
     let readback = acquire_readback_texture(&mut pool, 100, 100, TextureFormat::Rgba8Unorm);
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "triangle", |pass| {
-        pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.draw(0..3, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        100,
+        100,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "triangle",
+        |pass| {
+            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.draw(0..3, 0..1);
+        },
+    );
 
     assert_eq!(pixels.len(), 100 * 100 * 4);
     let has_non_black = pixels.chunks(4).any(|p| p[0] > 0 || p[1] > 0 || p[2] > 0);
@@ -169,13 +184,21 @@ fn scheme_render_target_clear_only() {
     };
     let ctx = submission_context(&device);
 
-    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
     let readback = acquire_readback_texture(&mut pool, 4, 4, TextureFormat::Rgba8Unorm);
     let clear_color = Color::from_rgb(128, 64, 32);
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "clear", |pass| {
-        pass.clear(clear_color);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "clear",
+        |pass| {
+            pass.clear(clear_color);
+        },
+    );
 
     for chunk in pixels.chunks(4) {
         assert_eq!(chunk[0], 128, "Red channel mismatch");
@@ -186,14 +209,18 @@ fn scheme_render_target_clear_only() {
 
     // Retention smoke: scheme records once, second submit resubmits.
     let readback2 = acquire_readback_texture(&mut pool, 4, 4, TextureFormat::Rgba8Unorm);
-    let mut scheme = Scheme::new(&ctx);
-    {
-        let mut pass = scheme.render_pass("clear", &target);
-        pass.clear(clear_color);
-        pass.finish();
-    }
-    scheme.copy_to_texture(&target, &readback2).expect("copy_to_texture");
-    let _grant = scheme.grant_read_texture(&readback2).expect("grant");
+    let (mut scheme, _grant) = scheme_record_readback(
+        &ctx,
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback2,
+        "clear",
+        |pass| {
+            pass.clear(clear_color);
+        },
+    );
     let frame0 = scheme.submit().expect("submit 0");
     assert_eq!(scheme.replay_stats().records, 1);
     let frame1 = scheme.submit().expect("submit 1");
@@ -211,13 +238,21 @@ fn scheme_steady_state_readback_loop() {
     };
     let ctx = submission_context(&device);
 
-    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
     let readback = acquire_readback_texture(&mut pool, 4, 4, TextureFormat::Rgba8Unorm);
     let clear_color = Color::from_rgb(128, 64, 32);
 
-    let (mut scheme, grant) = scheme_record_readback(&ctx, &target, &readback, "clear", |pass| {
-        pass.clear(clear_color);
-    });
+    let (mut scheme, grant) = scheme_record_readback(
+        &ctx,
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "clear",
+        |pass| {
+            pass.clear(clear_color);
+        },
+    );
 
     let frame0 = scheme.submit().expect("submit 0");
     let pixels0 = read_grant_texture(&grant, &frame0);
@@ -251,17 +286,33 @@ fn scheme_multiple_render_targets() {
     };
     let ctx = submission_context(&device);
 
-    let target1 = RenderTarget::new(&device, 10, 10, TextureFormat::Rgba8Unorm).expect("target 1");
-    let target2 = RenderTarget::new(&device, 20, 20, TextureFormat::Rgba8Unorm).expect("target 2");
     let readback1 = acquire_readback_texture(&mut pool, 10, 10, TextureFormat::Rgba8Unorm);
     let readback2 = acquire_readback_texture(&mut pool, 20, 20, TextureFormat::Rgba8Unorm);
 
-    let pixels1 = scheme_render_and_readback(&ctx, &target1, &readback1, "clear_red", |pass| {
-        pass.clear(Color::RED);
-    });
-    let pixels2 = scheme_render_and_readback(&ctx, &target2, &readback2, "clear_blue", |pass| {
-        pass.clear(Color::BLUE);
-    });
+    let pixels1 = scheme_render_and_readback(
+        &ctx,
+        10,
+        10,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback1,
+        "clear_red",
+        |pass| {
+            pass.clear(Color::RED);
+        },
+    );
+    let pixels2 = scheme_render_and_readback(
+        &ctx,
+        20,
+        20,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback2,
+        "clear_blue",
+        |pass| {
+            pass.clear(Color::BLUE);
+        },
+    );
 
     assert_eq!(pixels1[0], 255);
     assert_eq!(pixels1[1], 0);
@@ -279,8 +330,6 @@ fn scheme_indexed_drawing() {
         return;
     };
     let ctx = submission_context(&device);
-
-    let target = RenderTarget::new(&device, 100, 100, TextureFormat::Rgba8Unorm).expect("render target");
 
     let shader_source = r#"
         struct VertexInput {
@@ -335,15 +384,24 @@ fn scheme_indexed_drawing() {
         .expect("ib");
     let readback = acquire_readback_texture(&mut pool, 100, 100, TextureFormat::Rgba8Unorm);
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "indexed_u16", |pass| {
-        pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-        pass.bind_parcel_mut(&index_buffer, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
-        pass.draw_indexed(0..6, 0, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        100,
+        100,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "indexed_u16",
+        |pass| {
+            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.bind_parcel_mut(&index_buffer, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.set_index_buffer(&index_buffer, IndexFormat::Uint16);
+            pass.draw_indexed(0..6, 0, 0..1);
+        },
+    );
 
     assert_eq!(pixels.len(), 100 * 100 * 4);
     let non_black_count = pixels.chunks(4).filter(|p| p[0] > 0 || p[1] > 0 || p[2] > 0).count();
@@ -361,8 +419,6 @@ fn scheme_indexed_drawing_uint32() {
         return;
     };
     let ctx = submission_context(&device);
-
-    let target = RenderTarget::new(&device, 50, 50, TextureFormat::Rgba8Unorm).expect("render target");
 
     let shader_source = r#"
         struct VertexInput {
@@ -416,15 +472,24 @@ fn scheme_indexed_drawing_uint32() {
         .expect("ib");
     let readback = acquire_readback_texture(&mut pool, 50, 50, TextureFormat::Rgba8Unorm);
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "indexed_u32", |pass| {
-        pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-        pass.bind_parcel_mut(&index_buffer, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.set_index_buffer(&index_buffer, IndexFormat::Uint32);
-        pass.draw_indexed(0..3, 0, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        50,
+        50,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "indexed_u32",
+        |pass| {
+            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.bind_parcel_mut(&index_buffer, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.set_index_buffer(&index_buffer, IndexFormat::Uint32);
+            pass.draw_indexed(0..3, 0, 0..1);
+        },
+    );
 
     let red_pixel_count = pixels
         .chunks(4)
@@ -471,15 +536,6 @@ fn scheme_depth_occlusion_red_beats_green() {
     };
     let ctx = submission_context(&device);
 
-    let target = RenderTarget::new_with_depth(
-        &device,
-        64,
-        64,
-        TextureFormat::Rgba8Unorm,
-        Some(DepthFormat::Depth32Float),
-    )
-    .expect("render target");
-
     let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang")).expect("shader");
     let pipeline = RenderPipeline::new(
         &device,
@@ -525,17 +581,26 @@ fn scheme_depth_occlusion_red_beats_green() {
         .expect("green vb");
     let readback = acquire_readback_texture(&mut pool, 64, 64, TextureFormat::Rgba8Unorm);
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "depth_red_wins", |pass| {
-        pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
-        pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.clear_depth(1.0);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &red_vb);
-        pass.draw(0..3, 0..1);
-        pass.set_vertex_buffer(0, &green_vb);
-        pass.draw(0..3, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        64,
+        64,
+        TextureFormat::Rgba8Unorm,
+        Some(DepthFormat::Depth32Float),
+        &readback,
+        "depth_red_wins",
+        |pass| {
+            pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
+            pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.clear_depth(1.0);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &red_vb);
+            pass.draw(0..3, 0..1);
+            pass.set_vertex_buffer(0, &green_vb);
+            pass.draw(0..3, 0..1);
+        },
+    );
 
     let total = pixels.len() / 4;
     let red_count = pixels
@@ -563,15 +628,6 @@ fn scheme_depth_occlusion_green_beats_red() {
         return;
     };
     let ctx = submission_context(&device);
-
-    let target = RenderTarget::new_with_depth(
-        &device,
-        64,
-        64,
-        TextureFormat::Rgba8Unorm,
-        Some(DepthFormat::Depth32Float),
-    )
-    .expect("render target");
 
     let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang")).expect("shader");
     let pipeline = RenderPipeline::new(
@@ -618,17 +674,26 @@ fn scheme_depth_occlusion_green_beats_red() {
         .expect("green vb");
     let readback = acquire_readback_texture(&mut pool, 64, 64, TextureFormat::Rgba8Unorm);
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "depth_green_wins", |pass| {
-        pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
-        pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.clear_depth(1.0);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &red_vb);
-        pass.draw(0..3, 0..1);
-        pass.set_vertex_buffer(0, &green_vb);
-        pass.draw(0..3, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        64,
+        64,
+        TextureFormat::Rgba8Unorm,
+        Some(DepthFormat::Depth32Float),
+        &readback,
+        "depth_green_wins",
+        |pass| {
+            pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
+            pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.clear_depth(1.0);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &red_vb);
+            pass.draw(0..3, 0..1);
+            pass.set_vertex_buffer(0, &green_vb);
+            pass.draw(0..3, 0..1);
+        },
+    );
 
     let total = pixels.len() / 4;
     let green_count = pixels
@@ -702,7 +767,6 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
 "#;
 
     let shader = ShaderModule::from_slang(&device, shader_source).expect("shader");
-    let target = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("target");
     let readback = acquire_readback_texture(&mut pool, 4, 4, TextureFormat::Rgba8Unorm);
 
     let pipeline = RenderPipeline::new(
@@ -721,15 +785,24 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     )
     .expect("pipeline");
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "bindless_read", |pass| {
-        pass.clear(Color::BLACK);
-        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
-            parcel: &buffer,
-            access: NodeAccess::ReadWrite,
-        }]);
-        pass.set_pipeline(&pipeline);
-        pass.draw(0..3, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "bindless_read",
+        |pass| {
+            pass.clear(Color::BLACK);
+            pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+                parcel: &buffer,
+                access: NodeAccess::ReadWrite,
+            }]);
+            pass.set_pipeline(&pipeline);
+            pass.draw(0..3, 0..1);
+        },
+    );
 
     assert_eq!(pixels.len(), 4 * 4 * 4);
     let all_green = pixels.chunks(4).all(|p| p[1] > 100);
@@ -818,7 +891,6 @@ float4 fs_main(Interpolated<float4> tex, Filter smp, FullscreenVarying input) : 
 "#;
 
     let shader = ShaderModule::from_slang(&device, shader_source).expect("shader");
-    let target = RenderTarget::new(&device, W, H, TextureFormat::Rgba8Unorm).expect("target");
     let readback = acquire_readback_texture(&mut pool, W, H, TextureFormat::Rgba8Unorm);
     let pipeline = RenderPipeline::new(
         &device,
@@ -832,25 +904,34 @@ float4 fs_main(Interpolated<float4> tex, Filter smp, FullscreenVarying input) : 
     )
     .expect("pipeline");
 
-    let pixels = scheme_render_and_readback(&ctx, &target, &readback, "textured_quad", |pass| {
-        pass.bind_shader_resources(&[
-            ShaderResourceSlot::Parcel {
-                parcel: &texture,
-                access: NodeAccess::Read,
-            },
-            ShaderResourceSlot::Sampler(&sampler),
-        ]);
-        pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-        pass.clear(Color {
-            r: 0.1,
-            g: 0.1,
-            b: 0.15,
-            a: 1.0,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.draw(0..6, 0..1);
-    });
+    let pixels = scheme_render_and_readback(
+        &ctx,
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "textured_quad",
+        |pass| {
+            pass.bind_shader_resources(&[
+                ShaderResourceSlot::Parcel {
+                    parcel: &texture,
+                    access: NodeAccess::Read,
+                },
+                ShaderResourceSlot::Sampler(&sampler),
+            ]);
+            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.clear(Color {
+                r: 0.1,
+                g: 0.1,
+                b: 0.15,
+                a: 1.0,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.draw(0..6, 0..1);
+        },
+    );
 
     assert_eq!(pixels.len(), (W * H * 4) as usize);
     let center = ((H / 2) * W + (W / 2)) as usize * 4;

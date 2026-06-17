@@ -28,7 +28,8 @@ use crate::task_graph::{
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{
-    BackendType, Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat, TextureKind,
+    BackendType, Color, DepthFormat, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use crate::validation_env;
 use std::fmt;
@@ -453,6 +454,9 @@ pub struct LeaseId(pub(crate) u32);
 /// Marker type for texture leases acquired via [`Scheme::lease_texture`].
 pub struct LeaseTexture;
 
+/// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
+pub struct LeaseRenderTarget;
+
 /// One-submission tenancy of pool property held by a [`Scheme`].
 ///
 /// Leases have no cross-scheme identity; the scheme owns the N=1 backing parcel
@@ -487,6 +491,8 @@ pub struct Scheme {
     ctx: Context,
     /// N=1 backing parcels for [`Lease`] declarations, indexed by [`LeaseId`].
     leases: Vec<Parcel>,
+    /// N=1 backing render targets for [`Lease<LeaseRenderTarget>`] declarations, indexed by [`LeaseId`].
+    rt_leases: Vec<RenderTarget>,
     /// COW dirty bit: set by every structural mutation, cleared by a successful record.
     dirty: bool,
     /// Set by foreign schemes when shared-parcel interaction topology changes.
@@ -529,6 +535,7 @@ impl Scheme {
             submit_state: IrSubmitState::new(),
             ctx: ctx.clone(),
             leases: Vec::new(),
+            rt_leases: Vec::new(),
             dirty: true,
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
@@ -633,6 +640,33 @@ impl Scheme {
             id,
             _marker: PhantomData,
         })
+    }
+
+    /// Declare a render-target lease owned by this scheme (N=1).
+    ///
+    /// The backing render target is held until the scheme is dropped or [`Self::begin_rerecord`]
+    /// clears it. Structural mutation.
+    pub fn lease_render_target(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        depth_format: Option<DepthFormat>,
+    ) -> Result<Lease<LeaseRenderTarget>, GoldyError> {
+        self.dirty = true;
+        let rt = RenderTarget::new_with_depth(self.ctx.device(), width, height, format, depth_format)
+            .map_err(|e| self.ctx.classify(e))?;
+        let id = LeaseId(u32::try_from(self.rt_leases.len()).expect("render target lease id overflow"));
+        self.rt_leases.push(rt);
+        Ok(Lease {
+            id,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Borrow the backing [`RenderTarget`] for a scheme-held lease.
+    pub fn rt(&self, lease: &Lease<LeaseRenderTarget>) -> &RenderTarget {
+        &self.rt_leases[lease.id.0 as usize]
     }
 
     /// Typed resource descriptor handle for a scheme-held lease (advanced binding).
@@ -781,6 +815,7 @@ impl Scheme {
                 pool.adopt(StampedParcel { parcel, ready_after });
             });
         }
+        self.rt_leases.clear();
     }
 
     fn finish_submit_frame(
@@ -887,13 +922,14 @@ impl Scheme {
     }
 
     /// Copy an offscreen render target into a present lease drawable.
-    pub fn copy_to_present(&mut self, src: &RenderTarget, dst: &PresentLease) {
+    pub fn copy_to_present(&mut self, src: &Lease<LeaseRenderTarget>, dst: &PresentLease) {
         self.dirty = true;
+        let handle = self.rt_leases[src.id.0 as usize].backend_handle();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_present",
             bindings: vec![
                 ResourceBinding {
-                    resource: ResourceId::RenderTarget(src.backend_handle()),
+                    resource: ResourceId::RenderTarget(handle),
                     access: NodeAccess::Read,
                 },
                 ResourceBinding {
@@ -902,7 +938,7 @@ impl Scheme {
                 },
             ],
             kind: NodeKind::CopyRenderTarget {
-                src: src.backend_handle(),
+                src: handle,
                 dst: ResourceId::PresentLease(dst.id),
             },
         });
@@ -913,7 +949,8 @@ impl Scheme {
     ///
     /// The destination must be a texture parcel with [`TextureFlags::COPY_DST`], homed on
     /// this scheme's context, and matching the render target's width, height, and format.
-    pub fn copy_to_texture(&mut self, src: &RenderTarget, dst: &Parcel) -> Result<(), GoldyError> {
+    pub fn copy_to_texture(&mut self, src: &Lease<LeaseRenderTarget>, dst: &Parcel) -> Result<(), GoldyError> {
+        let src_rt = &self.rt_leases[src.id.0 as usize];
         if !dst.is_homed_on(&self.ctx) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "parcel home device does not match scheme context"
@@ -934,28 +971,29 @@ impl Scheme {
                 "copy_to_texture requires non-zero texture dimensions"
             )));
         }
-        if width != src.width() || height != src.height() {
+        if width != src_rt.width() || height != src_rt.height() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "copy_to_texture: texture {width}x{height} does not match render target {}x{}",
-                src.width(),
-                src.height()
+                src_rt.width(),
+                src_rt.height()
             )));
         }
-        if format != src.format() {
+        if format != src_rt.format() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "copy_to_texture: texture format {format:?} does not match render target {:?}",
-                src.format()
+                src_rt.format()
             )));
         }
 
         self.dirty = true;
         self.submit_state.register_parcel_stamp(dst);
+        let src_handle = src_rt.backend_handle();
         let dst_resource = dst.resource_id();
         self.ir.nodes.push(TaskNode {
             label: "copy_to_texture",
             bindings: vec![
                 ResourceBinding {
-                    resource: ResourceId::RenderTarget(src.backend_handle()),
+                    resource: ResourceId::RenderTarget(src_handle),
                     access: NodeAccess::Read,
                 },
                 ResourceBinding {
@@ -964,7 +1002,7 @@ impl Scheme {
                 },
             ],
             kind: NodeKind::CopyRenderTarget {
-                src: src.backend_handle(),
+                src: src_handle,
                 dst: dst_resource,
             },
         });
@@ -972,14 +1010,19 @@ impl Scheme {
     }
 
     /// Begin recording an offscreen render pass on this scheme.
-    pub fn render_pass<'a>(&'a mut self, label: &'static str, rt: &RenderTarget) -> SchemeRenderPassBuilder<'a> {
+    pub fn render_pass<'a>(
+        &'a mut self,
+        label: &'static str,
+        rt: &Lease<LeaseRenderTarget>,
+    ) -> SchemeRenderPassBuilder<'a> {
         self.dirty = true;
+        let handle = self.rt_leases[rt.id.0 as usize].backend_handle();
         SchemeRenderPassBuilder {
             scheme: self,
             label,
-            target: rt.backend_handle(),
+            target: handle,
             bindings: vec![ResourceBinding {
-                resource: ResourceId::RenderTarget(rt.backend_handle()),
+                resource: ResourceId::RenderTarget(handle),
                 access: NodeAccess::Write,
             }],
             commands: Vec::new(),
@@ -1012,6 +1055,7 @@ impl Drop for Scheme {
                 pool.adopt(StampedParcel { parcel, ready_after });
             });
         }
+        self.rt_leases.clear();
     }
 }
 
@@ -2372,14 +2416,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_present_appends_ir_node() {
-        use crate::render_target::RenderTarget;
-
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
-        let rt = RenderTarget::new(&device, 4, 4, crate::types::TextureFormat::Rgba8Unorm).expect("render target");
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
         assert_eq!(scheme.ir_node_count(), 0);
 
         scheme.copy_to_present(&rt, &lease);
@@ -2397,12 +2441,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_texture_appends_ir_node() {
-        use crate::render_target::RenderTarget;
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
         let device = mock_device();
         let ctx = device.create_context().expect("context");
-        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
         let mut pool = crate::RetainedPool::new(device.clone());
         let tex = pool
             .acquire_texture(
@@ -2417,6 +2459,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let tex_handle = tex.texture_handle().expect("texture handle");
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
         assert_eq!(scheme.ir_node_count(), 0);
 
         scheme.copy_to_texture(&rt, &tex).expect("copy_to_texture");
@@ -2434,18 +2479,19 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_texture_rejects_buffer_parcel() {
-        use crate::render_target::RenderTarget;
         use crate::types::{BufferKind, TextureFormat};
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().expect("context");
-        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
         let buffer = pool
             .acquire_buffer_sized::<u32>(4, BufferKind::Scattered, crate::types::BufferFlags::empty())
             .expect("buffer");
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
         let err = scheme
             .copy_to_texture(&rt, &buffer)
             .expect_err("buffer parcel must fail");
@@ -2455,13 +2501,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_texture_rejects_missing_copy_dst_flag() {
-        use crate::render_target::RenderTarget;
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().expect("context");
-        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
         let texture = pool
             .acquire_texture(
                 4,
@@ -2474,6 +2518,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
         let err = scheme
             .copy_to_texture(&rt, &texture)
             .expect_err("missing COPY_DST must fail");
@@ -2483,13 +2530,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_texture_rejects_dimension_mismatch() {
-        use crate::render_target::RenderTarget;
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().expect("context");
-        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
         let texture = pool
             .acquire_texture(
                 8,
@@ -2502,6 +2547,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
         let err = scheme
             .copy_to_texture(&rt, &texture)
             .expect_err("dimension mismatch must fail");
@@ -2514,13 +2562,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_texture_rejects_format_mismatch() {
-        use crate::render_target::RenderTarget;
         use crate::types::{TextureFlags, TextureFormat, TextureKind};
 
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().expect("context");
-        let rt = RenderTarget::new(&device, 4, 4, TextureFormat::Rgba8Unorm).expect("render target");
         let texture = pool
             .acquire_texture(
                 4,
@@ -2533,6 +2579,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .expect("texture");
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
+            .expect("render target");
         let err = scheme
             .copy_to_texture(&rt, &texture)
             .expect_err("format mismatch must fail");
@@ -2913,17 +2962,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn copy_to_present_and_render_pass_partition_on_present_boundary() {
-        use crate::render_target::RenderTarget;
         use crate::task_graph::analysis;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
-        let rt = RenderTarget::new(&device, 4, 4, crate::types::TextureFormat::Rgba8Unorm).expect("rt");
         let shader = mock_render_shader(&device);
         let pipeline = mock_render_pipeline(&device, &shader);
 
         let mut scheme = Scheme::new(&ctx);
+        let rt = scheme
+            .lease_render_target(4, 4, crate::types::TextureFormat::Rgba8Unorm, None)
+            .expect("rt");
         let mut pass = scheme.render_pass("render", &rt);
         pass.set_pipeline(&pipeline);
         pass.draw_fullscreen();

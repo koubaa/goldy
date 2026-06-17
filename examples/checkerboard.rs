@@ -8,8 +8,8 @@
 
 use goldy::{
     shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, LayoutCheckable,
-    NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    Lease, LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -42,7 +42,7 @@ struct App {
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
     present: Option<PresentGrant>,
-    scene_rt: Option<RenderTarget>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     start_time: Instant,
     frame_count: u32,
@@ -69,11 +69,6 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
-        let (width, height) = swapchain.size();
-        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
-    }
-
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
@@ -94,7 +89,7 @@ impl App {
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
         uniform: &Parcel,
-        scene_rt: &RenderTarget,
+        scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("checkerboard", scene_rt);
@@ -132,8 +127,9 @@ impl App {
         let uniform =
             retained_pool.acquire_buffer_sized::<TimeUniforms>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
-        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
         let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
         let present = Self::record_scheme(&mut scheme, &pipeline, &uniform, &scene_rt, &screen);
 
         self.ctx = Some(ctx);
@@ -179,20 +175,27 @@ impl App {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
             if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
-                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
-                    if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
-                        self.pipeline = Some(pipeline);
-                        if let (Some(scheme), Some(pipeline), Some(uniform), Some(screen)) = (
-                            self.scheme.as_mut(),
-                            self.pipeline.as_ref(),
-                            self.uniform.as_ref(),
-                            self.screen.as_ref(),
-                        ) {
-                            scheme.begin_rerecord();
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                    self.pipeline = Some(pipeline);
+                    if let (Some(scheme), Some(pipeline), Some(uniform), Some(screen)) = (
+                        self.scheme.as_mut(),
+                        self.pipeline.as_ref(),
+                        self.uniform.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        scheme.begin_rerecord();
+
+                        let (width, height) = swapchain.size();
+
+                        if let Ok(rt) =
+                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        {
                             let present = Self::record_scheme(scheme, pipeline, uniform, &rt, screen);
+
                             self.present = Some(present);
+
+                            self.scene_rt = Some(rt);
                         }
-                        self.scene_rt = Some(rt);
                     }
                 }
             }

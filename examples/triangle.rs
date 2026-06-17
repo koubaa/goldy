@@ -5,9 +5,9 @@
 //! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, PresentGrant,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
-    SwapchainPool, Vertex2D,
+    shader::builtins, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use winit::{
@@ -31,7 +31,7 @@ struct App {
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
     present: Option<PresentGrant>,
-    scene_rt: Option<RenderTarget>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     frame_count: u64,
     start_time: std::time::Instant,
@@ -58,11 +58,6 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
-        let (width, height) = swapchain.size();
-        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
-    }
-
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
@@ -83,7 +78,7 @@ impl App {
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
         vertex_buffer: &Parcel,
-        scene_rt: &RenderTarget,
+        scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
         bg_color: Color,
     ) -> PresentGrant {
@@ -119,8 +114,9 @@ impl App {
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
         let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
 
-        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
         let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
@@ -163,17 +159,21 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
-                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
-                    if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
-                        self.pipeline = Some(pipeline);
-                        if let (Some(scheme), Some(pipeline), Some(vertex_buffer), Some(screen)) = (
-                            self.scheme.as_mut(),
-                            self.pipeline.as_ref(),
-                            self.vertex_buffer.as_ref(),
-                            self.screen.as_ref(),
-                        ) {
-                            scheme.begin_rerecord();
+            if let (Some(device), Some(swapchain), Some(shader), Some(scheme)) =
+                (&self.device, &self.swapchain, &self.shader, self.scheme.as_mut())
+            {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                    self.pipeline = Some(pipeline);
+                    if let (Some(pipeline), Some(vertex_buffer), Some(screen)) = (
+                        self.pipeline.as_ref(),
+                        self.vertex_buffer.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        scheme.begin_rerecord();
+                        let (width, height) = swapchain.size();
+                        if let Ok(rt) =
+                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        {
                             let bg_color = Color {
                                 r: 0.1,
                                 g: 0.1,
@@ -182,8 +182,8 @@ impl App {
                             };
                             let present = Self::record_scheme(scheme, pipeline, vertex_buffer, &rt, screen, bg_color);
                             self.present = Some(present);
+                            self.scene_rt = Some(rt);
                         }
-                        self.scene_rt = Some(rt);
                     }
                 }
             }

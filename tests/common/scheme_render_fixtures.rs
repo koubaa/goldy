@@ -2,9 +2,8 @@
 
 use goldy::{
     types::ResourceAccess, BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device,
-    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    Scheme, ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
+    ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 
@@ -22,13 +21,20 @@ pub fn create_device() -> Option<Device> {
 
 pub fn scheme_render_clear(device: &Device, width: u32, height: u32, color: Color) -> Vec<u8> {
     let ctx = device.create_context().expect("context");
-    let target =
-        RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
     let mut pool = goldy::RetainedPool::new(Arc::new(device.clone()));
     let readback = acquire_readback_texture(&mut pool, width, height, TextureFormat::Rgba8Unorm);
-    scheme_render_and_readback(&ctx, &target, &readback, "clear", |pass| {
-        pass.clear(color);
-    })
+    scheme_render_and_readback(
+        &ctx,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "clear",
+        |pass| {
+            pass.clear(color);
+        },
+    )
 }
 
 pub fn scheme_render_triangle(
@@ -39,8 +45,6 @@ pub fn scheme_render_triangle(
     vertices: [Vertex2D; 3],
 ) -> Vec<u8> {
     let ctx = device.create_context().expect("context");
-    let target =
-        RenderTarget::new(device, width, height, TextureFormat::Rgba8Unorm).expect("Failed to create render target");
 
     let shader_source = r#"
         struct VertexInput {
@@ -87,13 +91,22 @@ pub fn scheme_render_triangle(
         .expect("vertex buffer");
     let readback = acquire_readback_texture(&mut pool, width, height, TextureFormat::Rgba8Unorm);
 
-    scheme_render_and_readback(&ctx, &target, &readback, "triangle", |pass| {
-        pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-        pass.clear(clear_color);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &vertex_buffer);
-        pass.draw(0..3, 0..1);
-    })
+    scheme_render_and_readback(
+        &ctx,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "triangle",
+        |pass| {
+            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.clear(clear_color);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &vertex_buffer);
+            pass.draw(0..3, 0..1);
+        },
+    )
 }
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -124,14 +137,6 @@ pub fn depth_vertex_layout() -> VertexBufferLayout {
 
 pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u8> {
     let ctx = device.create_context().expect("context");
-    let target = RenderTarget::new_with_depth(
-        device,
-        width,
-        height,
-        TextureFormat::Rgba8Unorm,
-        Some(DepthFormat::Depth32Float),
-    )
-    .expect("Failed to create render target with depth");
 
     let shader_source = include_str!("../../shaders/depth_test.slang");
     let shader = ShaderModule::from_slang(device, shader_source).expect("Failed to create shader");
@@ -182,17 +187,26 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
         .expect("green vb");
     let readback = acquire_readback_texture(&mut pool, width, height, TextureFormat::Rgba8Unorm);
 
-    scheme_render_and_readback(&ctx, &target, &readback, "depth_occlusion", |pass| {
-        pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
-        pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.clear_depth(1.0);
-        pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, &red_vb);
-        pass.draw(0..3, 0..1);
-        pass.set_vertex_buffer(0, &green_vb);
-        pass.draw(0..3, 0..1);
-    })
+    scheme_render_and_readback(
+        &ctx,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        Some(DepthFormat::Depth32Float),
+        &readback,
+        "depth_occlusion",
+        |pass| {
+            pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
+            pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
+            pass.clear(Color::BLACK);
+            pass.clear_depth(1.0);
+            pass.set_pipeline(&pipeline);
+            pass.set_vertex_buffer(0, &red_vb);
+            pass.draw(0..3, 0..1);
+            pass.set_vertex_buffer(0, &green_vb);
+            pass.draw(0..3, 0..1);
+        },
+    )
 }
 
 pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
@@ -257,19 +271,26 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         use_buffer_a = !use_buffer_a;
     }
 
-    let target = RenderTarget::new(device, RENDER_WIDTH, RENDER_HEIGHT, TextureFormat::Rgba8Unorm)
-        .expect("Failed to create render target");
     let readback = acquire_readback_texture(&mut pool, RENDER_WIDTH, RENDER_HEIGHT, TextureFormat::Rgba8Unorm);
 
-    scheme_render_and_readback(&ctx, &target, &readback, "gol_render", |pass| {
-        let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
-        // Scattered<uint> maps to a UAV slot; match TaskGraph bind_resources (ReadWrite), not SRV.
-        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
-            parcel: cells,
-            access: NodeAccess::ReadWrite,
-        }]);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&render_pipeline);
-        pass.draw(0..3, 0..1);
-    })
+    scheme_render_and_readback(
+        &ctx,
+        RENDER_WIDTH,
+        RENDER_HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        None,
+        &readback,
+        "gol_render",
+        |pass| {
+            let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
+            // Scattered<uint> maps to a UAV slot; match TaskGraph bind_resources (ReadWrite), not SRV.
+            pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+                parcel: cells,
+                access: NodeAccess::ReadWrite,
+            }]);
+            pass.clear(Color::BLACK);
+            pass.set_pipeline(&render_pipeline);
+            pass.draw(0..3, 0..1);
+        },
+    )
 }

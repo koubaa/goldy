@@ -8,8 +8,8 @@
 
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
-    PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
+    write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
     ShaderModule, SwapchainPool,
 };
 use std::sync::Arc;
@@ -39,7 +39,7 @@ struct App {
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
     present: Option<PresentGrant>,
-    scene_rt: Option<RenderTarget>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
 
     start_time: Instant,
@@ -76,11 +76,6 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
-        let (width, height) = swapchain.size();
-        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
-    }
-
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
@@ -103,7 +98,7 @@ impl App {
         vertex_parcel: &Parcel,
         vertex_count: u32,
         bg_color: Color,
-        scene_rt: &RenderTarget,
+        scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("digital_clock", scene_rt);
@@ -121,26 +116,32 @@ impl App {
         if vertex_count == self.recorded_vertex_count && bg_color == self.recorded_bg_color {
             return;
         }
-        if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(scene_rt), Some(screen)) = (
+        if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(swapchain), Some(screen)) = (
             self.scheme.as_mut(),
             self.pipeline.as_ref(),
             self.vertex_parcel.as_ref(),
-            self.scene_rt.as_ref(),
+            self.swapchain.as_ref(),
             self.screen.as_ref(),
         ) {
             scheme.begin_rerecord();
-            let present = Self::record_scheme(
-                scheme,
-                pipeline,
-                vertex_parcel,
-                vertex_count,
-                bg_color,
-                scene_rt,
-                screen,
-            );
-            self.present = Some(present);
-            self.recorded_vertex_count = vertex_count;
-            self.recorded_bg_color = bg_color;
+            let (width, height) = swapchain.size();
+            if let Ok(rt) =
+                scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+            {
+                let present = Self::record_scheme(
+                    scheme,
+                    pipeline,
+                    vertex_parcel,
+                    vertex_count,
+                    bg_color,
+                    &rt,
+                    screen,
+                );
+                self.present = Some(present);
+                self.recorded_vertex_count = vertex_count;
+                self.recorded_bg_color = bg_color;
+                self.scene_rt = Some(rt);
+            }
         }
     }
 
@@ -164,9 +165,10 @@ impl App {
             BufferFlags::empty(),
         )?;
 
-        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
         let bg_color = self.clock_state.background_color();
         let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
         let present = Self::record_scheme(&mut scheme, &pipeline, &vertex_parcel, 1, bg_color, &scene_rt, &screen);
 
         self.ctx = Some(ctx);
@@ -238,19 +240,23 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
-                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
-                    if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
-                        self.pipeline = Some(pipeline);
-                        if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(screen)) = (
-                            self.scheme.as_mut(),
-                            self.pipeline.as_ref(),
-                            self.vertex_parcel.as_ref(),
-                            self.screen.as_ref(),
-                        ) {
-                            let bg_color = self.clock_state.background_color();
-                            let vertex_count = self.recorded_vertex_count.max(1);
-                            scheme.begin_rerecord();
+            if let (Some(device), Some(swapchain), Some(shader), Some(scheme)) =
+                (&self.device, &self.swapchain, &self.shader, self.scheme.as_mut())
+            {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                    self.pipeline = Some(pipeline);
+                    if let (Some(pipeline), Some(vertex_parcel), Some(screen)) = (
+                        self.pipeline.as_ref(),
+                        self.vertex_parcel.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        let bg_color = self.clock_state.background_color();
+                        let vertex_count = self.recorded_vertex_count.max(1);
+                        scheme.begin_rerecord();
+                        let (width, height) = swapchain.size();
+                        if let Ok(rt) =
+                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        {
                             let present = Self::record_scheme(
                                 scheme,
                                 pipeline,
@@ -263,8 +269,8 @@ impl App {
                             self.present = Some(present);
                             self.recorded_vertex_count = vertex_count;
                             self.recorded_bg_color = bg_color;
+                            self.scene_rt = Some(rt);
                         }
-                        self.scene_rt = Some(rt);
                     }
                 }
             }

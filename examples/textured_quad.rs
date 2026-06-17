@@ -6,8 +6,8 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, PresentGrant, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
+    BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, Parcel, PresentGrant,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
     ShaderResourceSlot, SwapchainPool, Vertex2DUv,
 };
 use std::sync::Arc;
@@ -93,7 +93,7 @@ struct App {
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
     present: Option<PresentGrant>,
-    scene_rt: Option<RenderTarget>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     _retained_pool: Option<RetainedPool>,
     vertex_buffer: Option<Parcel>,
@@ -126,11 +126,6 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
-        let (width, height) = swapchain.size();
-        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
-    }
-
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
@@ -153,7 +148,7 @@ impl App {
         vertex_buffer: &Parcel,
         texture: &Parcel,
         sampler: &Sampler,
-        scene_rt: &RenderTarget,
+        scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let shader_resources = [
@@ -226,9 +221,9 @@ impl App {
         let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
 
         let vertex_buffer = retained_pool.acquire_buffer_with_data(&QUAD_VERTICES, BufferKind::Scattered)?;
-        let scene_rt = Self::create_scene_rt(&device, &swapchain)?;
-
         let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
         let present = Self::record_scheme(
             &mut scheme,
             &pipeline,
@@ -274,31 +269,28 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
-                if let Ok(rt) = Self::create_scene_rt(device, swapchain) {
-                    if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
-                        self.pipeline = Some(pipeline);
-                        if let (
-                            Some(scheme),
-                            Some(pipeline),
-                            Some(vertex_buffer),
-                            Some(texture),
-                            Some(sampler),
-                            Some(screen),
-                        ) = (
-                            self.scheme.as_mut(),
-                            self.pipeline.as_ref(),
-                            self.vertex_buffer.as_ref(),
-                            self.texture.as_ref(),
-                            self.sampler.as_ref(),
-                            self.screen.as_ref(),
-                        ) {
-                            scheme.begin_rerecord();
+            if let (Some(device), Some(swapchain), Some(shader), Some(scheme)) =
+                (&self.device, &self.swapchain, &self.shader, self.scheme.as_mut())
+            {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                    self.pipeline = Some(pipeline);
+                    if let (Some(pipeline), Some(vertex_buffer), Some(texture), Some(sampler), Some(screen)) = (
+                        self.pipeline.as_ref(),
+                        self.vertex_buffer.as_ref(),
+                        self.texture.as_ref(),
+                        self.sampler.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        scheme.begin_rerecord();
+                        let (width, height) = swapchain.size();
+                        if let Ok(rt) =
+                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        {
                             let present =
                                 Self::record_scheme(scheme, pipeline, vertex_buffer, texture, sampler, &rt, screen);
                             self.present = Some(present);
+                            self.scene_rt = Some(rt);
                         }
-                        self.scene_rt = Some(rt);
                     }
                 }
             }

@@ -5,9 +5,9 @@
 //! Run with: cargo run --example multi_window
 
 use goldy::{
-    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
-    PresentGrant, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
 
@@ -228,7 +228,7 @@ struct WindowState {
     screen: goldy::PresentLease,
     present: PresentGrant,
     scheme: Scheme,
-    scene_rt: RenderTarget,
+    scene_rt: Lease<LeaseRenderTarget>,
     pipeline: RenderPipeline,
     shader: ShaderModule,
     effect_type: EffectType,
@@ -242,11 +242,6 @@ struct WindowState {
 }
 
 impl WindowState {
-    fn create_scene_rt(device: &goldy::Device, swapchain: &SwapchainPool) -> anyhow::Result<RenderTarget> {
-        let (width, height) = swapchain.size();
-        RenderTarget::new(device, width.max(1), height.max(1), swapchain.format())
-    }
-
     fn create_pipeline(
         device: &goldy::Device,
         shader: &ShaderModule,
@@ -267,7 +262,7 @@ impl WindowState {
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
         vertex_parcel: &Parcel,
-        scene_rt: &RenderTarget,
+        scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
         label: &'static str,
     ) -> PresentGrant {
@@ -284,14 +279,23 @@ impl WindowState {
 
     fn rerecord_scheme(&mut self) {
         self.scheme.begin_rerecord();
-        self.present = Self::record_scheme(
-            &mut self.scheme,
-            &self.pipeline,
-            &self.vertex_parcel,
-            &self.scene_rt,
-            &self.screen,
-            self.effect_type.title(),
-        );
+        let (width, height) = self.swapchain.size();
+        if let Ok(rt) = self.scheme.lease_render_target(
+            width.max(1),
+            height.max(1),
+            self.swapchain.format(),
+            None,
+        ) {
+            self.scene_rt = rt;
+            self.present = Self::record_scheme(
+                &mut self.scheme,
+                &self.pipeline,
+                &self.vertex_parcel,
+                &self.scene_rt,
+                &self.screen,
+                self.effect_type.title(),
+            );
+        }
     }
 
     fn new(
@@ -302,7 +306,6 @@ impl WindowState {
     ) -> anyhow::Result<Self> {
         let swapchain = SwapchainPool::new(ctx, window.as_ref(), 3)?;
         let screen = swapchain.lease();
-        let scene_rt = Self::create_scene_rt(device, &swapchain)?;
         let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
         let pipeline = Self::create_pipeline(device, &shader, &swapchain)?;
 
@@ -311,6 +314,8 @@ impl WindowState {
             retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
         let mut scheme = Scheme::new(ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
         let present = Self::record_scheme(
             &mut scheme,
             &pipeline,
@@ -398,7 +403,12 @@ impl WindowState {
     fn handle_resize(&mut self, device: &goldy::Device, width: u32, height: u32) {
         if width > 0 && height > 0 {
             let _ = self.swapchain.resize(width, height);
-            match Self::create_scene_rt(device, &self.swapchain) {
+            self.scheme.begin_rerecord();
+            let (width, height) = self.swapchain.size();
+            match self
+                .scheme
+                .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)
+            {
                 Ok(rt) => {
                     self.scene_rt = rt;
                     match Self::create_pipeline(device, &self.shader, &self.swapchain) {
