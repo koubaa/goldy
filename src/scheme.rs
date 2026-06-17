@@ -1259,7 +1259,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Append one scalar virtual-main parameter (region B of [`PushLayout`]).
+    /// Append one scalar virtual-main parameter (region B).
     ///
     /// The nth call corresponds to the nth scalar-kind parameter in the shader signature.
     /// Values are u32 wire words (`f32` via `f32::to_bits()`, etc.).

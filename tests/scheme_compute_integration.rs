@@ -1826,19 +1826,39 @@ fn scheme_write_parcel_reuse_across_submissions() {
     let device = make_device();
     let ctx = submission_context(&device);
 
-    let pipeline =
-        ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).expect("shader"))
-            .expect("pipeline");
+    let pipeline = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, COPY_SHADER).expect("shader"),
+    )
+    .expect("pipeline");
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let mid = pool
-        .acquire_buffer((N * core::mem::size_of::<u32>()) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            (N * core::mem::size_of::<u32>()) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
         .expect("mid");
     let out_a = pool
-        .acquire_buffer((N * core::mem::size_of::<u32>()) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            (N * core::mem::size_of::<u32>()) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
         .expect("out_a");
     let out_b = pool
-        .acquire_buffer((N * core::mem::size_of::<u32>()) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            (N * core::mem::size_of::<u32>()) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
         .expect("out_b");
 
     let mid_h = mid.handle(ResourceAccess::ReadWrite).expect("mid handle");
@@ -1850,7 +1870,8 @@ fn scheme_write_parcel_reuse_across_submissions() {
 
     // Scheme 1: write data_a into mid, copy mid → out_a, then read out_a back.
     let mut s1 = Scheme::new(&ctx);
-    s1.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_a).to_vec()).expect("commit write a");
+    s1.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_a).to_vec())
+        .expect("commit write a");
     s1.node("copy_a", &pipeline)
         .with_parcel(&mid, NodeAccess::Read)
         .with_parcel(&out_a, NodeAccess::Write)
@@ -1862,7 +1883,8 @@ fn scheme_write_parcel_reuse_across_submissions() {
     // Scheme 2: submitted immediately, without waiting for sub1.
     // The staging belt must not recycle the staging region used by s1.
     let mut s2 = Scheme::new(&ctx);
-    s2.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_b).to_vec()).expect("commit write b");
+    s2.commit_write_parcel(&mid, 0, bytemuck::cast_slice(&data_b).to_vec())
+        .expect("commit write b");
     s2.node("copy_b", &pipeline)
         .with_parcel(&mid, NodeAccess::Read)
         .with_parcel(&out_b, NodeAccess::Write)
@@ -2081,6 +2103,10 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
         .node("uniform_offset", &pipeline)
         .with_parcel(&inp, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
+        .with_views(&[
+            inp.handle(ResourceAccess::ReadWrite).expect("inp"),
+            out.handle(ResourceAccess::Write).expect("out"),
+        ])
         .with_param(OFFSET)
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&out).expect("grant");

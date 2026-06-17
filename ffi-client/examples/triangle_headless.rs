@@ -5,9 +5,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example triangle_headless`
 
 use goldy_ffi_client::{
-    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags,
-    TextureFormat, TextureKind, Vertex2D,
+    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
+    TextureKind, Vertex2D,
 };
 
 fn main() -> goldy_ffi_client::Result<()> {

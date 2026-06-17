@@ -68,6 +68,7 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{BytesByKind, MosaicSlot, Parcel};
 pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
+#[allow(deprecated)]
 pub use scheme::{
     write_to_parcel, Grant, GrantBuffer, GrantTexture, Lease, LeaseRenderTarget, LeaseTexture, Loan, PresentGrant,
     ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission,

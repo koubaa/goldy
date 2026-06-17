@@ -116,7 +116,9 @@ impl raw_window_handle::HasWindowHandle for Win32WindowWrapper {
 impl raw_window_handle::HasDisplayHandle for Win32WindowWrapper {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
         let handle = raw_window_handle::WindowsDisplayHandle::new();
-        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Windows(handle)) })
+        Ok(unsafe {
+            raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Windows(handle))
+        })
     }
 }
 
@@ -143,7 +145,9 @@ impl raw_window_handle::HasDisplayHandle for WaylandWindowWrapper {
         let handle = raw_window_handle::WaylandDisplayHandle::new(
             std::ptr::NonNull::new(self.display).expect("wayland display"),
         );
-        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Wayland(handle)) })
+        Ok(unsafe {
+            raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Wayland(handle))
+        })
     }
 }
 
@@ -166,6 +170,10 @@ impl raw_window_handle::HasWindowHandle for CocoaWindowWrapper {
 impl raw_window_handle::HasDisplayHandle for CocoaWindowWrapper {
     fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
         let handle = raw_window_handle::AppKitDisplayHandle::new();
-        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::AppKit(handle)) })
+        Ok(
+            unsafe {
+                raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::AppKit(handle))
+            },
+        )
     }
 }

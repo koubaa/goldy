@@ -217,14 +217,14 @@ impl Surface {
     ///
     /// The graph **must** contain at least one swapchain-output binding
     /// (declared via [`TaskGraph::declare_swapchain_output`] and bound
-    /// via [`NodeBuilder::bind_swapchain_output`](crate::NodeBuilder::bind_swapchain_output)).
+    /// via [`NodeBuilder::with_swapchain_output`](crate::NodeBuilder::with_swapchain_output)).
     pub fn submit_graph(&self, graph: &mut TaskGraph) -> Result<Frame> {
         let _tz = tracy_zone!("surface.submit_graph");
 
         if !graph.has_swapchain_output() {
             anyhow::bail!(
                 "Surface::submit_graph: graph contains no SwapchainOutput binding; \
-                 use TaskGraph::declare_swapchain_output + NodeBuilder::bind_swapchain_output, \
+                 use TaskGraph::declare_swapchain_output + NodeBuilder::with_swapchain_output, \
                  or render to a texture and copy in a separate graph"
             );
         }

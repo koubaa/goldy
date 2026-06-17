@@ -190,7 +190,12 @@ impl PyScheme {
         Ok(PySchemeRenderTargetLease { inner: lease })
     }
 
-    fn render_pass(slf: Py<Self>, py: Python<'_>, label: String, lease: &PySchemeRenderTargetLease) -> PyResult<PySchemeRenderPass> {
+    fn render_pass(
+        slf: Py<Self>,
+        py: Python<'_>,
+        label: String,
+        lease: &PySchemeRenderTargetLease,
+    ) -> PyResult<PySchemeRenderPass> {
         {
             let scheme = slf.borrow_mut(py);
             if scheme.active_compute.borrow().is_some() || scheme.active_render_pass.borrow().is_some() {
@@ -199,11 +204,7 @@ impl PyScheme {
                 ));
             }
             let static_label = scheme.intern_label(&label)?;
-            let pass = RenderPassRecord::new_for_scheme_lease(
-                static_label,
-                &scheme.inner.borrow(),
-                &lease.inner,
-            );
+            let pass = RenderPassRecord::new_for_scheme_lease(static_label, &scheme.inner.borrow(), &lease.inner);
             *scheme.active_render_pass.borrow_mut() = Some(pass);
         }
         Ok(PySchemeRenderPass { scheme: slf })
@@ -219,9 +220,7 @@ impl PyScheme {
 
     fn copy_to_present(&self, src: &PySchemeRenderTargetLease, dst: &PyPresentLease) -> PyResult<()> {
         self.ensure_no_active_recorder()?;
-        self.inner
-            .borrow_mut()
-            .copy_to_present(&src.inner, &dst.inner);
+        self.inner.borrow_mut().copy_to_present(&src.inner, &dst.inner);
         Ok(())
     }
 
@@ -440,20 +439,15 @@ impl PySchemeRenderPass {
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.with_buffer_view(
-                parcel.inner.as_ref().view(goldy::MosaicSlot(slot)),
-                access.into(),
-            );
+            pass.with_buffer_view(parcel.inner.as_ref().view(goldy::MosaicSlot(slot)), access.into());
         })?;
         Ok(slf)
     }
 
     fn clear<'py>(slf: PyRef<'py, Self>, py: Python<'py>, color: &PyColor) -> PyResult<PyRef<'py, Self>> {
-        slf.scheme
-            .borrow(py)
-            .with_active_render_pass(|pass| {
-                pass.clear(color.inner);
-            })?;
+        slf.scheme.borrow(py).with_active_render_pass(|pass| {
+            pass.clear(color.inner);
+        })?;
         Ok(slf)
     }
 
@@ -462,11 +456,9 @@ impl PySchemeRenderPass {
         py: Python<'py>,
         pipeline: &PyRenderPipeline,
     ) -> PyResult<PyRef<'py, Self>> {
-        slf.scheme
-            .borrow(py)
-            .with_active_render_pass(|pass| {
-                pass.set_pipeline(&pipeline.inner);
-            })?;
+        slf.scheme.borrow(py).with_active_render_pass(|pass| {
+            pass.set_pipeline(&pipeline.inner);
+        })?;
         Ok(slf)
     }
 
@@ -517,11 +509,9 @@ impl PySchemeRenderPass {
         } else {
             (first_instance, instance_count.unwrap_or(1))
         };
-        slf.scheme
-            .borrow(py)
-            .with_active_render_pass(|pass| {
-                pass.draw(fv, vc, fi, ic);
-            })?;
+        slf.scheme.borrow(py).with_active_render_pass(|pass| {
+            pass.draw(fv, vc, fi, ic);
+        })?;
         Ok(slf)
     }
 

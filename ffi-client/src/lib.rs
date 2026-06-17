@@ -37,14 +37,15 @@ pub use scheme::{
     ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentGrant, PresentLease, ReadGrant, ReplayStats, Scheme,
     SchemeRenderPassBuilder, SchemeRenderTargetLease, SchemeSubmission,
 };
-pub use swapchain_pool::SwapchainPool;
 pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
+pub use swapchain_pool::SwapchainPool;
 pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
     NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
-    ResourceCategory, ResourceHandle, TextureFormat, TextureFlags, TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    ResourceCategory, ResourceHandle, TextureFlags, TextureFormat, TextureKind, Vertex2D, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 
 /// Built-in shader sources (`shader::builtins`, matching native Goldy).

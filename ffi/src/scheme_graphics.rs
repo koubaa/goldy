@@ -73,15 +73,8 @@ pub unsafe extern "C" fn goldy_scheme_lease_render_target(
         set_last_error("Cannot lease_render_target while recording a node");
         return std::ptr::null_mut();
     }
-    let depth = if has_depth {
-        Some(depth_format.into())
-    } else {
-        None
-    };
-    match (*scheme)
-        .inner
-        .lease_render_target(width, height, format.into(), depth)
-    {
+    let depth = if has_depth { Some(depth_format.into()) } else { None };
+    match (*scheme).inner.lease_render_target(width, height, format.into(), depth) {
         Ok(lease) => Box::into_raw(Box::new(GoldySchemeRenderTargetLease { lease })),
         Err(e) => {
             set_last_error(format!("{e}"));
@@ -218,10 +211,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_with_views(
 /// # Safety
 /// `scheme` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_clear(
-    scheme: *mut GoldyScheme,
-    color: GoldyColor,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_scheme_render_pass_clear(scheme: *mut GoldyScheme, color: GoldyColor) -> GoldyResult {
     if scheme.is_null() {
         return GoldyResult::NullPointer;
     }
@@ -238,10 +228,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_clear(
 /// # Safety
 /// `scheme` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_clear_depth(
-    scheme: *mut GoldyScheme,
-    depth: f32,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_scheme_render_pass_clear_depth(scheme: *mut GoldyScheme, depth: f32) -> GoldyResult {
     if scheme.is_null() {
         return GoldyResult::NullPointer;
     }

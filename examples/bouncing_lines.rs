@@ -133,12 +133,10 @@ impl RenderState {
     fn rerecord_scheme(&mut self) {
         self.scheme.begin_rerecord();
         let (width, height) = self.swapchain.size();
-        if let Ok(rt) = self.scheme.lease_render_target(
-            width.max(1),
-            height.max(1),
-            self.swapchain.format(),
-            None,
-        ) {
+        if let Ok(rt) = self
+            .scheme
+            .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)
+        {
             self.scene_rt = rt;
             self.present = Self::record_scheme(
                 &mut self.scheme,

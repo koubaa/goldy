@@ -286,10 +286,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel_view(
 /// # Safety
 /// `scheme` must be valid and a compute node must be active.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_compute_node_with_param(
-    scheme: *mut GoldyScheme,
-    value: u32,
-) -> GoldyResult {
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_param(scheme: *mut GoldyScheme, value: u32) -> GoldyResult {
     if scheme.is_null() {
         return GoldyResult::NullPointer;
     }

@@ -119,7 +119,7 @@ pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
 
 /// Opaque handle returned by [`TaskGraph::declare_swapchain_output`].
 ///
-/// Passed to [`NodeBuilder::bind_swapchain_output`] when recording the
+/// Passed to [`NodeBuilder::with_swapchain_output`] when recording the
 /// fine-pass dispatch.  Carries no data — it exists purely for type-safety so
 /// callers cannot accidentally swap a concrete texture with a swapchain output.
 ///

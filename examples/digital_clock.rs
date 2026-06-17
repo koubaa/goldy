@@ -125,18 +125,8 @@ impl App {
         ) {
             scheme.begin_rerecord();
             let (width, height) = swapchain.size();
-            if let Ok(rt) =
-                scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
-            {
-                let present = Self::record_scheme(
-                    scheme,
-                    pipeline,
-                    vertex_parcel,
-                    vertex_count,
-                    bg_color,
-                    &rt,
-                    screen,
-                );
+            if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None) {
+                let present = Self::record_scheme(scheme, pipeline, vertex_parcel, vertex_count, bg_color, &rt, screen);
                 self.present = Some(present);
                 self.recorded_vertex_count = vertex_count;
                 self.recorded_bg_color = bg_color;

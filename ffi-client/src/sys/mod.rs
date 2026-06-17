@@ -741,7 +741,10 @@ pub unsafe fn goldy_present_grant_consume(
     (lib().goldy_present_grant_consume)(grant, submission)
 }
 
-pub unsafe fn goldy_scheme_grant_read_texture(scheme: *mut GoldyScheme, parcel: *const GoldyParcel) -> *mut GoldyReadGrant {
+pub unsafe fn goldy_scheme_grant_read_texture(
+    scheme: *mut GoldyScheme,
+    parcel: *const GoldyParcel,
+) -> *mut GoldyReadGrant {
     (lib().goldy_scheme_grant_read_texture)(scheme, parcel)
 }
 

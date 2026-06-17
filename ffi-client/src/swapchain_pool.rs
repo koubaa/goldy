@@ -29,17 +29,15 @@ impl SwapchainPool {
         surface: *mut std::ffi::c_void,
         depth: u32,
     ) -> Result<Self> {
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_swapchain_pool_create_wayland(ctx.as_ptr(), display, surface, depth)
-        });
+        let ptr =
+            non_null_expect(unsafe { sys::goldy_swapchain_pool_create_wayland(ctx.as_ptr(), display, surface, depth) });
         Ok(Self { ptr })
     }
 
     pub fn size(&self) -> (u32, u32) {
-        (
-            unsafe { sys::goldy_swapchain_pool_width(self.ptr) },
-            unsafe { sys::goldy_swapchain_pool_height(self.ptr) },
-        )
+        (unsafe { sys::goldy_swapchain_pool_width(self.ptr) }, unsafe {
+            sys::goldy_swapchain_pool_height(self.ptr)
+        })
     }
 
     pub fn format(&self) -> TextureFormat {

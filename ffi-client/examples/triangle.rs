@@ -5,9 +5,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example triangle`
 
 use goldy_ffi_client::{
-    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess,
-    PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    SchemeRenderTargetLease, ShaderModule, SwapchainPool, Vertex2D,
+    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PresentGrant,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, SchemeRenderTargetLease,
+    ShaderModule, SwapchainPool, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -24,17 +24,12 @@ fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Re
         .window_handle()
         .map_err(|e| goldy_ffi_client::GoldyError::from_message(format!("window handle: {e}")))?;
     match handle.as_raw() {
-            #[cfg(windows)]
-            RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
-            #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
-            #[cfg(target_os = "linux")]
-            RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(
-                ctx,
-                h.display.as_ptr(),
-                h.surface.as_ptr(),
-                3,
-            ),
+        #[cfg(windows)]
+        RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(ctx, h.display.as_ptr(), h.surface.as_ptr(), 3),
         other => Err(goldy_ffi_client::GoldyError::from_message(format!(
             "unsupported window handle for swapchain pool: {other:?}"
         ))),
@@ -133,26 +128,15 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx)?;
         let (width, height) = swapchain.size();
-        let scene_rt = scheme.lease_render_target(
-            width.max(1),
-            height.max(1),
-            swapchain.format(),
-            None::<DepthFormat>,
-        )?;
+        let scene_rt =
+            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)?;
         let bg_color = Color {
             r: 0.1,
             g: 0.1,
             b: 0.2,
             a: 1.0,
         };
-        let present = record_scheme(
-            &mut scheme,
-            &pipeline,
-            &vertex_buffer,
-            &scene_rt,
-            &screen,
-            bg_color,
-        )?;
+        let present = record_scheme(&mut scheme, &pipeline, &vertex_buffer, &scene_rt, &screen, bg_color)?;
 
         self.ctx = Some(ctx);
         self.device = Some(device);
@@ -192,14 +176,7 @@ impl App {
                 tracing::error!("Failed to resize swapchain: {e}");
                 return;
             }
-            if let (
-                Some(ctx),
-                Some(swapchain),
-                Some(shader),
-                Some(vertex_buffer),
-                Some(screen),
-                Some(device),
-            ) = (
+            if let (Some(ctx), Some(swapchain), Some(shader), Some(vertex_buffer), Some(screen), Some(device)) = (
                 self.ctx.as_ref(),
                 self.swapchain.as_ref(),
                 self.shader.as_ref(),
@@ -230,26 +207,17 @@ impl App {
                         }
                     };
                     let (width, height) = swapchain.size();
-                    if let Ok(rt) = scheme.lease_render_target(
-                        width.max(1),
-                        height.max(1),
-                        swapchain.format(),
-                        None::<DepthFormat>,
-                    ) {
+                    if let Ok(rt) =
+                        scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)
+                    {
                         let bg_color = Color {
                             r: 0.1,
                             g: 0.1,
                             b: 0.2,
                             a: 1.0,
                         };
-                        if let Ok(present) = record_scheme(
-                            &mut scheme,
-                            pipeline,
-                            vertex_buffer,
-                            &rt,
-                            screen,
-                            bg_color,
-                        ) {
+                        if let Ok(present) = record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color)
+                        {
                             self.scheme = Some(scheme);
                             self.scene_rt = Some(rt);
                             self.present = Some(present);

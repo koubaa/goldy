@@ -11,10 +11,11 @@ use goldy_ffi::{
     goldy_render_target_destroy, goldy_render_target_read_to_buffer, goldy_retained_pool_acquire_buffer,
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_builtin_vertex_color_2d, goldy_shader_create,
     goldy_shader_destroy, goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_with_parcel, goldy_task_graph_render_pass_clear,
-    goldy_task_graph_render_pass_draw, goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline,
-    goldy_task_graph_render_pass_set_vertex_buffer_parcel, GoldyBufferKind, GoldyColor, GoldyNodeAccess,
-    GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFormat, GoldyVertexAttribute, GoldyVertexFormat,
+    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw,
+    goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline,
+    goldy_task_graph_render_pass_set_vertex_buffer_parcel, goldy_task_graph_render_pass_with_parcel, GoldyBufferKind,
+    GoldyColor, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFormat, GoldyVertexAttribute,
+    GoldyVertexFormat,
 };
 use std::ffi::CString;
 use std::mem::size_of;

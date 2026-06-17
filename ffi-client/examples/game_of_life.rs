@@ -5,9 +5,9 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, MosaicSlot, NodeAccess,
-    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
-    ResourceCategory, ResourceHandle, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule, SwapchainPool,
+    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, PresentGrant,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory,
+    ResourceHandle, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule, SwapchainPool,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -34,17 +34,12 @@ fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Re
         .window_handle()
         .map_err(|e| goldy_ffi_client::GoldyError::from_message(format!("window handle: {e}")))?;
     match handle.as_raw() {
-            #[cfg(windows)]
-            RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
-            #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
-            #[cfg(target_os = "linux")]
-            RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(
-                ctx,
-                h.display.as_ptr(),
-                h.surface.as_ptr(),
-                3,
-            ),
+        #[cfg(windows)]
+        RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(ctx, h.display.as_ptr(), h.surface.as_ptr(), 3),
         other => Err(goldy_ffi_client::GoldyError::from_message(format!(
             "unsupported window handle for swapchain pool: {other:?}"
         ))),
@@ -151,12 +146,7 @@ fn record_display_scheme(
 ) -> goldy_ffi_client::Result<(Scheme, SchemeRenderTargetLease, PresentGrant)> {
     let mut scheme = Scheme::new(ctx)?;
     let (width, height) = swapchain.size();
-    let rt = scheme.lease_render_target(
-        width.max(1),
-        height.max(1),
-        swapchain.format(),
-        None::<DepthFormat>,
-    )?;
+    let rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)?;
     let render_idx = cells.mosaic_view_resource_index(current_slot, ResourceAccess::ReadWrite)?;
     {
         let mut pass = scheme.render_pass("game_of_life_render", &rt);
@@ -250,14 +240,8 @@ impl App {
         )?;
 
         let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
-        let (display_scheme, scene_rt, present) = record_display_scheme(
-            &ctx,
-            &swapchain,
-            &cells,
-            current_slot,
-            &render_pipeline,
-            &screen,
-        )?;
+        let (display_scheme, scene_rt, present) =
+            record_display_scheme(&ctx, &swapchain, &cells, current_slot, &render_pipeline, &screen)?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
         println!("Press Escape or close window to exit");
@@ -335,14 +319,9 @@ impl App {
                 self.screen.as_ref(),
             ) {
                 let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
-                if let Ok((scheme, rt, present)) = record_display_scheme(
-                    ctx,
-                    swapchain,
-                    cells,
-                    current_slot,
-                    render_pipeline,
-                    screen,
-                ) {
+                if let Ok((scheme, rt, present)) =
+                    record_display_scheme(ctx, swapchain, cells, current_slot, render_pipeline, screen)
+                {
                     self.display_scheme = Some(scheme);
                     self.scene_rt = Some(rt);
                     self.present = Some(present);

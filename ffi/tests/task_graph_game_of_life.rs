@@ -12,13 +12,13 @@ use goldy_ffi::{
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_render_target_buffer_size,
     goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create, goldy_shader_destroy,
-    goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_with_parcel_view,
-    goldy_task_graph_compute_node_with_resource_slots, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
-    goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
-    goldy_task_graph_render_pass_with_parcel_view, goldy_task_graph_render_pass_with_views,
+    goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_dispatch,
+    goldy_task_graph_compute_node_with_parcel_view, goldy_task_graph_compute_node_with_resource_slots,
+    goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
     goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw_fullscreen,
-    goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline, GoldyColor, GoldyNodeAccess,
-    GoldyRenderPipelineDesc, GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
+    goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline,
+    goldy_task_graph_render_pass_with_parcel_view, goldy_task_graph_render_pass_with_views, GoldyColor,
+    GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
 };
 use std::ffi::CString;
 

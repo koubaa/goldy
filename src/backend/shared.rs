@@ -444,7 +444,10 @@ mod tests {
         let (idx_a, start_a) = core.write(payload_a, |sz| Ok(MockChunk::new(sz))).unwrap();
         assert_eq!(core.active.len(), 1, "one active chunk after first write");
         assert_eq!(core.in_flight.len(), 0);
-        assert_eq!(&core.active[idx_a].backing[start_a as usize..start_a as usize + payload_a.len()], payload_a);
+        assert_eq!(
+            &core.active[idx_a].backing[start_a as usize..start_a as usize + payload_a.len()],
+            payload_a
+        );
 
         core.finish(42);
         assert_eq!(core.active.len(), 0, "active drained by finish");
@@ -461,7 +464,10 @@ mod tests {
 
         // The in-flight chunk still holds payload_a unmodified.
         let inflight_chunk = &core.in_flight[0].1[0];
-        assert_eq!(&inflight_chunk.backing[start_a as usize..start_a as usize + payload_a.len()], payload_a);
+        assert_eq!(
+            &inflight_chunk.backing[start_a as usize..start_a as usize + payload_a.len()],
+            payload_a
+        );
     }
 
     /// Once a chunk is moved from `in_flight` to `free` (simulating a reclaim),
