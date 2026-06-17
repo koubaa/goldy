@@ -13,6 +13,10 @@ pub enum GoldyRenderPipeline {}
 pub enum GoldyRenderTarget {}
 pub enum GoldySampler {}
 pub enum GoldyScheme {}
+pub enum GoldySchemeRenderTargetLease {}
+pub enum GoldyPresentGrant {}
+pub enum GoldyPresentLease {}
+pub enum GoldySwapchainPool {}
 pub enum GoldyShaderModule {}
 pub enum GoldySurface {}
 pub enum GoldySurfaceFrame {}

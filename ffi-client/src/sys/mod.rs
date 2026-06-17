@@ -583,3 +583,225 @@ pub unsafe fn goldy_read_grant_consume(
 ) -> GoldyResult {
     (lib().goldy_read_grant_consume)(grant, submission, output, output_size)
 }
+
+pub unsafe fn goldy_scheme_lease_render_target(
+    scheme: *mut GoldyScheme,
+    width: u32,
+    height: u32,
+    format: GoldyTextureFormat,
+    has_depth: bool,
+    depth_format: GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease {
+    (lib().goldy_scheme_lease_render_target)(scheme, width, height, format, has_depth, depth_format)
+}
+
+pub unsafe fn goldy_scheme_render_target_lease_destroy(lease: *mut GoldySchemeRenderTargetLease) {
+    (lib().goldy_scheme_render_target_lease_destroy)(lease)
+}
+
+pub unsafe fn goldy_scheme_render_pass_begin(
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    lease: *const GoldySchemeRenderTargetLease,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_begin)(scheme, label, lease)
+}
+
+pub unsafe fn goldy_scheme_render_pass_bind_parcel_view(
+    scheme: *mut GoldyScheme,
+    parcel: *const GoldyParcel,
+    slot: u32,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_bind_parcel_view)(scheme, parcel, slot, access)
+}
+
+pub unsafe fn goldy_scheme_render_pass_bind_parcel(
+    scheme: *mut GoldyScheme,
+    parcel: *const GoldyParcel,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_bind_parcel)(scheme, parcel, access)
+}
+
+pub unsafe fn goldy_scheme_render_pass_bind_resources_typed(
+    scheme: *mut GoldyScheme,
+    indices: *const u32,
+    handle_count: u32,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_bind_resources_typed)(scheme, indices, handle_count)
+}
+
+pub unsafe fn goldy_scheme_render_pass_clear(scheme: *mut GoldyScheme, color: GoldyColor) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_clear)(scheme, color)
+}
+
+pub unsafe fn goldy_scheme_render_pass_clear_depth(scheme: *mut GoldyScheme, depth: f32) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_clear_depth)(scheme, depth)
+}
+
+pub unsafe fn goldy_scheme_render_pass_set_pipeline(
+    scheme: *mut GoldyScheme,
+    pipeline: *const GoldyRenderPipeline,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_set_pipeline)(scheme, pipeline)
+}
+
+pub unsafe fn goldy_scheme_render_pass_set_vertex_buffer_parcel(
+    scheme: *mut GoldyScheme,
+    slot: u32,
+    parcel: *const GoldyParcel,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_set_vertex_buffer_parcel)(scheme, slot, parcel)
+}
+
+pub unsafe fn goldy_scheme_render_pass_set_index_buffer(
+    scheme: *mut GoldyScheme,
+    parcel: *const GoldyParcel,
+    format: GoldyIndexFormat,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_set_index_buffer)(scheme, parcel, format)
+}
+
+pub unsafe fn goldy_scheme_render_pass_draw(
+    scheme: *mut GoldyScheme,
+    first_vertex: u32,
+    vertex_count: u32,
+    first_instance: u32,
+    instance_count: u32,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_draw)(scheme, first_vertex, vertex_count, first_instance, instance_count)
+}
+
+pub unsafe fn goldy_scheme_render_pass_draw_indexed(
+    scheme: *mut GoldyScheme,
+    first_index: u32,
+    index_count: u32,
+    base_vertex: i32,
+    first_instance: u32,
+    instance_count: u32,
+) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_draw_indexed)(
+        scheme,
+        first_index,
+        index_count,
+        base_vertex,
+        first_instance,
+        instance_count,
+    )
+}
+
+pub unsafe fn goldy_scheme_render_pass_draw_fullscreen(scheme: *mut GoldyScheme) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_draw_fullscreen)(scheme)
+}
+
+pub unsafe fn goldy_scheme_render_pass_finish(scheme: *mut GoldyScheme) -> GoldyResult {
+    (lib().goldy_scheme_render_pass_finish)(scheme)
+}
+
+pub unsafe fn goldy_scheme_copy_to_texture(
+    scheme: *mut GoldyScheme,
+    src_lease: *const GoldySchemeRenderTargetLease,
+    dst_parcel: *const GoldyParcel,
+) -> GoldyResult {
+    (lib().goldy_scheme_copy_to_texture)(scheme, src_lease, dst_parcel)
+}
+
+pub unsafe fn goldy_scheme_copy_to_present(
+    scheme: *mut GoldyScheme,
+    src_lease: *const GoldySchemeRenderTargetLease,
+    dst_lease: *const GoldyPresentLease,
+) -> GoldyResult {
+    (lib().goldy_scheme_copy_to_present)(scheme, src_lease, dst_lease)
+}
+
+pub unsafe fn goldy_scheme_grant_present(
+    scheme: *mut GoldyScheme,
+    lease: *const GoldyPresentLease,
+) -> *mut GoldyPresentGrant {
+    (lib().goldy_scheme_grant_present)(scheme, lease)
+}
+
+pub unsafe fn goldy_present_grant_destroy(grant: *mut GoldyPresentGrant) {
+    (lib().goldy_present_grant_destroy)(grant)
+}
+
+pub unsafe fn goldy_present_grant_consume(
+    grant: *const GoldyPresentGrant,
+    submission: *const GoldySchemeSubmission,
+) -> GoldyResult {
+    (lib().goldy_present_grant_consume)(grant, submission)
+}
+
+pub unsafe fn goldy_scheme_grant_read_texture(scheme: *mut GoldyScheme, parcel: *const GoldyParcel) -> *mut GoldyReadGrant {
+    (lib().goldy_scheme_grant_read_texture)(scheme, parcel)
+}
+
+pub unsafe fn goldy_retained_pool_acquire_texture(
+    pool: *mut GoldyRetainedPool,
+    width: u32,
+    height: u32,
+    format: GoldyTextureFormat,
+    access: GoldyTextureKind,
+    flags: GoldyTextureFlags,
+    data: *const u8,
+    data_size: usize,
+) -> *mut GoldyParcel {
+    (lib().goldy_retained_pool_acquire_texture)(pool, width, height, format, access, flags, data, data_size)
+}
+
+pub unsafe fn goldy_swapchain_pool_destroy(pool: *mut GoldySwapchainPool) {
+    (lib().goldy_swapchain_pool_destroy)(pool)
+}
+
+pub unsafe fn goldy_swapchain_pool_lease(pool: *const GoldySwapchainPool) -> *mut GoldyPresentLease {
+    (lib().goldy_swapchain_pool_lease)(pool)
+}
+
+pub unsafe fn goldy_swapchain_pool_width(pool: *const GoldySwapchainPool) -> u32 {
+    (lib().goldy_swapchain_pool_width)(pool)
+}
+
+pub unsafe fn goldy_swapchain_pool_height(pool: *const GoldySwapchainPool) -> u32 {
+    (lib().goldy_swapchain_pool_height)(pool)
+}
+
+pub unsafe fn goldy_swapchain_pool_format(pool: *const GoldySwapchainPool) -> GoldyTextureFormat {
+    (lib().goldy_swapchain_pool_format)(pool)
+}
+
+pub unsafe fn goldy_swapchain_pool_resize(pool: *mut GoldySwapchainPool, width: u32, height: u32) -> GoldyResult {
+    (lib().goldy_swapchain_pool_resize)(pool, width, height)
+}
+
+pub unsafe fn goldy_present_lease_destroy(lease: *mut GoldyPresentLease) {
+    (lib().goldy_present_lease_destroy)(lease)
+}
+
+#[cfg(windows)]
+pub unsafe fn goldy_swapchain_pool_create_win32(
+    ctx: *const GoldyContext,
+    hwnd: *mut std::ffi::c_void,
+    depth: u32,
+) -> *mut GoldySwapchainPool {
+    (lib().goldy_swapchain_pool_create_win32)(ctx, hwnd, depth)
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn goldy_swapchain_pool_create_appkit(
+    ctx: *const GoldyContext,
+    ns_view: *mut std::ffi::c_void,
+    depth: u32,
+) -> *mut GoldySwapchainPool {
+    (lib().goldy_swapchain_pool_create_appkit)(ctx, ns_view, depth)
+}
+
+#[cfg(target_os = "linux")]
+pub unsafe fn goldy_swapchain_pool_create_wayland(
+    ctx: *const GoldyContext,
+    display: *mut std::ffi::c_void,
+    surface: *mut std::ffi::c_void,
+    depth: u32,
+) -> *mut GoldySwapchainPool {
+    (lib().goldy_swapchain_pool_create_wayland)(ctx, display, surface, depth)
+}

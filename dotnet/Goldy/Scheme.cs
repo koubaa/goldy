@@ -3,7 +3,7 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// Retained compute scheme bound to one <see cref="Context"/>.
+/// Retained scheme bound to one <see cref="Context"/>.
 /// </summary>
 public sealed class Scheme : IDisposable
 {
@@ -31,6 +31,76 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
+    /// Declare an offscreen render-target lease on this scheme.
+    /// </summary>
+    public SchemeRenderTargetLease LeaseRenderTarget(
+        uint width,
+        uint height,
+        TextureFormat format,
+        DepthFormat? depthFormat = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var hasDepth = depthFormat.HasValue;
+        var depth = depthFormat ?? default;
+        var lease = NativeMethods.SchemeLeaseRenderTarget(Handle, width, height, format, hasDepth, depth);
+        if (lease == nint.Zero)
+            throw GoldyException.FromLastError("Scheme lease_render_target");
+        return new SchemeRenderTargetLease(lease);
+    }
+
+    /// <summary>
+    /// Begin recording an offscreen render pass. Finish with <see cref="SchemeRenderPassScope.Dispose"/>.
+    /// </summary>
+    public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(lease);
+        var result = NativeMethods.SchemeRenderPassBegin(Handle, label, lease.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_begin");
+        return new SchemeRenderPassScope(this);
+    }
+
+    /// <summary>
+    /// Copy a scheme-held render target into a texture parcel (for grant readback).
+    /// </summary>
+    public void CopyToTexture(SchemeRenderTargetLease src, Parcel dst)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(src);
+        ArgumentNullException.ThrowIfNull(dst);
+        var result = NativeMethods.SchemeCopyToTexture(Handle, src.Handle, dst.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme copy_to_texture");
+    }
+
+    /// <summary>
+    /// Copy a scheme-held render target into a present lease drawable.
+    /// </summary>
+    public void CopyToPresent(SchemeRenderTargetLease src, PresentLease dst)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(src);
+        ArgumentNullException.ThrowIfNull(dst);
+        var result = NativeMethods.SchemeCopyToPresent(Handle, src.Handle, dst.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme copy_to_present");
+    }
+
+    /// <summary>
+    /// Record a present easement grant over a swapchain lease (once per scheme).
+    /// </summary>
+    public PresentGrant GrantPresent(PresentLease lease)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(lease);
+        var grant = NativeMethods.SchemeGrantPresent(Handle, lease.Handle);
+        if (grant == nint.Zero)
+            throw GoldyException.FromLastError("Scheme grant_present");
+        return new PresentGrant(grant);
+    }
+
+    /// <summary>
     /// Record a read easement over a buffer parcel (once per scheme).
     /// </summary>
     public ReadGrant GrantRead(Parcel parcel)
@@ -52,7 +122,7 @@ public sealed class Scheme : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(parcel);
 
-        var grant = NativeMethods.SchemeGrantRead(Handle, parcel.Handle);
+        var grant = NativeMethods.SchemeGrantReadTexture(Handle, parcel.Handle);
         if (grant == nint.Zero)
             throw GoldyException.FromLastError("Scheme grant_read_texture");
         return new ReadGrant(grant);
@@ -106,6 +176,20 @@ public sealed class SchemeComputeNodeScope : IDisposable
         return this;
     }
 
+    public SchemeComputeNodeScope DeclareParcelView(
+        Parcel parcel,
+        uint slot,
+        NodeAccess nodeAccess,
+        ResourceAccess resourceAccess)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeComputeNodeDeclareParcelView(
+            _scheme.Handle, parcel.Handle, slot, nodeAccess, resourceAccess);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme compute_node_declare_parcel_view");
+        return this;
+    }
+
     public void Dispatch(uint workgroupsX = 1, uint workgroupsY = 1, uint workgroupsZ = 1)
     {
         EnsureOpen();
@@ -126,5 +210,113 @@ public sealed class SchemeComputeNodeScope : IDisposable
     {
         if (_finished)
             throw new InvalidOperationException("Scheme compute node already finished");
+    }
+}
+
+/// <summary>
+/// Active scheme render-pass recording scope. Call <see cref="Dispose"/> to finish the pass.
+/// </summary>
+public sealed class SchemeRenderPassScope : IDisposable
+{
+    private readonly Scheme _scheme;
+    private bool _finished;
+
+    internal SchemeRenderPassScope(Scheme scheme) => _scheme = scheme;
+
+    public SchemeRenderPassScope BindParcel(Parcel parcel, NodeAccess access)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassBindParcel(_scheme.Handle, parcel.Handle, access);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_bind_parcel");
+        return this;
+    }
+
+    public SchemeRenderPassScope BindParcelView(Parcel parcel, uint slot, NodeAccess access)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassBindParcelView(_scheme.Handle, parcel.Handle, slot, access);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_bind_parcel_view");
+        return this;
+    }
+
+    public SchemeRenderPassScope BindResourceIndex(uint scatteredIndex)
+    {
+        EnsureOpen();
+        unsafe
+        {
+            uint category = 0; // Scattered
+            Span<uint> pair = stackalloc uint[] { category, scatteredIndex };
+            fixed (uint* p = pair)
+            {
+                var result = NativeMethods.SchemeRenderPassBindResourcesTyped(_scheme.Handle, (nint)p, 1);
+                if (result != GoldyResult.Ok)
+                    throw GoldyException.FromLastError("Scheme render_pass_bind_resources_typed");
+            }
+        }
+        return this;
+    }
+
+    public SchemeRenderPassScope Clear(Color color)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassClear(_scheme.Handle, color);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_clear");
+        return this;
+    }
+
+    public SchemeRenderPassScope SetPipeline(RenderPipeline pipeline)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassSetPipeline(_scheme.Handle, pipeline.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_set_pipeline");
+        return this;
+    }
+
+    public SchemeRenderPassScope SetVertexBuffer(uint slot, Parcel parcel)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassSetVertexBufferParcel(_scheme.Handle, slot, parcel.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_set_vertex_buffer_parcel");
+        return this;
+    }
+
+    public SchemeRenderPassScope Draw(uint vertexCount, uint instanceCount = 1, uint firstVertex = 0, uint firstInstance = 0)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassDraw(
+            _scheme.Handle, firstVertex, vertexCount, firstInstance, instanceCount);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_draw");
+        return this;
+    }
+
+    public SchemeRenderPassScope DrawFullscreen()
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeRenderPassDrawFullscreen(_scheme.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_draw_fullscreen");
+        return this;
+    }
+
+    public void Dispose()
+    {
+        if (_finished)
+            return;
+        _finished = true;
+        var result = NativeMethods.SchemeRenderPassFinish(_scheme.Handle);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme render_pass_finish");
+    }
+
+    private void EnsureOpen()
+    {
+        if (_finished)
+            throw new InvalidOperationException("Scheme render pass already finished");
     }
 }

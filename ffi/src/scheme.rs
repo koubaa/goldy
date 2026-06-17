@@ -1,4 +1,9 @@
-//! FFI bindings for [`goldy::Scheme`] (compute-only surface).
+//! FFI bindings for [`goldy::Scheme`].
+
+#[path = "scheme_graphics.rs"]
+mod scheme_graphics;
+
+pub use scheme_graphics::GoldySchemeRenderTargetLease;
 
 use crate::compute::GoldyComputePipeline;
 use crate::context::GoldyContext;
@@ -6,7 +11,7 @@ use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::retained_pool::GoldyParcel;
 use crate::types::{GoldyNodeAccess, GoldyResourceAccess};
 use goldy::scheme::{ReadGrant, Scheme};
-use goldy::task_graph::{ComputeNodeRecord, NodeAccess};
+use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord};
 use goldy::types::ResourceAccess;
 use goldy::{Grant, GrantBuffer, GrantTexture, MosaicSlot, ParcelType};
 use std::ffi::CStr;
@@ -61,19 +66,21 @@ pub struct GoldyReplayStats {
     pub resubmit_hits: u64,
 }
 
+/// Opaque present easement grant handle returned by [`goldy_scheme_grant_present`].
+pub struct GoldyPresentGrant {
+    pub(crate) inner: goldy::PresentGrant,
+}
+
 /// Opaque handle to a retained Goldy scheme.
 pub struct GoldyScheme {
     pub(crate) inner: Scheme,
     active_compute: Option<ComputeNodeRecord>,
+    pub(crate) active_render_pass: Option<RenderPassRecord>,
     labels: Vec<String>,
 }
 
 impl GoldyScheme {
-    fn has_active_recorder(&self) -> bool {
-        self.active_compute.is_some()
-    }
-
-    fn intern_label(&mut self, label: &str) -> &'static str {
+    pub(crate) fn intern_label(&mut self, label: &str) -> &'static str {
         self.labels.push(label.to_string());
         let s = self.labels.last().unwrap();
         // SAFETY: `labels` is cleared when the scheme is dropped alongside IR node labels.
@@ -125,6 +132,7 @@ pub unsafe extern "C" fn goldy_scheme_create(ctx: *const GoldyContext) -> *mut G
     Box::into_raw(Box::new(GoldyScheme {
         inner: Scheme::new(&(*ctx).inner),
         active_compute: None,
+        active_render_pass: None,
         labels: Vec::new(),
     }))
 }

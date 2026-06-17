@@ -1,13 +1,13 @@
-//! Headless Game of Life — hybrid TaskGraph (compute + render) smoke test.
+//! Headless Game of Life — hybrid Scheme (compute + render) smoke test.
 //!
-//! Mirrors `goldy/ffi/tests/task_graph_game_of_life.rs` and `goldy/examples/game_of_life.rs`.
+//! Mirrors `goldy/ffi/tests/task_graph_game_of_life.rs` and native scheme patterns.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
 use goldy_ffi_client::{
-    Color, ComputePipeline, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, RenderPipeline, RenderPipelineDesc,
-    RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle, RetainedPool, ShaderModule,
-    TaskGraph, TextureFormat,
+    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, MosaicSlot, NodeAccess,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle,
+    RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat, TextureKind,
 };
 
 const GRID_WIDTH: u32 = 128;
@@ -35,12 +35,13 @@ fn count_live(cells: &[u32]) -> u32 {
 }
 
 fn main() -> goldy_ffi_client::Result<()> {
-    println!("Goldy game_of_life_headless (ffi-client)\n");
+    println!("Goldy game_of_life_headless (ffi-client / Scheme)\n");
 
     let instance = Instance::new()?;
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())?
         .request_device(&DeviceDescriptor::default())?;
+    let ctx = Context::new(&device)?;
 
     let initial = initial_cells();
     let mut retained_pool = RetainedPool::new(&device)?;
@@ -62,40 +63,53 @@ fn main() -> goldy_ffi_client::Result<()> {
         },
     )?;
 
-    let target = RenderTarget::new(&device, GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm)?;
+    let readback = retained_pool.acquire_texture(
+        GRID_WIDTH,
+        GRID_HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC.union(TextureFlags::COPY_DST),
+        None,
+    )?;
 
-    let read_idx = cells.mosaic_view_resource_index(SLOT_A, ResourceAccess::ReadWrite)?;
-    let write_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::Write)?;
-
-    let mut graph = TaskGraph::new();
+    let mut scheme = Scheme::new(&ctx)?;
 
     {
-        let mut node = graph.compute_node("game_of_life", &compute_pipeline);
-        node.bind_parcel_view(&cells, SLOT_A, NodeAccess::Read);
-        node.bind_parcel_view(&cells, SLOT_B, NodeAccess::Write);
-        node.bind_resources_raw(&[read_idx, write_idx]);
+        let mut node = scheme.compute_node("game_of_life", &compute_pipeline);
+        node.declare_parcel_view(&cells, SLOT_A, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.declare_parcel_view(&cells, SLOT_B, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
-    let render_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::ReadWrite)?;
-    let mut pass = graph.render_pass("game_of_life_render", &target);
-    pass.bind_parcel_view_mut(&cells, SLOT_B, NodeAccess::Read);
-    pass.clear(Color::BLACK);
-    pass.set_pipeline(&render_pipeline);
-    pass.bind_resources_typed(&[ResourceHandle {
-        category: ResourceCategory::Scattered,
-        index: render_idx,
-    }]);
-    pass.draw_fullscreen();
-    pass.finish_recorded();
+    let rt = scheme.lease_render_target(
+        GRID_WIDTH,
+        GRID_HEIGHT,
+        TextureFormat::Rgba8Unorm,
+        None::<DepthFormat>,
+    )?;
+    {
+        let render_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::ReadWrite)?;
+        let mut pass = scheme.render_pass("game_of_life_render", &rt);
+        pass.bind_parcel_view_mut(&cells, SLOT_B, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(&render_pipeline);
+        pass.bind_resources_typed(&[ResourceHandle {
+            category: ResourceCategory::Scattered,
+            index: render_idx,
+        }]);
+        pass.draw_fullscreen();
+        pass.finish_recorded();
+    }
 
-    graph.dispatch(&device)?;
+    scheme.copy_to_texture(&rt, &readback)?;
+    let grant = scheme.grant_read_texture(&readback)?;
+    let submission = scheme.submit()?;
+    let pixels = grant.consume(&submission)?;
 
     let bytes = cells.mosaic_view_read_to_cpu(SLOT_B, &device)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&bytes);
     assert_eq!(count_live(cells_out), 4, "still-life block should remain 4 live cells");
 
-    let pixels = target.read_to_cpu()?;
     let cx = (GRID_WIDTH / 2) as usize;
     let cy = (GRID_HEIGHT / 2) as usize;
     let stride = (GRID_WIDTH * 4) as usize;

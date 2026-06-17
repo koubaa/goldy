@@ -21,6 +21,7 @@ mod retained_pool;
 mod scheme;
 mod shader;
 mod surface;
+mod swapchain_pool;
 mod task_graph;
 mod types;
 
@@ -61,6 +62,11 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheme::PySchemeSubmission>()?;
     m.add_class::<scheme::PyReadGrant>()?;
     m.add_class::<scheme::PySchemeComputeNode>()?;
+    m.add_class::<scheme::PySchemeRenderPass>()?;
+    m.add_class::<scheme::PySchemeRenderTargetLease>()?;
+    m.add_class::<scheme::PyPresentLease>()?;
+    m.add_class::<scheme::PyPresentGrant>()?;
+    m.add_class::<swapchain_pool::PySwapchainPool>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;
     m.add_class::<retained_pool::PyMosaicBuilder>()?;

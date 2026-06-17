@@ -186,6 +186,12 @@ typedef struct GoldyMosaicBuilder GoldyMosaicBuilder;
 // Opaque handle to a retained [`goldy::Parcel`].
 typedef struct GoldyParcel GoldyParcel;
 
+// Opaque present easement grant handle returned by [`goldy_scheme_grant_present`].
+typedef struct GoldyPresentGrant GoldyPresentGrant;
+
+// Opaque handle to a stable present lease from a swapchain pool.
+typedef struct GoldyPresentLease GoldyPresentLease;
+
 // Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
 //
 // Heap-allocated; destroy with [`goldy_read_grant_destroy`].
@@ -206,6 +212,9 @@ typedef struct GoldySampler GoldySampler;
 // Opaque handle to a retained Goldy scheme.
 typedef struct GoldyScheme GoldyScheme;
 
+// Opaque handle to a scheme-held render-target lease.
+typedef struct GoldySchemeRenderTargetLease GoldySchemeRenderTargetLease;
+
 // Opaque per-submission token returned by [`goldy_scheme_submit`].
 //
 // Heap-allocated; destroy with [`goldy_scheme_submission_destroy`].
@@ -222,6 +231,9 @@ typedef struct GoldySurface GoldySurface;
 
 // Opaque handle to a Goldy SurfaceFrame.
 typedef struct GoldySurfaceFrame GoldySurfaceFrame;
+
+// Opaque handle to a swapchain pool.
+typedef struct GoldySwapchainPool GoldySwapchainPool;
 
 // Opaque handle to a Goldy TaskGraph.
 typedef struct GoldyTaskGraph GoldyTaskGraph;
@@ -285,6 +297,14 @@ typedef struct GoldySamplerDesc {
     float lod_max_clamp;
 } GoldySamplerDesc;
 
+// RGBA color with floating point components (0.0 - 1.0).
+typedef struct GoldyColor {
+    float r;
+    float g;
+    float b;
+    float a;
+} GoldyColor;
+
 // Outcome counters for [`goldy_scheme_replay_stats`].
 typedef struct GoldyReplayStats {
     uint64_t records;
@@ -297,14 +317,6 @@ typedef struct GoldyReplayStats {
 typedef struct GoldySwapchainOutput {
     uint8_t _private[0];
 } GoldySwapchainOutput;
-
-// RGBA color with floating point components (0.0 - 1.0).
-typedef struct GoldyColor {
-    float r;
-    float g;
-    float b;
-    float a;
-} GoldyColor;
 
 #ifdef __cplusplus
 extern "C" {
@@ -497,6 +509,29 @@ uint32_t goldy_parcel_mosaic_view_resource_index(const struct GoldyParcel *parce
 // # Safety
 // The parcel pointer must be valid.
 uint64_t goldy_parcel_mosaic_view_size(const struct GoldyParcel *parcel, uint32_t slot);
+
+// Present the swapchain for `(grant × submission)`.
+//
+// Blocks until this submission's GPU work completes, then presents.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_present_grant_consume(const struct GoldyPresentGrant *grant,
+                                             const struct GoldySchemeSubmission *submission);
+
+// Destroy a present grant from [`goldy_scheme_grant_present`].
+//
+// # Safety
+// `grant` must be valid and not used after this call.
+void goldy_present_grant_destroy(struct GoldyPresentGrant *grant);
+
+// Destroy a present lease handle.
+//
+// Does not remove the lease from the pool; the backing remains until the pool is dropped.
+//
+// # Safety
+// `lease` must be valid and not used after this call.
+void goldy_present_lease_destroy(struct GoldyPresentLease *lease);
 
 // Logical byte size of readable data for this grant.
 //
@@ -715,6 +750,22 @@ enum GoldyResult goldy_scheme_compute_node_dispatch(struct GoldyScheme *scheme,
                                                     uint32_t workgroups_y,
                                                     uint32_t workgroups_z);
 
+// Copy a scheme-held render target into a present lease drawable.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_copy_to_present(struct GoldyScheme *scheme,
+                                              const struct GoldySchemeRenderTargetLease *src_lease,
+                                              const struct GoldyPresentLease *dst_lease);
+
+// Copy a scheme-held render target into a texture parcel (for grant readback).
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_copy_to_texture(struct GoldyScheme *scheme,
+                                              const struct GoldySchemeRenderTargetLease *src_lease,
+                                              const struct GoldyParcel *dst_parcel);
+
 // Create a scheme bound to `ctx`.
 //
 // # Safety
@@ -727,6 +778,15 @@ struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
 // `scheme` must be valid and not used after this call.
 void goldy_scheme_destroy(struct GoldyScheme *scheme);
 
+// Record a present easement grant over a swapchain lease (once per scheme).
+//
+// Returns a heap-allocated [`GoldyPresentGrant`]; destroy with [`goldy_present_grant_destroy`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyPresentGrant *goldy_scheme_grant_present(struct GoldyScheme *scheme,
+                                                     const struct GoldyPresentLease *lease);
+
 // Record a read-easement grant over a buffer parcel (once per scheme).
 //
 // Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
@@ -737,17 +797,150 @@ void goldy_scheme_destroy(struct GoldyScheme *scheme);
 struct GoldyReadGrant *goldy_scheme_grant_read(struct GoldyScheme *scheme,
                                                const struct GoldyParcel *parcel);
 
+// Record a read easement over a texture parcel (once per scheme).
+//
+// Like [`goldy_scheme_grant_read`] but requires a texture parcel with [`TextureFlags::COPY_SRC`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyReadGrant *goldy_scheme_grant_read_texture(struct GoldyScheme *scheme,
+                                                       const struct GoldyParcel *parcel);
+
 // True when the next submit must re-record.
 //
 // # Safety
 // `scheme` must be valid.
 bool goldy_scheme_is_dirty(const struct GoldyScheme *scheme);
 
+// Declare a render-target lease on `scheme` (N=1 backing).
+//
+// Returns a heap-allocated lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
+// The lease is valid until the scheme is destroyed.
+//
+// # Safety
+// `scheme` must be valid.
+struct GoldySchemeRenderTargetLease *goldy_scheme_lease_render_target(struct GoldyScheme *scheme,
+                                                                      uint32_t width,
+                                                                      uint32_t height,
+                                                                      enum GoldyTextureFormat format,
+                                                                      bool has_depth,
+                                                                      enum GoldyDepthFormat depth_format);
+
 // Number of nodes recorded in the scheme IR.
 //
 // # Safety
 // `scheme` must be valid.
 uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
+
+// Begin recording an offscreen render pass on a scheme-held lease.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_begin(struct GoldyScheme *scheme,
+                                                const char *label,
+                                                const struct GoldySchemeRenderTargetLease *lease);
+
+// Declare a graph dependency on a retained parcel for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_bind_parcel(struct GoldyScheme *scheme,
+                                                      const struct GoldyParcel *parcel,
+                                                      enum GoldyNodeAccess access);
+
+// Declare a mosaic sub-view dependency for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_bind_parcel_view(struct GoldyScheme *scheme,
+                                                           const struct GoldyParcel *parcel,
+                                                           uint32_t slot,
+                                                           enum GoldyNodeAccess access);
+
+// Bind typed resource handles for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_bind_resources_typed(struct GoldyScheme *scheme,
+                                                               const uint32_t *indices,
+                                                               uint32_t handle_count);
+
+// Clear the color attachment in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_clear(struct GoldyScheme *scheme,
+                                                struct GoldyColor color);
+
+// Clear the depth attachment in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_clear_depth(struct GoldyScheme *scheme, float depth);
+
+// Draw non-indexed primitives in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_draw(struct GoldyScheme *scheme,
+                                               uint32_t first_vertex,
+                                               uint32_t vertex_count,
+                                               uint32_t first_instance,
+                                               uint32_t instance_count);
+
+// Draw a fullscreen triangle in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_draw_fullscreen(struct GoldyScheme *scheme);
+
+// Draw indexed primitives in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_draw_indexed(struct GoldyScheme *scheme,
+                                                       uint32_t first_index,
+                                                       uint32_t index_count,
+                                                       int32_t base_vertex,
+                                                       uint32_t first_instance,
+                                                       uint32_t instance_count);
+
+// Finalize the active render pass and append it to the scheme.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_finish(struct GoldyScheme *scheme);
+
+// Bind an index buffer parcel for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_set_index_buffer(struct GoldyScheme *scheme,
+                                                           const struct GoldyParcel *parcel,
+                                                           enum GoldyIndexFormat format);
+
+// Set the render pipeline for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_set_pipeline(struct GoldyScheme *scheme,
+                                                       const struct GoldyRenderPipeline *pipeline);
+
+// Bind a vertex buffer slot from a retained buffer parcel.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_set_vertex_buffer_parcel(struct GoldyScheme *scheme,
+                                                                   uint32_t slot,
+                                                                   const struct GoldyParcel *parcel);
+
+// Destroy a render-target lease handle.
+//
+// Does not remove the lease from the scheme; the backing remains until the scheme is dropped.
+//
+// # Safety
+// `lease` must be valid and not used after this call.
+void goldy_scheme_render_target_lease_destroy(struct GoldySchemeRenderTargetLease *lease);
 
 // Submission outcome counters.
 //
@@ -915,6 +1108,72 @@ enum GoldyResult goldy_surface_submit_graph_to_frame(const struct GoldySurface *
 // # Safety
 // The surface pointer must be valid.
 uint32_t goldy_surface_width(const struct GoldySurface *surface);
+
+// Create a swapchain pool from an AppKit `NSView` pointer.
+//
+// # Safety
+// `ctx` must be valid. `ns_view` must be a valid `NSView*` for the window's content view.
+struct GoldySwapchainPool *goldy_swapchain_pool_create_appkit(const struct GoldyContext *ctx,
+                                                              void *ns_view,
+                                                              uint32_t depth);
+
+// Create a swapchain pool from Wayland `wl_display` and `wl_surface` pointers.
+//
+// # Safety
+// `ctx` must be valid. `display` and `surface` must be valid Wayland handles.
+struct GoldySwapchainPool *goldy_swapchain_pool_create_wayland(const struct GoldyContext *ctx,
+                                                               void *display,
+                                                               void *surface,
+                                                               uint32_t depth);
+
+// Create a swapchain pool from a Win32 HWND.
+//
+// # Safety
+// `ctx` must be valid. `hwnd` must be a valid Win32 window handle.
+struct GoldySwapchainPool *goldy_swapchain_pool_create_win32(const struct GoldyContext *ctx,
+                                                             void *hwnd,
+                                                             uint32_t depth);
+
+// Destroy a swapchain pool.
+//
+// # Safety
+// `pool` must be valid and not used after this call.
+void goldy_swapchain_pool_destroy(struct GoldySwapchainPool *pool);
+
+// Swapchain surface format.
+//
+// # Safety
+// `pool` must be valid.
+enum GoldyTextureFormat goldy_swapchain_pool_format(const struct GoldySwapchainPool *pool);
+
+// Current swapchain drawable height.
+//
+// # Safety
+// `pool` must be valid.
+uint32_t goldy_swapchain_pool_height(const struct GoldySwapchainPool *pool);
+
+// Acquire a stable present lease from `pool`.
+//
+// Returns a heap-allocated lease handle; destroy with [`goldy_present_lease_destroy`].
+// The lease identity remains valid until the pool is destroyed.
+//
+// # Safety
+// `pool` must be valid.
+struct GoldyPresentLease *goldy_swapchain_pool_lease(const struct GoldySwapchainPool *pool);
+
+// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
+//
+// # Safety
+// `pool` must be valid.
+enum GoldyResult goldy_swapchain_pool_resize(struct GoldySwapchainPool *pool,
+                                             uint32_t width,
+                                             uint32_t height);
+
+// Current swapchain drawable width.
+//
+// # Safety
+// `pool` must be valid.
+uint32_t goldy_swapchain_pool_width(const struct GoldySwapchainPool *pool);
 
 // Reset the graph to empty while retaining internal capacity.
 //

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conway's Game of Life — hybrid TaskGraph in a window (compute + render + blit).
+"""Conway's Game of Life — hybrid Scheme in a window (compute + render + present).
 
 Requires: pip install glfw
 
@@ -94,14 +94,53 @@ def create_initial_state() -> np.ndarray:
     return cells
 
 
-def make_scene_rt(device: goldy.Device, surface: goldy.Surface) -> goldy.RenderTarget:
-    width = max(surface.width, 1)
-    height = max(surface.height, 1)
-    return goldy.RenderTarget(device, width, height, surface.format)
+def run_compute_step(
+    ctx: goldy.Context,
+    cells: goldy.Parcel,
+    read_slot: int,
+    write_slot: int,
+    pipeline: goldy.ComputePipeline,
+) -> None:
+    scheme = goldy.Scheme(ctx)
+    node = scheme.node("game_of_life", pipeline)
+    (
+        node.declare_parcel_view(cells, read_slot, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .declare_parcel_view(cells, write_slot, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
+    )
+    scheme.submit()
+
+
+def record_display_scheme(
+    ctx: goldy.Context,
+    swapchain: goldy.SwapchainPool,
+    cells: goldy.Parcel,
+    current_slot: int,
+    render_pipeline: goldy.RenderPipeline,
+    screen: goldy.PresentLease,
+) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.PresentGrant]:
+    scheme = goldy.Scheme(ctx)
+    rt = scheme.lease_render_target(
+        max(swapchain.width, 1),
+        max(swapchain.height, 1),
+        swapchain.format,
+    )
+    render_idx = cells.mosaic_view_resource_index(current_slot, goldy.ResourceAccess.READ_WRITE)
+    with scheme.render_pass("game_of_life_render", rt) as rp:
+        (
+            rp.bind_parcel_view(cells, current_slot, goldy.NodeAccess.READ)
+            .clear(goldy.Color.BLACK)
+            .set_pipeline(render_pipeline)
+            .bind_resource_index(render_idx)
+            .draw_fullscreen()
+        )
+    scheme.copy_to_present(rt, screen)
+    present = scheme.grant_present(screen)
+    return scheme, rt, present
 
 
 def main() -> int:
-    print("Goldy Python Game of Life (TaskGraph)")
+    print("Goldy Python Game of Life (Scheme + Present)")
     print("=" * 40)
     print("Press Escape or close the window to exit\n")
 
@@ -110,7 +149,7 @@ def main() -> int:
         return 1
 
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
-    window = glfw.create_window(800, 800, "Goldy - Game of Life (Python)", None, None)
+    window = glfw.create_window(800, 800, "Goldy - Game of Life (Python / Scheme)", None, None)
     if not window:
         glfw.terminate()
         print("Failed to create GLFW window", file=sys.stderr)
@@ -121,7 +160,9 @@ def main() -> int:
 
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
-    surface = goldy.Surface.from_glfw(device, window)
+    ctx = device.create_context()
+    swapchain = goldy.SwapchainPool.from_glfw(ctx, window)
+    screen = swapchain.lease()
 
     initial = create_initial_state()
     zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
@@ -139,14 +180,17 @@ def main() -> int:
         render_shader,
         render_shader,
         goldy.RenderPipelineDesc(
-            target_format=surface.format,
+            target_format=swapchain.format,
             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
         ),
     )
 
-    scene_rt = make_scene_rt(device, surface)
-    frame_graph = goldy.TaskGraph()
     use_buffer_a = True
+    current_slot = SLOT_A
+    display_scheme, scene_rt, present = record_display_scheme(
+        ctx, swapchain, cells, current_slot, render_pipeline, screen
+    )
+
     frame_count = 0
     last_update = time.monotonic()
     frame_limit = demo_frame_limit()
@@ -156,57 +200,47 @@ def main() -> int:
         while not glfw.window_should_close(window):
             fb_width, fb_height = glfw.get_framebuffer_size(window)
             if fb_width > 0 and fb_height > 0:
-                if fb_width != surface.width or fb_height != surface.height:
-                    surface.resize(fb_width, fb_height)
-                    scene_rt = make_scene_rt(device, surface)
+                if fb_width != swapchain.width or fb_height != swapchain.height:
+                    swapchain.resize(fb_width, fb_height)
+                    render_pipeline = goldy.RenderPipeline(
+                        device,
+                        render_shader,
+                        render_shader,
+                        goldy.RenderPipelineDesc(
+                            target_format=swapchain.format,
+                            topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
+                        ),
+                    )
+                    display_scheme, scene_rt, present = record_display_scheme(
+                        ctx,
+                        swapchain,
+                        cells,
+                        current_slot,
+                        render_pipeline,
+                        screen,
+                    )
 
             now = time.monotonic()
-            should_update = (now - last_update) > 0.033
-
-            frame_graph.clear()
-
-            if should_update:
+            if (now - last_update) > 0.033:
                 last_update = now
                 read_slot = SLOT_A if use_buffer_a else SLOT_B
                 write_slot = SLOT_B if use_buffer_a else SLOT_A
-                read_idx = cells.mosaic_view_resource_index(
-                    read_slot, goldy.ResourceAccess.READ_WRITE
-                )
-                write_idx = cells.mosaic_view_resource_index(
-                    write_slot, goldy.ResourceAccess.WRITE
-                )
-                with frame_graph.compute_node(
-                    "game_of_life",
-                    compute_pipeline,
-                    workgroups=(WORKGROUPS_X, WORKGROUPS_Y, 1),
-                ) as node:
-                    (
-                        node.bind_parcel_view(cells, read_slot, goldy.NodeAccess.READ)
-                        .bind_parcel_view(cells, write_slot, goldy.NodeAccess.WRITE)
-                        .bind_resources_raw([read_idx, write_idx])
-                    )
+                run_compute_step(ctx, cells, read_slot, write_slot, compute_pipeline)
                 use_buffer_a = not use_buffer_a
+                new_slot = SLOT_A if use_buffer_a else SLOT_B
+                if new_slot != current_slot:
+                    current_slot = new_slot
+                    display_scheme, scene_rt, present = record_display_scheme(
+                        ctx,
+                        swapchain,
+                        cells,
+                        current_slot,
+                        render_pipeline,
+                        screen,
+                    )
 
-            current_slot = SLOT_A if use_buffer_a else SLOT_B
-            cells_idx = cells.mosaic_view_resource_index(
-                current_slot, goldy.ResourceAccess.READ_WRITE
-            )
-
-            with frame_graph.render_pass("game_of_life_render", scene_rt) as rp:
-                (
-                    rp.bind_parcel_view(cells, current_slot, goldy.NodeAccess.READ)
-                    .clear(goldy.Color.BLACK)
-                    .set_pipeline(render_pipeline)
-                    .bind_resource_index(cells_idx)
-                    .draw_fullscreen()
-                )
-
-            swapchain = frame_graph.declare_swapchain_output()
-            frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
-
-            frame = surface.acquire()
-            surface.submit_graph_to_frame(frame_graph, frame)
-            surface.present(frame)
+            submission = display_scheme.submit()
+            present.consume(submission)
 
             frame_count += 1
             glfw.poll_events()

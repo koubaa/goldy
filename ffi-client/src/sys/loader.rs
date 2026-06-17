@@ -121,6 +121,41 @@ pub(crate) struct GoldyFfi {
     pub goldy_read_grant_destroy: FnGoldyReadGrantDestroy,
     pub goldy_read_grant_byte_size: FnGoldyReadGrantByteSize,
     pub goldy_read_grant_consume: FnGoldyReadGrantConsume,
+    pub goldy_scheme_lease_render_target: FnGoldySchemeLeaseRenderTarget,
+    pub goldy_scheme_render_target_lease_destroy: FnGoldySchemeRenderTargetLeaseDestroy,
+    pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
+    pub goldy_scheme_render_pass_bind_parcel_view: FnGoldySchemeRenderPassBindParcelView,
+    pub goldy_scheme_render_pass_bind_parcel: FnGoldySchemeRenderPassBindParcel,
+    pub goldy_scheme_render_pass_bind_resources_typed: FnGoldySchemeRenderPassBindResourcesTyped,
+    pub goldy_scheme_render_pass_clear: FnGoldySchemeRenderPassClear,
+    pub goldy_scheme_render_pass_clear_depth: FnGoldySchemeRenderPassClearDepth,
+    pub goldy_scheme_render_pass_set_pipeline: FnGoldySchemeRenderPassSetPipeline,
+    pub goldy_scheme_render_pass_set_vertex_buffer_parcel: FnGoldySchemeRenderPassSetVertexBufferParcel,
+    pub goldy_scheme_render_pass_set_index_buffer: FnGoldySchemeRenderPassSetIndexBuffer,
+    pub goldy_scheme_render_pass_draw: FnGoldySchemeRenderPassDraw,
+    pub goldy_scheme_render_pass_draw_indexed: FnGoldySchemeRenderPassDrawIndexed,
+    pub goldy_scheme_render_pass_draw_fullscreen: FnGoldySchemeRenderPassDrawFullscreen,
+    pub goldy_scheme_render_pass_finish: FnGoldySchemeRenderPassFinish,
+    pub goldy_scheme_copy_to_texture: FnGoldySchemeCopyToTexture,
+    pub goldy_scheme_copy_to_present: FnGoldySchemeCopyToPresent,
+    pub goldy_scheme_grant_present: FnGoldySchemeGrantPresent,
+    pub goldy_present_grant_destroy: FnGoldyPresentGrantDestroy,
+    pub goldy_present_grant_consume: FnGoldyPresentGrantConsume,
+    pub goldy_scheme_grant_read_texture: FnGoldySchemeGrantReadTexture,
+    pub goldy_retained_pool_acquire_texture: FnGoldyRetainedPoolAcquireTexture,
+    pub goldy_swapchain_pool_destroy: FnGoldySwapchainPoolDestroy,
+    pub goldy_swapchain_pool_lease: FnGoldySwapchainPoolLease,
+    pub goldy_swapchain_pool_width: FnGoldySwapchainPoolWidth,
+    pub goldy_swapchain_pool_height: FnGoldySwapchainPoolHeight,
+    pub goldy_swapchain_pool_format: FnGoldySwapchainPoolFormat,
+    pub goldy_swapchain_pool_resize: FnGoldySwapchainPoolResize,
+    pub goldy_present_lease_destroy: FnGoldyPresentLeaseDestroy,
+    #[cfg(windows)]
+    pub goldy_swapchain_pool_create_win32: FnGoldySwapchainPoolCreateWin32,
+    #[cfg(target_os = "macos")]
+    pub goldy_swapchain_pool_create_appkit: FnGoldySwapchainPoolCreateAppkit,
+    #[cfg(target_os = "linux")]
+    pub goldy_swapchain_pool_create_wayland: FnGoldySwapchainPoolCreateWayland,
 }
 
 impl GoldyFfi {
@@ -341,6 +376,83 @@ impl GoldyFfi {
             goldy_read_grant_destroy: sym!("goldy_read_grant_destroy", FnGoldyReadGrantDestroy),
             goldy_read_grant_byte_size: sym!("goldy_read_grant_byte_size", FnGoldyReadGrantByteSize),
             goldy_read_grant_consume: sym!("goldy_read_grant_consume", FnGoldyReadGrantConsume),
+            goldy_scheme_lease_render_target: sym!("goldy_scheme_lease_render_target", FnGoldySchemeLeaseRenderTarget),
+            goldy_scheme_render_target_lease_destroy: sym!(
+                "goldy_scheme_render_target_lease_destroy",
+                FnGoldySchemeRenderTargetLeaseDestroy
+            ),
+            goldy_scheme_render_pass_begin: sym!("goldy_scheme_render_pass_begin", FnGoldySchemeRenderPassBegin),
+            goldy_scheme_render_pass_bind_parcel_view: sym!(
+                "goldy_scheme_render_pass_bind_parcel_view",
+                FnGoldySchemeRenderPassBindParcelView
+            ),
+            goldy_scheme_render_pass_bind_parcel: sym!(
+                "goldy_scheme_render_pass_bind_parcel",
+                FnGoldySchemeRenderPassBindParcel
+            ),
+            goldy_scheme_render_pass_bind_resources_typed: sym!(
+                "goldy_scheme_render_pass_bind_resources_typed",
+                FnGoldySchemeRenderPassBindResourcesTyped
+            ),
+            goldy_scheme_render_pass_clear: sym!("goldy_scheme_render_pass_clear", FnGoldySchemeRenderPassClear),
+            goldy_scheme_render_pass_clear_depth: sym!(
+                "goldy_scheme_render_pass_clear_depth",
+                FnGoldySchemeRenderPassClearDepth
+            ),
+            goldy_scheme_render_pass_set_pipeline: sym!(
+                "goldy_scheme_render_pass_set_pipeline",
+                FnGoldySchemeRenderPassSetPipeline
+            ),
+            goldy_scheme_render_pass_set_vertex_buffer_parcel: sym!(
+                "goldy_scheme_render_pass_set_vertex_buffer_parcel",
+                FnGoldySchemeRenderPassSetVertexBufferParcel
+            ),
+            goldy_scheme_render_pass_set_index_buffer: sym!(
+                "goldy_scheme_render_pass_set_index_buffer",
+                FnGoldySchemeRenderPassSetIndexBuffer
+            ),
+            goldy_scheme_render_pass_draw: sym!("goldy_scheme_render_pass_draw", FnGoldySchemeRenderPassDraw),
+            goldy_scheme_render_pass_draw_indexed: sym!(
+                "goldy_scheme_render_pass_draw_indexed",
+                FnGoldySchemeRenderPassDrawIndexed
+            ),
+            goldy_scheme_render_pass_draw_fullscreen: sym!(
+                "goldy_scheme_render_pass_draw_fullscreen",
+                FnGoldySchemeRenderPassDrawFullscreen
+            ),
+            goldy_scheme_render_pass_finish: sym!("goldy_scheme_render_pass_finish", FnGoldySchemeRenderPassFinish),
+            goldy_scheme_copy_to_texture: sym!("goldy_scheme_copy_to_texture", FnGoldySchemeCopyToTexture),
+            goldy_scheme_copy_to_present: sym!("goldy_scheme_copy_to_present", FnGoldySchemeCopyToPresent),
+            goldy_scheme_grant_present: sym!("goldy_scheme_grant_present", FnGoldySchemeGrantPresent),
+            goldy_present_grant_destroy: sym!("goldy_present_grant_destroy", FnGoldyPresentGrantDestroy),
+            goldy_present_grant_consume: sym!("goldy_present_grant_consume", FnGoldyPresentGrantConsume),
+            goldy_scheme_grant_read_texture: sym!("goldy_scheme_grant_read_texture", FnGoldySchemeGrantReadTexture),
+            goldy_retained_pool_acquire_texture: sym!(
+                "goldy_retained_pool_acquire_texture",
+                FnGoldyRetainedPoolAcquireTexture
+            ),
+            goldy_swapchain_pool_destroy: sym!("goldy_swapchain_pool_destroy", FnGoldySwapchainPoolDestroy),
+            goldy_swapchain_pool_lease: sym!("goldy_swapchain_pool_lease", FnGoldySwapchainPoolLease),
+            goldy_swapchain_pool_width: sym!("goldy_swapchain_pool_width", FnGoldySwapchainPoolWidth),
+            goldy_swapchain_pool_height: sym!("goldy_swapchain_pool_height", FnGoldySwapchainPoolHeight),
+            goldy_swapchain_pool_format: sym!("goldy_swapchain_pool_format", FnGoldySwapchainPoolFormat),
+            goldy_swapchain_pool_resize: sym!("goldy_swapchain_pool_resize", FnGoldySwapchainPoolResize),
+            goldy_present_lease_destroy: sym!("goldy_present_lease_destroy", FnGoldyPresentLeaseDestroy),
+            #[cfg(windows)]
+            goldy_swapchain_pool_create_win32: sym!(
+                "goldy_swapchain_pool_create_win32",
+                FnGoldySwapchainPoolCreateWin32
+            ),
+            #[cfg(target_os = "macos")]
+            goldy_swapchain_pool_create_appkit: sym!(
+                "goldy_swapchain_pool_create_appkit",
+                FnGoldySwapchainPoolCreateAppkit
+            ),
+            #[cfg(target_os = "linux")]
+            goldy_swapchain_pool_create_wayland: sym!(
+                "goldy_swapchain_pool_create_wayland",
+                FnGoldySwapchainPoolCreateWayland
+            ),
             _library: library,
         })
     }

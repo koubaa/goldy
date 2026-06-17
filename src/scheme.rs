@@ -618,6 +618,24 @@ impl Scheme {
         });
     }
 
+    /// Append a render pass node to the scheme IR.
+    pub(crate) fn commit_render_pass(
+        &mut self,
+        label: &'static str,
+        target: crate::backend::RenderTargetHandle,
+        bindings: Vec<ResourceBinding>,
+        commands: Vec<RenderCommand>,
+        stamp_targets: &[std::sync::Arc<crate::parcel::ParcelStamp>],
+    ) {
+        self.apply_compute_stamps(stamp_targets);
+        self.dirty = true;
+        self.ir.nodes.push(TaskNode {
+            label,
+            bindings,
+            kind: NodeKind::RenderPass { target, commands },
+        });
+    }
+
     /// Declare a transient texture lease backed by the context's transient pool (N=1).
     ///
     /// The backing parcel is held until the scheme is dropped. Structural mutation.

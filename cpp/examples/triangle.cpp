@@ -1,8 +1,8 @@
 /**
- * Triangle example - animated colored triangle in a window (cross-platform).
+ * Triangle example - colored triangle in a window (cross-platform).
  *
- * Uses GLFW for windowing and Goldy TaskGraph:
- * offscreen RenderTarget -> render_pass -> copy_render_target_to_swapchain -> present.
+ * Uses GLFW for windowing and retained Scheme:
+ * offscreen lease -> render_pass -> copy_to_present -> grant_present.
  *
  * Build: cmake --build build --target triangle
  */
@@ -29,8 +29,8 @@
 #include <GLFW/glfw3native.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -44,32 +44,28 @@ struct Vertex {
 };
 
 struct GpuState {
+    goldy::Context ctx;
     goldy::Device device;
     goldy::RetainedPool pool;
     goldy::Parcel vertex_buffer;
     goldy::ShaderModule shader;
     goldy::RenderPipeline pipeline;
-    goldy::RenderTarget scene_rt;
-    goldy::Surface surface;
-    goldy::TaskGraph frame_graph;
+    goldy::SwapchainPool swapchain;
+    goldy::PresentLease screen;
+    goldy::Scheme scheme;
+    goldy::SchemeRenderTargetLease scene_rt;
+    goldy::PresentGrant present;
     uint64_t frame_count = 0;
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
 
-goldy::RenderTarget make_scene_rt(const goldy::Device& device, const goldy::Surface& surface) {
-    auto [width, height] = surface.size();
-    width = std::max(width, 1u);
-    height = std::max(height, 1u);
-    return goldy::RenderTarget(device, width, height, surface.format());
-}
-
-goldy::Surface create_surface(const goldy::Device& device, GLFWwindow* window) {
+goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow* window) {
 #if defined(_WIN32)
     void* hwnd = glfwGetWin32Window(window);
     if (!hwnd) {
         throw std::runtime_error("glfwGetWin32Window failed");
     }
-    return goldy::Surface(device, hwnd);
+    return goldy::SwapchainPool(ctx, hwnd);
 #elif defined(__APPLE__)
     void* ns_window = glfwGetCocoaWindow(window);
     if (!ns_window) {
@@ -81,7 +77,7 @@ goldy::Surface create_surface(const goldy::Device& device, GLFWwindow* window) {
     if (!ns_view) {
         throw std::runtime_error("NSWindow contentView is null");
     }
-    return goldy::Surface(device, ns_view);
+    return goldy::SwapchainPool(ctx, ns_view);
 #else
     void* display = glfwGetWaylandDisplay();
     void* surface = glfwGetWaylandWindow(window);
@@ -89,8 +85,27 @@ goldy::Surface create_surface(const goldy::Device& device, GLFWwindow* window) {
         throw std::runtime_error(
             "Wayland handles unavailable — run under a Wayland session (Vulkan backend requires Wayland on Linux)");
     }
-    return goldy::Surface(device, display, surface);
+    return goldy::SwapchainPool(ctx, display, surface);
 #endif
+}
+
+goldy::PresentGrant record_scheme(
+    goldy::Scheme& scheme,
+    const goldy::RenderPipeline& pipeline,
+    const goldy::Parcel& vertex_buffer,
+    goldy::SchemeRenderTargetLease& scene_rt,
+    const goldy::PresentLease& screen,
+    const goldy::Color& bg_color) {
+    {
+        auto pass = scheme.render_pass("triangle", scene_rt);
+        pass.bind_parcel(vertex_buffer, goldy::NodeAccess::Read)
+            .clear(bg_color)
+            .set_pipeline(pipeline)
+            .set_vertex_buffer_parcel(0, vertex_buffer)
+            .draw(0, 3);
+    }
+    scheme.copy_to_present(scene_rt, screen);
+    return scheme.grant_present(screen);
 }
 
 GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
@@ -100,12 +115,14 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
         {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f, 1.0f}},
     };
 
+    goldy::Context ctx(device);
     goldy::RetainedPool pool(device);
     goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
         std::span<const Vertex>(vertices),
         goldy::BufferKind::Scattered);
 
-    goldy::Surface surface = create_surface(device, window);
+    goldy::SwapchainPool swapchain = create_swapchain_pool(ctx, window);
+    goldy::PresentLease screen = swapchain.lease();
 
     goldy::ShaderModule shader(device, goldy::ShaderModule::builtin_vertex_color_2d());
 
@@ -119,53 +136,41 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     pipeline_desc.vertex_attribute_count = static_cast<uint32_t>(std::size(attributes));
     pipeline_desc.vertex_stride = sizeof(Vertex);
     pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    pipeline_desc.target_format = surface.format();
+    pipeline_desc.target_format = swapchain.format();
     pipeline_desc.depth_enabled = false;
 
     goldy::RenderPipeline pipeline(device, shader, shader, pipeline_desc);
-    goldy::RenderTarget scene_rt = make_scene_rt(device, surface);
+
+    goldy::Scheme scheme(ctx);
+    auto [width, height] = swapchain.size();
+    width = std::max(width, 1u);
+    height = std::max(height, 1u);
+    goldy::SchemeRenderTargetLease scene_rt =
+        scheme.lease_render_target(width, height, swapchain.format());
+    const goldy::Color bg_color{0.1f, 0.1f, 0.2f, 1.0f};
+    goldy::PresentGrant present =
+        record_scheme(scheme, pipeline, vertex_buffer, scene_rt, screen, bg_color);
 
     return GpuState{
+        std::move(ctx),
         std::move(device),
         std::move(pool),
         std::move(vertex_buffer),
         std::move(shader),
         std::move(pipeline),
+        std::move(swapchain),
+        std::move(screen),
+        std::move(scheme),
         std::move(scene_rt),
-        std::move(surface),
-        goldy::TaskGraph{},
+        std::move(present),
         0,
         std::chrono::steady_clock::now(),
     };
 }
 
 void render_frame(GpuState& gpu) {
-    const float t = std::sin(static_cast<float>(gpu.frame_count) * 0.02f) * 0.5f + 0.5f;
-    const goldy::Color bg_color{
-        0.1f + t * 0.1f,
-        0.1f + t * 0.05f,
-        0.2f + t * 0.1f,
-        1.0f,
-    };
-
-    gpu.frame_graph.clear();
-
-    {
-        auto pass = gpu.frame_graph.render_pass("triangle", gpu.scene_rt);
-        pass.bind_parcel(gpu.vertex_buffer, goldy::NodeAccess::Read)
-            .clear(bg_color)
-            .set_pipeline(gpu.pipeline)
-            .set_vertex_buffer_parcel(0, gpu.vertex_buffer)
-            .draw(0, 3);
-    }
-
-    const auto swapchain = gpu.frame_graph.declare_swapchain_output();
-    gpu.frame_graph.copy_render_target_to_swapchain(gpu.scene_rt, swapchain);
-
-    auto frame = gpu.surface.begin();
-    frame = gpu.surface.submit_graph_to_frame(gpu.frame_graph, std::move(frame));
-    gpu.surface.present(std::move(frame));
-
+    auto submission = gpu.scheme.submit();
+    gpu.present.consume(submission);
     ++gpu.frame_count;
 }
 
@@ -178,11 +183,33 @@ void handle_resize(GpuState& gpu, GLFWwindow* window) {
     }
     const auto w = static_cast<uint32_t>(width);
     const auto h = static_cast<uint32_t>(height);
-    if (w == gpu.surface.width() && h == gpu.surface.height()) {
+    if (w == gpu.swapchain.width() && h == gpu.swapchain.height()) {
         return;
     }
-    gpu.surface.resize(w, h);
-    gpu.scene_rt = make_scene_rt(gpu.device, gpu.surface);
+    gpu.swapchain.resize(w, h);
+
+    gpu.scheme = goldy::Scheme(gpu.ctx);
+    auto [new_w, new_h] = gpu.swapchain.size();
+    new_w = std::max(new_w, 1u);
+    new_h = std::max(new_h, 1u);
+    gpu.scene_rt = gpu.scheme.lease_render_target(new_w, new_h, gpu.swapchain.format());
+
+    GoldyRenderPipelineDesc pipeline_desc{};
+    pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pipeline_desc.target_format = gpu.swapchain.format();
+    pipeline_desc.depth_enabled = false;
+    GoldyVertexAttribute attributes[] = {
+        {0, GOLDY_VERTEX_FORMAT_FLOAT32X2, 0},
+        {1, GOLDY_VERTEX_FORMAT_FLOAT32X4, static_cast<uint32_t>(sizeof(float) * 2)},
+    };
+    pipeline_desc.vertex_attributes = attributes;
+    pipeline_desc.vertex_attribute_count = static_cast<uint32_t>(std::size(attributes));
+    pipeline_desc.vertex_stride = sizeof(Vertex);
+    gpu.pipeline = goldy::RenderPipeline(gpu.device, gpu.shader, gpu.shader, pipeline_desc);
+
+    const goldy::Color bg_color{0.1f, 0.1f, 0.2f, 1.0f};
+    gpu.present = record_scheme(
+        gpu.scheme, gpu.pipeline, gpu.vertex_buffer, gpu.scene_rt, gpu.screen, bg_color);
 }
 
 void print_perf(const GpuState& gpu) {
@@ -199,9 +226,9 @@ void print_perf(const GpuState& gpu) {
 
 int main() {
     try {
-        std::cout << "Goldy Triangle Window (C++ / GLFW)\n";
-        std::cout << "==================================\n";
-        std::cout << "TaskGraph: offscreen RT -> swapchain blit -> present\n";
+        std::cout << "Goldy Triangle Window (C++ / Scheme + Present)\n";
+        std::cout << "=============================================\n";
+        std::cout << "Scheme: offscreen lease -> copy_to_present -> grant_present\n";
         std::cout << "Press Escape or close the window to exit\n\n";
 
         if (!glfwInit()) {
@@ -209,7 +236,7 @@ int main() {
         }
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        GLFWwindow* window = glfwCreateWindow(800, 600, "Goldy - Animated Triangle (C++)", nullptr, nullptr);
+        GLFWwindow* window = glfwCreateWindow(800, 600, "Goldy - Triangle (C++)", nullptr, nullptr);
         if (!window) {
             glfwTerminate();
             throw std::runtime_error("glfwCreateWindow failed");

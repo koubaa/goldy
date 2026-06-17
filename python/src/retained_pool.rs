@@ -56,7 +56,7 @@ impl PyRetainedPool {
     }
 
     /// Acquire a retained texture parcel.
-    #[pyo3(signature = (width, height, format, kind, *, copy_src = true))]
+    #[pyo3(signature = (width, height, format, kind, *, copy_src = true, copy_dst = false))]
     fn acquire_texture(
         &self,
         width: u32,
@@ -64,12 +64,15 @@ impl PyRetainedPool {
         format: PyTextureFormat,
         kind: PyTextureKind,
         copy_src: bool,
+        copy_dst: bool,
     ) -> PyResult<PyParcel> {
-        let flags = if copy_src {
-            goldy::TextureFlags::COPY_SRC
-        } else {
-            goldy::TextureFlags::empty()
-        };
+        let mut flags = goldy::TextureFlags::empty();
+        if copy_src {
+            flags |= goldy::TextureFlags::COPY_SRC;
+        }
+        if copy_dst {
+            flags |= goldy::TextureFlags::COPY_DST;
+        }
         let parcel = self
             .inner
             .borrow_mut()

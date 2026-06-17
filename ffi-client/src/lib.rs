@@ -18,6 +18,7 @@ mod retained_pool;
 mod scheme;
 mod shader_module;
 mod surface;
+mod swapchain_pool;
 mod sys;
 mod task_graph;
 mod types;
@@ -32,14 +33,18 @@ pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use render_target::RenderTarget;
 pub use retained_pool::{MosaicBuilder, MosaicSlot, RetainedPool};
-pub use scheme::{ComputeNodeBuilder as SchemeComputeNodeBuilder, ReadGrant, ReplayStats, Scheme, SchemeSubmission};
+pub use scheme::{
+    ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentGrant, PresentLease, ReadGrant, ReplayStats, Scheme,
+    SchemeRenderPassBuilder, SchemeRenderTargetLease, SchemeSubmission,
+};
+pub use swapchain_pool::SwapchainPool;
 pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
 pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
     NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
-    ResourceCategory, ResourceHandle, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    ResourceCategory, ResourceHandle, TextureFormat, TextureFlags, TextureKind, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 /// Built-in shader sources (`shader::builtins`, matching native Goldy).

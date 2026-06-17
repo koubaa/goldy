@@ -92,7 +92,7 @@ impl PyTaskGraph {
 }
 
 /// Parse a Python `range` or `slice` into `(start, count)` with step 1.
-fn parse_index_range(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<(u32, u32)> {
+pub(crate) fn parse_index_range(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<(u32, u32)> {
     let start: i64 = match obj.getattr("start") {
         Ok(v) => v.extract().unwrap_or(0),
         Err(_) => 0,

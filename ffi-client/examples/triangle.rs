@@ -1,13 +1,13 @@
 //! Triangle example - render a colored triangle in an interactive window.
 //!
-//! Demonstrates the Surface API with task-graph submission via `libgoldy_ffi`:
-//! offscreen `RenderTarget` → `render_pass` → `copy_render_target_to_swapchain` → present.
+//! Demonstrates retained Scheme with offscreen render pass → copy-to-present.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example triangle`
 
 use goldy_ffi_client::{
-    shader::builtins, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
+    shader::builtins, BufferKind, Color, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess,
+    PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    SchemeRenderTargetLease, ShaderModule, SwapchainPool, Vertex2D,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -19,60 +19,86 @@ use winit::{
     window::{Window, WindowId},
 };
 
-fn surface_from_window(device: &goldy_ffi_client::Device, window: &Window) -> goldy_ffi_client::Result<Surface> {
+fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Result<SwapchainPool> {
     let handle = window
         .window_handle()
         .map_err(|e| goldy_ffi_client::GoldyError::from_message(format!("window handle: {e}")))?;
-    unsafe {
-        match handle.as_raw() {
+    match handle.as_raw() {
             #[cfg(windows)]
-            RawWindowHandle::Win32(h) => Surface::from_win32(device, h.hwnd.get() as *mut _),
+            RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
             #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(h) => Surface::from_appkit(device, h.ns_view.as_ptr()),
-            other => Err(goldy_ffi_client::GoldyError::from_message(format!(
-                "unsupported window handle for surface creation: {other:?}"
-            ))),
-        }
+            RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
+            #[cfg(target_os = "linux")]
+            RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(
+                ctx,
+                h.display.as_ptr(),
+                h.surface.as_ptr(),
+                3,
+            ),
+        other => Err(goldy_ffi_client::GoldyError::from_message(format!(
+            "unsupported window handle for swapchain pool: {other:?}"
+        ))),
     }
+}
+
+fn record_scheme(
+    scheme: &mut Scheme,
+    pipeline: &RenderPipeline,
+    vertex_buffer: &goldy_ffi_client::Parcel,
+    scene_rt: &SchemeRenderTargetLease,
+    screen: &goldy_ffi_client::PresentLease,
+    bg_color: Color,
+) -> goldy_ffi_client::Result<PresentGrant> {
+    {
+        let mut pass = scheme.render_pass("triangle", scene_rt);
+        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer_parcel(0, vertex_buffer);
+        pass.draw(0..3, 0..1);
+        pass.finish_recorded();
+    }
+    scheme.copy_to_present(scene_rt, screen)?;
+    scheme.grant_present(screen)
 }
 
 struct App {
     instance: Instance,
+    ctx: Option<Context>,
     device: Option<goldy_ffi_client::Device>,
     _retained_pool: Option<RetainedPool>,
-    vertex_buffer: Option<Parcel>,
+    vertex_buffer: Option<goldy_ffi_client::Parcel>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy_ffi_client::PresentLease>,
+    present: Option<PresentGrant>,
+    scene_rt: Option<SchemeRenderTargetLease>,
+    scheme: Option<Scheme>,
     frame_count: u64,
     start_time: std::time::Instant,
 }
 
 impl App {
     fn new() -> anyhow::Result<Self> {
-        let instance = Instance::new()?;
         Ok(Self {
-            instance,
+            instance: Instance::new()?,
+            ctx: None,
             device: None,
             _retained_pool: None,
             vertex_buffer: None,
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             frame_count: 0,
             start_time: std::time::Instant::now(),
         })
-    }
-
-    fn create_scene_rt(device: &goldy_ffi_client::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -80,6 +106,7 @@ impl App {
             .instance
             .request_adapter(&RequestAdapterOptions::default())?
             .request_device(&DeviceDescriptor::default())?;
+        let ctx = Context::new(&device)?;
 
         let vertices = [
             Vertex2D::new(0.0, -0.5, Color::RED),
@@ -89,82 +116,145 @@ impl App {
         let mut retained_pool = RetainedPool::new(&device)?;
         let vertex_buffer = retained_pool.acquire_buffer_with_data(&vertices, BufferKind::Scattered)?;
 
-        let surface = surface_from_window(&device, window.as_ref())?;
+        let swapchain = swapchain_from_window(&ctx, window.as_ref())?;
+        let screen = swapchain.lease()?;
 
         let shader = ShaderModule::from_slang(&device, builtins::VERTEX_COLOR_2D)?;
-        let pipeline_desc = RenderPipelineDesc {
-            vertex_layout: Vertex2D::layout(),
-            target_format: surface.format(),
-            ..Default::default()
+        let pipeline = RenderPipeline::new(
+            &device,
+            &shader,
+            &shader,
+            &RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                target_format: swapchain.format(),
+                ..Default::default()
+            },
+        )?;
+
+        let mut scheme = Scheme::new(&ctx)?;
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(
+            width.max(1),
+            height.max(1),
+            swapchain.format(),
+            None::<DepthFormat>,
+        )?;
+        let bg_color = Color {
+            r: 0.1,
+            g: 0.1,
+            b: 0.2,
+            a: 1.0,
         };
-        let pipeline = RenderPipeline::new(&device, &shader, &shader, &pipeline_desc)?;
+        let present = record_scheme(
+            &mut scheme,
+            &pipeline,
+            &vertex_buffer,
+            &scene_rt,
+            &screen,
+            bg_color,
+        )?;
 
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
-
+        self.ctx = Some(ctx);
         self.device = Some(device);
         self._retained_pool = Some(retained_pool);
         self.vertex_buffer = Some(vertex_buffer);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
-
+        self.scheme = Some(scheme);
         Ok(())
     }
 
     fn render_frame(&mut self) -> anyhow::Result<()> {
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
-
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let vertex_buffer = self.vertex_buffer.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
-
-        let t = (self.frame_count as f32 * 0.02).sin() * 0.5 + 0.5;
-        let bg_color = Color {
-            r: 0.1 + t * 0.1,
-            g: 0.1 + t * 0.05,
-            b: 0.2 + t * 0.1,
-            a: 1.0,
-        };
-
-        self.frame_graph.clear();
-
-        let mut pass = self.frame_graph.render_pass("triangle", scene_rt);
-        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
-        pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer_parcel(0, vertex_buffer);
-        pass.draw(0..3, 0..1);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let scheme = self.scheme.as_mut().unwrap();
+        let submission = scheme.submit()?;
+        self.present.as_ref().unwrap().consume(&submission)?;
 
         self.frame_count += 1;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                if let Err(e) = surface.resize(new_size.width, new_size.height) {
-                    tracing::error!("Failed to resize surface: {}", e);
-                }
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        if let Some(swapchain) = &mut self.swapchain {
+            if let Err(e) = swapchain.resize(new_size.width, new_size.height) {
+                tracing::error!("Failed to resize swapchain: {e}");
+                return;
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                match Self::create_scene_rt(device, surface) {
-                    Ok(rt) => self.scene_rt = Some(rt),
-                    Err(e) => tracing::error!("Failed to resize scene render target: {e:#}"),
+            if let (
+                Some(ctx),
+                Some(swapchain),
+                Some(shader),
+                Some(vertex_buffer),
+                Some(screen),
+                Some(device),
+            ) = (
+                self.ctx.as_ref(),
+                self.swapchain.as_ref(),
+                self.shader.as_ref(),
+                self.vertex_buffer.as_ref(),
+                self.screen.as_ref(),
+                self.device.as_ref(),
+            ) {
+                let pipeline = RenderPipeline::new(
+                    device,
+                    shader,
+                    shader,
+                    &RenderPipelineDesc {
+                        vertex_layout: Vertex2D::layout(),
+                        target_format: swapchain.format(),
+                        ..Default::default()
+                    },
+                )
+                .ok();
+                if let Some(pipeline) = pipeline {
+                    self.pipeline = Some(pipeline);
+                }
+                if let Some(pipeline) = self.pipeline.as_ref() {
+                    let mut scheme = match Scheme::new(ctx) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("Failed to recreate scheme on resize: {e}");
+                            return;
+                        }
+                    };
+                    let (width, height) = swapchain.size();
+                    if let Ok(rt) = scheme.lease_render_target(
+                        width.max(1),
+                        height.max(1),
+                        swapchain.format(),
+                        None::<DepthFormat>,
+                    ) {
+                        let bg_color = Color {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.2,
+                            a: 1.0,
+                        };
+                        if let Ok(present) = record_scheme(
+                            &mut scheme,
+                            pipeline,
+                            vertex_buffer,
+                            &rt,
+                            screen,
+                            bg_color,
+                        ) {
+                            self.scheme = Some(scheme);
+                            self.scene_rt = Some(rt);
+                            self.present = Some(present);
+                        }
+                    }
                 }
             }
         }
@@ -189,16 +279,18 @@ impl Drop for App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let attrs = Window::default_attributes()
-                .with_title("Goldy - Animated Triangle (Surface API)")
-                .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
-
-            let window = Arc::new(event_loop.create_window(attrs).unwrap());
-
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Triangle (Scheme + Present)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
-
             if let Err(e) = self.init_gpu(&window) {
-                tracing::error!("Failed to initialize GPU: {}", e);
+                tracing::error!("Failed to initialize GPU: {e}");
             }
             window.request_redraw();
         }
@@ -208,24 +300,24 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.window = None;
-                self.surface = None;
+                self.swapchain = None;
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     self.window = None;
-                    self.surface = None;
+                    self.swapchain = None;
                     event_loop.exit();
                 }
             }
             WindowEvent::RedrawRequested => {
-                if self.surface.is_none() {
+                if self.swapchain.is_none() {
                     return;
                 }
                 if let Err(e) = self.render_frame() {
-                    tracing::error!("Render error: {}", e);
+                    tracing::error!("Render error: {e}");
                 }
-                if self.surface.is_some() {
+                if self.swapchain.is_some() {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
@@ -250,16 +342,11 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Surface API Example (FFI client)");
-    println!("======================================");
-    println!("Rendering triangle via TaskGraph (offscreen RT → swapchain blit)");
+    println!("Goldy Triangle Example (ffi-client / Scheme + Present)");
     println!("Press Escape or close window to exit\n");
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut app = App::new()?;
-    event_loop.run_app(&mut app)?;
-
+    event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }

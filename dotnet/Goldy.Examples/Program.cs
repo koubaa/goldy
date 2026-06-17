@@ -29,13 +29,13 @@ class Program
 
     static void PrintUsage()
     {
-        Console.WriteLine("Goldy.Examples - GPU demos via TaskGraph FFI");
+        Console.WriteLine("Goldy.Examples - GPU demos via retained Scheme FFI");
         Console.WriteLine();
         Console.WriteLine("Usage: dotnet run --project Goldy.Examples -- [example]");
         Console.WriteLine();
         Console.WriteLine("Available examples:");
-        Console.WriteLine("  triangle           - Windowed animated triangle (default)");
+        Console.WriteLine("  triangle           - Windowed triangle (Scheme + present, default)");
         Console.WriteLine("  triangle-headless  - Headless triangle + readback (CI)");
-        Console.WriteLine("  gameoflife         - Windowed Conway's Game of Life (hybrid graph)");
+        Console.WriteLine("  gameoflife         - Windowed Conway's Game of Life (hybrid Scheme)");
     }
 }

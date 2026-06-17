@@ -1,13 +1,13 @@
-//! Conway's Game of Life — hybrid TaskGraph via goldy-ffi-client.
+//! Conway's Game of Life — hybrid Scheme via goldy-ffi-client.
 //!
-//! Mirrors `goldy/examples/game_of_life.rs`: compute ping-pong + offscreen render + swapchain blit.
+//! Compute ping-pong on a mosaic parcel + offscreen render + copy-to-present.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Color, ComputePipeline, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle,
-    RetainedPool, ShaderModule, Surface, TaskGraph,
+    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, MosaicSlot, NodeAccess,
+    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,
+    ResourceCategory, ResourceHandle, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule, SwapchainPool,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -29,20 +29,25 @@ const SLOT_B: MosaicSlot = MosaicSlot(1);
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
 
-fn surface_from_window(device: &goldy_ffi_client::Device, window: &Window) -> goldy_ffi_client::Result<Surface> {
+fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Result<SwapchainPool> {
     let handle = window
         .window_handle()
         .map_err(|e| goldy_ffi_client::GoldyError::from_message(format!("window handle: {e}")))?;
-    unsafe {
-        match handle.as_raw() {
+    match handle.as_raw() {
             #[cfg(windows)]
-            RawWindowHandle::Win32(h) => Surface::from_win32(device, h.hwnd.get() as *mut _),
+            RawWindowHandle::Win32(h) => SwapchainPool::from_win32(ctx, h.hwnd.get() as *mut _, 3),
             #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(h) => Surface::from_appkit(device, h.ns_view.as_ptr()),
-            other => Err(goldy_ffi_client::GoldyError::from_message(format!(
-                "unsupported window handle for surface creation: {other:?}"
-            ))),
-        }
+            RawWindowHandle::AppKit(h) => SwapchainPool::from_appkit(ctx, h.ns_view.as_ptr(), 3),
+            #[cfg(target_os = "linux")]
+            RawWindowHandle::Wayland(h) => SwapchainPool::from_wayland(
+                ctx,
+                h.display.as_ptr(),
+                h.surface.as_ptr(),
+                3,
+            ),
+        other => Err(goldy_ffi_client::GoldyError::from_message(format!(
+            "unsupported window handle for swapchain pool: {other:?}"
+        ))),
     }
 }
 
@@ -118,13 +123,68 @@ fn create_initial_state() -> Vec<u32> {
     cells
 }
 
+fn run_compute_step(
+    ctx: &Context,
+    cells: &goldy_ffi_client::Parcel,
+    read_slot: MosaicSlot,
+    write_slot: MosaicSlot,
+    pipeline: &ComputePipeline,
+) -> goldy_ffi_client::Result<()> {
+    let mut scheme = Scheme::new(ctx)?;
+    {
+        let mut node = scheme.compute_node("game_of_life", pipeline);
+        node.declare_parcel_view(cells, read_slot, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.declare_parcel_view(cells, write_slot, NodeAccess::Write, ResourceAccess::Write);
+        node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
+    }
+    scheme.submit()?;
+    Ok(())
+}
+
+fn record_display_scheme(
+    ctx: &Context,
+    swapchain: &SwapchainPool,
+    cells: &goldy_ffi_client::Parcel,
+    current_slot: MosaicSlot,
+    render_pipeline: &RenderPipeline,
+    screen: &goldy_ffi_client::PresentLease,
+) -> goldy_ffi_client::Result<(Scheme, SchemeRenderTargetLease, PresentGrant)> {
+    let mut scheme = Scheme::new(ctx)?;
+    let (width, height) = swapchain.size();
+    let rt = scheme.lease_render_target(
+        width.max(1),
+        height.max(1),
+        swapchain.format(),
+        None::<DepthFormat>,
+    )?;
+    let render_idx = cells.mosaic_view_resource_index(current_slot, ResourceAccess::ReadWrite)?;
+    {
+        let mut pass = scheme.render_pass("game_of_life_render", &rt);
+        pass.bind_parcel_view_mut(cells, current_slot, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(render_pipeline);
+        pass.bind_resources_typed(&[ResourceHandle {
+            category: ResourceCategory::Scattered,
+            index: render_idx,
+        }]);
+        pass.draw_fullscreen();
+        pass.finish_recorded();
+    }
+    scheme.copy_to_present(&rt, screen)?;
+    let present = scheme.grant_present(screen)?;
+    Ok((scheme, rt, present))
+}
+
 struct App {
     instance: Instance,
+    ctx: Option<Context>,
     device: Option<goldy_ffi_client::Device>,
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy_ffi_client::PresentLease>,
+    scene_rt: Option<SchemeRenderTargetLease>,
+    display_scheme: Option<Scheme>,
+    present: Option<PresentGrant>,
     compute_pipeline: Option<ComputePipeline>,
     render_pipeline: Option<RenderPipeline>,
     _retained_pool: Option<RetainedPool>,
@@ -139,11 +199,14 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
+            ctx: None,
             device: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            display_scheme: None,
+            present: None,
             compute_pipeline: None,
             render_pipeline: None,
             _retained_pool: None,
@@ -155,19 +218,15 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy_ffi_client::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format()).map_err(Into::into)
-    }
-
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
         let device = self
             .instance
             .request_adapter(&RequestAdapterOptions::default())?
             .request_device(&DeviceDescriptor::default())?;
+        let ctx = Context::new(&device)?;
 
-        let surface = surface_from_window(&device, window.as_ref())?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let swapchain = swapchain_from_window(&ctx, window.as_ref())?;
+        let screen = swapchain.lease()?;
 
         let initial = create_initial_state();
         let mut retained_pool = RetainedPool::new(&device)?;
@@ -185,23 +244,35 @@ impl App {
             &render_shader,
             &RenderPipelineDesc {
                 topology: PrimitiveTopology::TriangleList,
-                target_format: surface.format(),
+                target_format: swapchain.format(),
                 ..Default::default()
             },
         )?;
 
-        println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client)");
+        let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+        let (display_scheme, scene_rt, present) = record_display_scheme(
+            &ctx,
+            &swapchain,
+            &cells,
+            current_slot,
+            &render_pipeline,
+            &screen,
+        )?;
+
+        println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
         println!("Press Escape or close window to exit");
 
+        self.ctx = Some(ctx);
         self.device = Some(device);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
         self.scene_rt = Some(scene_rt);
+        self.display_scheme = Some(display_scheme);
+        self.present = Some(present);
         self.compute_pipeline = Some(compute_pipeline);
         self.render_pipeline = Some(render_pipeline);
         self._retained_pool = Some(retained_pool);
         self.cells = Some(cells);
-        self.use_buffer_a = true;
-
         Ok(())
     }
 
@@ -210,14 +281,6 @@ impl App {
 
         let now = std::time::Instant::now();
         let should_update = now.duration_since(self.last_update).as_millis() > 33;
-
-        let compute_pipeline = self.compute_pipeline.as_ref().unwrap();
-        let render_pipeline = self.render_pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
-        let cells = self.cells.as_ref().unwrap();
-
-        self.frame_graph.clear();
 
         if should_update {
             self.last_update = now;
@@ -228,53 +291,61 @@ impl App {
                 (SLOT_B, SLOT_A)
             };
 
-            let read_idx = cells.mosaic_view_resource_index(read_slot, ResourceAccess::ReadWrite)?;
-            let write_idx = cells.mosaic_view_resource_index(write_slot, ResourceAccess::Write)?;
-
-            let mut node = self.frame_graph.compute_node("game_of_life", compute_pipeline);
-            node.bind_parcel_view(cells, read_slot, NodeAccess::Read);
-            node.bind_parcel_view(cells, write_slot, NodeAccess::Write);
-            node.bind_resources_raw(&[read_idx, write_idx]);
-            node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
-
+            run_compute_step(
+                self.ctx.as_ref().unwrap(),
+                self.cells.as_ref().unwrap(),
+                read_slot,
+                write_slot,
+                self.compute_pipeline.as_ref().unwrap(),
+            )?;
             self.use_buffer_a = !self.use_buffer_a;
+
+            let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+            let (display_scheme, scene_rt, present) = record_display_scheme(
+                self.ctx.as_ref().unwrap(),
+                self.swapchain.as_ref().unwrap(),
+                self.cells.as_ref().unwrap(),
+                current_slot,
+                self.render_pipeline.as_ref().unwrap(),
+                self.screen.as_ref().unwrap(),
+            )?;
+            self.display_scheme = Some(display_scheme);
+            self.scene_rt = Some(scene_rt);
+            self.present = Some(present);
         }
 
-        let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
-        let render_idx = cells.mosaic_view_resource_index(current_slot, ResourceAccess::ReadWrite)?;
-
-        let mut pass = self.frame_graph.render_pass("game_of_life_render", scene_rt);
-        pass.bind_parcel_view_mut(cells, current_slot, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(render_pipeline);
-        pass.bind_resources_typed(&[ResourceHandle {
-            category: ResourceCategory::Scattered,
-            index: render_idx,
-        }]);
-        pass.draw_fullscreen();
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
-
+        let submission = self.display_scheme.as_mut().unwrap().submit()?;
+        self.present.as_ref().unwrap().consume(&submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                if let Err(e) = surface.resize(new_size.width, new_size.height) {
-                    tracing::error!("Failed to resize surface: {e}");
-                }
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        if let Some(swapchain) = &mut self.swapchain {
+            if let Err(e) = swapchain.resize(new_size.width, new_size.height) {
+                tracing::error!("Failed to resize swapchain: {e}");
+                return;
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                match Self::create_scene_rt(device, surface) {
-                    Ok(rt) => self.scene_rt = Some(rt),
-                    Err(e) => tracing::error!("Failed to resize scene render target: {e:#}"),
+            if let (Some(ctx), Some(cells), Some(render_pipeline), Some(screen)) = (
+                self.ctx.as_ref(),
+                self.cells.as_ref(),
+                self.render_pipeline.as_ref(),
+                self.screen.as_ref(),
+            ) {
+                let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+                if let Ok((scheme, rt, present)) = record_display_scheme(
+                    ctx,
+                    swapchain,
+                    cells,
+                    current_slot,
+                    render_pipeline,
+                    screen,
+                ) {
+                    self.display_scheme = Some(scheme);
+                    self.scene_rt = Some(rt);
+                    self.present = Some(present);
                 }
             }
         }
@@ -303,7 +374,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Game of Life (ffi-client)")
+                            .with_title("Game of Life (ffi-client / Scheme)")
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .expect("Failed to create window"),
@@ -326,13 +397,13 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.window = None;
-                self.surface = None;
+                self.swapchain = None;
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     self.window = None;
-                    self.surface = None;
+                    self.swapchain = None;
                     event_loop.exit();
                 }
             }
@@ -343,7 +414,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if self.surface.is_none() {
+                if self.swapchain.is_none() {
                     return;
                 }
                 if let Err(e) = self.render_frame() {
@@ -351,7 +422,7 @@ impl ApplicationHandler for App {
                 }
                 if demo_frame_limit().is_some_and(|n| self.frame_count >= n) {
                     self.window = None;
-                    self.surface = None;
+                    self.swapchain = None;
                     event_loop.exit();
                     return;
                 }
@@ -372,14 +443,11 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Game of Life (ffi-client TaskGraph)");
-    println!("=========================================\n");
+    println!("Goldy Game of Life (ffi-client / Scheme)");
+    println!("========================================\n");
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut app = App::new()?;
-    event_loop.run_app(&mut app)?;
-
+    event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }

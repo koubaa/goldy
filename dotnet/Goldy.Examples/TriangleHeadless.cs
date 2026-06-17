@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 using Goldy;
 
 /// <summary>
-/// Headless triangle via TaskGraph (CI / no display).
+/// Headless triangle via retained Scheme (render pass + readback).
 /// </summary>
 static class TriangleHeadless
 {
@@ -15,11 +15,12 @@ static class TriangleHeadless
 
     public static void Run()
     {
-        Console.WriteLine("Goldy .NET Triangle (headless TaskGraph)");
+        Console.WriteLine("Goldy .NET Triangle (headless Scheme)");
         Console.WriteLine(new string('=', 40));
 
         using var instance = new Instance();
         using var device = instance.RequestAdapter().RequestDevice();
+        using var ctx = device.CreateContext();
         Console.WriteLine($"Backend: {instance.BackendType}");
 
         using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
@@ -42,13 +43,19 @@ static class TriangleHeadless
         ];
         using var retainedPool = new RetainedPool(device);
         using var vertexParcel = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+        using var readback = retainedPool.AcquireTexture(
+            100,
+            100,
+            TextureFormat.Rgba8Unorm,
+            TextureKind.Direct,
+            TextureFlags.CopySrc | TextureFlags.CopyDst);
 
         const uint width = 100;
         const uint height = 100;
-        using var target = new RenderTarget(device, width, height, TextureFormat.Rgba8Unorm);
 
-        using var graph = new TaskGraph();
-        using (var pass = graph.RenderPass("triangle", target))
+        using var scheme = new Scheme(ctx);
+        using var rt = scheme.LeaseRenderTarget(width, height, TextureFormat.Rgba8Unorm);
+        using (var pass = scheme.RenderPass("triangle", rt))
         {
             pass
                 .BindParcel(vertexParcel, NodeAccess.Read)
@@ -58,9 +65,11 @@ static class TriangleHeadless
                 .Draw(3);
         }
 
-        graph.Dispatch(device);
+        scheme.CopyToTexture(rt, readback);
+        using var grant = scheme.GrantReadTexture(readback);
+        using var submission = scheme.Submit();
+        var pixels = grant.Consume(submission);
 
-        var pixels = target.ReadToCpu();
         if (pixels.Length != width * height * 4)
             throw new InvalidOperationException($"Unexpected readback size: {pixels.Length}");
 

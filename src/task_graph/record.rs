@@ -182,6 +182,36 @@ impl RenderPassRecord {
             },
         });
     }
+
+    /// Begin accumulating a render pass targeting a scheme-held render-target lease.
+    pub fn new_for_scheme_lease(
+        label: &'static str,
+        scheme: &crate::Scheme,
+        lease: &crate::Lease<crate::LeaseRenderTarget>,
+    ) -> Self {
+        let handle = scheme.rt(lease).backend_handle();
+        Self {
+            label,
+            target: handle,
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::RenderTarget(handle),
+                access: NodeAccess::Write,
+            }],
+            commands: Vec::new(),
+            stamp_targets: Vec::new(),
+        }
+    }
+
+    /// Commit this render pass into a retained [`crate::Scheme`].
+    pub fn commit_scheme(self, scheme: &mut crate::Scheme) {
+        scheme.commit_render_pass(
+            self.label,
+            self.target,
+            self.bindings,
+            self.commands,
+            &self.stamp_targets,
+        );
+    }
 }
 
 /// Accumulates one compute dispatch node before [`Self::commit_dispatch`].

@@ -103,6 +103,35 @@ impl RetainedPool {
         self.acquire_buffer(data.len() as u64, kind, Some(element_stride), Some(data))
     }
 
+    /// Acquire a retained texture parcel.
+    pub fn acquire_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+        kind: crate::types::TextureKind,
+        flags: crate::types::TextureFlags,
+        init: Option<&[u8]>,
+    ) -> Result<Parcel> {
+        let (data, data_size) = match init {
+            Some(bytes) => (bytes.as_ptr(), bytes.len()),
+            None => (std::ptr::null(), 0),
+        };
+        let ptr = non_null(unsafe {
+            sys::goldy_retained_pool_acquire_texture(
+                self.ptr,
+                width,
+                height,
+                format.into(),
+                kind.into(),
+                flags.into(),
+                data,
+                data_size,
+            )
+        })?;
+        Parcel::from_ptr(ptr)
+    }
+
     pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldyRetainedPool {
         self.ptr
     }

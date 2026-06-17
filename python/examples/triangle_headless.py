@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless triangle — TaskGraph clear + draw + readback (CI / no display).
+"""Headless triangle — Scheme render pass + readback (CI / no display).
 
 Usage:
     python triangle_headless.py
@@ -10,11 +10,12 @@ import numpy as np
 
 
 def main():
-    print("Goldy Python Triangle (headless TaskGraph)")
+    print("Goldy Python Triangle (headless Scheme)")
     print("=" * 40)
 
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
+    ctx = device.create_context()
     print(f"Backend: {instance.backend_type}")
 
     shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
@@ -53,11 +54,18 @@ def main():
     )
     retained_pool = goldy.RetainedPool(device)
     vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    readback = retained_pool.acquire_texture(
+        100,
+        100,
+        goldy.TextureFormat.RGBA8_UNORM,
+        goldy.TextureKind.DIRECT,
+        copy_src=True,
+        copy_dst=True,
+    )
 
-    target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
-
-    graph = goldy.TaskGraph()
-    with graph.render_pass("triangle", target) as rp:
+    scheme = goldy.Scheme(ctx)
+    rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
+    with scheme.render_pass("triangle", rt) as rp:
         (
             rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
@@ -66,8 +74,10 @@ def main():
             .draw(range(3))
         )
 
-    graph.dispatch(device)
-    pixels = target.read_to_cpu()
+    scheme.copy_to_texture(rt, readback)
+    grant = scheme.grant_read_texture(readback)
+    submission = scheme.submit()
+    pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(100, 100, 4)
 
     assert pixels.shape == (100, 100, 4)
     assert np.any(pixels[:, :, :3] > 0), "Triangle should write non-black pixels"

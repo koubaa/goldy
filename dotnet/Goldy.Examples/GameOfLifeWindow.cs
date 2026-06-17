@@ -4,7 +4,7 @@ using Silk.NET.GLFW;
 namespace Goldy.Examples;
 
 /// <summary>
-/// Windowed Conway's Game of Life — hybrid TaskGraph (compute ping-pong + render + blit).
+/// Windowed Conway's Game of Life — hybrid Scheme (compute ping-pong + render + present).
 /// </summary>
 static class GameOfLifeWindow
 {
@@ -14,9 +14,52 @@ static class GameOfLifeWindow
     const uint WorkgroupsX = (GridWidth + 7) / 8;
     const uint WorkgroupsY = (GridHeight + 7) / 8;
 
+    static void RunComputeStep(
+        Context ctx,
+        Parcel readBuf,
+        Parcel writeBuf,
+        ComputePipeline pipeline)
+    {
+        using var scheme = new Scheme(ctx);
+        using (var node = scheme.ComputeNode("game_of_life", pipeline))
+        {
+            node
+                .DeclareParcel(readBuf, NodeAccess.Read, ResourceAccess.ReadWrite)
+                .DeclareParcel(writeBuf, NodeAccess.Write, ResourceAccess.Write);
+            node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
+        }
+        using var _ = scheme.Submit();
+    }
+
+    static (Scheme scheme, SchemeRenderTargetLease rt, PresentGrant present) RecordDisplayScheme(
+        Context ctx,
+        SwapchainPool swapchain,
+        Parcel currentBuf,
+        RenderPipeline renderPipeline,
+        PresentLease screen)
+    {
+        var scheme = new Scheme(ctx);
+        var rt = scheme.LeaseRenderTarget(
+            Math.Max(swapchain.Width, 1u),
+            Math.Max(swapchain.Height, 1u),
+            swapchain.Format);
+        using (var pass = scheme.RenderPass("game_of_life_render", rt))
+        {
+            pass
+                .BindParcel(currentBuf, NodeAccess.Read)
+                .Clear(Color.Black)
+                .SetPipeline(renderPipeline)
+                .BindResourceIndex(currentBuf.ResourceIndex(ResourceAccess.Read))
+                .DrawFullscreen();
+        }
+        scheme.CopyToPresent(rt, screen);
+        var present = scheme.GrantPresent(screen);
+        return (scheme, rt, present);
+    }
+
     public static unsafe void Run()
     {
-        Console.WriteLine("Goldy .NET Game of Life (TaskGraph)");
+        Console.WriteLine("Goldy .NET Game of Life (Scheme + Present)");
         Console.WriteLine(new string('=', 40));
         Console.WriteLine("Press Escape or close the window to exit\n");
 
@@ -27,7 +70,7 @@ static class GameOfLifeWindow
             throw new InvalidOperationException("glfwInit failed");
 
         glfw.WindowHint(WindowHintClientApi.ClientApi, ClientApi.NoApi);
-        var window = glfw.CreateWindow(800, 800, "Goldy - Game of Life (.NET)", null, null);
+        var window = glfw.CreateWindow(800, 800, "Goldy - Game of Life (.NET / Scheme)", null, null);
         if (window == null)
         {
             glfw.Terminate();
@@ -42,7 +85,9 @@ static class GameOfLifeWindow
         {
             using var instance = new Instance();
             using var device = instance.RequestAdapter().RequestDevice();
-            using var surface = GlfwSurface.Create(device, window);
+            using var ctx = device.CreateContext();
+            using var swapchain = GlfwSwapchainPool.Create(ctx, window);
+            using var screen = swapchain.Lease();
 
             var computeSrc = ShaderPaths.Load("game_of_life.slang");
             var renderSrc = ShaderPaths.Load("game_of_life_render.slang");
@@ -50,8 +95,8 @@ static class GameOfLifeWindow
             var initial = CreateInitialState();
             var zeros = new uint[CellCount];
             using var retainedPool = new RetainedPool(device);
-            using var bufA = retainedPool.AcquireBuffer(initial, BufferKind.Scattered);
-            using var bufB = retainedPool.AcquireBuffer(zeros, BufferKind.Scattered);
+            using var bufA = retainedPool.AcquireBuffer<uint>(initial, BufferKind.Scattered);
+            using var bufB = retainedPool.AcquireBuffer<uint>(zeros, BufferKind.Scattered);
 
             using var computeShader = new ShaderModule(device, computeSrc);
             using var renderShader = new ShaderModule(device, renderSrc);
@@ -62,13 +107,14 @@ static class GameOfLifeWindow
                 renderShader,
                 new RenderPipelineDesc
                 {
-                    TargetFormat = surface.Format,
+                    TargetFormat = swapchain.Format,
                     Topology = PrimitiveTopology.TriangleList,
                 });
 
-            var sceneRt = MakeSceneRt(device, surface);
-            using var frameGraph = new TaskGraph();
             var useBufferA = true;
+            var currentBuf = bufA;
+            var (displayScheme, sceneRt, present) = RecordDisplayScheme(
+                ctx, swapchain, currentBuf, renderPipeline, screen);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -77,57 +123,39 @@ static class GameOfLifeWindow
                 {
                     var w = (uint)fbWidth;
                     var h = (uint)fbHeight;
-                    if (w != surface.Width || h != surface.Height)
+                    if (w != swapchain.Width || h != swapchain.Height)
                     {
-                        surface.Resize(w, h);
+                        swapchain.Resize(w, h);
                         sceneRt.Dispose();
-                        sceneRt = MakeSceneRt(device, surface);
+                        present.Dispose();
+                        displayScheme.Dispose();
+                        (displayScheme, sceneRt, present) = RecordDisplayScheme(
+                            ctx, swapchain, currentBuf, renderPipeline, screen);
                     }
                 }
 
                 var now = DateTime.UtcNow;
-                var shouldUpdate = (now - lastUpdate).TotalMilliseconds > 33;
-
-                frameGraph.Clear();
-
-                if (shouldUpdate)
+                if ((now - lastUpdate).TotalMilliseconds > 33)
                 {
                     lastUpdate = now;
                     var readBuf = useBufferA ? bufA : bufB;
                     var writeBuf = useBufferA ? bufB : bufA;
-                    var readIdx = readBuf.ResourceIndex(ResourceAccess.ReadWrite);
-                    var writeIdx = writeBuf.ResourceIndex(ResourceAccess.Write);
-
-                    using (var node = frameGraph.ComputeNode("game_of_life", computePipeline))
-                    {
-                        node
-                            .BindParcel(readBuf, NodeAccess.Read)
-                            .BindParcel(writeBuf, NodeAccess.Write)
-                            .BindResourcesRaw(new uint[] { readIdx, writeIdx });
-                        node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
-                    }
-
+                    RunComputeStep(ctx, readBuf, writeBuf, computePipeline);
                     useBufferA = !useBufferA;
+                    var newBuf = useBufferA ? bufA : bufB;
+                    if (!ReferenceEquals(newBuf, currentBuf))
+                    {
+                        currentBuf = newBuf;
+                        sceneRt.Dispose();
+                        present.Dispose();
+                        displayScheme.Dispose();
+                        (displayScheme, sceneRt, present) = RecordDisplayScheme(
+                            ctx, swapchain, currentBuf, renderPipeline, screen);
+                    }
                 }
 
-                var currentBuf = useBufferA ? bufA : bufB;
-
-                using (var pass = frameGraph.RenderPass("game_of_life_render", sceneRt))
-                {
-                    pass
-                        .BindParcel(currentBuf, NodeAccess.Read)
-                        .Clear(Color.Black)
-                        .SetPipeline(renderPipeline)
-                        .BindResourceIndex(currentBuf.ResourceIndex(ResourceAccess.Read))
-                        .DrawFullscreen();
-                }
-
-                var swapchain = frameGraph.DeclareSwapchainOutput();
-                frameGraph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
-
-                var frame = surface.Acquire();
-                surface.SubmitGraphToFrame(frameGraph, frame);
-                surface.Present(frame);
+                using var submission = displayScheme.Submit();
+                present.Consume(submission);
 
                 frameCount++;
                 glfw.PollEvents();
@@ -140,6 +168,8 @@ static class GameOfLifeWindow
             }
 
             sceneRt.Dispose();
+            present.Dispose();
+            displayScheme.Dispose();
         }
         finally
         {
@@ -159,13 +189,6 @@ static class GameOfLifeWindow
         if (string.IsNullOrWhiteSpace(raw))
             return null;
         return Math.Max(1, int.Parse(raw));
-    }
-
-    static RenderTarget MakeSceneRt(Device device, Surface surface)
-    {
-        var w = Math.Max(surface.Width, 1u);
-        var h = Math.Max(surface.Height, 1u);
-        return new RenderTarget(device, w, h, surface.Format);
     }
 
     static uint[] CreateInitialState()

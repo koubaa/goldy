@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless Game of Life — hybrid TaskGraph smoke test (compute + render + readback).
+"""Headless Game of Life — hybrid Scheme (compute + render + readback).
 
 Mirrors `goldy/ffi-client/examples/game_of_life_headless.rs`. No GLFW/display required.
 
@@ -39,7 +39,7 @@ def count_live(cells: np.ndarray) -> int:
 
 
 def main() -> int:
-    print("Goldy Python Game of Life (headless TaskGraph)")
+    print("Goldy Python Game of Life (headless Scheme)")
     print("=" * 40)
 
     compute_src = (SHADERS_DIR / "game_of_life.slang").read_text(encoding="utf-8")
@@ -47,6 +47,7 @@ def main() -> int:
 
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
+    ctx = device.create_context()
     print(f"Backend: {instance.backend_type}")
 
     initial = initial_cells()
@@ -70,35 +71,38 @@ def main() -> int:
         ),
     )
 
-    target = goldy.RenderTarget(device, GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
+    readback = retained_pool.acquire_texture(
+        GRID_WIDTH,
+        GRID_HEIGHT,
+        goldy.TextureFormat.RGBA8_UNORM,
+        goldy.TextureKind.DIRECT,
+        copy_src=True,
+        copy_dst=True,
+    )
 
-    read_idx = cells.mosaic_view_resource_index(SLOT_A, goldy.ResourceAccess.READ_WRITE)
-    write_idx = cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.WRITE)
+    scheme = goldy.Scheme(ctx)
+    node = scheme.node("game_of_life", compute_pipeline)
+    (
+        node.declare_parcel_view(cells, SLOT_A, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .declare_parcel_view(cells, SLOT_B, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
+    )
 
-    graph = goldy.TaskGraph()
-    with graph.compute_node(
-        "game_of_life",
-        compute_pipeline,
-        workgroups=(WORKGROUPS_X, WORKGROUPS_Y, 1),
-    ) as node:
-        (
-            node.bind_parcel_view(cells, SLOT_A, goldy.NodeAccess.READ)
-            .bind_parcel_view(cells, SLOT_B, goldy.NodeAccess.WRITE)
-            .bind_resources_raw([read_idx, write_idx])
-        )
-
-    with graph.render_pass("game_of_life_render", target) as rp:
+    rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
+    render_idx = cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.READ_WRITE)
+    with scheme.render_pass("game_of_life_render", rt) as rp:
         (
             rp.bind_parcel_view(cells, SLOT_B, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
-            .bind_resource_index(
-                cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.READ)
-            )
+            .bind_resource_index(render_idx)
             .draw_fullscreen()
         )
 
-    graph.dispatch(device)
+    scheme.copy_to_texture(rt, readback)
+    grant = scheme.grant_read_texture(readback)
+    submission = scheme.submit()
+    pixels = grant.consume(submission)
 
     cells_out = np.frombuffer(
         cells.mosaic_view_read_to_cpu(SLOT_B, device), dtype=np.uint32
@@ -107,10 +111,10 @@ def main() -> int:
     live = count_live(cells_out)
     assert live == 4, f"still-life block should remain 4 live cells, got {live}"
 
-    pixels = target.read_to_cpu()
+    stride = GRID_WIDTH * 4
     cx = GRID_WIDTH // 2
     cy = GRID_HEIGHT // 2
-    g = int(pixels[cy, cx, 1])
+    g = pixels[cy * stride + cx * 4 + 1]
     assert g > 100, f"center pixel should show alive cells (g={g})"
 
     print(f"Simulation + render OK ({GRID_WIDTH}x{GRID_HEIGHT}, g={g} at center)")
