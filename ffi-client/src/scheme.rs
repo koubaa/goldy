@@ -244,14 +244,14 @@ pub struct ComputeNodeBuilder<'a> {
 }
 
 impl ComputeNodeBuilder<'_> {
-    pub fn declare_parcel(
+    pub fn with_parcel(
         &mut self,
         parcel: &Parcel,
         node_access: NodeAccess,
         resource_access: ResourceAccess,
     ) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_declare_parcel(
+            sys::goldy_scheme_compute_node_with_parcel(
                 self.scheme.ptr,
                 parcel.as_ptr(),
                 node_access.into(),
@@ -261,7 +261,7 @@ impl ComputeNodeBuilder<'_> {
         self
     }
 
-    pub fn declare_parcel_view(
+    pub fn with_parcel_view(
         &mut self,
         parcel: &Parcel,
         slot: MosaicSlot,
@@ -269,7 +269,7 @@ impl ComputeNodeBuilder<'_> {
         resource_access: ResourceAccess,
     ) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_declare_parcel_view(
+            sys::goldy_scheme_compute_node_with_parcel_view(
                 self.scheme.ptr,
                 parcel.as_ptr(),
                 slot.0,
@@ -277,6 +277,11 @@ impl ComputeNodeBuilder<'_> {
                 resource_access.into(),
             )
         });
+        self
+    }
+
+    pub fn with_param(&mut self, value: u32) -> &mut Self {
+        expect_ok(unsafe { sys::goldy_scheme_compute_node_with_param(self.scheme.ptr, value) });
         self
     }
 
@@ -304,16 +309,16 @@ pub struct SchemeRenderPassBuilder<'a> {
 }
 
 impl SchemeRenderPassBuilder<'_> {
-    pub fn bind_parcel_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_bind_parcel(self.scheme.ptr, parcel.as_ptr(), access.into())
+            sys::goldy_scheme_render_pass_with_parcel(self.scheme.ptr, parcel.as_ptr(), access.into())
         });
         self
     }
 
-    pub fn bind_parcel_view_mut(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_bind_parcel_view(self.scheme.ptr, parcel.as_ptr(), slot.0, access.into())
+            sys::goldy_scheme_render_pass_with_parcel_view(self.scheme.ptr, parcel.as_ptr(), slot.0, access.into())
         });
         self
     }
@@ -372,7 +377,7 @@ impl SchemeRenderPassBuilder<'_> {
             flat.push(h.index);
         }
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_bind_resources_typed(self.scheme.ptr, flat.as_ptr(), handles.len() as u32)
+            sys::goldy_scheme_render_pass_with_views(self.scheme.ptr, flat.as_ptr(), handles.len() as u32)
         });
         self
     }

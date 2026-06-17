@@ -102,7 +102,7 @@ impl App {
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("digital_clock", scene_rt);
-        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
+        pass.with_parcel(vertex_parcel, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);

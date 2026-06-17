@@ -81,9 +81,9 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
     let mut worker = Scheme::new(&ctx);
     worker
         .node("copy", &pipeline)
-        .bind_parcel(&input, NodeAccess::Read)
-        .bind_parcel(&output, NodeAccess::Write)
-        .bind_views(&[
+        .with_parcel(&input, NodeAccess::Read)
+        .with_parcel(&output, NodeAccess::Write)
+        .with_views(&[
             input.handle(ResourceAccess::Read).expect("input handle"),
             output.handle(ResourceAccess::Write).expect("output handle"),
         ])
@@ -133,9 +133,9 @@ fn clean_scheme_resubmits_without_rerecord() {
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("copy", &pipeline)
-        .bind_parcel(&input, NodeAccess::Read)
-        .bind_parcel(&output, NodeAccess::Write)
-        .bind_views(&[
+        .with_parcel(&input, NodeAccess::Read)
+        .with_parcel(&output, NodeAccess::Write)
+        .with_views(&[
             input.handle(ResourceAccess::Read).expect("input handle"),
             output.handle(ResourceAccess::Write).expect("output handle"),
         ])
@@ -188,8 +188,8 @@ fn selector_advances_across_identical_submissions() {
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("bump_selector", &pipeline)
-        .bind_parcel(&selector, NodeAccess::ReadWrite)
-        .bind_views(&[selector.handle(ResourceAccess::ReadWrite).expect("selector handle")])
+        .with_parcel(&selector, NodeAccess::ReadWrite)
+        .with_views(&[selector.handle(ResourceAccess::ReadWrite).expect("selector handle")])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&selector).expect("grant_read");
@@ -236,9 +236,9 @@ fn two_schemes_on_one_context_do_not_collide() {
     let mut scheme_a = Scheme::new(&ctx);
     scheme_a
         .node("copy_a", &pipeline)
-        .bind_parcel(&in_a, NodeAccess::Read)
-        .bind_parcel(&out_a, NodeAccess::Write)
-        .bind_views(&[
+        .with_parcel(&in_a, NodeAccess::Read)
+        .with_parcel(&out_a, NodeAccess::Write)
+        .with_views(&[
             in_a.handle(ResourceAccess::Read).expect("in_a handle"),
             out_a.handle(ResourceAccess::Write).expect("out_a handle"),
         ])
@@ -254,9 +254,9 @@ fn two_schemes_on_one_context_do_not_collide() {
     let mut scheme_b = Scheme::new(&ctx);
     scheme_b
         .node("copy_b", &pipeline)
-        .bind_parcel(&in_b, NodeAccess::Read)
-        .bind_parcel(&out_b, NodeAccess::Write)
-        .bind_views(&[
+        .with_parcel(&in_b, NodeAccess::Read)
+        .with_parcel(&out_b, NodeAccess::Write)
+        .with_views(&[
             in_b.handle(ResourceAccess::Read).expect("in_b handle"),
             out_b.handle(ResourceAccess::Write).expect("out_b handle"),
         ])
@@ -319,8 +319,8 @@ fn lease_texture_scheme_resubmits_without_rerecord() {
         .expect("lease handle");
     scheme
         .node("write_tex", &pipeline)
-        .writes_lease(&lease)
-        .bind_views(&[handle])
+        .with_lease(&lease, NodeAccess::Write)
+        .with_views(&[handle])
         .dispatch(1, 1, 1);
 
     scheme.submit().expect("submit 0");
@@ -419,8 +419,8 @@ fn grant_read_concurrent_frames_distinct_backings() {
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("fill", &pipe)
-        .bind_parcel(&buf, NodeAccess::Write)
-        .bind_views(&[buf.handle(ResourceAccess::Write).expect("handle")])
+        .with_parcel(&buf, NodeAccess::Write)
+        .with_views(&[buf.handle(ResourceAccess::Write).expect("handle")])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buf).expect("grant_read");
 
@@ -487,8 +487,8 @@ fn grant_read_texture_concurrent_frames_distinct_backings() {
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("write_tex", &pipeline)
-        .bind_parcel(&texture, NodeAccess::Write)
-        .bind_views(&[tex_w])
+        .with_parcel(&texture, NodeAccess::Write)
+        .with_views(&[tex_w])
         .dispatch(wg_x, wg_y, 1);
     let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
 
@@ -521,8 +521,8 @@ fn fill_42_scheme(ctx: &Context, pipe: &ComputePipeline, buf: &Parcel) -> Scheme
     let mut scheme = Scheme::new(ctx);
     scheme
         .node("fill", pipe)
-        .bind_parcel(buf, NodeAccess::Write)
-        .bind_views(&[buf.handle(ResourceAccess::Write).expect("handle")])
+        .with_parcel(buf, NodeAccess::Write)
+        .with_views(&[buf.handle(ResourceAccess::Write).expect("handle")])
         .dispatch(1, 1, 1);
     scheme
 }
@@ -609,8 +609,8 @@ fn grant_read_before_dispatch_node_still_reads_producer_output() {
     let grant = scheme.grant_read(&buf).expect("grant_read");
     scheme
         .node("fill", &pipe)
-        .bind_parcel(&buf, NodeAccess::Write)
-        .bind_views(&[buf.handle(ResourceAccess::Write).expect("handle")])
+        .with_parcel(&buf, NodeAccess::Write)
+        .with_views(&[buf.handle(ResourceAccess::Write).expect("handle")])
         .dispatch(1, 1, 1);
     let frame = scheme.submit().expect("submit");
     let values = read_grant_u32(&grant, &frame, 64);
@@ -688,8 +688,8 @@ fn grant_read_texture_sequential_resubmit_correct_data() {
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("write_tex", &pipeline)
-        .bind_parcel(&texture, NodeAccess::Write)
-        .bind_views(&[tex_w])
+        .with_parcel(&texture, NodeAccess::Write)
+        .with_views(&[tex_w])
         .dispatch(wg_x, wg_y, 1);
     let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
 

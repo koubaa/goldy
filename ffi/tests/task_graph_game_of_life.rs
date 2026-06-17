@@ -12,10 +12,10 @@ use goldy_ffi::{
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_render_target_buffer_size,
     goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create, goldy_shader_destroy,
-    goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_bind_parcel_view,
-    goldy_task_graph_compute_node_bind_resources_raw, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
+    goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_with_parcel_view,
+    goldy_task_graph_compute_node_with_resource_slots, goldy_task_graph_compute_node_dispatch, goldy_task_graph_create,
     goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
-    goldy_task_graph_render_pass_bind_parcel_view, goldy_task_graph_render_pass_bind_resources_typed,
+    goldy_task_graph_render_pass_with_parcel_view, goldy_task_graph_render_pass_with_views,
     goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw_fullscreen,
     goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline, GoldyColor, GoldyNodeAccess,
     GoldyRenderPipelineDesc, GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
@@ -126,20 +126,20 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_bind_parcel_view(graph, cells, SLOT_A, GoldyNodeAccess::Read),
+            goldy_task_graph_compute_node_with_parcel_view(graph, cells, SLOT_A, GoldyNodeAccess::Read),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_bind_parcel_view(graph, cells, SLOT_B, GoldyNodeAccess::Write),
+            goldy_task_graph_compute_node_with_parcel_view(graph, cells, SLOT_B, GoldyNodeAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         let slots = [read_idx, write_idx];
         assert_eq!(
-            goldy_task_graph_compute_node_bind_resources_raw(graph, slots.as_ptr(), 2),
+            goldy_task_graph_compute_node_with_resource_slots(graph, slots.as_ptr(), 2),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -162,7 +162,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_render_pass_bind_parcel_view(graph, cells, SLOT_B, GoldyNodeAccess::Read),
+            goldy_task_graph_render_pass_with_parcel_view(graph, cells, SLOT_B, GoldyNodeAccess::Read),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -189,7 +189,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
         );
         let typed = [0u32, render_idx];
         assert_eq!(
-            goldy_task_graph_render_pass_bind_resources_typed(graph, typed.as_ptr(), 1),
+            goldy_task_graph_render_pass_with_views(graph, typed.as_ptr(), 1),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

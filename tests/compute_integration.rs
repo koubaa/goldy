@@ -129,7 +129,7 @@ fn test_compute_with_uav_buffer() {
     let mut graph = TaskGraph::new();
     graph
         .node("double", &pipeline)
-        .bind_resources(&[&buffer])
+        .with_resources(&[&buffer])
         .dispatch(1, 1, 1);
     let result = graph.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch: {:?}", result.err());
@@ -160,7 +160,7 @@ fn test_compute_with_srv_and_uav() {
     let mut graph = TaskGraph::new();
     graph
         .node("copy", &pipeline)
-        .bind_resources(&[&input_buffer, &output_buffer])
+        .with_resources(&[&input_buffer, &output_buffer])
         .dispatch(1, 1, 1);
     let result = graph.dispatch(&ctx);
     assert!(result.is_ok(), "Failed to dispatch with SRV+UAV: {:?}", result.err());
@@ -338,7 +338,7 @@ fn test_compute_write_and_readback() {
     let mut graph = TaskGraph::new();
     graph
         .node("double", &pipeline)
-        .bind_resources(&[&buffer])
+        .with_resources(&[&buffer])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -438,7 +438,7 @@ fn test_compute_batched_clear_before_dispatch() {
     graph.clear_buffer(&input_buf, 0, 0);
     graph
         .node("n0", &pipeline)
-        .bind_resources(&[&input_buf, &output_buf])
+        .with_resources(&[&input_buf, &output_buf])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -476,12 +476,12 @@ fn test_compute_clear_between_dispatches() {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &copy_pipeline)
-        .bind_resources(&[&input_buf, &output_buf])
+        .with_resources(&[&input_buf, &output_buf])
         .dispatch(1, 1, 1);
     graph.clear_buffer(&output_buf, 0, 0);
     graph
         .node("n1", &inc_pipeline)
-        .bind_resources(&[&output_buf])
+        .with_resources(&[&output_buf])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -521,7 +521,7 @@ fn test_compute_dispatch_indirect() {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
-        .bind_resources(&[&data_buf])
+        .with_resources(&[&data_buf])
         .dispatch_indirect(&args_buf, 0);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -550,7 +550,7 @@ fn test_dispatch_indirect_invalid_buffer() {
         let temp = test_alloc_buffer_with_data(&device, &[1u32, 1, 1], BufferKind::Scattered);
         graph
             .node("indirect", &pipeline)
-            .bind_resources(&[&data_buf])
+            .with_resources(&[&data_buf])
             .dispatch_indirect(&temp, 0);
     }
     let result = graph.dispatch(&ctx);
@@ -585,7 +585,7 @@ fn test_compute_many_resource_slots() {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
-        .bind_resources(&[&a, &b, &c, &d, &e, &out])
+        .with_resources(&[&a, &b, &c, &d, &e, &out])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -651,7 +651,7 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
     let pipeline = ComputePipeline::new(&device, &shader).expect("Failed to create compute pipeline");
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&buffer]).dispatch(1, 1, 1);
     let result = graph.dispatch(&ctx);
     assert!(
         result.is_ok(),
@@ -701,7 +701,7 @@ fn test_buffer_view_copy_between_sub_regions() {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
-        .bind_resources_raw_slice(&[idx_a, idx_b])
+        .with_resource_slots_slice(&[idx_a, idx_b])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -750,7 +750,7 @@ fn test_buffer_view_isolation() {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
-        .bind_resources_raw_slice(&[idx])
+        .with_resource_slots_slice(&[idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -808,7 +808,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
-        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .with_resource_slots_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -897,7 +897,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
     let buf = test_alloc_buffer_with_data(&device, &[0.0f32; 7], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 7 * 4];
@@ -979,7 +979,7 @@ void cs_main(Scattered<float> out, ThreadId id) {
     let buf = test_alloc_buffer_with_data(&device, &[0.0f32; 9], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 9 * 4];
@@ -1054,9 +1054,9 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("typed_copy", &pipeline)
-        .bind_buffer(&input_buf, NodeAccess::Read)
-        .bind_buffer(&output_buf, NodeAccess::Write)
-        .bind_resources_raw_slice(&[srv, uav])
+        .with_buffer(&input_buf, NodeAccess::Read)
+        .with_buffer(&output_buf, NodeAccess::Write)
+        .with_resource_slots_slice(&[srv, uav])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1122,7 +1122,7 @@ void cs_main(Scattered<uint> input, Scattered<uint> output, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
-        .bind_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]])
+        .with_resources(&[&buffers[0], &buffers[NUM_BUFFERS - 1]])
         .dispatch(workgroups, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1183,8 +1183,8 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("write_tex", &pipeline)
-        .bind_texture(&texture, NodeAccess::Write)
-        .bind_resources_raw_slice(&[tex_idx])
+        .with_texture(&texture, NodeAccess::Write)
+        .with_resource_slots_slice(&[tex_idx])
         .dispatch(wg_x, wg_y, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1239,7 +1239,7 @@ fn test_cpu_readable_compute_write_and_read() {
     );
 
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&buffer]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&buffer]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut out = vec![0u8; N * size_of::<u32>()];
@@ -1296,17 +1296,17 @@ fn test_write_buffer_reuse_across_submissions() {
     let mut g1 = TaskGraph::new();
     g1.write_buffer(&mid, 0, bytemuck::cast_slice(&data_a).to_vec());
     g1.node("copy_a", &pipeline)
-        .bind_buffer(&mid, NodeAccess::Read)
-        .bind_buffer(&out_a, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx_in, idx_out_a])
+        .with_buffer(&mid, NodeAccess::Read)
+        .with_buffer(&out_a, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx_in, idx_out_a])
         .dispatch(1, 1, 1);
 
     let mut g2 = TaskGraph::new();
     g2.write_buffer(&mid, 0, bytemuck::cast_slice(&data_b).to_vec());
     g2.node("copy_b", &pipeline)
-        .bind_buffer(&mid, NodeAccess::Read)
-        .bind_buffer(&out_b, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx_in, idx_out_b])
+        .with_buffer(&mid, NodeAccess::Read)
+        .with_buffer(&out_b, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx_in, idx_out_b])
         .dispatch(1, 1, 1);
 
     let tv1 = g1.submit(&ctx).expect("submit 1");
@@ -1396,8 +1396,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_uint", &pipeline)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_with_user(vec![heap_idx], &[EXPECTED])
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots(vec![heap_idx])
+        .with_param(EXPECTED)
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1429,8 +1430,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_zero", &pipeline)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_with_user(vec![heap_idx], &[0u32])
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots(vec![heap_idx])
+        .with_param(0u32)
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1462,8 +1464,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_max", &pipeline)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_with_user(vec![heap_idx], &[u32::MAX])
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots(vec![heap_idx])
+        .with_param(u32::MAX)
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1505,8 +1508,9 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_float", &pipeline)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_with_user(vec![heap_idx], &[bits])
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots(vec![heap_idx])
+        .with_param(bits)
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1546,8 +1550,10 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_two", &pipeline)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_with_user(vec![heap_idx], &[A, B])
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots(vec![heap_idx])
+        .with_param(A)
+        .with_param(B)
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1588,9 +1594,10 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_offset", &pipeline)
-        .bind_buffer(&inp, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_with_user(vec![inp_idx, out_idx], &[OFFSET])
+        .with_buffer(&inp, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots(vec![inp_idx, out_idx])
+        .with_param(OFFSET)
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
@@ -1951,15 +1958,15 @@ fn test_transient_buffer_write_then_copy() {
 
     graph
         .node("write_iota", &write_pipeline)
-        .bind_transient_buffer(tid, NodeAccess::Write)
-        .bind_resources_raw_slice(&[u32::MAX])
+        .with_transient_buffer(tid, NodeAccess::Write)
+        .with_resource_slots_slice(&[u32::MAX])
         .dispatch(1, 1, 1);
 
     graph
         .node("copy_out", &copy_pipeline)
-        .bind_transient_buffer(tid, NodeAccess::ReadWrite)
-        .bind_buffer(&output, NodeAccess::Write)
-        .bind_resources_raw_slice(&[u32::MAX, output_uav])
+        .with_transient_buffer(tid, NodeAccess::ReadWrite)
+        .with_buffer(&output, NodeAccess::Write)
+        .with_resource_slots_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).expect("dispatch transient graph");
@@ -2008,15 +2015,15 @@ fn test_regular_buffer_write_then_copy() {
 
     graph
         .node("write_iota", &write_pipeline)
-        .bind_buffer(&scratch, NodeAccess::Write)
-        .bind_resources_raw_slice(&[scratch_uav])
+        .with_buffer(&scratch, NodeAccess::Write)
+        .with_resource_slots_slice(&[scratch_uav])
         .dispatch(1, 1, 1);
 
     graph
         .node("copy_out", &copy_pipeline)
-        .bind_buffer(&scratch, NodeAccess::Read)
-        .bind_buffer(&output, NodeAccess::Write)
-        .bind_resources_raw_slice(&[scratch_uav, output_uav])
+        .with_buffer(&scratch, NodeAccess::Read)
+        .with_buffer(&output, NodeAccess::Write)
+        .with_resource_slots_slice(&[scratch_uav, output_uav])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).expect("dispatch graph");
@@ -2073,26 +2080,26 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     // Wave 0: populate t0. The bridge write is a schedule-only edge (shader has one slot).
     graph
         .node("wave0_iota", &iota_pipeline)
-        .bind_transient_buffer(t0, NodeAccess::Write)
-        .bind_buffer(&bridge, NodeAccess::Write)
-        .bind_resources_raw_slice(&[u32::MAX])
+        .with_transient_buffer(t0, NodeAccess::Write)
+        .with_buffer(&bridge, NodeAccess::Write)
+        .with_resource_slots_slice(&[u32::MAX])
         .dispatch(1, 1, 1);
 
     // Wave 1: bridge read forces wave ordering; overwrite aliased bytes via t1.
     // Transient is listed first so the single shader slot resolves to t1 (not bridge).
     graph
         .node("wave1_scale", &scale_pipeline)
-        .bind_transient_buffer(t1, NodeAccess::Write)
-        .bind_buffer(&bridge, NodeAccess::Read)
-        .bind_resources_raw_slice(&[u32::MAX])
+        .with_transient_buffer(t1, NodeAccess::Write)
+        .with_buffer(&bridge, NodeAccess::Read)
+        .with_resource_slots_slice(&[u32::MAX])
         .dispatch(1, 1, 1);
 
     // Wave 2: copy the final aliased transient to a regular buffer for readback.
     graph
         .node("wave2_copy", &copy_pipeline)
-        .bind_transient_buffer(t1, NodeAccess::ReadWrite)
-        .bind_buffer(&output, NodeAccess::Write)
-        .bind_resources_raw_slice(&[u32::MAX, output_uav])
+        .with_transient_buffer(t1, NodeAccess::ReadWrite)
+        .with_buffer(&output, NodeAccess::Write)
+        .with_resource_slots_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).expect("dispatch aliased transient graph");
@@ -2318,7 +2325,7 @@ fn test_wave_inclusive_scan_uniform_64() {
 
     let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
@@ -2344,7 +2351,7 @@ fn test_wave_inclusive_scan_ramp_64() {
 
     let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
@@ -2368,7 +2375,7 @@ fn test_wave_inclusive_scan_uniform_256() {
 
     let out = test_alloc_buffer(&device, 256 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 256 * 4];
@@ -2394,7 +2401,7 @@ fn test_workgroup_reduce_uint_correct() {
 
     let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
@@ -2419,7 +2426,7 @@ fn test_workgroup_inclusive_scan_uint_correct() {
 
     let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
@@ -2445,7 +2452,7 @@ fn test_workgroup_broadcast_correct() {
 
     let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
@@ -2466,7 +2473,7 @@ fn test_workgroup_upper_bound_linear() {
 
     let out = test_alloc_buffer(&device, 64 * 4, BufferKind::Scattered, None, BufferFlags::empty());
     let mut graph = TaskGraph::new();
-    graph.node("n0", &pipeline).bind_resources(&[&out]).dispatch(1, 1, 1);
+    graph.node("n0", &pipeline).with_resources(&[&out]).dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut raw = vec![0u8; 64 * 4];
@@ -2556,7 +2563,7 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let mut graph_enc = TaskGraph::new();
     graph_enc
         .node("n0", &write_pipeline)
-        .bind_resources_raw_slice(&[storage_idx])
+        .with_resource_slots_slice(&[storage_idx])
         .dispatch(1, 1, 1);
     graph_enc.dispatch(&ctx).expect("write dispatch");
 
@@ -2574,9 +2581,9 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let mut graph_enc2 = TaskGraph::new();
     graph_enc2
         .node("read", &read_pipeline)
-        .bind_texture(&tex, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[
+        .with_texture(&tex, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[
             sampled_idx,
             sampler.resource_index(ResourceAccess::Read).unwrap(),
             out.resource_index(ResourceAccess::Write).unwrap(),
@@ -2665,14 +2672,14 @@ fn two_contexts_both_submit_and_complete() {
     let mut graph_enc_a = TaskGraph::new();
     graph_enc_a
         .node("n0", &pipeline)
-        .bind_resources(&[&buf_a])
+        .with_resources(&[&buf_a])
         .dispatch(1, 1, 1);
     let tv_a = graph_enc_a.submit(&ctx_a).expect("ctx_a submit");
 
     let mut graph_enc_b = TaskGraph::new();
     graph_enc_b
         .node("n0", &pipeline)
-        .bind_resources(&[&buf_b])
+        .with_resources(&[&buf_b])
         .dispatch(1, 1, 1);
     let tv_b = graph_enc_b.submit(&ctx_b).expect("ctx_b submit");
 

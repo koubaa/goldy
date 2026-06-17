@@ -194,7 +194,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
-    scheme.node("fill", pipeline).declare_parcel(
+    scheme.node("fill", pipeline).with_parcel(
         parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
     ).dispatch(1, 1, 1)
     grant = scheme.grant_read(parcel)
@@ -249,7 +249,7 @@ def test_triangle_via_graph(device):
     graph = goldy.TaskGraph()
     with graph.render_pass("triangle", target) as rp:
         (
-            rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
+            rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
             .set_pipeline(pipeline)
             .set_vertex_buffer_parcel(0, vertex_parcel)

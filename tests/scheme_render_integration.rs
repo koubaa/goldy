@@ -69,7 +69,7 @@ fn scheme_render_pass_triangle_readback() {
         &readback,
         "triangle",
         |pass| {
-            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.with_parcel(&vertex_buffer, NodeAccess::Read);
             pass.clear(clear);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
@@ -163,7 +163,7 @@ fn scheme_vulkan_render_and_readback() {
         &readback,
         "triangle",
         |pass| {
-            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.with_parcel(&vertex_buffer, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
@@ -393,8 +393,8 @@ fn scheme_indexed_drawing() {
         &readback,
         "indexed_u16",
         |pass| {
-            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-            pass.bind_parcel_mut(&index_buffer, NodeAccess::Read);
+            pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+            pass.with_parcel(&index_buffer, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
@@ -481,8 +481,8 @@ fn scheme_indexed_drawing_uint32() {
         &readback,
         "indexed_u32",
         |pass| {
-            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
-            pass.bind_parcel_mut(&index_buffer, NodeAccess::Read);
+            pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+            pass.with_parcel(&index_buffer, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
@@ -590,8 +590,8 @@ fn scheme_depth_occlusion_red_beats_green() {
         &readback,
         "depth_red_wins",
         |pass| {
-            pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
-            pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
+            pass.with_parcel(&red_vb, NodeAccess::Read);
+            pass.with_parcel(&green_vb, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.clear_depth(1.0);
             pass.set_pipeline(&pipeline);
@@ -683,8 +683,8 @@ fn scheme_depth_occlusion_green_beats_red() {
         &readback,
         "depth_green_wins",
         |pass| {
-            pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
-            pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
+            pass.with_parcel(&red_vb, NodeAccess::Read);
+            pass.with_parcel(&green_vb, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.clear_depth(1.0);
             pass.set_pipeline(&pipeline);
@@ -795,7 +795,7 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
         "bindless_read",
         |pass| {
             pass.clear(Color::BLACK);
-            pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+            pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
                 parcel: &buffer,
                 access: NodeAccess::ReadWrite,
             }]);
@@ -913,14 +913,14 @@ float4 fs_main(Interpolated<float4> tex, Filter smp, FullscreenVarying input) : 
         &readback,
         "textured_quad",
         |pass| {
-            pass.bind_shader_resources(&[
+            pass.with_shader_resources(&[
                 ShaderResourceSlot::Parcel {
                     parcel: &texture,
                     access: NodeAccess::Read,
                 },
                 ShaderResourceSlot::Sampler(&sampler),
             ]);
-            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.with_parcel(&vertex_buffer, NodeAccess::Read);
             pass.clear(Color {
                 r: 0.1,
                 g: 0.1,
@@ -1052,8 +1052,8 @@ float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
     let mut writer = Scheme::new(&ctx);
     writer
         .node("write_sentinel", &write_pipeline)
-        .bind_parcel(&sentinel, NodeAccess::Write)
-        .bind_views(&[sentinel.handle(ResourceAccess::Write).expect("sentinel uav")])
+        .with_parcel(&sentinel, NodeAccess::Write)
+        .with_views(&[sentinel.handle(ResourceAccess::Write).expect("sentinel uav")])
         .dispatch(1, 1, 1);
     writer.submit().expect("writer submit");
 
@@ -1067,8 +1067,8 @@ float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
     let mut consumer = Scheme::new(&ctx);
     consumer
         .node("dummy_compute", &dummy_pipeline)
-        .bind_parcel(&dummy_buf, NodeAccess::Read)
-        .bind_views(&[dummy_buf.handle(ResourceAccess::Read).expect("dummy srv")])
+        .with_parcel(&dummy_buf, NodeAccess::Read)
+        .with_views(&[dummy_buf.handle(ResourceAccess::Read).expect("dummy srv")])
         .dispatch(1, 1, 1);
     let rt = consumer
         .lease_render_target(W, H, TextureFormat::Rgba8Unorm, None)
@@ -1076,7 +1076,7 @@ float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
     {
         let mut pass = consumer.render_pass("sentinel_render", &rt);
         pass.clear(Color::RED); // red clear exposes missing draw or stale read
-        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
             parcel: &sentinel,
             access: NodeAccess::Read,
         }]);

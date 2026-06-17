@@ -133,8 +133,8 @@ fn run_compute_step(
     let mut scheme = Scheme::new(ctx)?;
     {
         let mut node = scheme.compute_node("game_of_life", pipeline);
-        node.declare_parcel_view(cells, read_slot, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.declare_parcel_view(cells, write_slot, NodeAccess::Write, ResourceAccess::Write);
+        node.with_parcel_view(cells, read_slot, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.with_parcel_view(cells, write_slot, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
     scheme.submit()?;
@@ -160,10 +160,10 @@ fn record_display_scheme(
     let render_idx = cells.mosaic_view_resource_index(current_slot, ResourceAccess::ReadWrite)?;
     {
         let mut pass = scheme.render_pass("game_of_life_render", &rt);
-        pass.bind_parcel_view_mut(cells, current_slot, NodeAccess::Read);
+        pass.with_parcel_view(cells, current_slot, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
-        pass.bind_resources_typed(&[ResourceHandle {
+        pass.with_views(&[ResourceHandle {
             category: ResourceCategory::Scattered,
             index: render_idx,
         }]);

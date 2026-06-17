@@ -190,8 +190,8 @@ impl App {
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("solid_cube", scene_rt);
-        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
-        pass.bind_parcel_mut(index_parcel, NodeAccess::Read);
+        pass.with_parcel(vertex_parcel, NodeAccess::Read);
+        pass.with_parcel(index_parcel, NodeAccess::Read);
         pass.clear(Color {
             r: 0.02,
             g: 0.02,

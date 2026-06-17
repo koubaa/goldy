@@ -41,7 +41,7 @@ let cells = mosaic.build()?;
 frame_graph.write_parcel(&uniform, 0, bytemuck::bytes_of(&data).to_vec())?;
 
 let mut pass = frame_graph.render_pass("draw", &rt);
-pass.bind_parcel_mut(&vb, NodeAccess::Read);
+pass.with_parcel(&vb, NodeAccess::Read);
 pass.set_vertex_buffer(0, &vb);
 pass.draw(0..3, 0..1);
 ```

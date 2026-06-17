@@ -83,8 +83,8 @@ def main() -> int:
     scheme = goldy.Scheme(ctx)
     node = scheme.node("game_of_life", compute_pipeline)
     (
-        node.declare_parcel_view(cells, SLOT_A, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
-        .declare_parcel_view(cells, SLOT_B, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        node.with_parcel_view(cells, SLOT_A, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .with_parcel_view(cells, SLOT_B, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
 
@@ -92,7 +92,7 @@ def main() -> int:
     render_idx = cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.READ_WRITE)
     with scheme.render_pass("game_of_life_render", rt) as rp:
         (
-            rp.bind_parcel_view(cells, SLOT_B, goldy.NodeAccess.READ)
+            rp.with_parcel_view(cells, SLOT_B, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .bind_resource_index(render_idx)

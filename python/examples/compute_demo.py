@@ -53,7 +53,7 @@ def main():
     
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
-    scheme.node("double", pipeline).declare_parcel(
+    scheme.node("double", pipeline).with_parcel(
         parcel, goldy.NodeAccess.READ_WRITE, goldy.ResourceAccess.WRITE
     ).dispatch(4, 1, 1)
     grant = scheme.grant_read(parcel)

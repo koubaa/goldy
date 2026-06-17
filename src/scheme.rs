@@ -1231,7 +1231,8 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// Declare that this node accesses a retained [`crate::Parcel`] deed.
     ///
     /// The parcel's bindless index is appended to `resource_slots` in call order.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+    /// The nth call corresponds to the nth resource-kind parameter in the shader signature.
+    pub fn with_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
         self.scheme.submit_state.register_parcel_stamp(parcel);
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -1244,23 +1245,8 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_parcel`]; retained for internal/tests — prefer [`Self::bind_parcel`].
-    #[allow(dead_code)]
-    pub(crate) fn bind_parcel_slot(self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
-        self.bind_parcel(parcel, access)
-    }
-
-    /// Declare that this node reads a scheme-held [`Lease`].
-    pub fn reads_lease(self, lease: &Lease<LeaseTexture>) -> Self {
-        self.bind_lease(lease, NodeAccess::Read)
-    }
-
-    /// Declare that this node writes a scheme-held [`Lease`].
-    pub fn writes_lease(self, lease: &Lease<LeaseTexture>) -> Self {
-        self.bind_lease(lease, NodeAccess::Write)
-    }
-
-    fn bind_lease(mut self, lease: &Lease<LeaseTexture>, access: NodeAccess) -> Self {
+    /// Declare that this node accesses a scheme-held texture [`Lease`].
+    pub fn with_lease(mut self, lease: &Lease<LeaseTexture>, access: NodeAccess) -> Self {
         let idx = lease.id.0 as usize;
         let backing = &self.scheme.leases[idx];
         let resource = backing.resource_id();
@@ -1273,11 +1259,25 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Bind explicit resource view handles (advanced: mosaic parcels and non-default views).
+    /// Append one scalar virtual-main parameter (region B of [`PushLayout`]).
     ///
-    /// Replaces any previously set user slots while preserving trailing
-    /// [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entries appended by [`Self::writes_present`].
-    pub fn bind_views(mut self, handles: &[crate::types::ResourceHandle]) -> Self {
+    /// The nth call corresponds to the nth scalar-kind parameter in the shader signature.
+    /// Values are u32 wire words (`f32` via `f32::to_bits()`, etc.).
+    pub fn with_param(mut self, value: u32) -> Self {
+        use crate::backend::shared::MAX_USER_SLOTS;
+        assert!(
+            self.user_slots.len() < MAX_USER_SLOTS,
+            "with_param: at most {MAX_USER_SLOTS} scalar params per dispatch"
+        );
+        self.user_slots.push(value);
+        self
+    }
+
+    /// Declare explicit resource view handles (advanced: mosaic parcels and non-default views).
+    ///
+    /// Replaces resource slot indices while preserving trailing
+    /// [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entries appended by [`Self::with_present`].
+    pub fn with_views(mut self, handles: &[crate::types::ResourceHandle]) -> Self {
         let trailing_placeholders: Vec<u32> = self
             .resource_slots
             .iter()
@@ -1294,18 +1294,18 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_views`]; retained for internal/tests.
+    /// Like [`Self::with_views`]; retained for internal/tests.
     #[allow(dead_code)]
-    pub(crate) fn bind_resources_typed(self, handles: &[crate::types::ResourceHandle]) -> Self {
-        self.bind_views(handles)
+    pub(crate) fn with_views_typed(self, handles: &[crate::types::ResourceHandle]) -> Self {
+        self.with_views(handles)
     }
 
     /// Declare a UAV write to a present lease (swapchain drawable).
     ///
     /// Appends a [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entry at the end of `resource_slots`
     /// so the resolver can patch it to the correct UAV index at submit time.
-    /// May be called before or after [`Self::bind_views`].
-    pub fn writes_present(mut self, lease: &PresentLease) -> Self {
+    /// May be called before or after [`Self::with_views`].
+    pub fn with_present(mut self, lease: &PresentLease) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::PresentLease(lease.id),
             access: NodeAccess::Write,
@@ -1342,9 +1342,9 @@ pub struct SchemeRenderPassBuilder<'a> {
 impl<'a> SchemeRenderPassBuilder<'a> {
     /// Declare a read or write dependency on a parcel deed.
     ///
-    /// When [`Self::set_pipeline`] is called, parcels bound here are also registered
+    /// When [`Self::set_pipeline`] is called, parcels declared here are also registered
     /// for push-constant resource binding in call order.
-    pub fn bind_parcel_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
         self.scheme.submit_state.register_parcel_stamp(parcel);
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -1357,17 +1357,11 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_parcel_mut`]; retained for internal/tests.
-    #[allow(dead_code)]
-    pub(crate) fn bind_parcel_slot_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
-        self.bind_parcel_mut(parcel, access)
-    }
-
     /// Declare push-constant slots in shader parameter order and register graph bindings.
     ///
     /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
     /// handles before each pipeline bind.
-    pub fn bind_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
+    pub fn with_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
         for slot in slots {
             match slot {
                 ShaderResourceSlot::Parcel { parcel, access } => {
@@ -1380,7 +1374,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
                     let handle = parcel.handle(resource_access).unwrap_or_else(|| {
                         panic!(
                             "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
-                             use bind_parcel_mut for geometry and bind views at draw time"
+                             use with_parcel for geometry and with_views at draw time"
                         )
                     });
                     self.push_constant_handles.push(handle);
@@ -1416,18 +1410,18 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         self
     }
 
-    /// Bind explicit resource view handles at draw time (advanced: mosaic parcels and non-default views).
-    pub fn bind_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+    /// Declare explicit resource view handles at draw time (advanced: mosaic parcels and non-default views).
+    pub fn with_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesTyped {
             handles: handles.to_vec(),
         });
         self
     }
 
-    /// Like [`Self::bind_views`]; retained for internal/tests.
+    /// Like [`Self::with_views`]; retained for internal/tests.
     #[allow(dead_code)]
-    pub(crate) fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.bind_views(handles)
+    pub(crate) fn with_views_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+        self.with_views(handles)
     }
 
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) -> &mut Self {
@@ -1632,7 +1626,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(ctx);
         scheme
             .node("a", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
         (scheme, parcel)
     }
@@ -1651,7 +1645,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(scheme.is_dirty(), "new scheme starts dirty");
         scheme
             .node("a", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         scheme.submit().unwrap();
@@ -1680,7 +1674,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _handle = scheme.leases[0].handle(ResourceAccess::Write).expect("lease handle");
         scheme
             .node("write_tex", &pipeline)
-            .writes_lease(&lease)
+            .with_lease(&lease, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         (scheme, lease)
@@ -1727,7 +1721,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let parcel2 = retained_buffer_parcel(&mut pool);
         scheme
             .node("b", &pipeline)
-            .bind_parcel(&parcel2, NodeAccess::Write)
+            .with_parcel(&parcel2, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         assert!(scheme.is_dirty());
@@ -1807,7 +1801,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("a", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let frame1 = scheme.submit().unwrap();
@@ -2430,8 +2424,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("write", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Write)
-            .writes_present(&lease)
+            .with_parcel(&parcel, NodeAccess::Write)
+            .with_present(&lease)
             .dispatch(1, 1, 1);
         scheme.grant_present(&lease);
 
@@ -2622,8 +2616,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn writes_present_placeholder_in_resource_slots_when_last() {
-        // Correct ordering: bind_resources_typed first, then writes_present.
+    fn with_present_placeholder_in_resource_slots_when_last() {
+        // Correct ordering: with_views first, then with_present.
         // The placeholder must end up appended to the existing resource_slots.
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -2638,8 +2632,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         scheme
             .node("n", &pipeline)
             // Bind a fake slot (index 42) via raw slot push, simulated here by using
-            // bind_resources_typed with a ResourceHandle. We use a parcel handle for this.
-            .writes_present(&lease)
+            // with_views with a ResourceHandle. We use a parcel handle for this.
+            .with_present(&lease)
             .dispatch(1, 1, 1);
 
         // Node 0 must be a Dispatch whose resource_slots end with PRESENT_LEASE_SLOT_PLACEHOLDER.
@@ -2664,9 +2658,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn writes_present_placeholder_preserved_when_bind_views_follows() {
-        // Regression test: bind_views called AFTER writes_present must preserve
-        // the PRESENT_LEASE_SLOT_PLACEHOLDER that writes_present appended.
+    fn with_present_placeholder_preserved_when_with_views_follows() {
+        // Regression test: with_views called AFTER with_present must preserve
+        // the PRESENT_LEASE_SLOT_PLACEHOLDER that with_present appended.
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
@@ -2678,8 +2672,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("n", &pipeline)
-            .writes_present(&lease) // pushes PLACEHOLDER
-            .bind_views(&[lease_tex]) // must preserve PLACEHOLDER
+            .with_present(&lease) // pushes PLACEHOLDER
+            .with_views(&[lease_tex]) // must preserve PLACEHOLDER
             .dispatch(1, 1, 1);
 
         match &scheme.ir.nodes[0].kind {
@@ -2689,7 +2683,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                     .any(|s| *s == crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER);
                 assert!(
                     has_placeholder,
-                    "bind_views must preserve PRESENT_LEASE_SLOT_PLACEHOLDER; \
+                    "with_views must preserve PRESENT_LEASE_SLOT_PLACEHOLDER; \
                      resource_slots: {resource_slots:?}"
                 );
                 // The user handle must still be present at slot 0.
@@ -2968,8 +2962,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("write", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Write)
-            .writes_present(&lease)
+            .with_parcel(&parcel, NodeAccess::Write)
+            .with_present(&lease)
             .dispatch(1, 1, 1);
         let present = scheme.grant_present(&lease);
 
@@ -2980,8 +2974,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert!(scheme.is_dirty());
         scheme
             .node("write", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::Write)
-            .writes_present(&lease)
+            .with_parcel(&parcel, NodeAccess::Write)
+            .with_present(&lease)
             .dispatch(2, 2, 1);
         let present2 = scheme.grant_present(&lease);
 

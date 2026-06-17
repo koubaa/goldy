@@ -258,7 +258,7 @@ mod buffer_alloc_tests {
         let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
         graph.dispatch(&ctx).expect("dispatch");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
@@ -277,7 +277,7 @@ mod buffer_alloc_tests {
         let initial2: Vec<u32> = (0..16).collect();
         buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
         let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
         graph.dispatch(&ctx).expect("dispatch2");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))

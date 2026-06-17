@@ -76,7 +76,7 @@ public class TaskGraphTests
             using (var pass = graph.RenderPass("triangle", target))
             {
                 pass
-                    .BindParcel(vertexParcel, NodeAccess.Read)
+                    .WithParcel(vertexParcel, NodeAccess.Read)
                     .Clear(Color.Black)
                     .SetPipeline(pipeline)
                     .SetVertexBuffer(0, vertexParcel)

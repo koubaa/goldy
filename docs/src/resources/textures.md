@@ -251,7 +251,7 @@ Pass texture and sampler indices together through resource bindings:
 ```rust
 let tex = texture.handle(ResourceAccess::Read).unwrap();
 let samp = sampler.handle(ResourceAccess::Read).unwrap();
-pass.bind_resources_typed(&[tex, samp]);
+pass.with_views(&[tex, samp]);
 ```
 
 In Slang:

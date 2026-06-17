@@ -94,7 +94,7 @@ impl App {
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("gradient", scene_rt);
-        pass.bind_parcel_mut(uniform, NodeAccess::Read);
+        pass.with_parcel(uniform, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(pipeline);
         pass.draw_fullscreen();

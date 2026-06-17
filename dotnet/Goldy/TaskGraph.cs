@@ -140,12 +140,12 @@ public sealed class RenderPassScope : IDisposable
 
     internal RenderPassScope(TaskGraph graph) => _graph = graph;
 
-    public RenderPassScope BindParcel(Parcel parcel, NodeAccess access)
+    public RenderPassScope WithParcel(Parcel parcel, NodeAccess access)
     {
         EnsureOpen();
-        var result = NativeMethods.TaskGraphRenderPassBindParcel(_graph.Handle, parcel.Handle, access);
+        var result = NativeMethods.TaskGraphRenderPassWithParcel(_graph.Handle, parcel.Handle, access);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph render_pass_bind_parcel");
+            throw GoldyException.FromLastError("TaskGraph render_pass_with_parcel");
         return this;
     }
 
@@ -158,9 +158,9 @@ public sealed class RenderPassScope : IDisposable
             Span<uint> pair = stackalloc uint[] { category, scatteredIndex };
             fixed (uint* p = pair)
             {
-                var result = NativeMethods.TaskGraphRenderPassBindResourcesTyped(_graph.Handle, (nint)p, 1);
+                var result = NativeMethods.TaskGraphRenderPassWithViews(_graph.Handle, (nint)p, 1);
                 if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("TaskGraph render_pass_bind_resources_typed");
+                    throw GoldyException.FromLastError("TaskGraph render_pass_with_views");
             }
         }
         return this;
@@ -281,12 +281,12 @@ public sealed class ComputeNodeScope : IDisposable
         _wgZ = wgZ;
     }
 
-    public ComputeNodeScope BindParcel(Parcel parcel, NodeAccess access)
+    public ComputeNodeScope WithParcel(Parcel parcel, NodeAccess access)
     {
         EnsureOpen();
-        var result = NativeMethods.TaskGraphComputeNodeBindParcel(_graph.Handle, parcel.Handle, access);
+        var result = NativeMethods.TaskGraphComputeNodeWithParcel(_graph.Handle, parcel.Handle, access);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("TaskGraph compute_node_bind_parcel");
+            throw GoldyException.FromLastError("TaskGraph compute_node_with_parcel");
         return this;
     }
 
@@ -303,7 +303,7 @@ public sealed class ComputeNodeScope : IDisposable
                 var result = NativeMethods.TaskGraphComputeNodeBindResourcesRaw(
                     _graph.Handle, (nint)p, (uint)indices.Length);
                 if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("TaskGraph compute_node_bind_resources_raw");
+                    throw GoldyException.FromLastError("TaskGraph compute_node_with_resource_slots");
             }
         }
         return this;

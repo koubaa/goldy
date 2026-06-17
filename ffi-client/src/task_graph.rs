@@ -101,16 +101,16 @@ pub struct RenderPassBuilder<'a> {
 }
 
 impl RenderPassBuilder<'_> {
-    pub fn bind_parcel_mut(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_bind_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
+            sys::goldy_task_graph_render_pass_with_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
         });
         self
     }
 
-    pub fn bind_parcel_view_mut(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_bind_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
+            sys::goldy_task_graph_render_pass_with_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
         });
         self
     }
@@ -164,7 +164,7 @@ impl RenderPassBuilder<'_> {
             flat.push(h.index);
         }
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_bind_resources_typed(self.graph.ptr, flat.as_ptr(), handles.len() as u32)
+            sys::goldy_task_graph_render_pass_with_views(self.graph.ptr, flat.as_ptr(), handles.len() as u32)
         });
         self
     }
@@ -193,28 +193,33 @@ pub struct ComputeNodeBuilder<'a> {
 }
 
 impl ComputeNodeBuilder<'_> {
-    pub fn bind_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &Parcel, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_compute_node_bind_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
+            sys::goldy_task_graph_compute_node_with_parcel(self.graph.ptr, parcel.as_ptr(), access.into())
         });
         self
     }
 
-    pub fn bind_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_compute_node_bind_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
+            sys::goldy_task_graph_compute_node_with_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
         });
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_compute_node_bind_resources_raw(
+            sys::goldy_task_graph_compute_node_with_resource_slots(
                 self.graph.ptr,
                 indices.as_ptr(),
                 indices.len() as u32,
             )
         });
+        self
+    }
+
+    pub fn with_param(&mut self, value: u32) -> &mut Self {
+        expect_ok(unsafe { sys::goldy_task_graph_compute_node_with_param(self.graph.ptr, value) });
         self
     }
 

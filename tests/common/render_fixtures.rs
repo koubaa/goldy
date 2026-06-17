@@ -107,7 +107,7 @@ pub fn render_triangle(
     let vertex_buffer = test_alloc_buffer_with_data(&device, &vertices, BufferKind::Scattered);
 
     graph_render(device, &target, "triangle", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
         pass.clear(clear_color);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -229,12 +229,12 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         if use_buffer_a {
             graph
                 .node("gol_update", &compute_pipeline)
-                .bind_resources(&[&buffer_a, &buffer_b])
+                .with_resources(&[&buffer_a, &buffer_b])
                 .dispatch(workgroups_x, workgroups_y, 1);
         } else {
             graph
                 .node("gol_update", &compute_pipeline)
-                .bind_resources(&[&buffer_b, &buffer_a])
+                .with_resources(&[&buffer_b, &buffer_a])
                 .dispatch(workgroups_x, workgroups_y, 1);
         }
         graph.dispatch(&ctx).expect("Compute dispatch failed");
@@ -246,15 +246,15 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
 
     graph_render(device, &target, "gol_render", |pass| {
         if use_buffer_a {
-            pass.bind_buffer_mut(&buffer_a, NodeAccess::Read);
+            pass.with_buffer(&buffer_a, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.set_pipeline(&render_pipeline);
-            pass.bind_resources(&[&buffer_a]);
+            pass.with_resources(&[&buffer_a]);
         } else {
-            pass.bind_buffer_mut(&buffer_b, NodeAccess::Read);
+            pass.with_buffer(&buffer_b, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.set_pipeline(&render_pipeline);
-            pass.bind_resources(&[&buffer_b]);
+            pass.with_resources(&[&buffer_b]);
         }
         pass.draw(0..3, 0..1);
     });
@@ -345,8 +345,8 @@ pub fn render_depth_occlusion(device: &Device, width: u32, height: u32) -> Vec<u
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(device, &target, "depth_occlusion", |pass| {
-        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
-        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
+        pass.with_buffer(&red_vb, NodeAccess::Read);
+        pass.with_buffer(&green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);

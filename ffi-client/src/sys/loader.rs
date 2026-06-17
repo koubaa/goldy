@@ -72,15 +72,16 @@ pub(crate) struct GoldyFfi {
     pub goldy_task_graph_create: FnGoldyTaskGraphCreate,
     pub goldy_task_graph_declare_swapchain_output: FnGoldyTaskGraphDeclareSwapchainOutput,
     pub goldy_task_graph_compute_node_begin: FnGoldyTaskGraphComputeNodeBegin,
-    pub goldy_task_graph_compute_node_bind_parcel: FnGoldyTaskGraphComputeNodeBindParcel,
-    pub goldy_task_graph_compute_node_bind_resources_raw: FnGoldyTaskGraphComputeNodeBindResourcesRaw,
+    pub goldy_task_graph_compute_node_with_parcel: FnGoldyTaskGraphComputeNodeWithParcel,
+    pub goldy_task_graph_compute_node_with_resource_slots: FnGoldyTaskGraphComputeNodeWithResourceSlots,
+    pub goldy_task_graph_compute_node_with_param: FnGoldyTaskGraphComputeNodeWithParam,
     pub goldy_task_graph_compute_node_dispatch: FnGoldyTaskGraphComputeNodeDispatch,
     pub goldy_task_graph_destroy: FnGoldyTaskGraphDestroy,
     pub goldy_task_graph_dispatch: FnGoldyTaskGraphDispatch,
     pub goldy_task_graph_write_parcel: FnGoldyTaskGraphWriteParcel,
     pub goldy_task_graph_render_pass_begin: FnGoldyTaskGraphRenderPassBegin,
-    pub goldy_task_graph_render_pass_bind_parcel: FnGoldyTaskGraphRenderPassBindParcel,
-    pub goldy_task_graph_render_pass_bind_resources_typed: FnGoldyTaskGraphRenderPassBindResourcesTyped,
+    pub goldy_task_graph_render_pass_with_parcel: FnGoldyTaskGraphRenderPassWithParcel,
+    pub goldy_task_graph_render_pass_with_views: FnGoldyTaskGraphRenderPassWithViews,
     pub goldy_task_graph_render_pass_clear: FnGoldyTaskGraphRenderPassClear,
     pub goldy_task_graph_render_pass_clear_depth: FnGoldyTaskGraphRenderPassClearDepth,
     pub goldy_task_graph_render_pass_draw: FnGoldyTaskGraphRenderPassDraw,
@@ -102,16 +103,17 @@ pub(crate) struct GoldyFfi {
     pub goldy_parcel_mosaic_view_resource_index: FnGoldyParcelMosaicViewResourceIndex,
     pub goldy_parcel_mosaic_view_read_to_cpu: FnGoldyParcelMosaicViewReadToCpu,
     pub goldy_parcel_mosaic_view_size: FnGoldyParcelMosaicViewSize,
-    pub goldy_task_graph_compute_node_bind_parcel_view: FnGoldyTaskGraphComputeNodeBindParcelView,
-    pub goldy_task_graph_render_pass_bind_parcel_view: FnGoldyTaskGraphRenderPassBindParcelView,
+    pub goldy_task_graph_compute_node_with_parcel_view: FnGoldyTaskGraphComputeNodeWithParcelView,
+    pub goldy_task_graph_render_pass_with_parcel_view: FnGoldyTaskGraphRenderPassWithParcelView,
     pub goldy_scheme_create: FnGoldySchemeCreate,
     pub goldy_scheme_destroy: FnGoldySchemeDestroy,
     pub goldy_scheme_len: FnGoldySchemeLen,
     pub goldy_scheme_is_dirty: FnGoldySchemeIsDirty,
     pub goldy_scheme_replay_stats: FnGoldySchemeReplayStats,
     pub goldy_scheme_compute_node_begin: FnGoldySchemeComputeNodeBegin,
-    pub goldy_scheme_compute_node_declare_parcel: FnGoldySchemeComputeNodeDeclareParcel,
-    pub goldy_scheme_compute_node_declare_parcel_view: FnGoldySchemeComputeNodeDeclareParcelView,
+    pub goldy_scheme_compute_node_with_parcel: FnGoldySchemeComputeNodeWithParcel,
+    pub goldy_scheme_compute_node_with_parcel_view: FnGoldySchemeComputeNodeWithParcelView,
+    pub goldy_scheme_compute_node_with_param: FnGoldySchemeComputeNodeWithParam,
     pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
     pub goldy_scheme_submit: FnGoldySchemeSubmit,
     pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
@@ -124,9 +126,9 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_lease_render_target: FnGoldySchemeLeaseRenderTarget,
     pub goldy_scheme_render_target_lease_destroy: FnGoldySchemeRenderTargetLeaseDestroy,
     pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
-    pub goldy_scheme_render_pass_bind_parcel_view: FnGoldySchemeRenderPassBindParcelView,
-    pub goldy_scheme_render_pass_bind_parcel: FnGoldySchemeRenderPassBindParcel,
-    pub goldy_scheme_render_pass_bind_resources_typed: FnGoldySchemeRenderPassBindResourcesTyped,
+    pub goldy_scheme_render_pass_with_parcel_view: FnGoldySchemeRenderPassWithParcelView,
+    pub goldy_scheme_render_pass_with_parcel: FnGoldySchemeRenderPassWithParcel,
+    pub goldy_scheme_render_pass_with_views: FnGoldySchemeRenderPassWithViews,
     pub goldy_scheme_render_pass_clear: FnGoldySchemeRenderPassClear,
     pub goldy_scheme_render_pass_clear_depth: FnGoldySchemeRenderPassClearDepth,
     pub goldy_scheme_render_pass_set_pipeline: FnGoldySchemeRenderPassSetPipeline,
@@ -255,13 +257,17 @@ impl GoldyFfi {
                 "goldy_task_graph_compute_node_begin",
                 FnGoldyTaskGraphComputeNodeBegin
             ),
-            goldy_task_graph_compute_node_bind_parcel: sym!(
-                "goldy_task_graph_compute_node_bind_parcel",
-                FnGoldyTaskGraphComputeNodeBindParcel
+            goldy_task_graph_compute_node_with_parcel: sym!(
+                "goldy_task_graph_compute_node_with_parcel",
+                FnGoldyTaskGraphComputeNodeWithParcel
             ),
-            goldy_task_graph_compute_node_bind_resources_raw: sym!(
-                "goldy_task_graph_compute_node_bind_resources_raw",
-                FnGoldyTaskGraphComputeNodeBindResourcesRaw
+            goldy_task_graph_compute_node_with_resource_slots: sym!(
+                "goldy_task_graph_compute_node_with_resource_slots",
+                FnGoldyTaskGraphComputeNodeWithResourceSlots
+            ),
+            goldy_task_graph_compute_node_with_param: sym!(
+                "goldy_task_graph_compute_node_with_param",
+                FnGoldyTaskGraphComputeNodeWithParam
             ),
             goldy_task_graph_compute_node_dispatch: sym!(
                 "goldy_task_graph_compute_node_dispatch",
@@ -274,13 +280,13 @@ impl GoldyFfi {
                 "goldy_task_graph_render_pass_begin",
                 FnGoldyTaskGraphRenderPassBegin
             ),
-            goldy_task_graph_render_pass_bind_parcel: sym!(
-                "goldy_task_graph_render_pass_bind_parcel",
-                FnGoldyTaskGraphRenderPassBindParcel
+            goldy_task_graph_render_pass_with_parcel: sym!(
+                "goldy_task_graph_render_pass_with_parcel",
+                FnGoldyTaskGraphRenderPassWithParcel
             ),
-            goldy_task_graph_render_pass_bind_resources_typed: sym!(
-                "goldy_task_graph_render_pass_bind_resources_typed",
-                FnGoldyTaskGraphRenderPassBindResourcesTyped
+            goldy_task_graph_render_pass_with_views: sym!(
+                "goldy_task_graph_render_pass_with_views",
+                FnGoldyTaskGraphRenderPassWithViews
             ),
             goldy_task_graph_render_pass_clear: sym!(
                 "goldy_task_graph_render_pass_clear",
@@ -339,13 +345,13 @@ impl GoldyFfi {
                 FnGoldyParcelMosaicViewReadToCpu
             ),
             goldy_parcel_mosaic_view_size: sym!("goldy_parcel_mosaic_view_size", FnGoldyParcelMosaicViewSize),
-            goldy_task_graph_compute_node_bind_parcel_view: sym!(
-                "goldy_task_graph_compute_node_bind_parcel_view",
-                FnGoldyTaskGraphComputeNodeBindParcelView
+            goldy_task_graph_compute_node_with_parcel_view: sym!(
+                "goldy_task_graph_compute_node_with_parcel_view",
+                FnGoldyTaskGraphComputeNodeWithParcelView
             ),
-            goldy_task_graph_render_pass_bind_parcel_view: sym!(
-                "goldy_task_graph_render_pass_bind_parcel_view",
-                FnGoldyTaskGraphRenderPassBindParcelView
+            goldy_task_graph_render_pass_with_parcel_view: sym!(
+                "goldy_task_graph_render_pass_with_parcel_view",
+                FnGoldyTaskGraphRenderPassWithParcelView
             ),
             goldy_scheme_create: sym!("goldy_scheme_create", FnGoldySchemeCreate),
             goldy_scheme_destroy: sym!("goldy_scheme_destroy", FnGoldySchemeDestroy),
@@ -353,13 +359,17 @@ impl GoldyFfi {
             goldy_scheme_is_dirty: sym!("goldy_scheme_is_dirty", FnGoldySchemeIsDirty),
             goldy_scheme_replay_stats: sym!("goldy_scheme_replay_stats", FnGoldySchemeReplayStats),
             goldy_scheme_compute_node_begin: sym!("goldy_scheme_compute_node_begin", FnGoldySchemeComputeNodeBegin),
-            goldy_scheme_compute_node_declare_parcel: sym!(
-                "goldy_scheme_compute_node_declare_parcel",
-                FnGoldySchemeComputeNodeDeclareParcel
+            goldy_scheme_compute_node_with_parcel: sym!(
+                "goldy_scheme_compute_node_with_parcel",
+                FnGoldySchemeComputeNodeWithParcel
             ),
-            goldy_scheme_compute_node_declare_parcel_view: sym!(
-                "goldy_scheme_compute_node_declare_parcel_view",
-                FnGoldySchemeComputeNodeDeclareParcelView
+            goldy_scheme_compute_node_with_parcel_view: sym!(
+                "goldy_scheme_compute_node_with_parcel_view",
+                FnGoldySchemeComputeNodeWithParcelView
+            ),
+            goldy_scheme_compute_node_with_param: sym!(
+                "goldy_scheme_compute_node_with_param",
+                FnGoldySchemeComputeNodeWithParam
             ),
             goldy_scheme_compute_node_dispatch: sym!(
                 "goldy_scheme_compute_node_dispatch",
@@ -382,17 +392,17 @@ impl GoldyFfi {
                 FnGoldySchemeRenderTargetLeaseDestroy
             ),
             goldy_scheme_render_pass_begin: sym!("goldy_scheme_render_pass_begin", FnGoldySchemeRenderPassBegin),
-            goldy_scheme_render_pass_bind_parcel_view: sym!(
-                "goldy_scheme_render_pass_bind_parcel_view",
-                FnGoldySchemeRenderPassBindParcelView
+            goldy_scheme_render_pass_with_parcel_view: sym!(
+                "goldy_scheme_render_pass_with_parcel_view",
+                FnGoldySchemeRenderPassWithParcelView
             ),
-            goldy_scheme_render_pass_bind_parcel: sym!(
-                "goldy_scheme_render_pass_bind_parcel",
-                FnGoldySchemeRenderPassBindParcel
+            goldy_scheme_render_pass_with_parcel: sym!(
+                "goldy_scheme_render_pass_with_parcel",
+                FnGoldySchemeRenderPassWithParcel
             ),
-            goldy_scheme_render_pass_bind_resources_typed: sym!(
-                "goldy_scheme_render_pass_bind_resources_typed",
-                FnGoldySchemeRenderPassBindResourcesTyped
+            goldy_scheme_render_pass_with_views: sym!(
+                "goldy_scheme_render_pass_with_views",
+                FnGoldySchemeRenderPassWithViews
             ),
             goldy_scheme_render_pass_clear: sym!("goldy_scheme_render_pass_clear", FnGoldySchemeRenderPassClear),
             goldy_scheme_render_pass_clear_depth: sym!(

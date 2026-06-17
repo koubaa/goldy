@@ -75,8 +75,8 @@ fn saxpy_style_chain_closed_form() {
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("inc", &pipe)
-        .bind_parcel(&buf, NodeAccess::ReadWrite)
-        .bind_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&buf, NodeAccess::ReadWrite)
+        .with_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buf).expect("grant");
 
@@ -106,16 +106,16 @@ fn war_write_after_read_pipelined_overwrite() {
     let mut reader = Scheme::new(&ctx);
     reader
         .node("read", &read_pipe)
-        .bind_parcel(&buf, NodeAccess::Read)
-        .bind_views(&[buf.handle(ResourceAccess::Read).expect("srv")])
+        .with_parcel(&buf, NodeAccess::Read)
+        .with_views(&[buf.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     reader.submit().expect("read");
 
     let mut writer = Scheme::new(&ctx);
     writer
         .node("write", &write_pipe)
-        .bind_parcel(&buf, NodeAccess::Write)
-        .bind_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&buf, NodeAccess::Write)
+        .with_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     let grant = writer.grant_read(&buf).expect("grant");
     let submission = writer.submit().expect("write");
@@ -132,9 +132,9 @@ fn retained_copy_reader(
     let mut reader = Scheme::new(ctx);
     reader
         .node("copy", pipe)
-        .bind_parcel(src, NodeAccess::Read)
-        .bind_parcel(dst, NodeAccess::Write)
-        .bind_views(&[
+        .with_parcel(src, NodeAccess::Read)
+        .with_parcel(dst, NodeAccess::Write)
+        .with_views(&[
             src.handle(ResourceAccess::Read).expect("src srv"),
             dst.handle(ResourceAccess::Write).expect("dst uav"),
         ])
@@ -204,8 +204,8 @@ fn retained_waw_overwrites_independent_upload() {
     let mut worker = Scheme::new(&ctx);
     worker
         .node("overwrite", &write_pipe)
-        .bind_parcel(&src, NodeAccess::Write)
-        .bind_views(&[src.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&src, NodeAccess::Write)
+        .with_views(&[src.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     let grant = worker.grant_read(&src).expect("grant");
 
@@ -273,16 +273,16 @@ fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
     let mut reader = Scheme::new(&ctx);
     reader
         .node("read_p", &read_pipe)
-        .bind_parcel(&parcel_p, NodeAccess::Read)
-        .bind_views(&[parcel_p.handle(ResourceAccess::Read).expect("srv")])
+        .with_parcel(&parcel_p, NodeAccess::Read)
+        .with_views(&[parcel_p.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     reader.submit().expect("reader record");
 
     let mut writer = Scheme::new(&ctx);
     writer
         .node("write_q", &write_pipe)
-        .bind_parcel(&parcel_q, NodeAccess::Write)
-        .bind_views(&[parcel_q.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&parcel_q, NodeAccess::Write)
+        .with_views(&[parcel_q.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     for _ in 0..3 {
         writer.submit().expect("writer submit");
@@ -322,16 +322,16 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
     let mut reader = Scheme::new(&ctx);
     reader
         .node("read", &read_pipe)
-        .bind_parcel(&parcel, NodeAccess::Read)
-        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .with_parcel(&parcel, NodeAccess::Read)
+        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     reader.submit().expect("reader record");
 
     let mut writer = Scheme::new(&ctx);
     writer
         .node("write", &write_pipe)
-        .bind_parcel(&parcel, NodeAccess::Write)
-        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&parcel, NodeAccess::Write)
+        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     writer.submit().expect("writer record");
     assert!(reader.is_topology_dirty());
@@ -369,8 +369,8 @@ fn topology_re_record_produces_correct_barriers_and_data() {
     let mut reader = Scheme::new(&ctx);
     reader
         .node("read", &read_pipe)
-        .bind_parcel(&parcel, NodeAccess::Read)
-        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .with_parcel(&parcel, NodeAccess::Read)
+        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     let grant = reader.grant_read(&parcel).expect("grant");
     reader.submit().expect("reader record");
@@ -378,8 +378,8 @@ fn topology_re_record_produces_correct_barriers_and_data() {
     let mut writer = Scheme::new(&ctx);
     writer
         .node("write", &write_pipe)
-        .bind_parcel(&parcel, NodeAccess::Write)
-        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&parcel, NodeAccess::Write)
+        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     writer.submit().expect("writer record");
 
@@ -405,16 +405,16 @@ fn repeated_resubmit_of_b_never_dirties_a() {
     let mut worker = Scheme::new(&ctx);
     worker
         .node("inc", &inc_pipe)
-        .bind_parcel(&parcel, NodeAccess::ReadWrite)
-        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(&parcel, NodeAccess::ReadWrite)
+        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     worker.submit().expect("worker record");
 
     let mut observer = Scheme::new(&ctx);
     observer
         .node("observe", &read_pipe)
-        .bind_parcel(&parcel, NodeAccess::Read)
-        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .with_parcel(&parcel, NodeAccess::Read)
+        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     observer.submit().expect("observer settle");
     assert!(!observer.is_topology_dirty());

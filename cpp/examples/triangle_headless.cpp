@@ -94,7 +94,7 @@ int main() {
             kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
         {
             auto pass = scheme.render_pass("triangle", rt);
-            pass.bind_parcel(vertex_buffer, goldy::NodeAccess::Read)
+            pass.with_parcel(vertex_buffer, goldy::NodeAccess::Read)
                 .clear(goldy::Color::black())
                 .set_pipeline(pipeline)
                 .set_vertex_buffer_parcel(0, vertex_buffer)

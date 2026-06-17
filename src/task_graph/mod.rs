@@ -31,14 +31,14 @@
 //! graph.clear_buffer(&pool_backing, 0, pool.capacity());
 //!
 //! graph.node("pathtag_reduce", &pipeline_a)
-//!     .bind_buffer(&scene_buf, NodeAccess::Read)
-//!     .bind_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
-//!     .bind_resources_raw_slice(&[scene_idx, tagmonoid_idx])
+//!     .with_buffer(&scene_buf, NodeAccess::Read)
+//!     .with_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
+//!     .with_resource_slots_slice(&[scene_idx, tagmonoid_idx])
 //!     .dispatch(64, 1, 1);
 //!
 //! graph.node("bbox_clear", &pipeline_b)
-//!     .bind_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
-//!     .bind_resources_raw_slice(&[bbox_idx])
+//!     .with_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
+//!     .with_resource_slots_slice(&[bbox_idx])
 //!     .dispatch(16, 1, 1);
 //!
 //! let tv = graph.submit(&ctx)?;

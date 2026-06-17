@@ -166,27 +166,36 @@ public sealed class SchemeComputeNodeScope : IDisposable
 
     internal SchemeComputeNodeScope(Scheme scheme) => _scheme = scheme;
 
-    public SchemeComputeNodeScope DeclareParcel(Parcel parcel, NodeAccess nodeAccess, ResourceAccess resourceAccess)
+    public SchemeComputeNodeScope WithParcel(Parcel parcel, NodeAccess nodeAccess, ResourceAccess resourceAccess)
     {
         EnsureOpen();
-        var result = NativeMethods.SchemeComputeNodeDeclareParcel(
+        var result = NativeMethods.SchemeComputeNodeWithParcel(
             _scheme.Handle, parcel.Handle, nodeAccess, resourceAccess);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme compute_node_declare_parcel");
+            throw GoldyException.FromLastError("Scheme compute_node_with_parcel");
         return this;
     }
 
-    public SchemeComputeNodeScope DeclareParcelView(
+    public SchemeComputeNodeScope WithParcelView(
         Parcel parcel,
         uint slot,
         NodeAccess nodeAccess,
         ResourceAccess resourceAccess)
     {
         EnsureOpen();
-        var result = NativeMethods.SchemeComputeNodeDeclareParcelView(
+        var result = NativeMethods.SchemeComputeNodeWithParcelView(
             _scheme.Handle, parcel.Handle, slot, nodeAccess, resourceAccess);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme compute_node_declare_parcel_view");
+            throw GoldyException.FromLastError("Scheme compute_node_with_parcel_view");
+        return this;
+    }
+
+    public SchemeComputeNodeScope WithParam(uint value)
+    {
+        EnsureOpen();
+        var result = NativeMethods.SchemeComputeNodeWithParam(_scheme.Handle, value);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme compute_node_with_param");
         return this;
     }
 
@@ -223,21 +232,21 @@ public sealed class SchemeRenderPassScope : IDisposable
 
     internal SchemeRenderPassScope(Scheme scheme) => _scheme = scheme;
 
-    public SchemeRenderPassScope BindParcel(Parcel parcel, NodeAccess access)
+    public SchemeRenderPassScope WithParcel(Parcel parcel, NodeAccess access)
     {
         EnsureOpen();
-        var result = NativeMethods.SchemeRenderPassBindParcel(_scheme.Handle, parcel.Handle, access);
+        var result = NativeMethods.SchemeRenderPassWithParcel(_scheme.Handle, parcel.Handle, access);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme render_pass_bind_parcel");
+            throw GoldyException.FromLastError("Scheme render_pass_with_parcel");
         return this;
     }
 
-    public SchemeRenderPassScope BindParcelView(Parcel parcel, uint slot, NodeAccess access)
+    public SchemeRenderPassScope WithParcelView(Parcel parcel, uint slot, NodeAccess access)
     {
         EnsureOpen();
-        var result = NativeMethods.SchemeRenderPassBindParcelView(_scheme.Handle, parcel.Handle, slot, access);
+        var result = NativeMethods.SchemeRenderPassWithParcelView(_scheme.Handle, parcel.Handle, slot, access);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme render_pass_bind_parcel_view");
+            throw GoldyException.FromLastError("Scheme render_pass_with_parcel_view");
         return this;
     }
 
@@ -250,9 +259,9 @@ public sealed class SchemeRenderPassScope : IDisposable
             Span<uint> pair = stackalloc uint[] { category, scatteredIndex };
             fixed (uint* p = pair)
             {
-                var result = NativeMethods.SchemeRenderPassBindResourcesTyped(_scheme.Handle, (nint)p, 1);
+                var result = NativeMethods.SchemeRenderPassWithViews(_scheme.Handle, (nint)p, 1);
                 if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("Scheme render_pass_bind_resources_typed");
+                    throw GoldyException.FromLastError("Scheme render_pass_with_views");
             }
         }
         return this;

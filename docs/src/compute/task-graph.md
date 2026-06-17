@@ -25,13 +25,13 @@ use goldy::{TaskGraph, NodeAccess};
 let mut graph = TaskGraph::new();
 
 graph.node("write_data", &pipeline_a)
-    .bind_buffer(&buf, NodeAccess::Write)
-    .bind_resources_raw(&[buf_idx])
+    .with_buffer(&buf, NodeAccess::Write)
+    .with_resource_slots(&[buf_idx])
     .dispatch(64, 1, 1);
 
 graph.node("read_data", &pipeline_b)
-    .bind_buffer(&buf, NodeAccess::Read)
-    .bind_resources_raw(&[buf_idx])
+    .with_buffer(&buf, NodeAccess::Read)
+    .with_resource_slots(&[buf_idx])
     .dispatch(64, 1, 1);
 
 let ctx = device.create_context();
@@ -56,17 +56,17 @@ All node types participate in the same dependency analysis.
 
 ### Declaring resource access
 
-Each node declares its resource access via `bind_buffer`, `bind_buffer_view`, or `bind_texture`:
+Each node declares its resource access via `with_buffer`, `with_buffer_view`, or `bind_texture`:
 
 ```rust
 graph.node("reduce", &pipeline)
-    .bind_buffer(&input, NodeAccess::Read)
-    .bind_buffer(&output, NodeAccess::Write)
-    .bind_resources_raw(&[input_idx, output_idx])
+    .with_buffer(&input, NodeAccess::Read)
+    .with_buffer(&output, NodeAccess::Write)
+    .with_resource_slots(&[input_idx, output_idx])
     .dispatch(64, 1, 1);
 ```
 
-`bind_resources_raw` sets the actual shader slot indices. The `bind_buffer` / `bind_texture` calls are purely for dependency analysis — they tell the scheduler *what* this node touches, not *how* to bind it.
+`with_resource_slots` sets the actual shader slot indices. The `with_buffer` / `bind_texture` calls are purely for dependency analysis — they tell the scheduler *what* this node touches, not *how* to bind it.
 
 ### Finalizing nodes
 
@@ -97,24 +97,24 @@ let mut graph = TaskGraph::new();
 
 // Wave 0: A writes buf_x
 graph.node("A", &p1)
-    .bind_buffer(&buf_x, NodeAccess::Write)
+    .with_buffer(&buf_x, NodeAccess::Write)
     .dispatch(1, 1, 1);
 
 // Wave 1: B and C both read buf_x (SWMR — they run concurrently)
 graph.node("B", &p2)
-    .bind_buffer(&buf_x, NodeAccess::Read)
-    .bind_buffer(&buf_y, NodeAccess::Write)
+    .with_buffer(&buf_x, NodeAccess::Read)
+    .with_buffer(&buf_y, NodeAccess::Write)
     .dispatch(1, 1, 1);
 
 graph.node("C", &p3)
-    .bind_buffer(&buf_x, NodeAccess::Read)
-    .bind_buffer(&buf_z, NodeAccess::Write)
+    .with_buffer(&buf_x, NodeAccess::Read)
+    .with_buffer(&buf_z, NodeAccess::Write)
     .dispatch(1, 1, 1);
 
 // Wave 2: D reads both outputs
 graph.node("D", &p4)
-    .bind_buffer(&buf_y, NodeAccess::Read)
-    .bind_buffer(&buf_z, NodeAccess::Read)
+    .with_buffer(&buf_y, NodeAccess::Read)
+    .with_buffer(&buf_z, NodeAccess::Read)
     .dispatch(1, 1, 1);
 
 graph.dispatch(&device)?;
@@ -133,11 +133,11 @@ let view_b = pool.alloc::<u32>(64)?;
 let mut graph = TaskGraph::new();
 
 graph.node("write_a", &pipeline)
-    .bind_buffer_view(&view_a, NodeAccess::Write)
+    .with_buffer_view(&view_a, NodeAccess::Write)
     .dispatch(1, 1, 1);
 
 graph.node("write_b", &pipeline)
-    .bind_buffer_view(&view_b, NodeAccess::Write)
+    .with_buffer_view(&view_b, NodeAccess::Write)
     .dispatch(1, 1, 1);
 
 // No barrier — view_a and view_b occupy disjoint byte ranges
@@ -157,12 +157,12 @@ let tmp = graph.transient_buffer(256);
 
 graph.node("produce", &pipeline_a)
     .bind_transient_buffer(tmp, NodeAccess::Write)
-    .bind_resources_raw(&[0])
+    .with_resource_slots(&[0])
     .dispatch(1, 1, 1);
 
 graph.node("consume", &pipeline_b)
     .bind_transient_buffer(tmp, NodeAccess::Read)
-    .bind_resources_raw(&[0])
+    .with_resource_slots(&[0])
     .dispatch(1, 1, 1);
 
 graph.dispatch(&device)?;
@@ -175,7 +175,7 @@ let tmp_tex = graph.transient_texture(width, height, TextureFormat::Rgba8Unorm);
 
 graph.node("render", &pipeline)
     .bind_transient_texture(tmp_tex, NodeAccess::Write)
-    .bind_resources_raw(&[0])
+    .with_resource_slots(&[0])
     .dispatch(wg_x, wg_y, 1);
 ```
 
@@ -229,9 +229,9 @@ let (read_view, write_view) = if use_buffer_a {
 
 let mut graph = TaskGraph::new();
 graph.node("game_of_life", &compute_pipeline)
-    .bind_buffer_view(read_view, NodeAccess::Read)
-    .bind_buffer_view(write_view, NodeAccess::Write)
-    .bind_resources_raw(&[
+    .with_buffer_view(read_view, NodeAccess::Read)
+    .with_buffer_view(write_view, NodeAccess::Write)
+    .with_resource_slots(&[
         read_view.handle(ResourceAccess::Read).unwrap().index(),
         write_view.handle(ResourceAccess::Write).unwrap().index(),
     ])

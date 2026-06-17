@@ -107,8 +107,8 @@ impl RenderState {
     ) -> PresentGrant {
         scheme
             .node("update_lines", compute_pipeline)
-            .bind_parcel(line_buffer, NodeAccess::ReadWrite)
-            .bind_views(&[line_buffer.handle(ResourceAccess::Write).unwrap()])
+            .with_parcel(line_buffer, NodeAccess::ReadWrite)
+            .with_views(&[line_buffer.handle(ResourceAccess::Write).unwrap()])
             .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
 
         let bg_color = Color {
@@ -119,10 +119,10 @@ impl RenderState {
         };
 
         let mut pass = scheme.render_pass("bouncing_lines", scene_rt);
-        pass.bind_parcel_mut(line_buffer, NodeAccess::Read);
+        pass.with_parcel(line_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
-        pass.bind_views(&[line_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
+        pass.with_views(&[line_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..2, 0..NUM_LINES);
         pass.finish();
 

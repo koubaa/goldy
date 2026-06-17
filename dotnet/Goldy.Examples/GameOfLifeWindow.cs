@@ -24,8 +24,8 @@ static class GameOfLifeWindow
         using (var node = scheme.ComputeNode("game_of_life", pipeline))
         {
             node
-                .DeclareParcel(readBuf, NodeAccess.Read, ResourceAccess.ReadWrite)
-                .DeclareParcel(writeBuf, NodeAccess.Write, ResourceAccess.Write);
+                .WithParcel(readBuf, NodeAccess.Read, ResourceAccess.ReadWrite)
+                .WithParcel(writeBuf, NodeAccess.Write, ResourceAccess.Write);
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
         using var _ = scheme.Submit();
@@ -46,7 +46,7 @@ static class GameOfLifeWindow
         using (var pass = scheme.RenderPass("game_of_life_render", rt))
         {
             pass
-                .BindParcel(currentBuf, NodeAccess.Read)
+                .WithParcel(currentBuf, NodeAccess.Read)
                 .Clear(Color.Black)
                 .SetPipeline(renderPipeline)
                 .BindResourceIndex(currentBuf.ResourceIndex(ResourceAccess.Read))

@@ -267,7 +267,7 @@ impl WindowState {
         label: &'static str,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass(label, scene_rt);
-        pass.bind_parcel_mut(vertex_parcel, NodeAccess::Read);
+        pass.with_parcel(vertex_parcel, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_parcel);

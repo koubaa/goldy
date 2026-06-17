@@ -120,7 +120,7 @@ fn test_vulkan_render_and_readback() {
     let vertex_buffer = test_alloc_buffer_with_data(&device, &vertices, BufferKind::Scattered);
 
     graph_render(&device, &target, "triangle", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -263,8 +263,8 @@ fn test_indexed_drawing() {
     let index_buffer = test_alloc_buffer_with_data(&device, &indices, BufferKind::Scattered);
 
     graph_render(&device, &target, "indexed_u16", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
-        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
+        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
+        pass.with_buffer(&index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -348,8 +348,8 @@ fn test_indexed_drawing_uint32() {
     let index_buffer = test_alloc_buffer_with_data(&device, &indices, BufferKind::Scattered);
 
     graph_render(&device, &target, "indexed_u32", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
-        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
+        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
+        pass.with_buffer(&index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -478,8 +478,8 @@ fn test_depth_occlusion_red_beats_green() {
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(&device, &target, "depth_red_wins", |pass| {
-        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
-        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
+        pass.with_buffer(&red_vb, NodeAccess::Read);
+        pass.with_buffer(&green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -579,8 +579,8 @@ fn test_depth_occlusion_green_beats_red() {
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(&device, &target, "depth_green_wins", |pass| {
-        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
-        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
+        pass.with_buffer(&red_vb, NodeAccess::Read);
+        pass.with_buffer(&green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -694,10 +694,10 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     .expect("create pipeline");
 
     graph_render(&device, &target, "bindless_read", |pass| {
-        pass.bind_buffer_mut(&buffer, NodeAccess::Read);
+        pass.with_buffer(&buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
+        pass.with_resources(&[&buffer]);
         pass.draw(0..3, 0..1);
     });
 

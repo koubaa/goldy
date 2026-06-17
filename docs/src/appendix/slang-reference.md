@@ -255,7 +255,7 @@ VSOutput vs_draw(BufRO<Particle> particles, InstanceId iid, VertexId vid) {
 Resources are bound in declaration order (left to right in the shader signature):
 
 ```rust
-pass.bind_resources_raw(&[
+pass.with_resource_slots(&[
     cfg_buf.resource_index(ResourceAccess::Read).unwrap(),
     particle_buf.resource_index(ResourceAccess::Write).unwrap(),
 ]);

@@ -76,8 +76,8 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     {
         let mut node = scheme.compute_node("game_of_life", &compute_pipeline);
-        node.declare_parcel_view(&cells, SLOT_A, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.declare_parcel_view(&cells, SLOT_B, NodeAccess::Write, ResourceAccess::Write);
+        node.with_parcel_view(&cells, SLOT_A, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.with_parcel_view(&cells, SLOT_B, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
@@ -90,10 +90,10 @@ fn main() -> goldy_ffi_client::Result<()> {
     {
         let render_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::ReadWrite)?;
         let mut pass = scheme.render_pass("game_of_life_render", &rt);
-        pass.bind_parcel_view_mut(&cells, SLOT_B, NodeAccess::Read);
+        pass.with_parcel_view(&cells, SLOT_B, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
-        pass.bind_resources_typed(&[ResourceHandle {
+        pass.with_views(&[ResourceHandle {
             category: ResourceCategory::Scattered,
             index: render_idx,
         }]);

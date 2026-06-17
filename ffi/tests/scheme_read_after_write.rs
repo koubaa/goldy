@@ -10,7 +10,7 @@ use goldy_ffi::{
     goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
     goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy, goldy_read_grant_byte_size,
     goldy_read_grant_consume, goldy_read_grant_destroy, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
-    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_declare_parcel,
+    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_with_parcel,
     goldy_scheme_compute_node_dispatch, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read,
     goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind,
     GoldyNodeAccess, GoldyResourceAccess, GoldyResult,
@@ -71,7 +71,7 @@ fn scheme_read_after_acquire_then_copy() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_declare_parcel(
+            goldy_scheme_compute_node_with_parcel(
                 scheme,
                 src,
                 GoldyNodeAccess::Read,
@@ -82,7 +82,7 @@ fn scheme_read_after_acquire_then_copy() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_declare_parcel(scheme, dst, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
+            goldy_scheme_compute_node_with_parcel(scheme, dst, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

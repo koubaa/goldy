@@ -40,8 +40,8 @@ Struct parameters are automatically treated as broadcast (constant buffer) data.
 let mut graph = TaskGraph::new();
 graph
     .node("simulate", &sim_pipeline)
-    .bind_buffer(&particles, NodeAccess::ReadWrite)
-    .bind_resources_raw(&[particles_handle.index()])
+    .with_buffer(&particles, NodeAccess::ReadWrite)
+    .with_resource_slots(&[particles_handle.index()])
     .dispatch(group_count, 1, 1);
 ```
 

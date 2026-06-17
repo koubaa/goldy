@@ -137,8 +137,8 @@ impl App {
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("depth_quads", scene_rt);
-        pass.bind_parcel_mut(warm_parcel, NodeAccess::Read);
-        pass.bind_parcel_mut(cool_parcel, NodeAccess::Read);
+        pass.with_parcel(warm_parcel, NodeAccess::Read);
+        pass.with_parcel(cool_parcel, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(pipeline);

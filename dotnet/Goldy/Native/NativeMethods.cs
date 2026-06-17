@@ -229,22 +229,22 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_finish")]
     internal static partial GoldyResult TaskGraphRenderPassFinish(nint graph);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_parcel")]
-    internal static partial GoldyResult TaskGraphRenderPassBindParcel(nint graph, nint parcel, NodeAccess access);
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_with_parcel")]
+    internal static partial GoldyResult TaskGraphRenderPassWithParcel(nint graph, nint parcel, NodeAccess access);
 
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_set_vertex_buffer_parcel")]
     internal static partial GoldyResult TaskGraphRenderPassSetVertexBufferParcel(nint graph, uint slot, nint parcel);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_bind_resources_typed")]
-    internal static partial GoldyResult TaskGraphRenderPassBindResourcesTyped(nint graph, nint indices, uint handleCount);
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_render_pass_with_views")]
+    internal static partial GoldyResult TaskGraphRenderPassWithViews(nint graph, nint indices, uint handleCount);
 
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_begin", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial GoldyResult TaskGraphComputeNodeBegin(nint graph, string label, nint pipeline);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_parcel")]
-    internal static partial GoldyResult TaskGraphComputeNodeBindParcel(nint graph, nint parcel, NodeAccess access);
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_with_parcel")]
+    internal static partial GoldyResult TaskGraphComputeNodeWithParcel(nint graph, nint parcel, NodeAccess access);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_bind_resources_raw")]
+    [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_with_resource_slots")]
     internal static partial GoldyResult TaskGraphComputeNodeBindResourcesRaw(nint graph, nint indices, uint count);
 
     [LibraryImport(LibName, EntryPoint = "goldy_task_graph_compute_node_dispatch")]
@@ -276,9 +276,12 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_begin", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial GoldyResult SchemeComputeNodeBegin(nint scheme, string label, nint pipeline);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_declare_parcel")]
-    internal static partial GoldyResult SchemeComputeNodeDeclareParcel(
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_parcel")]
+    internal static partial GoldyResult SchemeComputeNodeWithParcel(
         nint scheme, nint parcel, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_param")]
+    internal static partial GoldyResult SchemeComputeNodeWithParam(nint scheme, uint value);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_dispatch")]
     internal static partial GoldyResult SchemeComputeNodeDispatch(
@@ -321,15 +324,15 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_begin", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial GoldyResult SchemeRenderPassBegin(nint scheme, string label, nint lease);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_bind_parcel")]
-    internal static partial GoldyResult SchemeRenderPassBindParcel(nint scheme, nint parcel, NodeAccess access);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_parcel")]
+    internal static partial GoldyResult SchemeRenderPassWithParcel(nint scheme, nint parcel, NodeAccess access);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_bind_parcel_view")]
-    internal static partial GoldyResult SchemeRenderPassBindParcelView(
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_parcel_view")]
+    internal static partial GoldyResult SchemeRenderPassWithParcelView(
         nint scheme, nint parcel, uint slot, NodeAccess access);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_bind_resources_typed")]
-    internal static partial GoldyResult SchemeRenderPassBindResourcesTyped(nint scheme, nint indices, uint handleCount);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_views")]
+    internal static partial GoldyResult SchemeRenderPassWithViews(nint scheme, nint indices, uint handleCount);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_clear")]
     internal static partial GoldyResult SchemeRenderPassClear(nint scheme, Color color);
@@ -350,8 +353,8 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_finish")]
     internal static partial GoldyResult SchemeRenderPassFinish(nint scheme);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_declare_parcel_view")]
-    internal static partial GoldyResult SchemeComputeNodeDeclareParcelView(
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_parcel_view")]
+    internal static partial GoldyResult SchemeComputeNodeWithParcelView(
         nint scheme, nint parcel, uint slot, NodeAccess nodeAccess, ResourceAccess resourceAccess);
 
     [LibraryImport(LibName, EntryPoint = "goldy_present_grant_consume")]

@@ -100,7 +100,7 @@ pub fn scheme_render_triangle(
         &readback,
         "triangle",
         |pass| {
-            pass.bind_parcel_mut(&vertex_buffer, NodeAccess::Read);
+            pass.with_parcel(&vertex_buffer, NodeAccess::Read);
             pass.clear(clear_color);
             pass.set_pipeline(&pipeline);
             pass.set_vertex_buffer(0, &vertex_buffer);
@@ -196,8 +196,8 @@ pub fn scheme_render_depth_occlusion(device: &Device, width: u32, height: u32) -
         &readback,
         "depth_occlusion",
         |pass| {
-            pass.bind_parcel_mut(&red_vb, NodeAccess::Read);
-            pass.bind_parcel_mut(&green_vb, NodeAccess::Read);
+            pass.with_parcel(&red_vb, NodeAccess::Read);
+            pass.with_parcel(&green_vb, NodeAccess::Read);
             pass.clear(Color::BLACK);
             pass.clear_depth(1.0);
             pass.set_pipeline(&pipeline);
@@ -253,18 +253,18 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
             let write = buffer_b.handle(ResourceAccess::Write).expect("buffer_b write");
             scheme
                 .node("gol_update", &compute_pipeline)
-                .bind_parcel(&buffer_a, NodeAccess::Read)
-                .bind_parcel(&buffer_b, NodeAccess::Write)
-                .bind_views(&[read, write])
+                .with_parcel(&buffer_a, NodeAccess::Read)
+                .with_parcel(&buffer_b, NodeAccess::Write)
+                .with_views(&[read, write])
                 .dispatch(workgroups_x, workgroups_y, 1);
         } else {
             let read = buffer_b.handle(ResourceAccess::ReadWrite).expect("buffer_b read");
             let write = buffer_a.handle(ResourceAccess::Write).expect("buffer_a write");
             scheme
                 .node("gol_update", &compute_pipeline)
-                .bind_parcel(&buffer_b, NodeAccess::Read)
-                .bind_parcel(&buffer_a, NodeAccess::Write)
-                .bind_views(&[read, write])
+                .with_parcel(&buffer_b, NodeAccess::Read)
+                .with_parcel(&buffer_a, NodeAccess::Write)
+                .with_views(&[read, write])
                 .dispatch(workgroups_x, workgroups_y, 1);
         }
         scheme.submit().expect("compute submit");
@@ -284,7 +284,7 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         |pass| {
             let cells = if use_buffer_a { &buffer_a } else { &buffer_b };
             // Scattered<uint> maps to a UAV slot; match TaskGraph bind_resources (ReadWrite), not SRV.
-            pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+            pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
                 parcel: cells,
                 access: NodeAccess::ReadWrite,
             }]);

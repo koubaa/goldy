@@ -121,8 +121,8 @@ fn record_scheme(
     let wg_y = height.div_ceil(8);
     scheme
         .node("compute", pipeline)
-        .bind_parcel(uniform, NodeAccess::Read)
-        .writes_present(screen)
+        .with_parcel(uniform, NodeAccess::Read)
+        .with_present(screen)
         .dispatch(wg_x, wg_y, 1);
     scheme.grant_present(screen)
 }

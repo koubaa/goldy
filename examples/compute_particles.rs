@@ -171,9 +171,9 @@ impl RenderState {
         )?;
         self.frame_graph
             .node("update_particles", &self.compute_pipeline)
-            .bind_parcel(&self.particle_buffer, NodeAccess::ReadWrite)
-            .bind_parcel(&self.params_buffer, NodeAccess::Read)
-            .bind_resources_raw_slice(&[
+            .with_parcel(&self.particle_buffer, NodeAccess::ReadWrite)
+            .with_parcel(&self.params_buffer, NodeAccess::Read)
+            .with_resource_slots_slice(&[
                 self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
                 self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
             ])
@@ -187,10 +187,10 @@ impl RenderState {
         };
 
         let mut pass = self.frame_graph.render_pass("particles", &self.scene_rt);
-        pass.bind_parcel_mut(&self.particle_buffer, NodeAccess::Read);
+        pass.with_parcel(&self.particle_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[self.particle_buffer.resource_index(ResourceAccess::Read).unwrap()]);
+        pass.with_resource_slots(&[self.particle_buffer.resource_index(ResourceAccess::Read).unwrap()]);
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish_recorded();
 

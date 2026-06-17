@@ -28,7 +28,7 @@ def record_scheme(
 ) -> goldy.PresentGrant:
     with scheme.render_pass("triangle", scene_rt) as rp:
         (
-            rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
+            rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .clear(bg)
             .set_pipeline(pipeline)
             .set_vertex_buffer_parcel(0, vertex_parcel)

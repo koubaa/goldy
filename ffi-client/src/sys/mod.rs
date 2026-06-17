@@ -341,29 +341,33 @@ pub unsafe fn goldy_task_graph_compute_node_begin(
     (lib().goldy_task_graph_compute_node_begin)(graph, label, pipeline)
 }
 
-pub unsafe fn goldy_task_graph_compute_node_bind_parcel(
+pub unsafe fn goldy_task_graph_compute_node_with_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_compute_node_bind_parcel)(graph, parcel, access)
+    (lib().goldy_task_graph_compute_node_with_parcel)(graph, parcel, access)
 }
 
-pub unsafe fn goldy_task_graph_compute_node_bind_parcel_view(
+pub unsafe fn goldy_task_graph_compute_node_with_parcel_view(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     slot: u32,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_compute_node_bind_parcel_view)(graph, parcel, slot, access)
+    (lib().goldy_task_graph_compute_node_with_parcel_view)(graph, parcel, slot, access)
 }
 
-pub unsafe fn goldy_task_graph_compute_node_bind_resources_raw(
+pub unsafe fn goldy_task_graph_compute_node_with_resource_slots(
     graph: *mut GoldyTaskGraph,
     indices: *const u32,
     count: u32,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_compute_node_bind_resources_raw)(graph, indices, count)
+    (lib().goldy_task_graph_compute_node_with_resource_slots)(graph, indices, count)
+}
+
+pub unsafe fn goldy_task_graph_compute_node_with_param(graph: *mut GoldyTaskGraph, value: u32) -> GoldyResult {
+    (lib().goldy_task_graph_compute_node_with_param)(graph, value)
 }
 
 pub unsafe fn goldy_task_graph_compute_node_dispatch(
@@ -393,29 +397,29 @@ pub unsafe fn goldy_task_graph_render_pass_begin(
     (lib().goldy_task_graph_render_pass_begin)(graph, label, target)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_bind_parcel(
+pub unsafe fn goldy_task_graph_render_pass_with_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_bind_parcel)(graph, parcel, access)
+    (lib().goldy_task_graph_render_pass_with_parcel)(graph, parcel, access)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_bind_parcel_view(
+pub unsafe fn goldy_task_graph_render_pass_with_parcel_view(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     slot: u32,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_bind_parcel_view)(graph, parcel, slot, access)
+    (lib().goldy_task_graph_render_pass_with_parcel_view)(graph, parcel, slot, access)
 }
 
-pub unsafe fn goldy_task_graph_render_pass_bind_resources_typed(
+pub unsafe fn goldy_task_graph_render_pass_with_views(
     graph: *mut GoldyTaskGraph,
     indices: *const u32,
     handle_count: u32,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_bind_resources_typed)(graph, indices, handle_count)
+    (lib().goldy_task_graph_render_pass_with_views)(graph, indices, handle_count)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_clear(graph: *mut GoldyTaskGraph, color: GoldyColor) -> GoldyResult {
@@ -513,23 +517,27 @@ pub unsafe fn goldy_scheme_compute_node_begin(
     (lib().goldy_scheme_compute_node_begin)(scheme, label, pipeline)
 }
 
-pub unsafe fn goldy_scheme_compute_node_declare_parcel(
+pub unsafe fn goldy_scheme_compute_node_with_parcel(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     node_access: GoldyNodeAccess,
     resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
-    (lib().goldy_scheme_compute_node_declare_parcel)(scheme, parcel, node_access, resource_access)
+    (lib().goldy_scheme_compute_node_with_parcel)(scheme, parcel, node_access, resource_access)
 }
 
-pub unsafe fn goldy_scheme_compute_node_declare_parcel_view(
+pub unsafe fn goldy_scheme_compute_node_with_parcel_view(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     slot: u32,
     node_access: GoldyNodeAccess,
     resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
-    (lib().goldy_scheme_compute_node_declare_parcel_view)(scheme, parcel, slot, node_access, resource_access)
+    (lib().goldy_scheme_compute_node_with_parcel_view)(scheme, parcel, slot, node_access, resource_access)
+}
+
+pub unsafe fn goldy_scheme_compute_node_with_param(scheme: *mut GoldyScheme, value: u32) -> GoldyResult {
+    (lib().goldy_scheme_compute_node_with_param)(scheme, value)
 }
 
 pub unsafe fn goldy_scheme_compute_node_dispatch(
@@ -607,29 +615,29 @@ pub unsafe fn goldy_scheme_render_pass_begin(
     (lib().goldy_scheme_render_pass_begin)(scheme, label, lease)
 }
 
-pub unsafe fn goldy_scheme_render_pass_bind_parcel_view(
+pub unsafe fn goldy_scheme_render_pass_with_parcel_view(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     slot: u32,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_bind_parcel_view)(scheme, parcel, slot, access)
+    (lib().goldy_scheme_render_pass_with_parcel_view)(scheme, parcel, slot, access)
 }
 
-pub unsafe fn goldy_scheme_render_pass_bind_parcel(
+pub unsafe fn goldy_scheme_render_pass_with_parcel(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_bind_parcel)(scheme, parcel, access)
+    (lib().goldy_scheme_render_pass_with_parcel)(scheme, parcel, access)
 }
 
-pub unsafe fn goldy_scheme_render_pass_bind_resources_typed(
+pub unsafe fn goldy_scheme_render_pass_with_views(
     scheme: *mut GoldyScheme,
     indices: *const u32,
     handle_count: u32,
 ) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_bind_resources_typed)(scheme, indices, handle_count)
+    (lib().goldy_scheme_render_pass_with_views)(scheme, indices, handle_count)
 }
 
 pub unsafe fn goldy_scheme_render_pass_clear(scheme: *mut GoldyScheme, color: GoldyColor) -> GoldyResult {

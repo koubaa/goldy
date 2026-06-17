@@ -125,7 +125,7 @@ impl App {
     ) -> PresentGrant {
         let mut pass = scheme.render_pass("waveform", scene_rt);
         for parcel in channel_parcels {
-            pass.bind_parcel_mut(parcel, NodeAccess::Read);
+            pass.with_parcel(parcel, NodeAccess::Read);
         }
         pass.clear(Color {
             r: 0.02,

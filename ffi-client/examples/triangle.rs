@@ -51,7 +51,7 @@ fn record_scheme(
 ) -> goldy_ffi_client::Result<PresentGrant> {
     {
         let mut pass = scheme.render_pass("triangle", scene_rt);
-        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(vertex_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer_parcel(0, vertex_buffer);

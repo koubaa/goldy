@@ -69,8 +69,8 @@ void cs_main(BufRO<uint> buf, ThreadId id) {
 fn write_scheme(ctx: &Context, parcel: &Parcel, pipeline: &ComputePipeline) -> Scheme {
     let mut s = Scheme::new(ctx);
     s.node("write", pipeline)
-        .bind_parcel(parcel, NodeAccess::Write)
-        .bind_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
+        .with_parcel(parcel, NodeAccess::Write)
+        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     s
 }
@@ -78,8 +78,8 @@ fn write_scheme(ctx: &Context, parcel: &Parcel, pipeline: &ComputePipeline) -> S
 fn read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &ComputePipeline) -> Scheme {
     let mut s = Scheme::new(ctx);
     s.node("read", pipeline)
-        .bind_parcel(parcel, NodeAccess::Read)
-        .bind_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
+        .with_parcel(parcel, NodeAccess::Read)
+        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     s
 }
@@ -289,7 +289,7 @@ fn recorded_graph_syncs(device: &Device) -> Vec<bool> {
     with_mock(device, |m| m.recorded_graph_syncs.clone())
 }
 
-/// A minimal render scheme that declares a read dependency on `parcel` via `bind_parcel_mut`.
+/// A minimal render scheme that declares a read dependency on `parcel` via `with_parcel`.
 ///
 /// The render pass itself does nothing interesting (clear + draw 0 verts), but registering
 /// the parcel is enough to put a `ResourceSync` in the ledger so the cross-submit analysis
@@ -300,7 +300,7 @@ fn render_read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &RenderPipeline)
         .lease_render_target(4, 4, TextureFormat::Rgba8Unorm, None)
         .expect("render target lease");
     let mut pass = s.render_pass("render_read", &rt);
-    pass.bind_parcel_mut(parcel, NodeAccess::Read);
+    pass.with_parcel(parcel, NodeAccess::Read);
     pass.set_pipeline(pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();

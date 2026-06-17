@@ -242,20 +242,20 @@ impl RenderState {
             .write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
         self.frame_graph
             .node("update_particles", &self.compute_pipeline)
-            .bind_parcel(&self.particle_buffer, NodeAccess::ReadWrite)
-            .bind_parcel(&self.params_buffer, NodeAccess::Read)
-            .bind_resources_raw_slice(&[
+            .with_parcel(&self.particle_buffer, NodeAccess::ReadWrite)
+            .with_parcel(&self.params_buffer, NodeAccess::Read)
+            .with_resource_slots_slice(&[
                 self.particle_buffer.resource_index(ResourceAccess::Write).unwrap(),
                 self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
             ])
             .dispatch(NUM_PARTICLES.div_ceil(64), 1, 1);
 
         let mut pass = self.frame_graph.render_pass("particles", &self.scene_rt);
-        pass.bind_parcel_mut(&self.particle_buffer, NodeAccess::Read);
-        pass.bind_parcel_mut(&self.params_buffer, NodeAccess::Read);
+        pass.with_parcel(&self.particle_buffer, NodeAccess::Read);
+        pass.with_parcel(&self.params_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[
+        pass.with_resource_slots(&[
             self.particle_buffer.resource_index(ResourceAccess::Read).unwrap(),
             self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
         ]);

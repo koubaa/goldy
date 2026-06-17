@@ -132,13 +132,13 @@ fn lcm(a: u64, b: u64) -> u64 {
 /// // Dispatch nodes declare what they read/write so the analyzer can insert
 /// // barriers automatically.
 /// graph.node("write_data", &pipeline_a)
-///     .bind_buffer(&buf, NodeAccess::Write)
-///     .bind_resources_raw_slice(&[buf_idx])
+///     .with_buffer(&buf, NodeAccess::Write)
+///     .with_resource_slots_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.node("read_data", &pipeline_b)
-///     .bind_buffer(&buf, NodeAccess::Read)
-///     .bind_resources_raw_slice(&[buf_idx])
+///     .with_buffer(&buf, NodeAccess::Read)
+///     .with_resource_slots_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// let tv = graph.submit(&ctx)?;
@@ -174,12 +174,12 @@ pub struct TaskGraph {
     /// When the node count hasn't changed and the cache already holds a
     /// schedule, we skip the expensive `binding_fingerprint` hash.
     schedule_validated_node_count: usize,
-    /// Stamp cells for [`crate::Parcel`]s bound via [`NodeBuilder::bind_parcel`].
+    /// Stamp cells for [`crate::Parcel`]s bound via [`NodeBuilder::with_parcel`].
     /// Cleared in [`Self::clear`]; stamped in [`Self::apply_reference_stamps`] at submit.
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
 }
 
-/// Stamp every parcel bound via [`NodeBuilder::bind_parcel`] with a context-qualified timeline.
+/// Stamp every parcel bound via [`NodeBuilder::with_parcel`] with a context-qualified timeline.
 pub(crate) fn apply_stamp_targets(
     targets: &[Arc<crate::parcel::ParcelStamp>],
     ctx: crate::backend::ContextHandle,
@@ -1601,7 +1601,7 @@ impl TaskGraph {
     /// Declare that this graph will write to a swapchain output.
     ///
     /// Returns a [`SwapchainOutputHandle`] that must be passed to
-    /// [`NodeBuilder::bind_swapchain_output`] when recording the final
+    /// [`NodeBuilder::with_swapchain_output`] when recording the final
     /// (fine-pass) dispatch node.  The concrete `TextureHandle` is resolved
     /// at submit time inside [`Surface::submit_graph`](crate::Surface::submit_graph).
     ///
@@ -1996,7 +1996,7 @@ impl TaskGraph {
         self.stamp_targets.clear();
     }
 
-    /// Stamp every [`crate::Parcel`] bound via [`NodeBuilder::bind_parcel`] with the
+    /// Stamp every [`crate::Parcel`] bound via [`NodeBuilder::with_parcel`] with the
     /// context-qualified timeline value of the submission that just completed.
     pub(crate) fn apply_reference_stamps(
         &self,
@@ -2369,7 +2369,7 @@ pub struct NodeBuilder<'a> {
 
 impl<'a> NodeBuilder<'a> {
     /// Declare that this node accesses a buffer with the given logical access.
-    pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
+    pub fn with_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -2386,7 +2386,7 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// Barriers are still emitted against the parent buffer handle so backends
     /// require no changes.
-    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
+    pub fn with_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -2399,7 +2399,7 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Declare that this node accesses a texture with the given logical access.
-    pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
+    pub fn with_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Texture(tex.handle),
             access,
@@ -2411,7 +2411,7 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+    pub fn with_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
         self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -2420,7 +2420,7 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
+    pub fn with_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientBuffer(id),
             access,
@@ -2428,7 +2428,7 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
+    pub fn with_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientTexture(id),
             access,
@@ -2443,7 +2443,7 @@ impl<'a> NodeBuilder<'a> {
     /// [`super::SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
     /// binding position so `TaskGraph::lower_swapchain_output` can patch it with the
     /// real UAV bindless index after `surface.begin()`.
-    pub fn bind_swapchain_output(mut self, _handle: SwapchainOutputHandle, access: NodeAccess) -> Self {
+    pub fn with_swapchain_output(mut self, _handle: SwapchainOutputHandle, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::SwapchainOutput,
             access,
@@ -2453,20 +2453,20 @@ impl<'a> NodeBuilder<'a> {
 
     /// Set the bindless resource slot indices for this node's dispatch (region A).
     /// Accepts an owned `Vec` to avoid re-allocation when the caller already has one.
-    pub fn bind_resources_raw(mut self, indices: Vec<u32>) -> Self {
+    pub fn with_resource_slots(mut self, indices: Vec<u32>) -> Self {
         self.resource_slots = indices;
         self
     }
 
     /// Convenience wrapper that copies a slice into owned storage.
-    pub fn bind_resources_raw_slice(self, indices: &[u32]) -> Self {
-        self.bind_resources_raw(indices.to_vec())
+    pub fn with_resource_slots_slice(self, indices: &[u32]) -> Self {
+        self.with_resource_slots(indices.to_vec())
     }
 
     /// Bind buffer resource slots and declare read/write dependencies.
     ///
     /// Slot indices are each buffer's UAV bindless index in shader parameter order.
-    pub fn bind_resources(mut self, buffers: &[&Buffer]) -> Self {
+    pub fn with_resources(mut self, buffers: &[&Buffer]) -> Self {
         use crate::types::ResourceAccess;
         let mut indices = Vec::with_capacity(buffers.len());
         for buf in buffers {
@@ -2477,7 +2477,7 @@ impl<'a> NodeBuilder<'a> {
             let idx = buf
                 .resource_index(ResourceAccess::ReadWrite)
                 .or_else(|| buf.resource_index(ResourceAccess::Read))
-                .expect("bind_resources: buffer has no bindless index");
+                .expect("with_resources: buffer has no bindless index");
             indices.push(idx);
         }
         self.resource_slots = indices;
@@ -2485,16 +2485,19 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Bind resource slots from typed [`ResourceHandle`]s (region A indices only).
-    pub fn bind_resources_typed(mut self, handles: &[ResourceHandle]) -> Self {
+    pub fn with_views(mut self, handles: &[ResourceHandle]) -> Self {
         self.resource_slots = handles.iter().map(|h| h.index()).collect();
         self
     }
 
-    /// Set user scalar parameters for this node's dispatch (region B).
-    /// Accepts an owned `Vec` for indices to avoid re-allocation.
-    pub fn bind_resources_raw_with_user(mut self, indices: Vec<u32>, user: &[u32]) -> Self {
-        self.resource_slots = indices;
-        self.user_slots = user.to_vec();
+    /// Append one scalar virtual-main parameter (region B).
+    pub fn with_param(mut self, value: u32) -> Self {
+        use crate::backend::shared::MAX_USER_SLOTS;
+        assert!(
+            self.user_slots.len() < MAX_USER_SLOTS,
+            "with_param: at most {MAX_USER_SLOTS} scalar params per dispatch"
+        );
+        self.user_slots.push(value);
         self
     }
 
@@ -2534,8 +2537,8 @@ impl<'a> NodeBuilder<'a> {
 
 /// One bindless push-constant slot in shader virtual-main parameter order.
 ///
-/// Use with [`RenderPassBuilder::bind_shader_resources`]. Mosaic parcels belong in
-/// [`RenderPassBuilder::bind_parcel_mut`] (graph dependency + vertex views), not here.
+/// Use with [`RenderPassBuilder::with_shader_resources`]. Mosaic parcels belong in
+/// [`RenderPassBuilder::with_parcel`] (graph dependency + vertex views), not here.
 pub enum ShaderResourceSlot<'a> {
     Parcel {
         parcel: &'a crate::Parcel,
@@ -2567,7 +2570,7 @@ impl<'a> RenderPassBuilder<'a> {
     ///
     /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
     /// handles before each pipeline bind.
-    pub fn bind_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
+    pub fn with_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
         for slot in slots {
             match slot {
                 ShaderResourceSlot::Parcel { parcel, access } => {
@@ -2580,7 +2583,7 @@ impl<'a> RenderPassBuilder<'a> {
                     let handle = parcel.handle(resource_access).unwrap_or_else(|| {
                         panic!(
                             "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
-                             use bind_parcel_mut for geometry and bind views at draw time"
+                             use with_parcel for geometry and bind views at draw time"
                         )
                     });
                     self.push_constant_handles.push(handle);
@@ -2596,8 +2599,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_parcel`] but for use while recording on `&mut self`.
-    pub fn bind_parcel_mut(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_parcel`] but for use while recording on `&mut self`.
+    pub fn with_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -2606,8 +2609,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_buffer`] but for use while recording on `&mut self`.
-    pub fn bind_buffer_mut(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_buffer`] but for use while recording on `&mut self`.
+    pub fn with_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -2615,8 +2618,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_texture`] but for use while recording on `&mut self`.
-    pub fn bind_texture_mut(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_texture`] but for use while recording on `&mut self`.
+    pub fn with_texture(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Texture(tex.handle),
             access,
@@ -2624,8 +2627,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_buffer_view`] but for use while recording on `&mut self`.
-    pub fn bind_buffer_view_mut(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_buffer_view`] but for use while recording on `&mut self`.
+    pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -2647,7 +2650,7 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Set the active pipeline and bind [`Self::bind_shader_resources`] slots when declared.
+    /// Set the active pipeline and apply [`Self::with_shader_resources`] slots when declared.
     ///
     /// Pipeline is bound before root constants (required on D3D12: root signature first).
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
@@ -2712,14 +2715,14 @@ impl<'a> RenderPassBuilder<'a> {
         self.draw(0..6, 0..count)
     }
 
-    pub fn bind_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+    pub fn with_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
         self.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesRaw {
             indices: indices.to_vec(),
             user: Vec::new(),
@@ -2728,66 +2731,9 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+    pub fn with_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesTyped {
             handles: handles.to_vec(),
-        });
-        self
-    }
-
-    pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::Buffer(buf.handle),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::BufferRange {
-                parent: view.parent_handle(),
-                offset: view.offset(),
-                len: view.size(),
-            },
-            access,
-        });
-        self
-    }
-
-    pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::Texture(tex.handle),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::TransientBuffer(id),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::TransientTexture(id),
-            access,
-        });
-        self
-    }
-
-    /// Declare that this render pass accesses a retained [`crate::Parcel`].
-    ///
-    /// Like [`NodeBuilder::bind_parcel`], the parcel is stamped at graph submit
-    /// time so [`crate::Parcel::last_referenced`] is updated automatically.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
-        self.graph.stamp_targets.push(parcel.stamp_handle());
-        self.bindings.push(ResourceBinding {
-            resource: parcel.resource_id(),
-            access,
         });
         self
     }
@@ -2891,12 +2837,12 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("compute_write", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(1, 1, 1);
 
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_buffer_mut(&buf, NodeAccess::Read);
+        pass.with_buffer(&buf, NodeAccess::Read);
         pass.clear(Color::RED);
         pass.finish_recorded();
 
@@ -2923,7 +2869,7 @@ mod tests {
 
         let mut graph = TaskGraph::new();
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
             parcel: &parcel,
             access: NodeAccess::Read,
         }]);
@@ -2943,7 +2889,7 @@ mod tests {
             render_cmds
                 .iter()
                 .any(|c| matches!(c, RenderCommand::BindResourcesRaw { .. })),
-            "set_pipeline should emit lowered BindResourcesRaw from bind_shader_resources"
+            "set_pipeline should emit lowered BindResourcesRaw from with_shader_resources"
         );
         let set_pipe = render_cmds
             .iter()
@@ -2967,7 +2913,7 @@ mod tests {
         graph.write_parcel(&parcel, 0, vec![1, 2, 3, 4]).unwrap();
 
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.with_parcel(&parcel, NodeAccess::Read);
         pass.clear(Color::RED);
         pass.finish_recorded();
 
@@ -3015,7 +2961,7 @@ mod tests {
     }
 
     #[test]
-    fn render_pass_bind_parcel_submit_stamps_last_referenced() {
+    fn render_pass_with_parcel_submit_stamps_last_referenced() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
@@ -3024,7 +2970,7 @@ mod tests {
 
         let mut graph = TaskGraph::new();
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.with_parcel(&parcel, NodeAccess::Read);
         pass.clear(Color::BLUE);
         pass.finish_recorded();
 
@@ -3042,8 +2988,8 @@ mod tests {
         let t = graph.transient_buffer(256);
         graph
             .node("touch", &pipeline)
-            .bind_transient_buffer(t, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&ctx).unwrap();
     }
@@ -3058,8 +3004,8 @@ mod tests {
         let tt = graph.transient_texture(4, 4, TextureFormat::Rgba8Unorm);
         graph
             .node("touch_tex", &pipeline)
-            .bind_transient_texture(tt, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_texture(tt, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&ctx).unwrap();
     }
@@ -3076,15 +3022,15 @@ mod tests {
         let t1 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
         graph
             .node("w0", &pipeline)
-            .bind_transient_texture(t0, NodeAccess::Write)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_texture(t0, NodeAccess::Write)
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("w1", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .bind_transient_texture(t1, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_buffer(&buf, NodeAccess::Read)
+            .with_transient_texture(t1, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&ctx).unwrap();
     }
@@ -3102,15 +3048,15 @@ mod tests {
         let t1 = graph.transient_buffer(256);
         graph
             .node("wave0", &pipeline)
-            .bind_transient_buffer(t0, NodeAccess::Write)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t0, NodeAccess::Write)
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("wave1", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_buffer(&buf, NodeAccess::Read)
+            .with_transient_buffer(t1, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
 
         let (schedule, _) = graph.schedule_and_split_wave();
@@ -3133,13 +3079,13 @@ mod tests {
         let t1 = graph.transient_buffer(256);
         graph
             .node("a", &pipeline)
-            .bind_transient_buffer(t0, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t0, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("b", &pipeline)
-            .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t1, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
 
         let (schedule, _) = graph.schedule_and_split_wave();
@@ -3166,14 +3112,14 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
-            .bind_buffer(&buf_a, NodeAccess::Write)
-            .bind_resources_raw_slice(&[42])
+            .with_buffer(&buf_a, NodeAccess::Write)
+            .with_resource_slots_slice(&[42])
             .dispatch(8, 1, 1);
         graph
             .node("read_write", &pipeline)
-            .bind_buffer(&buf_a, NodeAccess::Read)
-            .bind_buffer(&buf_b, NodeAccess::Write)
-            .bind_resources_raw_slice(&[43])
+            .with_buffer(&buf_a, NodeAccess::Read)
+            .with_buffer(&buf_b, NodeAccess::Write)
+            .with_resource_slots_slice(&[43])
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3204,11 +3150,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
-            .bind_buffer(&buf_a, NodeAccess::Write)
+            .with_buffer(&buf_a, NodeAccess::Write)
             .dispatch(8, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer(&buf_b, NodeAccess::Write)
+            .with_buffer(&buf_b, NodeAccess::Write)
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3235,7 +3181,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_buffer(&buf, NodeAccess::ReadWrite)
+            .with_buffer(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -3260,25 +3206,25 @@ mod tests {
         // A writes X
         graph
             .node("A", &p1)
-            .bind_buffer(&buf_x, NodeAccess::Write)
+            .with_buffer(&buf_x, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // B reads X, writes Y
         graph
             .node("B", &p2)
-            .bind_buffer(&buf_x, NodeAccess::Read)
-            .bind_buffer(&buf_y, NodeAccess::Write)
+            .with_buffer(&buf_x, NodeAccess::Read)
+            .with_buffer(&buf_y, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // C reads X, writes Z
         graph
             .node("C", &p3)
-            .bind_buffer(&buf_x, NodeAccess::Read)
-            .bind_buffer(&buf_z, NodeAccess::Write)
+            .with_buffer(&buf_x, NodeAccess::Read)
+            .with_buffer(&buf_z, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // D reads Y and Z
         graph
             .node("D", &p4)
-            .bind_buffer(&buf_y, NodeAccess::Read)
-            .bind_buffer(&buf_z, NodeAccess::Read)
+            .with_buffer(&buf_y, NodeAccess::Read)
+            .with_buffer(&buf_z, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3313,7 +3259,7 @@ mod tests {
 
         graph
             .node("A", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
+            .with_buffer(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
         assert!(!graph.is_empty());
         assert_eq!(graph.len(), 1);
@@ -3336,7 +3282,7 @@ mod tests {
         graph.clear_buffer(&buf, 0, 256);
         graph
             .node("read", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
+            .with_buffer(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3364,7 +3310,7 @@ mod tests {
         graph.clear_buffer(&buf_a, 0, 256);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer(&buf_b, NodeAccess::Write)
+            .with_buffer(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3386,12 +3332,12 @@ mod tests {
         graph.write_buffer(&buf, 0, vec![0u8; 256]);
         graph
             .node("read", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
+            .with_buffer(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
 
-        // No staging (dispatch uses bind_buffer for barrier-tracking only, no bindless slots).
+        // No staging (dispatch uses with_buffer for barrier-tracking only, no bindless slots).
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(
             cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
@@ -3412,7 +3358,7 @@ mod tests {
         graph.write_buffer(&buf_a, 0, vec![0u8; 4]);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer(&buf_b, NodeAccess::Write)
+            .with_buffer(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3440,11 +3386,11 @@ mod tests {
         graph.write_texture(&tex, vec![0u8; 4 * 4 * 4]).unwrap();
         graph
             .node("read_tex", &pipeline)
-            .bind_texture(&tex, NodeAccess::Read)
+            .with_texture(&tex, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
-        // No staging (dispatch uses bind_texture for barrier-tracking only, no bindless slots).
+        // No staging (dispatch uses with_texture for barrier-tracking only, no bindless slots).
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
         assert!(
             cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
@@ -3473,7 +3419,7 @@ mod tests {
         graph.write_texture(&tex, vec![0u8; 16]).unwrap();
         graph
             .node("writes_buf", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
+            .with_buffer(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3551,11 +3497,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
-            .bind_buffer_view(&view_a, NodeAccess::Write)
+            .with_buffer_view(&view_a, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .with_buffer_view(&view_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3576,11 +3522,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
-            .bind_buffer_view(&view, NodeAccess::Write)
+            .with_buffer_view(&view, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("read", &pipeline)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3609,16 +3555,16 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .bind_buffer(&owned, NodeAccess::Write)
+            .with_buffer(&owned, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
-            .bind_buffer_view(&view, NodeAccess::Write)
+            .with_buffer_view(&view, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("C", &p3)
-            .bind_buffer(&owned, NodeAccess::Read)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer(&owned, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3651,22 +3597,22 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .bind_buffer_view(&v0, NodeAccess::Write)
+            .with_buffer_view(&v0, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
-            .bind_buffer_view(&v0, NodeAccess::Read)
-            .bind_buffer_view(&v1, NodeAccess::Write)
+            .with_buffer_view(&v0, NodeAccess::Read)
+            .with_buffer_view(&v1, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("C", &p3)
-            .bind_buffer_view(&v0, NodeAccess::Read)
-            .bind_buffer_view(&v2, NodeAccess::Write)
+            .with_buffer_view(&v0, NodeAccess::Read)
+            .with_buffer_view(&v2, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("D", &p4)
-            .bind_buffer_view(&v1, NodeAccess::Read)
-            .bind_buffer_view(&v2, NodeAccess::Read)
+            .with_buffer_view(&v1, NodeAccess::Read)
+            .with_buffer_view(&v2, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3683,7 +3629,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_buffer_on_pool_backing_aliases_all_views() {
+    fn with_buffer_on_pool_backing_aliases_all_views() {
         // A writes the whole backing buffer; B reads a view — must have an edge
         let (device, shader, _, mut pool) = make_pool_setup(512);
         let p1 = mock_pipeline(&device, &shader);
@@ -3695,11 +3641,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .bind_buffer(backing, NodeAccess::Write)
+            .with_buffer(backing, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3724,7 +3670,7 @@ mod tests {
         for view in &views {
             graph
                 .node("write", &pipeline)
-                .bind_buffer_view(view, NodeAccess::Write)
+                .with_buffer_view(view, NodeAccess::Write)
                 .dispatch(1, 1, 1);
         }
 
@@ -3750,11 +3696,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write", &p1)
-            .bind_buffer_view(&view, NodeAccess::Write)
+            .with_buffer_view(&view, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("read", &p2)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3795,11 +3741,11 @@ mod tests {
         //   Wave 1: write_a, write_b (independent of each other)
         graph
             .node("write_a", &pipeline)
-            .bind_buffer_view(&view_a, NodeAccess::Write)
+            .with_buffer_view(&view_a, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .with_buffer_view(&view_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3812,7 +3758,7 @@ mod tests {
         assert_eq!(barrier_count, 1, "expected exactly one barrier (clear → views)");
 
         // ClearBuffer first, then dispatches with one barrier.
-        // No staging (dispatches use bind_buffer_view for barrier-tracking only).
+        // No staging (dispatches use with_buffer_view for barrier-tracking only).
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
 
         // Two dispatches present
@@ -3831,7 +3777,7 @@ mod tests {
         graph.clear_buffer_view(&view_a, 0, 0); // size=0 → clear to end of view
         graph
             .node("read_a", &pipeline)
-            .bind_buffer_view(&view_a, NodeAccess::Read)
+            .with_buffer_view(&view_a, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3842,7 +3788,7 @@ mod tests {
                 .count(),
             1
         );
-        // No staging (dispatch uses bind_buffer_view for barrier-tracking only).
+        // No staging (dispatch uses with_buffer_view for barrier-tracking only).
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
     }
 
@@ -3859,7 +3805,7 @@ mod tests {
         graph.clear_buffer_view(&view_a, 0, 0);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .with_buffer_view(&view_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3883,14 +3829,14 @@ mod tests {
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         assert_eq!(
@@ -3911,14 +3857,14 @@ mod tests {
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(8, 8, 1); // different dims
 
         assert_ne!(
@@ -3946,14 +3892,14 @@ mod tests {
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &p1)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &p2) // different pipeline
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let fp1 = g1.compute_retention_fingerprint();
@@ -3988,14 +3934,14 @@ mod tests {
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[2]) // different bindless slot
+            .with_buffer(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[2]) // different bindless slot
             .dispatch(4, 4, 1);
 
         assert_ne!(
@@ -4026,7 +3972,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_submit_stamps_last_referenced() {
+    fn with_parcel_submit_stamps_last_referenced() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
@@ -4039,7 +3985,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -4047,7 +3993,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_monotonic_max_across_submits() {
+    fn with_parcel_monotonic_max_across_submits() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
@@ -4058,7 +4004,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv1 = graph.submit(&ctx).unwrap();
 
@@ -4066,7 +4012,7 @@ mod tests {
         graph.clear();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv2 = graph.submit(&ctx).unwrap();
         assert!(tv2 > tv1);
@@ -4078,7 +4024,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_multiple_all_stamped() {
+    fn with_parcel_multiple_all_stamped() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
@@ -4090,8 +4036,8 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&p1, NodeAccess::Write)
-            .bind_parcel(&p2, NodeAccess::Read)
+            .with_parcel(&p1, NodeAccess::Write)
+            .with_parcel(&p2, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -4112,7 +4058,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&bound, NodeAccess::ReadWrite)
+            .with_parcel(&bound, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
         assert_eq!(bound.last_referenced_on(ctx.backend_handle()), Some(tv));
@@ -4131,7 +4077,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
 
@@ -4161,7 +4107,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         graph.clear();
 
@@ -4182,7 +4128,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -4201,7 +4147,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined_and_retain(&mut graph).unwrap();
@@ -4209,7 +4155,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_stamp_is_context_specific() {
+    fn with_parcel_stamp_is_context_specific() {
         let device = Arc::new(mock_device());
         let ctx_a = device.create_context().unwrap();
         let ctx_b = device.create_context().unwrap();
@@ -4221,7 +4167,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv_a = graph.submit(&ctx_a).unwrap();
 

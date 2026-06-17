@@ -71,14 +71,14 @@ Any user-defined struct type (e.g. `MyUniforms`) declared as a parameter is auto
 
 ## Dispatch-Time Type Checking
 
-When you call `bind_resources_typed`, Goldy compares each `ResourceHandle.category` against the shader's declared parameter types (extracted via `extract_push_constant_categories`):
+When you call `with_views`, Goldy compares each `ResourceHandle.category` against the shader's declared parameter types (extracted via `extract_push_constant_categories`):
 
 ```rust
 let uniforms = uniform_buf.handle(ResourceAccess::Read).unwrap();  // Broadcast
 let data     = storage_buf.handle(ResourceAccess::Write).unwrap(); // Scattered
 
 // Category validation happens here:
-pass.bind_resources_typed(&[uniforms, data]);
+pass.with_views(&[uniforms, data]);
 pass.dispatch(workgroups, 1, 1);
 ```
 
@@ -134,9 +134,9 @@ let pipeline = ComputePipeline::new(&device, &shader)?;
 let mut graph = TaskGraph::new();
 graph
     .node("update", &pipeline)
-    .bind_parcel(&params_buf, NodeAccess::Read)
-    .bind_parcel(&particle_buf, NodeAccess::ReadWrite)
-    .bind_resources_typed(&[
+    .with_parcel(&params_buf, NodeAccess::Read)
+    .with_parcel(&particle_buf, NodeAccess::ReadWrite)
+    .with_views(&[
         ResourceHandle::new(ResourceCategory::Broadcast, params_buf.resource_index(ResourceAccess::Read).unwrap()),
         ResourceHandle::new(ResourceCategory::Scattered, particle_buf.resource_index(ResourceAccess::Write).unwrap()),
     ])

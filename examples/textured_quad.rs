@@ -160,8 +160,8 @@ impl App {
         ];
 
         let mut pass = scheme.render_pass("textured_quad", scene_rt);
-        pass.bind_shader_resources(&shader_resources);
-        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
+        pass.with_shader_resources(&shader_resources);
+        pass.with_parcel(vertex_buffer, NodeAccess::Read);
         pass.clear(Color {
             r: 0.1,
             g: 0.1,

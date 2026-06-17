@@ -172,7 +172,7 @@ class TestComputePipeline:
 
         ctx = device.create_context()
         scheme = goldy.Scheme(ctx)
-        scheme.node("fill", pipeline).declare_parcel(
+        scheme.node("fill", pipeline).with_parcel(
             parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
         ).dispatch(1, 1, 1)
         grant = scheme.grant_read(parcel)
@@ -209,7 +209,7 @@ class TestComputePipeline:
 
         ctx = device.create_context()
         scheme = goldy.Scheme(ctx)
-        scheme.node("write_tex", pipeline).declare_parcel(
+        scheme.node("write_tex", pipeline).with_parcel(
             parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
         ).dispatch(2, 2, 1)
         grant = scheme.grant_read_texture(parcel)

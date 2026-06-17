@@ -125,8 +125,8 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
     let mut graph = TaskGraph::new();
     graph
         .node("compute", &state.compute_pipeline)
-        .bind_buffer(&state.uniform_buffer, NodeAccess::Read)
-        .bind_resources_raw(&[uniform_handle.index(), texture_handle.index()])
+        .with_buffer(&state.uniform_buffer, NodeAccess::Read)
+        .with_resource_slots(&[uniform_handle.index(), texture_handle.index()])
         .dispatch(wg_x, wg_y, 1);
 
     frame.submit_compute(&graph)?;
@@ -143,7 +143,7 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
 
 **Get bindless handles** — `bindless_srv_handle()` returns the read-only descriptor index for the uniform buffer. `bindless_handle()` returns the storage-image descriptor index for the swapchain texture. These indices are passed to the shader as the `BufRO<Uniforms>` and `DirectSpatial<float4>` slots respectively.
 
-**Build the TaskGraph** — `graph.node()` creates a compute node bound to a pipeline. `bind_buffer()` declares the dependency (the uniform buffer is read). `bind_resources_raw()` passes the bindless descriptor indices as push-constant slots. `dispatch()` sets the workgroup count.
+**Build the TaskGraph** — `graph.node()` creates a compute node bound to a pipeline. `with_buffer()` declares the dependency (the uniform buffer is read). `with_resource_slots()` passes the bindless descriptor indices as push-constant slots. `dispatch()` sets the workgroup count.
 
 **Submit and present** — `frame.submit_compute(&graph)` records and submits the compute work to the GPU. `frame.present()` presents the swapchain image. The compute shader already wrote the pixels — there is no blit or copy step.
 

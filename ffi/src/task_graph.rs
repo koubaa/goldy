@@ -167,7 +167,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_begin(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel_view(
+pub unsafe extern "C" fn goldy_task_graph_render_pass_with_parcel_view(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     slot: u32,
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel_view(
         Ok(p) => p,
         Err(e) => return e,
     };
-    pass.bind_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
+    pass.with_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
     GoldyResult::Ok
 }
 
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel_view(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel(
+pub unsafe extern "C" fn goldy_task_graph_render_pass_with_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     access: GoldyNodeAccess,
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel(
         Ok(p) => p,
         Err(e) => return e,
     };
-    pass.bind_parcel(&(*parcel).inner, node_access(access));
+    pass.with_parcel(&(*parcel).inner, node_access(access));
     GoldyResult::Ok
 }
 
@@ -213,7 +213,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_parcel(
 /// # Safety
 /// All pointers must be valid. `indices` must contain `handle_count * 2` elements.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_resources_typed(
+pub unsafe extern "C" fn goldy_task_graph_render_pass_with_views(
     graph: *mut GoldyTaskGraph,
     indices: *const u32,
     handle_count: u32,
@@ -236,13 +236,13 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_bind_resources_typed(
             3 => ResourceCategory::Texture,
             4 => ResourceCategory::Sampler,
             _ => {
-                set_last_error("Invalid resource category in bind_resources_typed");
+                set_last_error("Invalid resource category in with_views");
                 return GoldyResult::InvalidArgument;
             }
         };
         handles.push(ResourceHandle::new(cat, index));
     }
-    pass.bind_resources_typed(&handles);
+    pass.with_views(&handles);
     GoldyResult::Ok
 }
 
@@ -464,7 +464,7 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_begin(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel_view(
+pub unsafe extern "C" fn goldy_task_graph_compute_node_with_parcel_view(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     slot: u32,
@@ -477,7 +477,7 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel_view(
         Ok(n) => n,
         Err(e) => return e,
     };
-    node.bind_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
+    node.with_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
     GoldyResult::Ok
 }
 
@@ -486,7 +486,7 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel_view(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel(
+pub unsafe extern "C" fn goldy_task_graph_compute_node_with_parcel(
     graph: *mut GoldyTaskGraph,
     parcel: *const GoldyParcel,
     access: GoldyNodeAccess,
@@ -498,7 +498,7 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel(
         Ok(n) => n,
         Err(e) => return e,
     };
-    node.bind_parcel(&(*parcel).inner, node_access(access));
+    node.with_parcel_access(&(*parcel).inner, node_access(access));
     GoldyResult::Ok
 }
 
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_parcel(
 /// # Safety
 /// All pointers must be valid. `indices` must contain `count` elements.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_resources_raw(
+pub unsafe extern "C" fn goldy_task_graph_compute_node_with_resource_slots(
     graph: *mut GoldyTaskGraph,
     indices: *const u32,
     count: u32,
@@ -524,7 +524,27 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_bind_resources_raw(
     } else {
         &[]
     };
-    node.bind_resources_raw(slice);
+    node.with_resource_slots(slice);
+    GoldyResult::Ok
+}
+
+/// Append one scalar virtual-main parameter for the active compute node.
+///
+/// # Safety
+/// The graph pointer must be valid and a compute node must be active.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_with_param(
+    graph: *mut GoldyTaskGraph,
+    value: u32,
+) -> GoldyResult {
+    if graph.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *graph) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    node.with_param(value);
     GoldyResult::Ok
 }
 

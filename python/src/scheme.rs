@@ -327,7 +327,7 @@ pub struct PySchemeComputeNode {
 
 #[pymethods]
 impl PySchemeComputeNode {
-    fn declare_parcel<'py>(
+    fn with_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
@@ -340,14 +340,14 @@ impl PySchemeComputeNode {
             let node = active
                 .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
-            node.declare_parcel(parcel.inner.as_ref(), node_access.into(), resource_access.into())
+            node.with_parcel(parcel.inner.as_ref(), node_access.into(), resource_access.into())
                 .ok_or_else(|| GoldyError::new_err("Parcel has no resource index for the requested access"))?;
         }
         Ok(slf)
     }
 
     #[pyo3(signature = (parcel, slot, node_access, resource_access))]
-    fn declare_parcel_view<'py>(
+    fn with_parcel_view<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
@@ -361,13 +361,25 @@ impl PySchemeComputeNode {
             let node = active
                 .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
-            node.declare_parcel_view(
+            node.with_parcel_view(
                 parcel.inner.as_ref(),
                 goldy::MosaicSlot(slot),
                 node_access.into(),
                 resource_access.into(),
             )
             .ok_or_else(|| GoldyError::new_err("Mosaic view has no resource index for the requested access"))?;
+        }
+        Ok(slf)
+    }
+
+    fn with_param<'py>(slf: PyRef<'py, Self>, py: Python<'py>, value: u32) -> PyResult<PyRef<'py, Self>> {
+        {
+            let scheme = slf.scheme.borrow(py);
+            let mut active = scheme.active_compute.borrow_mut();
+            let node = active
+                .as_mut()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
+            node.with_param(value);
         }
         Ok(slf)
     }
@@ -408,19 +420,19 @@ pub struct PySchemeRenderPass {
 
 #[pymethods]
 impl PySchemeRenderPass {
-    fn bind_parcel<'py>(
+    fn with_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.bind_parcel(parcel.inner.as_ref(), access.into());
+            pass.with_parcel(parcel.inner.as_ref(), access.into());
         })?;
         Ok(slf)
     }
 
-    fn bind_parcel_view<'py>(
+    fn with_parcel_view<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
@@ -428,7 +440,7 @@ impl PySchemeRenderPass {
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.bind_buffer_view(
+            pass.with_buffer_view(
                 parcel.inner.as_ref().view(goldy::MosaicSlot(slot)),
                 access.into(),
             );
@@ -476,7 +488,7 @@ impl PySchemeRenderPass {
         scattered_index: u32,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.bind_resources_typed(&[ResourceHandle {
+            pass.with_views(&[ResourceHandle {
                 category: ResourceCategory::Scattered,
                 index: scattered_index,
             }]);

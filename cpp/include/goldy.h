@@ -719,28 +719,6 @@ enum GoldyResult goldy_scheme_compute_node_begin(struct GoldyScheme *scheme,
                                                  const char *label,
                                                  const struct GoldyComputePipeline *pipeline);
 
-// Declare a retained parcel for the active compute node.
-//
-// Registers both the graph dependency and the bindless shader slot internally —
-// callers never pass resource indices.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_compute_node_declare_parcel(struct GoldyScheme *scheme,
-                                                          const struct GoldyParcel *parcel,
-                                                          enum GoldyNodeAccess node_access,
-                                                          enum GoldyResourceAccess resource_access);
-
-// Declare a mosaic sub-view for the active compute node.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_compute_node_declare_parcel_view(struct GoldyScheme *scheme,
-                                                               const struct GoldyParcel *parcel,
-                                                               uint32_t slot,
-                                                               enum GoldyNodeAccess node_access,
-                                                               enum GoldyResourceAccess resource_access);
-
 // Finalize the active compute node with a direct dispatch.
 //
 // # Safety
@@ -749,6 +727,34 @@ enum GoldyResult goldy_scheme_compute_node_dispatch(struct GoldyScheme *scheme,
                                                     uint32_t workgroups_x,
                                                     uint32_t workgroups_y,
                                                     uint32_t workgroups_z);
+
+// Append one scalar virtual-main parameter for the active compute node.
+//
+// # Safety
+// `scheme` must be valid and a compute node must be active.
+enum GoldyResult goldy_scheme_compute_node_with_param(struct GoldyScheme *scheme, uint32_t value);
+
+// Declare a retained parcel for the active compute node.
+//
+// Registers both the graph dependency and the bindless shader slot internally —
+// callers never pass resource indices.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_with_parcel(struct GoldyScheme *scheme,
+                                                       const struct GoldyParcel *parcel,
+                                                       enum GoldyNodeAccess node_access,
+                                                       enum GoldyResourceAccess resource_access);
+
+// Declare a mosaic sub-view for the active compute node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_with_parcel_view(struct GoldyScheme *scheme,
+                                                            const struct GoldyParcel *parcel,
+                                                            uint32_t slot,
+                                                            enum GoldyNodeAccess node_access,
+                                                            enum GoldyResourceAccess resource_access);
 
 // Copy a scheme-held render target into a present lease drawable.
 //
@@ -840,31 +846,6 @@ enum GoldyResult goldy_scheme_render_pass_begin(struct GoldyScheme *scheme,
                                                 const char *label,
                                                 const struct GoldySchemeRenderTargetLease *lease);
 
-// Declare a graph dependency on a retained parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_render_pass_bind_parcel(struct GoldyScheme *scheme,
-                                                      const struct GoldyParcel *parcel,
-                                                      enum GoldyNodeAccess access);
-
-// Declare a mosaic sub-view dependency for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_render_pass_bind_parcel_view(struct GoldyScheme *scheme,
-                                                           const struct GoldyParcel *parcel,
-                                                           uint32_t slot,
-                                                           enum GoldyNodeAccess access);
-
-// Bind typed resource handles for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_render_pass_bind_resources_typed(struct GoldyScheme *scheme,
-                                                               const uint32_t *indices,
-                                                               uint32_t handle_count);
-
 // Clear the color attachment in the active render pass.
 //
 // # Safety
@@ -933,6 +914,31 @@ enum GoldyResult goldy_scheme_render_pass_set_pipeline(struct GoldyScheme *schem
 enum GoldyResult goldy_scheme_render_pass_set_vertex_buffer_parcel(struct GoldyScheme *scheme,
                                                                    uint32_t slot,
                                                                    const struct GoldyParcel *parcel);
+
+// Declare a graph dependency on a retained parcel for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_with_parcel(struct GoldyScheme *scheme,
+                                                      const struct GoldyParcel *parcel,
+                                                      enum GoldyNodeAccess access);
+
+// Declare a mosaic sub-view dependency for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_with_parcel_view(struct GoldyScheme *scheme,
+                                                           const struct GoldyParcel *parcel,
+                                                           uint32_t slot,
+                                                           enum GoldyNodeAccess access);
+
+// Bind typed resource handles for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_with_views(struct GoldyScheme *scheme,
+                                                     const uint32_t *indices,
+                                                     uint32_t handle_count);
 
 // Destroy a render-target lease handle.
 //
@@ -1191,31 +1197,6 @@ enum GoldyResult goldy_task_graph_compute_node_begin(struct GoldyTaskGraph *grap
                                                      const char *label,
                                                      const struct GoldyComputePipeline *pipeline);
 
-// Declare a graph dependency on a retained parcel for the active compute node.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_bind_parcel(struct GoldyTaskGraph *graph,
-                                                           const struct GoldyParcel *parcel,
-                                                           enum GoldyNodeAccess access);
-
-// Declare a mosaic sub-view dependency for the active compute node.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_bind_parcel_view(struct GoldyTaskGraph *graph,
-                                                                const struct GoldyParcel *parcel,
-                                                                uint32_t slot,
-                                                                enum GoldyNodeAccess access);
-
-// Set bindless resource slot indices for the active compute node.
-//
-// # Safety
-// All pointers must be valid. `indices` must contain `count` elements.
-enum GoldyResult goldy_task_graph_compute_node_bind_resources_raw(struct GoldyTaskGraph *graph,
-                                                                  const uint32_t *indices,
-                                                                  uint32_t count);
-
 // Finalize the active compute node with a direct dispatch.
 //
 // # Safety
@@ -1224,6 +1205,38 @@ enum GoldyResult goldy_task_graph_compute_node_dispatch(struct GoldyTaskGraph *g
                                                         uint32_t workgroups_x,
                                                         uint32_t workgroups_y,
                                                         uint32_t workgroups_z);
+
+// Append one scalar virtual-main parameter for the active compute node.
+//
+// # Safety
+// The graph pointer must be valid and a compute node must be active.
+enum GoldyResult goldy_task_graph_compute_node_with_param(struct GoldyTaskGraph *graph,
+                                                          uint32_t value);
+
+// Declare a graph dependency on a retained parcel for the active compute node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_compute_node_with_parcel(struct GoldyTaskGraph *graph,
+                                                           const struct GoldyParcel *parcel,
+                                                           enum GoldyNodeAccess access);
+
+// Declare a mosaic sub-view dependency for the active compute node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_compute_node_with_parcel_view(struct GoldyTaskGraph *graph,
+                                                                const struct GoldyParcel *parcel,
+                                                                uint32_t slot,
+                                                                enum GoldyNodeAccess access);
+
+// Set bindless resource slot indices for the active compute node.
+//
+// # Safety
+// All pointers must be valid. `indices` must contain `count` elements.
+enum GoldyResult goldy_task_graph_compute_node_with_resource_slots(struct GoldyTaskGraph *graph,
+                                                                   const uint32_t *indices,
+                                                                   uint32_t count);
 
 // Add a render-target → swapchain blit node to the graph.
 //
@@ -1274,34 +1287,6 @@ uint32_t goldy_task_graph_len(const struct GoldyTaskGraph *graph);
 enum GoldyResult goldy_task_graph_render_pass_begin(struct GoldyTaskGraph *graph,
                                                     const char *label,
                                                     const struct GoldyRenderTarget *target);
-
-// Declare a graph dependency on a retained parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_bind_parcel(struct GoldyTaskGraph *graph,
-                                                          const struct GoldyParcel *parcel,
-                                                          enum GoldyNodeAccess access);
-
-// Declare a mosaic sub-view dependency for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_bind_parcel_view(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyParcel *parcel,
-                                                               uint32_t slot,
-                                                               enum GoldyNodeAccess access);
-
-// Bind typed resource handles (category + index pairs) for the active render pass.
-//
-// `indices` is a flat array of u32 values: `[category0, index0, category1, index1, ...]`.
-// Use `GoldyResourceCategory::Scattered` (0) for buffer views.
-//
-// # Safety
-// All pointers must be valid. `indices` must contain `handle_count * 2` elements.
-enum GoldyResult goldy_task_graph_render_pass_bind_resources_typed(struct GoldyTaskGraph *graph,
-                                                                   const uint32_t *indices,
-                                                                   uint32_t handle_count);
 
 // Clear the color attachment in the active render pass.
 //
@@ -1372,6 +1357,34 @@ enum GoldyResult goldy_task_graph_render_pass_set_pipeline(struct GoldyTaskGraph
 enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer_parcel(struct GoldyTaskGraph *graph,
                                                                        uint32_t slot,
                                                                        const struct GoldyParcel *parcel);
+
+// Declare a graph dependency on a retained parcel for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_with_parcel(struct GoldyTaskGraph *graph,
+                                                          const struct GoldyParcel *parcel,
+                                                          enum GoldyNodeAccess access);
+
+// Declare a mosaic sub-view dependency for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_task_graph_render_pass_with_parcel_view(struct GoldyTaskGraph *graph,
+                                                               const struct GoldyParcel *parcel,
+                                                               uint32_t slot,
+                                                               enum GoldyNodeAccess access);
+
+// Bind typed resource handles (category + index pairs) for the active render pass.
+//
+// `indices` is a flat array of u32 values: `[category0, index0, category1, index1, ...]`.
+// Use `GoldyResourceCategory::Scattered` (0) for buffer views.
+//
+// # Safety
+// All pointers must be valid. `indices` must contain `handle_count * 2` elements.
+enum GoldyResult goldy_task_graph_render_pass_with_views(struct GoldyTaskGraph *graph,
+                                                         const uint32_t *indices,
+                                                         uint32_t handle_count);
 
 // Add a CPU→GPU upload node targeting a retained buffer parcel.
 //

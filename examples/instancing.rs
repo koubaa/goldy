@@ -110,9 +110,9 @@ impl RenderState {
     ) -> PresentGrant {
         scheme
             .node("update_instances", compute_pipeline)
-            .bind_parcel(instance_buffer, NodeAccess::ReadWrite)
-            .bind_parcel(params_buffer, NodeAccess::Read)
-            .bind_views(&[
+            .with_parcel(instance_buffer, NodeAccess::ReadWrite)
+            .with_parcel(params_buffer, NodeAccess::Read)
+            .with_views(&[
                 instance_buffer.handle(ResourceAccess::Write).unwrap(),
                 params_buffer.handle(ResourceAccess::Read).unwrap(),
             ])
@@ -126,10 +126,10 @@ impl RenderState {
         };
 
         let mut pass = scheme.render_pass("instancing", scene_rt);
-        pass.bind_parcel_mut(instance_buffer, NodeAccess::Read);
+        pass.with_parcel(instance_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
-        pass.bind_views(&[instance_buffer.handle(ResourceAccess::Read).unwrap()]);
+        pass.with_views(&[instance_buffer.handle(ResourceAccess::Read).unwrap()]);
         pass.draw(0..6, 0..NUM_QUADS);
         pass.finish();
 

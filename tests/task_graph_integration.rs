@@ -172,15 +172,15 @@ fn graph_linear_chain() {
     let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&dst, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .with_buffer(&src, NodeAccess::Read)
+        .with_buffer(&dst, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
 
     graph
         .node("add_ten", &add_pipe)
-        .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .bind_resources_raw_slice(&[dst_idx])
+        .with_buffer(&dst, NodeAccess::ReadWrite)
+        .with_resource_slots_slice(&[dst_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -216,13 +216,13 @@ fn graph_independent_dispatches() {
     let mut graph = TaskGraph::new();
     graph
         .node("fill_a", &pipe_42)
-        .bind_buffer(&buf_a, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx_a])
+        .with_buffer(&buf_a, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx_a])
         .dispatch(1, 1, 1);
     graph
         .node("fill_b", &pipe_99)
-        .bind_buffer(&buf_b, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx_b])
+        .with_buffer(&buf_b, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx_b])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -288,33 +288,33 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     // A: fill src with thread index
     graph
         .node("fill_src", &fill_pipe)
-        .bind_buffer(&src, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx])
+        .with_buffer(&src, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx])
         .dispatch(1, 1, 1);
 
     // B: double src -> y
     graph
         .node("double_to_y", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&y, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, y_idx])
+        .with_buffer(&src, NodeAccess::Read)
+        .with_buffer(&y, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, y_idx])
         .dispatch(1, 1, 1);
 
     // C: double src -> z
     graph
         .node("double_to_z", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&z, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, z_idx])
+        .with_buffer(&src, NodeAccess::Read)
+        .with_buffer(&z, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, z_idx])
         .dispatch(1, 1, 1);
 
     // D: sum y + z -> out
     graph
         .node("sum_yz", &sum_pipe)
-        .bind_buffer(&y, NodeAccess::Read)
-        .bind_buffer(&z, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[y_idx, z_idx, out_idx])
+        .with_buffer(&y, NodeAccess::Read)
+        .with_buffer(&z, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[y_idx, z_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -348,14 +348,14 @@ fn graph_two_pass_chained_compute() {
     let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&dst, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .with_buffer(&src, NodeAccess::Read)
+        .with_buffer(&dst, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
     graph
         .node("add_ten", &add_pipe)
-        .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .bind_resources_raw_slice(&[dst_idx])
+        .with_buffer(&dst, NodeAccess::ReadWrite)
+        .with_resource_slots_slice(&[dst_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).unwrap();
 
@@ -381,8 +381,8 @@ fn graph_nonblocking_submit() {
     let mut graph = TaskGraph::new();
     graph
         .node("fill", &pipe)
-        .bind_buffer(&buf, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx])
+        .with_buffer(&buf, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx])
         .dispatch(1, 1, 1);
 
     let tv = graph.submit(&ctx).unwrap();
@@ -434,9 +434,9 @@ fn clear_then_dispatch_reads_zeros() {
     graph.clear_buffer(&buf, 0, 64 * 4);
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -481,9 +481,9 @@ fn write_then_dispatch_reads_uploaded_data() {
     graph.write_buffer(&buf, 0, data_bytes);
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -527,9 +527,9 @@ fn write_parcel_then_dispatch_reads_uploaded_data() {
     graph.write_parcel(&parcel, 0, data_bytes).unwrap();
     graph
         .node("copy", &copy_pipe)
-        .bind_parcel(&parcel, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, out_idx])
+        .with_parcel(&parcel, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, out_idx])
         .dispatch(1, 1, 1);
 
     let tv = graph.submit(&ctx).unwrap();
@@ -594,9 +594,9 @@ fn stress_clear_then_dispatch_large() {
     graph.clear_buffer(&buf, 0, (N * 4) as u64);
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -649,9 +649,9 @@ fn stress_many_clears_many_dispatches() {
         let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
         graph
             .node("copy", &copy_pipe)
-            .bind_buffer(src, NodeAccess::Read)
-            .bind_buffer(out, NodeAccess::Write)
-            .bind_resources_raw_slice(&[src_idx, out_idx])
+            .with_buffer(src, NodeAccess::Read)
+            .with_buffer(out, NodeAccess::Write)
+            .with_resource_slots_slice(&[src_idx, out_idx])
             .dispatch((N / 64) as u32, 1, 1);
     }
 
@@ -703,9 +703,9 @@ fn stress_clear_write_dispatch_chain() {
     graph.write_buffer(&buf, 0, data_bytes);
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -754,9 +754,9 @@ fn stress_two_phase_submission() {
         let mut graph = TaskGraph::new();
         graph
             .node("double", &double_pipe)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .bind_buffer(&tmp, NodeAccess::Write)
-            .bind_resources_raw_slice(&[buf_idx, tmp_idx])
+            .with_buffer(&buf, NodeAccess::Read)
+            .with_buffer(&tmp, NodeAccess::Write)
+            .with_resource_slots_slice(&[buf_idx, tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
         ctx.wait_until(tv).unwrap();
@@ -767,8 +767,8 @@ fn stress_two_phase_submission() {
         let mut graph = TaskGraph::new();
         graph
             .node("add_ten", &add_pipe)
-            .bind_buffer(&tmp, NodeAccess::ReadWrite)
-            .bind_resources_raw_slice(&[tmp_idx])
+            .with_buffer(&tmp, NodeAccess::ReadWrite)
+            .with_resource_slots_slice(&[tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
         graph.dispatch(&ctx).unwrap();
     }
@@ -805,8 +805,8 @@ fn stress_rapid_submissions() {
         let mut graph = TaskGraph::new();
         graph
             .node("add_ten", &add_pipe)
-            .bind_buffer(&buf, NodeAccess::ReadWrite)
-            .bind_resources_raw_slice(&[idx])
+            .with_buffer(&buf, NodeAccess::ReadWrite)
+            .with_resource_slots_slice(&[idx])
             .dispatch((N / 64) as u32, 1, 1);
         last_tv = Some(graph.submit(&ctx).unwrap());
     }
@@ -869,15 +869,15 @@ void cs_main(Scattered<uint> args, ThreadId id) {
     graph.clear_buffer(&buf, 0, (N * 4) as u64);
     graph
         .node("write_args", &write_args_pipe)
-        .bind_buffer(&args, NodeAccess::Write)
-        .bind_resources_raw_slice(&[args_idx])
+        .with_buffer(&args, NodeAccess::Write)
+        .with_resource_slots_slice(&[args_idx])
         .dispatch(1, 1, 1);
     graph
         .node("copy_indirect", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_buffer(&args, NodeAccess::Read)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&args, NodeAccess::Read)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch_indirect(&args, 0);
 
     graph.dispatch(&ctx).unwrap();
@@ -941,17 +941,17 @@ fn stress_alternating_write_dispatch() {
     graph.write_buffer(&buf, 0, bytes1);
     graph
         .node("copy1", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out1, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out1_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out1, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out1_idx])
         .dispatch((N / 64) as u32, 1, 1);
     // Phase 2: write data2 (overwrites buf) → copy to out2
     graph.write_buffer(&buf, 0, bytes2);
     graph
         .node("copy2", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out2, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out2_idx])
+        .with_buffer(&buf, NodeAccess::Read)
+        .with_buffer(&out2, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out2_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
     graph.dispatch(&ctx).unwrap();

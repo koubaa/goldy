@@ -52,7 +52,7 @@ Every `BufferView` from a pool has its own bindless descriptor. Bind it like any
 
 ```rust
 let tile_handle = tiles.handle(ResourceAccess::Write).unwrap();
-pass.bind_resources_typed(&[tile_handle]);
+pass.with_views(&[tile_handle]);
 
 // Or as a vertex/index buffer
 pass.set_vertex_buffer(0, &tiles);

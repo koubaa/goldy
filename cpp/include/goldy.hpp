@@ -1201,21 +1201,21 @@ public:
     RenderPass(RenderPass&&) = delete;
     RenderPass& operator=(RenderPass&&) = delete;
 
-    RenderPass& bind_parcel(const Parcel& parcel, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_render_pass_bind_parcel(
+    RenderPass& with_parcel(const Parcel& parcel, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_with_parcel(
             graph_.ptr_.get(), parcel.get(), static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 
-    RenderPass& bind_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_render_pass_bind_parcel_view(
+    RenderPass& with_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_with_parcel_view(
             graph_.ptr_.get(), parcel.get(), slot, static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 
     RenderPass& bind_resource_index(uint32_t scattered_index) {
         const uint32_t pair[2] = {0, scattered_index};
-        detail::throw_on_result(goldy_task_graph_render_pass_bind_resources_typed(
+        detail::throw_on_result(goldy_task_graph_render_pass_with_views(
             graph_.ptr_.get(), pair, 1));
         return *this;
     }
@@ -1640,20 +1640,25 @@ public:
     ComputeNode(ComputeNode&&) = delete;
     ComputeNode& operator=(ComputeNode&&) = delete;
 
-    ComputeNode& declare_parcel(const Parcel& parcel, NodeAccess node_access, ResourceAccess resource_access) {
-        detail::throw_on_result(goldy_scheme_compute_node_declare_parcel(
+    ComputeNode& with_parcel(const Parcel& parcel, NodeAccess node_access, ResourceAccess resource_access) {
+        detail::throw_on_result(goldy_scheme_compute_node_with_parcel(
             scheme_.ptr_.get(), parcel.get(),
             static_cast<GoldyNodeAccess>(node_access),
             static_cast<GoldyResourceAccess>(resource_access)));
         return *this;
     }
 
-    ComputeNode& declare_parcel_view(const Parcel& parcel, uint32_t slot,
+    ComputeNode& with_parcel_view(const Parcel& parcel, uint32_t slot,
                                      NodeAccess node_access, ResourceAccess resource_access) {
-        detail::throw_on_result(goldy_scheme_compute_node_declare_parcel_view(
+        detail::throw_on_result(goldy_scheme_compute_node_with_parcel_view(
             scheme_.ptr_.get(), parcel.get(), slot,
             static_cast<GoldyNodeAccess>(node_access),
             static_cast<GoldyResourceAccess>(resource_access)));
+        return *this;
+    }
+
+    ComputeNode& with_param(uint32_t value) {
+        detail::throw_on_result(goldy_scheme_compute_node_with_param(scheme_.ptr_.get(), value));
         return *this;
     }
 
@@ -1700,21 +1705,21 @@ public:
     RenderPass(RenderPass&&) = delete;
     RenderPass& operator=(RenderPass&&) = delete;
 
-    RenderPass& bind_parcel(const Parcel& parcel, NodeAccess access) {
-        detail::throw_on_result(goldy_scheme_render_pass_bind_parcel(
+    RenderPass& with_parcel(const Parcel& parcel, NodeAccess access) {
+        detail::throw_on_result(goldy_scheme_render_pass_with_parcel(
             scheme_.ptr_.get(), parcel.get(), static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 
-    RenderPass& bind_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
-        detail::throw_on_result(goldy_scheme_render_pass_bind_parcel_view(
+    RenderPass& with_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
+        detail::throw_on_result(goldy_scheme_render_pass_with_parcel_view(
             scheme_.ptr_.get(), parcel.get(), slot, static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 
     RenderPass& bind_resource_index(uint32_t scattered_index) {
         const uint32_t pair[2] = {0, scattered_index};
-        detail::throw_on_result(goldy_scheme_render_pass_bind_resources_typed(
+        detail::throw_on_result(goldy_scheme_render_pass_with_views(
             scheme_.ptr_.get(), pair, 1));
         return *this;
     }
@@ -1808,20 +1813,20 @@ public:
     ComputeNode(ComputeNode&&) = delete;
     ComputeNode& operator=(ComputeNode&&) = delete;
 
-    ComputeNode& bind_parcel(const Parcel& parcel, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_compute_node_bind_parcel(
+    ComputeNode& with_parcel(const Parcel& parcel, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_with_parcel(
             graph_.ptr_.get(), parcel.get(), static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 
-    ComputeNode& bind_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_compute_node_bind_parcel_view(
+    ComputeNode& with_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_with_parcel_view(
             graph_.ptr_.get(), parcel.get(), slot, static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 
-    ComputeNode& bind_resources_raw(std::span<const uint32_t> indices) {
-        detail::throw_on_result(goldy_task_graph_compute_node_bind_resources_raw(
+    ComputeNode& with_resource_slots(std::span<const uint32_t> indices) {
+        detail::throw_on_result(goldy_task_graph_compute_node_with_resource_slots(
             graph_.ptr_.get(), indices.data(), static_cast<uint32_t>(indices.size())));
         return *this;
     }

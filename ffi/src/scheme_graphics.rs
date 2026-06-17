@@ -137,7 +137,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_begin(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_bind_parcel_view(
+pub unsafe extern "C" fn goldy_scheme_render_pass_with_parcel_view(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     slot: u32,
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_bind_parcel_view(
         Ok(p) => p,
         Err(e) => return e,
     };
-    pass.bind_buffer_view((*parcel).inner.view(MosaicSlot(slot)), map_node_access(access));
+    pass.with_buffer_view((*parcel).inner.view(MosaicSlot(slot)), map_node_access(access));
     GoldyResult::Ok
 }
 
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_bind_parcel_view(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_bind_parcel(
+pub unsafe extern "C" fn goldy_scheme_render_pass_with_parcel(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     access: GoldyNodeAccess,
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_bind_parcel(
         Ok(p) => p,
         Err(e) => return e,
     };
-    pass.bind_parcel(&(*parcel).inner, map_node_access(access));
+    pass.with_parcel(&(*parcel).inner, map_node_access(access));
     GoldyResult::Ok
 }
 
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_bind_parcel(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_bind_resources_typed(
+pub unsafe extern "C" fn goldy_scheme_render_pass_with_views(
     scheme: *mut GoldyScheme,
     indices: *const u32,
     handle_count: u32,
@@ -203,13 +203,13 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_bind_resources_typed(
             3 => ResourceCategory::Texture,
             4 => ResourceCategory::Sampler,
             _ => {
-                set_last_error("Invalid resource category in bind_resources_typed");
+                set_last_error("Invalid resource category in with_views");
                 return GoldyResult::InvalidArgument;
             }
         };
         handles.push(ResourceHandle::new(cat, index));
     }
-    pass.bind_resources_typed(&handles);
+    pass.with_views(&handles);
     GoldyResult::Ok
 }
 

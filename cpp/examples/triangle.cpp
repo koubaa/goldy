@@ -98,7 +98,7 @@ goldy::PresentGrant record_scheme(
     const goldy::Color& bg_color) {
     {
         auto pass = scheme.render_pass("triangle", scene_rt);
-        pass.bind_parcel(vertex_buffer, goldy::NodeAccess::Read)
+        pass.with_parcel(vertex_buffer, goldy::NodeAccess::Read)
             .clear(bg_color)
             .set_pipeline(pipeline)
             .set_vertex_buffer_parcel(0, vertex_buffer)

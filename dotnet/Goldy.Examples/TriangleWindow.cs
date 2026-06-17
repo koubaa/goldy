@@ -32,7 +32,7 @@ static class TriangleWindow
         using (var pass = scheme.RenderPass("triangle", rt))
         {
             pass
-                .BindParcel(vertexParcel, NodeAccess.Read)
+                .WithParcel(vertexParcel, NodeAccess.Read)
                 .Clear(bg)
                 .SetPipeline(pipeline)
                 .SetVertexBuffer(0, vertexParcel)

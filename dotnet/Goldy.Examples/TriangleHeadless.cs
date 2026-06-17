@@ -58,7 +58,7 @@ static class TriangleHeadless
         using (var pass = scheme.RenderPass("triangle", rt))
         {
             pass
-                .BindParcel(vertexParcel, NodeAccess.Read)
+                .WithParcel(vertexParcel, NodeAccess.Read)
                 .Clear(new Color(0.1f, 0.1f, 0.2f, 1.0f))
                 .SetPipeline(pipeline)
                 .SetVertexBuffer(0, vertexParcel)

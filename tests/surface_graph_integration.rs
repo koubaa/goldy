@@ -72,7 +72,7 @@ fn render_pass_task_graph_triangle_readback() {
 
     let mut graph = TaskGraph::new();
     let mut pass = graph.render_pass("triangle", &target);
-    pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+    pass.with_buffer(&vertex_buffer, NodeAccess::Read);
     pass.clear(clear);
     pass.set_pipeline(&pipeline);
     pass.set_vertex_buffer(0, &vertex_buffer);

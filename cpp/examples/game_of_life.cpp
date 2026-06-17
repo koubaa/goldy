@@ -183,9 +183,9 @@ void run_compute_step(
     goldy::Scheme scheme(ctx);
     {
         auto node = scheme.compute_node("game_of_life", pipeline);
-        node.declare_parcel_view(
+        node.with_parcel_view(
             cells, read_slot, goldy::NodeAccess::Read, goldy::ResourceAccess::ReadWrite);
-        node.declare_parcel_view(
+        node.with_parcel_view(
             cells, write_slot, goldy::NodeAccess::Write, goldy::ResourceAccess::Write);
         node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
     }
@@ -209,7 +209,7 @@ DisplayState record_display_scheme(
         cells.mosaic_view_resource_index(current_slot, goldy::ResourceAccess::ReadWrite);
     {
         auto pass = scheme.render_pass("game_of_life_render", scene_rt);
-        pass.bind_parcel_view(cells, current_slot, goldy::NodeAccess::Read)
+        pass.with_parcel_view(cells, current_slot, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(render_pipeline)
             .bind_resource_index(cells_idx)

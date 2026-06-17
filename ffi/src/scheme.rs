@@ -228,7 +228,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_begin(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_compute_node_declare_parcel(
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     node_access: GoldyNodeAccess,
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_declare_parcel(
         Err(e) => return e,
     };
     let res_access = map_resource_access(resource_access);
-    match node.declare_parcel(&(*parcel).inner, map_node_access(node_access), res_access) {
+    match node.with_parcel(&(*parcel).inner, map_node_access(node_access), res_access) {
         Some(_) => GoldyResult::Ok,
         None => {
             set_last_error("Parcel has no resource index for the requested access");
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_declare_parcel(
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_compute_node_declare_parcel_view(
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel_view(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     slot: u32,
@@ -272,13 +272,33 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_declare_parcel_view(
     };
     let res_access = map_resource_access(resource_access);
     let mosaic_slot = MosaicSlot(slot);
-    match node.declare_parcel_view(&(*parcel).inner, mosaic_slot, map_node_access(node_access), res_access) {
+    match node.with_parcel_view(&(*parcel).inner, mosaic_slot, map_node_access(node_access), res_access) {
         Some(_) => GoldyResult::Ok,
         None => {
             set_last_error("Mosaic view has no resource index for the requested access");
             GoldyResult::InvalidArgument
         }
     }
+}
+
+/// Append one scalar virtual-main parameter for the active compute node.
+///
+/// # Safety
+/// `scheme` must be valid and a compute node must be active.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_param(
+    scheme: *mut GoldyScheme,
+    value: u32,
+) -> GoldyResult {
+    if scheme.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *scheme) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    node.with_param(value);
+    GoldyResult::Ok
 }
 
 /// Finalize the active compute node with a direct dispatch.

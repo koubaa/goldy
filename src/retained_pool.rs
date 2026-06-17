@@ -537,7 +537,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("a", &pipeline)
-            .bind_parcel(&parcel, crate::task_graph::NodeAccess::Read)
+            .with_parcel(&parcel, crate::task_graph::NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let binding = graph.ir().nodes[0].bindings[0].resource;

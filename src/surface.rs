@@ -942,8 +942,8 @@ mod tests {
         let sc = graph.declare_swapchain_output();
         graph
             .node("fine", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
-            .bind_swapchain_output(sc, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_swapchain_output(sc, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let mut frame = surface.submit_graph(&mut graph).unwrap();
@@ -979,8 +979,8 @@ mod tests {
         let sc = graph.declare_swapchain_output();
         graph
             .node("fine", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
-            .bind_swapchain_output(sc, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_swapchain_output(sc, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let acquired = surface.begin().unwrap();

@@ -228,20 +228,20 @@ pub struct PyRenderPass {
 
 #[pymethods]
 impl PyRenderPass {
-    fn bind_parcel<'py>(
+    fn with_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.bind_parcel(parcel.inner.as_ref(), access.into());
+            pass.with_parcel(parcel.inner.as_ref(), access.into());
         })?;
         Ok(slf)
     }
 
     /// Declare a mosaic sub-view dependency for this render pass.
-    fn bind_parcel_view<'py>(
+    fn with_parcel_view<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
@@ -250,16 +250,16 @@ impl PyRenderPass {
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
             let view = parcel.inner.view(goldy::MosaicSlot(slot));
-            pass.bind_buffer_view(view, access.into());
+            pass.with_buffer_view(view, access.into());
         })?;
         Ok(slf)
     }
 
     /// Graph dependency + shader push-constant slot for a retained parcel (broadcast or scattered).
     ///
-    /// Combines [`Self::bind_parcel`] with [`RenderPassRecord::bind_resources_typed`] using the
+    /// Combines [`Self::with_parcel`] with [`RenderPassRecord::with_views`] using the
     /// parcel's typed [`ResourceHandle`] (correct category for broadcast uniforms).
-    fn bind_parcel_shader_resource<'py>(
+    fn with_parcel_shader_resource<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
@@ -271,8 +271,8 @@ impl PyRenderPass {
             .handle(resource_access)
             .ok_or_else(|| GoldyError::new_err("bindless resource handle unavailable"))?;
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.bind_parcel(parcel.inner.as_ref(), access.into());
-            pass.bind_resources_typed(&[handle]);
+            pass.with_parcel(parcel.inner.as_ref(), access.into());
+            pass.with_views(&[handle]);
         })?;
         Ok(slf)
     }
@@ -281,7 +281,7 @@ impl PyRenderPass {
     fn bind_resource_index<'py>(slf: PyRef<'py, Self>, py: Python<'py>, index: u32) -> PyResult<PyRef<'py, Self>> {
         let handle = ResourceHandle::new(ResourceCategory::Scattered, index);
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.bind_resources_typed(&[handle]);
+            pass.with_views(&[handle]);
         })?;
         Ok(slf)
     }
@@ -447,20 +447,20 @@ pub struct PyComputeNode {
 
 #[pymethods]
 impl PyComputeNode {
-    fn bind_parcel<'py>(
+    fn with_parcel<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_compute(|node| {
-            node.bind_parcel(parcel.inner.as_ref(), access.into());
+            node.with_parcel(parcel.inner.as_ref(), access.into());
         })?;
         Ok(slf)
     }
 
     /// Declare a mosaic sub-view dependency for this compute node.
-    fn bind_parcel_view<'py>(
+    fn with_parcel_view<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         parcel: &PyParcel,
@@ -469,18 +469,18 @@ impl PyComputeNode {
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_compute(|node| {
             let view = parcel.inner.view(goldy::MosaicSlot(slot));
-            node.bind_buffer_view(view, access.into());
+            node.with_buffer_view(view, access.into());
         })?;
         Ok(slf)
     }
 
-    fn bind_resources_raw<'py>(
+    fn with_resource_slots<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         indices: Vec<u32>,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_compute(|node| {
-            node.bind_resources_raw(&indices);
+            node.with_resource_slots(&indices);
         })?;
         Ok(slf)
     }

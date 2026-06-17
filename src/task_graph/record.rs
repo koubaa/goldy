@@ -35,7 +35,7 @@ impl RenderPassRecord {
         }
     }
 
-    pub fn bind_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -44,7 +44,7 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -52,7 +52,7 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn bind_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -148,14 +148,14 @@ impl RenderPassRecord {
         self.draw(0, 6, 0, count)
     }
 
-    pub fn bind_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+    pub fn with_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
         self.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesRaw {
             indices: indices.to_vec(),
             user: Vec::new(),
@@ -164,7 +164,7 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
+    pub fn with_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesTyped {
             handles: handles.to_vec(),
         });
@@ -236,16 +236,12 @@ impl ComputeNodeRecord {
         }
     }
 
-    pub fn bind_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
-        self.stamp_targets.push(parcel.stamp_handle());
-        self.bindings.push(ResourceBinding {
-            resource: parcel.resource_id(),
-            access,
-        });
-        self
+    /// Declare graph dependency on a parcel without resolving a shader slot.
+    pub fn with_parcel_access(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.register_parcel_binding(parcel, access)
     }
 
-    pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -253,7 +249,11 @@ impl ComputeNodeRecord {
         self
     }
 
-    pub fn bind_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+        self.register_buffer_view_binding(view, access)
+    }
+
+    fn register_buffer_view_binding(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -265,7 +265,7 @@ impl ComputeNodeRecord {
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         self.resource_slots = indices.to_vec();
         self
     }
@@ -275,23 +275,23 @@ impl ComputeNodeRecord {
     /// This is the preferred entry-point for language-binding consumers. It resolves the
     /// bindless slot internally so callers never handle raw resource indices.
     /// Returns `None` if the parcel has no slot registered for `resource_access`.
-    pub fn declare_parcel(
+    pub fn with_parcel(
         &mut self,
         parcel: &crate::Parcel,
         node_access: NodeAccess,
         resource_access: crate::types::ResourceAccess,
     ) -> Option<&mut Self> {
         let idx = parcel.resource_index(resource_access)?;
-        self.bind_parcel(parcel, node_access);
+        self.register_parcel_binding(parcel, node_access);
         self.resource_slots.push(idx);
         Some(self)
     }
 
     /// Declare a mosaic sub-view as a graph dependency and shader binding slot atomically.
     ///
-    /// Like [`Self::declare_parcel`] but for a single mosaic tile. Returns `None` if the
+    /// Like [`Self::with_parcel`] but for a single mosaic tile. Returns `None` if the
     /// view has no slot for `resource_access`.
-    pub fn declare_parcel_view(
+    pub fn with_parcel_view(
         &mut self,
         parcel: &crate::Parcel,
         slot: crate::MosaicSlot,
@@ -299,9 +299,29 @@ impl ComputeNodeRecord {
         resource_access: crate::types::ResourceAccess,
     ) -> Option<&mut Self> {
         let idx = parcel.mosaic_view_resource_index(slot, resource_access)?;
-        self.bind_buffer_view(parcel.view(slot), node_access);
+        self.register_buffer_view_binding(parcel.view(slot), node_access);
         self.resource_slots.push(idx);
         Some(self)
+    }
+
+    /// Append one scalar virtual-main parameter (region B).
+    pub fn with_param(&mut self, value: u32) -> &mut Self {
+        use crate::backend::shared::MAX_USER_SLOTS;
+        assert!(
+            self.user_slots.len() < MAX_USER_SLOTS,
+            "with_param: at most {MAX_USER_SLOTS} scalar params per dispatch"
+        );
+        self.user_slots.push(value);
+        self
+    }
+
+    pub(crate) fn register_parcel_binding(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
     }
 
     pub fn commit_dispatch(self, graph: &mut TaskGraph, x: u32, y: u32, z: u32) {
