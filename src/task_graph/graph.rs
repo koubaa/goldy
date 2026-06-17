@@ -1015,9 +1015,12 @@ impl IrSubmitState {
 
     pub fn register_parcel_stamp(&mut self, parcel: &crate::Parcel) {
         let stamp = parcel.stamp_handle();
-        self.stamp_targets.push(stamp.clone());
         if let Some(key) = ResourceKey::from_resource_id(parcel.resource_id()) {
+            // Keyed parcels are stamped precisely via apply_resource_sync_updates.
             self.resource_stamps.insert(key, stamp);
+        } else {
+            // Unkeyed resources (leases, etc.) still use the legacy conservative stamp.
+            self.stamp_targets.push(stamp);
         }
     }
 
