@@ -1,5 +1,6 @@
 use crate::device::Device;
 use crate::error::{check, non_null, Result};
+use crate::parcel::Parcel;
 use crate::sys::{self, GoldyBuffer};
 use crate::types::ResourceAccess;
 
@@ -42,6 +43,11 @@ impl Buffer {
             sys::goldy_buffer_unit_read_to_cpu(self.ptr, unit, device.as_ptr(), output.as_mut_ptr(), output.len())
         })?;
         Ok(output)
+    }
+
+    /// Borrow one bindable field unit as an owned parcel handle.
+    pub fn field(&self, unit: u32) -> Result<Parcel> {
+        Parcel::from_ptr(unsafe { sys::goldy_buffer_field(self.as_ptr(), unit) })
     }
 
     pub(crate) fn as_ptr(&self) -> *const GoldyBuffer {

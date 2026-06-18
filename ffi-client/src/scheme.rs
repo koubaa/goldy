@@ -150,6 +150,10 @@ impl Scheme {
         unsafe { sys::goldy_scheme_is_dirty(self.ptr) }
     }
 
+    pub fn begin_rerecord(&mut self) {
+        unsafe { sys::goldy_scheme_begin_rerecord(self.ptr) }
+    }
+
     pub fn replay_stats(&self) -> Result<ReplayStats> {
         let mut stats = GoldyReplayStats::default();
         check(unsafe { sys::goldy_scheme_replay_stats(self.ptr, &mut stats) })?;

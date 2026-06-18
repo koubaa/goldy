@@ -131,6 +131,10 @@ pub unsafe fn goldy_buffer_unit_read_to_cpu(
     (lib().goldy_buffer_unit_read_to_cpu)(buffer, unit, device, output, output_size)
 }
 
+pub unsafe fn goldy_buffer_field(buffer: *const GoldyBuffer, unit: u32) -> *mut GoldyParcel {
+    (lib().goldy_buffer_field)(buffer, unit)
+}
+
 pub unsafe fn goldy_parcel_destroy(parcel: *mut GoldyParcel) {
     (lib().goldy_parcel_destroy)(parcel)
 }
@@ -516,6 +520,10 @@ pub unsafe fn goldy_scheme_len(scheme: *const GoldyScheme) -> u32 {
 
 pub unsafe fn goldy_scheme_is_dirty(scheme: *const GoldyScheme) -> bool {
     (lib().goldy_scheme_is_dirty)(scheme)
+}
+
+pub unsafe fn goldy_scheme_begin_rerecord(scheme: *mut GoldyScheme) {
+    (lib().goldy_scheme_begin_rerecord)(scheme)
 }
 
 pub unsafe fn goldy_scheme_replay_stats(scheme: *const GoldyScheme, out_stats: *mut GoldyReplayStats) -> GoldyResult {

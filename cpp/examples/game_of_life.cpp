@@ -1,5 +1,9 @@
 /**
- * Game of Life — hybrid Scheme in a window (compute ping-pong + render + present).
+ * Game of Life — hybrid Scheme in a window (compute + render + present).
+ *
+ * Ping-pong cell grids live in one retained record buffer (fields "a" / "b").
+ * Each simulation step runs an ephemeral compute scheme; the display scheme is
+ * rebuilt when the active field flips.
  *
  * Build: cmake --build build --target game_of_life
  */
@@ -35,6 +39,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -46,14 +51,15 @@ constexpr size_t CELL_COUNT = static_cast<size_t>(GRID_WIDTH) * GRID_HEIGHT;
 constexpr uint32_t WORKGROUPS_X = (GRID_WIDTH + 7) / 8;
 constexpr uint32_t WORKGROUPS_Y = (GRID_HEIGHT + 7) / 8;
 
-constexpr uint32_t SLOT_A = 0;
-constexpr uint32_t SLOT_B = 1;
-
-struct DisplayState {
-    goldy::Scheme scheme;
-    goldy::SchemeRenderTargetLease scene_rt;
-    goldy::PresentGrant present;
-};
+uint32_t field_unit(const char* name) {
+    if (std::string_view(name) == "a") {
+        return 0;
+    }
+    if (std::string_view(name) == "b") {
+        return 1;
+    }
+    throw std::runtime_error(std::string("unknown field: ") + name);
+}
 
 struct GpuState {
     goldy::Context ctx;
@@ -66,7 +72,9 @@ struct GpuState {
     goldy::RenderPipeline render_pipeline;
     goldy::SwapchainPool swapchain;
     goldy::PresentLease screen;
-    DisplayState display;
+    goldy::Scheme display_scheme;
+    goldy::SchemeRenderTargetLease scene_rt;
+    goldy::PresentGrant present;
     bool use_buffer_a = true;
     uint64_t frame_count = 0;
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
@@ -177,58 +185,67 @@ goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow
 void run_compute_step(
     const goldy::Context& ctx,
     const goldy::Buffer& cells,
-    uint32_t read_slot,
-    uint32_t write_slot,
+    const char* read_field,
+    const char* write_field,
     const goldy::ComputePipeline& pipeline) {
+    goldy::Parcel read = cells.field(field_unit(read_field));
+    goldy::Parcel write = cells.field(field_unit(write_field));
     goldy::Scheme scheme(ctx);
     {
         auto node = scheme.compute_node("game_of_life", pipeline);
-        node.with_field(
-            cells, read_slot, goldy::NodeAccess::Read, goldy::ResourceAccess::ReadWrite);
-        node.with_field(
-            cells, write_slot, goldy::NodeAccess::Write, goldy::ResourceAccess::Write);
+        node.with_parcel(read, goldy::NodeAccess::Read, goldy::ResourceAccess::ReadWrite);
+        node.with_parcel(write, goldy::NodeAccess::Write, goldy::ResourceAccess::Write);
         node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
     }
     scheme.submit();
 }
 
-DisplayState record_display_scheme(
-    const goldy::Context& ctx,
-    const goldy::SwapchainPool& swapchain,
+goldy::PresentGrant record_display_scheme(
+    goldy::Scheme& scheme,
     const goldy::Buffer& cells,
-    uint32_t current_slot,
+    const char* current_field,
     const goldy::RenderPipeline& render_pipeline,
+    goldy::SchemeRenderTargetLease& scene_rt,
     const goldy::PresentLease& screen) {
-    goldy::Scheme scheme(ctx);
-    auto [width, height] = swapchain.size();
-    width = std::max(width, 1u);
-    height = std::max(height, 1u);
-    goldy::SchemeRenderTargetLease scene_rt =
-        scheme.lease_render_target(width, height, swapchain.format());
-    const uint32_t cells_idx =
-        cells.unit_resource_index(current_slot, goldy::ResourceAccess::ReadWrite);
+    const uint32_t unit = field_unit(current_field);
+    goldy::Parcel current = cells.field(unit);
+    const uint32_t cells_idx = cells.unit_resource_index(unit, goldy::ResourceAccess::ReadWrite);
     {
         auto pass = scheme.render_pass("game_of_life_render", scene_rt);
-        pass.with_field(cells, current_slot, goldy::NodeAccess::Read)
+        pass.with_parcel(current, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(render_pipeline)
             .bind_resource_index(cells_idx)
             .draw_fullscreen();
     }
     scheme.copy_to_present(scene_rt, screen);
-    goldy::PresentGrant present = scheme.grant_present(screen);
-    return DisplayState{std::move(scheme), std::move(scene_rt), std::move(present)};
+    return scheme.grant_present(screen);
+}
+
+void rebuild_display_scheme(GpuState& gpu) {
+    const char* current_field = gpu.use_buffer_a ? "a" : "b";
+    gpu.display_scheme.begin_rerecord();
+    auto [width, height] = gpu.swapchain.size();
+    width = std::max(width, 1u);
+    height = std::max(height, 1u);
+    gpu.scene_rt = gpu.display_scheme.lease_render_target(width, height, gpu.swapchain.format());
+    gpu.present = record_display_scheme(
+        gpu.display_scheme,
+        gpu.cells,
+        current_field,
+        gpu.render_pipeline,
+        gpu.scene_rt,
+        gpu.screen);
 }
 
 GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     const auto initial = create_initial_state();
-    const std::vector<uint32_t> zeros(CELL_COUNT, 0);
 
     goldy::Context ctx(device);
     goldy::RetainedPool pool(device);
     auto record = pool.record();
     record.emplace_named("a", initial);
-    record.emplace_named("b", zeros);
+    record.emplace_named("b", initial);
     goldy::Buffer cells = record.build(pool);
 
     goldy::ShaderModule compute_shader(device, find_shader("game_of_life.slang"));
@@ -244,8 +261,14 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
     render_desc.depth_enabled = false;
     goldy::RenderPipeline render_pipeline(device, render_shader, render_shader, render_desc);
 
-    DisplayState display = record_display_scheme(
-        ctx, swapchain, cells, SLOT_A, render_pipeline, screen);
+    goldy::Scheme display_scheme(ctx);
+    auto [width, height] = swapchain.size();
+    width = std::max(width, 1u);
+    height = std::max(height, 1u);
+    goldy::SchemeRenderTargetLease scene_rt =
+        display_scheme.lease_render_target(width, height, swapchain.format());
+    goldy::PresentGrant present =
+        record_display_scheme(display_scheme, cells, "a", render_pipeline, scene_rt, screen);
 
     return GpuState{
         std::move(ctx),
@@ -258,7 +281,9 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
         std::move(render_pipeline),
         std::move(swapchain),
         std::move(screen),
-        std::move(display),
+        std::move(display_scheme),
+        std::move(scene_rt),
+        std::move(present),
         true,
         0,
         std::chrono::steady_clock::now(),
@@ -267,6 +292,8 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
 }
 
 void render_frame(GpuState& gpu) {
+    ++gpu.frame_count;
+
     const auto now = std::chrono::steady_clock::now();
     const bool should_update =
         std::chrono::duration_cast<std::chrono::milliseconds>(now - gpu.last_update).count() > 33;
@@ -274,20 +301,16 @@ void render_frame(GpuState& gpu) {
     if (should_update) {
         gpu.last_update = now;
 
-        const uint32_t read_slot = gpu.use_buffer_a ? SLOT_A : SLOT_B;
-        const uint32_t write_slot = gpu.use_buffer_a ? SLOT_B : SLOT_A;
+        const char* read_field = gpu.use_buffer_a ? "a" : "b";
+        const char* write_field = gpu.use_buffer_a ? "b" : "a";
 
-        run_compute_step(gpu.ctx, gpu.cells, read_slot, write_slot, gpu.compute_pipeline);
+        run_compute_step(gpu.ctx, gpu.cells, read_field, write_field, gpu.compute_pipeline);
         gpu.use_buffer_a = !gpu.use_buffer_a;
-
-        const uint32_t current_slot = gpu.use_buffer_a ? SLOT_A : SLOT_B;
-        gpu.display = record_display_scheme(
-            gpu.ctx, gpu.swapchain, gpu.cells, current_slot, gpu.render_pipeline, gpu.screen);
+        rebuild_display_scheme(gpu);
     }
 
-    auto submission = gpu.display.scheme.submit();
-    gpu.display.present.consume(submission);
-    ++gpu.frame_count;
+    auto submission = gpu.display_scheme.submit();
+    gpu.present.consume(submission);
 }
 
 void handle_resize(GpuState& gpu, GLFWwindow* window) {
@@ -311,9 +334,7 @@ void handle_resize(GpuState& gpu, GLFWwindow* window) {
     gpu.render_pipeline =
         goldy::RenderPipeline(gpu.device, gpu.render_shader, gpu.render_shader, render_desc);
 
-    const uint32_t current_slot = gpu.use_buffer_a ? SLOT_A : SLOT_B;
-    gpu.display = record_display_scheme(
-        gpu.ctx, gpu.swapchain, gpu.cells, current_slot, gpu.render_pipeline, gpu.screen);
+    rebuild_display_scheme(gpu);
 }
 
 void print_perf(const GpuState& gpu) {
@@ -332,7 +353,6 @@ int main() {
     try {
         std::cout << "Goldy Game of Life (C++ / Scheme + Present)\n";
         std::cout << "===========================================\n";
-        std::cout << "Scheme: compute ping-pong + render + copy_to_present\n";
         std::cout << "Press Escape or close the window to exit\n\n";
 
         if (!glfwInit()) {

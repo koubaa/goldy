@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Conway's Game of Life — hybrid Scheme in a window (compute + render + present).
 
+Ping-pong cell grids live in one retained record buffer (fields `"a"` / `"b"`).
+Each simulation step runs an ephemeral compute scheme; the display scheme is
+rebuilt when the active field flips.
+
 Requires: pip install glfw
 
 Usage:
@@ -23,9 +27,6 @@ GRID_HEIGHT = 128
 CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
 WORKGROUPS_X = (GRID_WIDTH + 7) // 8
 WORKGROUPS_Y = (GRID_HEIGHT + 7) // 8
-
-SLOT_A = 0
-SLOT_B = 1
 
 SHADERS_DIR = Path(__file__).resolve().parents[2] / "shaders"
 
@@ -97,46 +98,59 @@ def create_initial_state() -> np.ndarray:
 def run_compute_step(
     ctx: goldy.Context,
     cells: goldy.Buffer,
-    read_slot: int,
-    write_slot: int,
+    read_field: str,
+    write_field: str,
     pipeline: goldy.ComputePipeline,
 ) -> None:
     scheme = goldy.Scheme(ctx)
     node = scheme.node("game_of_life", pipeline)
     (
-        node.with_buffer_unit(cells, read_slot, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
-        .with_buffer_unit(cells, write_slot, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        node.with_field(cells, read_field, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .with_field(cells, write_field, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
     scheme.submit()
 
 
 def record_display_scheme(
-    ctx: goldy.Context,
-    swapchain: goldy.SwapchainPool,
+    scheme: goldy.Scheme,
     cells: goldy.Buffer,
-    current_slot: int,
+    current_field: str,
     render_pipeline: goldy.RenderPipeline,
+    scene_rt: goldy.SchemeRenderTargetLease,
     screen: goldy.PresentLease,
-) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.PresentGrant]:
-    scheme = goldy.Scheme(ctx)
-    rt = scheme.lease_render_target(
-        max(swapchain.width, 1),
-        max(swapchain.height, 1),
-        swapchain.format,
-    )
-    render_idx = cells.unit_resource_index(current_slot, goldy.ResourceAccess.READ_WRITE)
-    with scheme.render_pass("game_of_life_render", rt) as rp:
+) -> goldy.PresentGrant:
+    render_idx = cells.field(current_field).resource_index(goldy.ResourceAccess.READ_WRITE)
+    with scheme.render_pass("game_of_life_render", scene_rt) as rp:
         (
-            rp.with_buffer_unit(cells, current_slot, goldy.NodeAccess.READ)
+            rp.with_field(cells, current_field, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .bind_resource_index(render_idx)
             .draw_fullscreen()
         )
-    scheme.copy_to_present(rt, screen)
-    present = scheme.grant_present(screen)
-    return scheme, rt, present
+    scheme.copy_to_present(scene_rt, screen)
+    return scheme.grant_present(screen)
+
+
+def rebuild_display_scheme(
+    display_scheme: goldy.Scheme,
+    swapchain: goldy.SwapchainPool,
+    cells: goldy.Buffer,
+    current_field: str,
+    render_pipeline: goldy.RenderPipeline,
+    screen: goldy.PresentLease,
+) -> tuple[goldy.SchemeRenderTargetLease, goldy.PresentGrant]:
+    display_scheme.begin_rerecord()
+    scene_rt = display_scheme.lease_render_target(
+        max(swapchain.width, 1),
+        max(swapchain.height, 1),
+        swapchain.format,
+    )
+    present = record_display_scheme(
+        display_scheme, cells, current_field, render_pipeline, scene_rt, screen
+    )
+    return scene_rt, present
 
 
 def main() -> int:
@@ -165,11 +179,10 @@ def main() -> int:
     screen = swapchain.lease()
 
     initial = create_initial_state()
-    zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
     retained_pool = goldy.RetainedPool(device)
     record = retained_pool.acquire_record()
-    record.emplace(initial)
-    record.emplace(zeros)
+    record.emplace_field("a", initial)
+    record.emplace_field("b", initial)
     cells = record.build(retained_pool)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
@@ -185,12 +198,17 @@ def main() -> int:
         ),
     )
 
-    use_buffer_a = True
-    current_slot = SLOT_A
-    display_scheme, scene_rt, present = record_display_scheme(
-        ctx, swapchain, cells, current_slot, render_pipeline, screen
+    display_scheme = goldy.Scheme(ctx)
+    scene_rt = display_scheme.lease_render_target(
+        max(swapchain.width, 1),
+        max(swapchain.height, 1),
+        swapchain.format,
+    )
+    present = record_display_scheme(
+        display_scheme, cells, "a", render_pipeline, scene_rt, screen
     )
 
+    use_buffer_a = True
     frame_count = 0
     last_update = time.monotonic()
     frame_limit = demo_frame_limit()
@@ -211,11 +229,12 @@ def main() -> int:
                             topology=goldy.PrimitiveTopology.TRIANGLE_LIST,
                         ),
                     )
-                    display_scheme, scene_rt, present = record_display_scheme(
-                        ctx,
+                    current_field = "a" if use_buffer_a else "b"
+                    scene_rt, present = rebuild_display_scheme(
+                        display_scheme,
                         swapchain,
                         cells,
-                        current_slot,
+                        current_field,
                         render_pipeline,
                         screen,
                     )
@@ -223,21 +242,19 @@ def main() -> int:
             now = time.monotonic()
             if (now - last_update) > 0.033:
                 last_update = now
-                read_slot = SLOT_A if use_buffer_a else SLOT_B
-                write_slot = SLOT_B if use_buffer_a else SLOT_A
-                run_compute_step(ctx, cells, read_slot, write_slot, compute_pipeline)
+                read_field = "a" if use_buffer_a else "b"
+                write_field = "b" if use_buffer_a else "a"
+                run_compute_step(ctx, cells, read_field, write_field, compute_pipeline)
                 use_buffer_a = not use_buffer_a
-                new_slot = SLOT_A if use_buffer_a else SLOT_B
-                if new_slot != current_slot:
-                    current_slot = new_slot
-                    display_scheme, scene_rt, present = record_display_scheme(
-                        ctx,
-                        swapchain,
-                        cells,
-                        current_slot,
-                        render_pipeline,
-                        screen,
-                    )
+                current_field = "a" if use_buffer_a else "b"
+                scene_rt, present = rebuild_display_scheme(
+                    display_scheme,
+                    swapchain,
+                    cells,
+                    current_field,
+                    render_pipeline,
+                    screen,
+                )
 
             submission = display_scheme.submit()
             present.consume(submission)

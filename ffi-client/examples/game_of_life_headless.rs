@@ -1,6 +1,7 @@
 //! Headless Game of Life — hybrid Scheme (compute + render) smoke test.
 //!
-//! Mirrors `goldy/ffi/tests/task_graph_game_of_life.rs` and native scheme patterns.
+//! Mirrors native scheme patterns: one retained record buffer (`"a"` / `"b"`), field
+//! parcels bound via `with_parcel`.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
@@ -13,9 +14,6 @@ use goldy_ffi_client::{
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: usize = (GRID_WIDTH * GRID_HEIGHT) as usize;
-
-const UNIT_A: u32 = 0;
-const UNIT_B: u32 = 1;
 
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
@@ -69,20 +67,23 @@ fn main() -> goldy_ffi_client::Result<()> {
         None,
     )?;
 
+    let read = cells.field(0)?;
+    let write = cells.field(1)?;
     let mut scheme = Scheme::new(&ctx)?;
 
     {
         let mut node = scheme.compute_node("game_of_life", &compute_pipeline);
-        node.with_buffer_unit(&cells, UNIT_A, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.with_buffer_unit(&cells, UNIT_B, NodeAccess::Write, ResourceAccess::Write);
+        node.with_parcel(&read, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.with_parcel(&write, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
     let rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
     {
-        let render_idx = cells.unit_resource_index(UNIT_B, ResourceAccess::ReadWrite)?;
+        let current = cells.field(1)?;
+        let render_idx = cells.unit_resource_index(1, ResourceAccess::ReadWrite)?;
         let mut pass = scheme.render_pass("game_of_life_render", &rt);
-        pass.with_buffer_unit(&cells, UNIT_B, NodeAccess::Read);
+        pass.with_parcel(&current, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
         pass.bind_resources_typed(&[ResourceHandle {
@@ -98,7 +99,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let submission = scheme.submit()?;
     let pixels = grant.consume(&submission)?;
 
-    let bytes = cells.unit_read_to_cpu(UNIT_B, &device)?;
+    let bytes = cells.unit_read_to_cpu(1, &device)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&bytes);
     assert_eq!(count_live(cells_out), 4, "still-life block should remain 4 live cells");
 

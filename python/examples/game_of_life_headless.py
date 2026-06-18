@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Headless Game of Life — hybrid Scheme (compute + render + readback).
 
-Mirrors `goldy/ffi-client/examples/game_of_life_headless.rs`. No GLFW/display required.
+Mirrors native scheme patterns: one retained record buffer (`"a"` / `"b"`), field
+parcels bound via `with_field`.
 
 Usage:
     python game_of_life_headless.py
@@ -19,9 +20,6 @@ GRID_HEIGHT = 128
 CELL_COUNT = GRID_WIDTH * GRID_HEIGHT
 WORKGROUPS_X = (GRID_WIDTH + 7) // 8
 WORKGROUPS_Y = (GRID_HEIGHT + 7) // 8
-
-SLOT_A = 0
-SLOT_B = 1
 
 SHADERS_DIR = Path(__file__).resolve().parents[2] / "shaders"
 
@@ -51,11 +49,10 @@ def main() -> int:
     print(f"Backend: {instance.backend_type}")
 
     initial = initial_cells()
-    zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
     retained_pool = goldy.RetainedPool(device)
     record = retained_pool.acquire_record()
-    record.emplace(initial)
-    record.emplace(zeros)
+    record.emplace_field("a", initial)
+    record.emplace_field("b", initial)
     cells = record.build(retained_pool)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
@@ -83,16 +80,16 @@ def main() -> int:
     scheme = goldy.Scheme(ctx)
     node = scheme.node("game_of_life", compute_pipeline)
     (
-        node.with_buffer_unit(cells, SLOT_A, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
-        .with_buffer_unit(cells, SLOT_B, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        node.with_field(cells, "a", goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .with_field(cells, "b", goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
 
     rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
-    render_idx = cells.unit_resource_index(SLOT_B, goldy.ResourceAccess.READ_WRITE)
+    render_idx = cells.field("b").resource_index(goldy.ResourceAccess.READ_WRITE)
     with scheme.render_pass("game_of_life_render", rt) as rp:
         (
-            rp.with_buffer_unit(cells, SLOT_B, goldy.NodeAccess.READ)
+            rp.with_field(cells, "b", goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .bind_resource_index(render_idx)
@@ -104,9 +101,7 @@ def main() -> int:
     submission = scheme.submit()
     pixels = grant.consume(submission)
 
-    cells_out = np.frombuffer(
-        cells.unit_read_to_cpu(SLOT_B, device), dtype=np.uint32
-    )
+    cells_out = np.frombuffer(cells.unit_read_to_cpu(1, device), dtype=np.uint32)
     assert cells_out.shape == (CELL_COUNT,)
     live = count_live(cells_out)
     assert live == 4, f"still-life block should remain 4 live cells, got {live}"

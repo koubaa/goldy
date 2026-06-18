@@ -1,6 +1,8 @@
 //! Conway's Game of Life — hybrid Scheme via goldy-ffi-client.
 //!
-//! Compute ping-pong on a partitioned buffer + offscreen render + copy-to-present.
+//! Ping-pong cell grids live in one retained record buffer (fields `"a"` / `"b"`).
+//! Each simulation step runs an ephemeral compute scheme; the display scheme is
+//! rebuilt when the active field flips.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
@@ -23,11 +25,16 @@ const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: usize = (GRID_WIDTH * GRID_HEIGHT) as usize;
 
-const UNIT_A: u32 = 0;
-const UNIT_B: u32 = 1;
-
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
+
+fn field_unit(name: &str) -> u32 {
+    match name {
+        "a" => 0,
+        "b" => 1,
+        other => panic!("unknown field {other:?}"),
+    }
+}
 
 fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Result<SwapchainPool> {
     let handle = window
@@ -121,15 +128,17 @@ fn create_initial_state() -> Vec<u32> {
 fn run_compute_step(
     ctx: &Context,
     cells: &Buffer,
-    read_unit: u32,
-    write_unit: u32,
+    read_field: &str,
+    write_field: &str,
     pipeline: &ComputePipeline,
 ) -> goldy_ffi_client::Result<()> {
+    let read = cells.field(field_unit(read_field))?;
+    let write = cells.field(field_unit(write_field))?;
     let mut scheme = Scheme::new(ctx)?;
     {
         let mut node = scheme.compute_node("game_of_life", pipeline);
-        node.with_buffer_unit(cells, read_unit, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.with_buffer_unit(cells, write_unit, NodeAccess::Write, ResourceAccess::Write);
+        node.with_parcel(&read, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.with_parcel(&write, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
     scheme.submit()?;
@@ -137,20 +146,19 @@ fn run_compute_step(
 }
 
 fn record_display_scheme(
-    ctx: &Context,
-    swapchain: &SwapchainPool,
+    scheme: &mut Scheme,
     cells: &Buffer,
-    current_unit: u32,
+    current_field: &str,
     render_pipeline: &RenderPipeline,
+    scene_rt: &SchemeRenderTargetLease,
     screen: &goldy_ffi_client::PresentLease,
-) -> goldy_ffi_client::Result<(Scheme, SchemeRenderTargetLease, PresentGrant)> {
-    let mut scheme = Scheme::new(ctx)?;
-    let (width, height) = swapchain.size();
-    let rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)?;
-    let render_idx = cells.unit_resource_index(current_unit, ResourceAccess::ReadWrite)?;
+) -> goldy_ffi_client::Result<PresentGrant> {
+    let unit = field_unit(current_field);
+    let current = cells.field(unit)?;
+    let render_idx = cells.unit_resource_index(unit, ResourceAccess::ReadWrite)?;
     {
-        let mut pass = scheme.render_pass("game_of_life_render", &rt);
-        pass.with_buffer_unit(cells, current_unit, NodeAccess::Read);
+        let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
+        pass.with_parcel(&current, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
         pass.bind_resources_typed(&[ResourceHandle {
@@ -160,61 +168,35 @@ fn record_display_scheme(
         pass.draw_fullscreen();
         pass.finish_recorded();
     }
-    scheme.copy_to_present(&rt, screen)?;
-    let present = scheme.grant_present(screen)?;
-    Ok((scheme, rt, present))
+    scheme.copy_to_present(scene_rt, screen)?;
+    scheme.grant_present(screen)
 }
 
-struct App {
-    instance: Instance,
-    ctx: Option<Context>,
-    device: Option<goldy_ffi_client::Device>,
-    window: Option<Arc<Window>>,
-    swapchain: Option<SwapchainPool>,
-    screen: Option<goldy_ffi_client::PresentLease>,
-    scene_rt: Option<SchemeRenderTargetLease>,
-    display_scheme: Option<Scheme>,
-    present: Option<PresentGrant>,
-    compute_pipeline: Option<ComputePipeline>,
-    render_pipeline: Option<RenderPipeline>,
-    _retained_pool: Option<RetainedPool>,
-    cells: Option<Buffer>,
+struct RenderState {
+    window: Arc<Window>,
+    ctx: Context,
+    swapchain: SwapchainPool,
+    screen: goldy_ffi_client::PresentLease,
+    scene_rt: SchemeRenderTargetLease,
+    display_scheme: Scheme,
+    present: PresentGrant,
+    compute_pipeline: ComputePipeline,
+    render_pipeline: RenderPipeline,
+    _retained_pool: RetainedPool,
+    cells: Buffer,
     use_buffer_a: bool,
     frame_count: u32,
     last_update: std::time::Instant,
     start_time: std::time::Instant,
 }
 
-impl App {
-    fn new() -> anyhow::Result<Self> {
-        Ok(Self {
-            instance: Instance::new()?,
-            ctx: None,
-            device: None,
-            window: None,
-            swapchain: None,
-            screen: None,
-            scene_rt: None,
-            display_scheme: None,
-            present: None,
-            compute_pipeline: None,
-            render_pipeline: None,
-            _retained_pool: None,
-            cells: None,
-            use_buffer_a: true,
-            frame_count: 0,
-            last_update: std::time::Instant::now(),
-            start_time: std::time::Instant::now(),
-        })
-    }
-
-    fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
-        let device = self
-            .instance
+impl RenderState {
+    fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        let instance = Instance::new()?;
+        let device = instance
             .request_adapter(&RequestAdapterOptions::default())?
             .request_device(&DeviceDescriptor::default())?;
         let ctx = Context::new(&device)?;
-
         let swapchain = swapchain_from_window(&ctx, window.as_ref())?;
         let screen = swapchain.lease()?;
 
@@ -236,28 +218,68 @@ impl App {
             },
         )?;
 
-        let current_unit = if self.use_buffer_a { UNIT_A } else { UNIT_B };
-        let (display_scheme, scene_rt, present) =
-            record_display_scheme(&ctx, &swapchain, &cells, current_unit, &render_pipeline, &screen)?;
+        let mut display_scheme = Scheme::new(&ctx)?;
+        let (width, height) = swapchain.size();
+        let scene_rt = display_scheme.lease_render_target(
+            width.max(1),
+            height.max(1),
+            swapchain.format(),
+            None::<DepthFormat>,
+        )?;
+        let present = record_display_scheme(
+            &mut display_scheme,
+            &cells,
+            "a",
+            &render_pipeline,
+            &scene_rt,
+            &screen,
+        )?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
+        println!("Features Gosper Glider Gun + random cells");
         println!("Press Escape or close window to exit");
 
-        self.ctx = Some(ctx);
-        self.device = Some(device);
-        self.swapchain = Some(swapchain);
-        self.screen = Some(screen);
-        self.scene_rt = Some(scene_rt);
-        self.display_scheme = Some(display_scheme);
-        self.present = Some(present);
-        self.compute_pipeline = Some(compute_pipeline);
-        self.render_pipeline = Some(render_pipeline);
-        self._retained_pool = Some(retained_pool);
-        self.cells = Some(cells);
+        Ok(Self {
+            window,
+            ctx,
+            swapchain,
+            screen,
+            scene_rt,
+            display_scheme,
+            present,
+            compute_pipeline,
+            render_pipeline,
+            _retained_pool: retained_pool,
+            cells,
+            use_buffer_a: true,
+            frame_count: 0,
+            last_update: std::time::Instant::now(),
+            start_time: std::time::Instant::now(),
+        })
+    }
+
+    fn rebuild_display_scheme(&mut self) -> goldy_ffi_client::Result<()> {
+        let current_field = if self.use_buffer_a { "a" } else { "b" };
+        self.display_scheme.begin_rerecord();
+        let (width, height) = self.swapchain.size();
+        self.scene_rt = self.display_scheme.lease_render_target(
+            width.max(1),
+            height.max(1),
+            self.swapchain.format(),
+            None::<DepthFormat>,
+        )?;
+        self.present = record_display_scheme(
+            &mut self.display_scheme,
+            &self.cells,
+            current_field,
+            &self.render_pipeline,
+            &self.scene_rt,
+            &self.screen,
+        )?;
         Ok(())
     }
 
-    fn render_frame(&mut self) -> anyhow::Result<()> {
+    fn render(&mut self) -> goldy_ffi_client::Result<()> {
         self.frame_count += 1;
 
         let now = std::time::Instant::now();
@@ -266,69 +288,26 @@ impl App {
         if should_update {
             self.last_update = now;
 
-            let (read_unit, write_unit) = if self.use_buffer_a {
-                (UNIT_A, UNIT_B)
-            } else {
-                (UNIT_B, UNIT_A)
-            };
-
+            let (read_field, write_field) = if self.use_buffer_a { ("a", "b") } else { ("b", "a") };
             run_compute_step(
-                self.ctx.as_ref().unwrap(),
-                self.cells.as_ref().unwrap(),
-                read_unit,
-                write_unit,
-                self.compute_pipeline.as_ref().unwrap(),
+                &self.ctx,
+                &self.cells,
+                read_field,
+                write_field,
+                &self.compute_pipeline,
             )?;
             self.use_buffer_a = !self.use_buffer_a;
-
-            let current_unit = if self.use_buffer_a { UNIT_A } else { UNIT_B };
-            let (display_scheme, scene_rt, present) = record_display_scheme(
-                self.ctx.as_ref().unwrap(),
-                self.swapchain.as_ref().unwrap(),
-                self.cells.as_ref().unwrap(),
-                current_unit,
-                self.render_pipeline.as_ref().unwrap(),
-                self.screen.as_ref().unwrap(),
-            )?;
-            self.display_scheme = Some(display_scheme);
-            self.scene_rt = Some(scene_rt);
-            self.present = Some(present);
+            self.rebuild_display_scheme()?;
         }
 
-        let submission = self.display_scheme.as_mut().unwrap().submit()?;
-        self.present.as_ref().unwrap().consume(&submission)?;
+        let submission = self.display_scheme.submit()?;
+        self.present.consume(&submission)?;
+        self.window.request_redraw();
         Ok(())
-    }
-
-    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width == 0 || new_size.height == 0 {
-            return;
-        }
-        if let Some(swapchain) = &mut self.swapchain {
-            if let Err(e) = swapchain.resize(new_size.width, new_size.height) {
-                tracing::error!("Failed to resize swapchain: {e}");
-                return;
-            }
-            if let (Some(ctx), Some(cells), Some(render_pipeline), Some(screen)) = (
-                self.ctx.as_ref(),
-                self.cells.as_ref(),
-                self.render_pipeline.as_ref(),
-                self.screen.as_ref(),
-            ) {
-                let current_unit = if self.use_buffer_a { UNIT_A } else { UNIT_B };
-                if let Ok((scheme, rt, present)) =
-                    record_display_scheme(ctx, swapchain, cells, current_unit, render_pipeline, screen)
-                {
-                    self.display_scheme = Some(scheme);
-                    self.scene_rt = Some(rt);
-                    self.present = Some(present);
-                }
-            }
-        }
     }
 }
 
-impl Drop for App {
+impl Drop for RenderState {
     fn drop(&mut self) {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         let fps = if elapsed > 0.0 {
@@ -343,9 +322,14 @@ impl Drop for App {
     }
 }
 
+#[derive(Default)]
+struct App {
+    state: Option<RenderState>,
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.state.is_none() {
             let window = Arc::new(
                 event_loop
                     .create_window(
@@ -356,9 +340,9 @@ impl ApplicationHandler for App {
                     .expect("Failed to create window"),
             );
 
-            match self.init_gpu(&window) {
-                Ok(()) => {
-                    self.window = Some(window.clone());
+            match RenderState::new(window.clone()) {
+                Ok(state) => {
+                    self.state = Some(state);
                     window.request_redraw();
                 }
                 Err(e) => {
@@ -371,39 +355,34 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                self.window = None;
-                self.swapchain = None;
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                    self.window = None;
-                    self.swapchain = None;
                     event_loop.exit();
                 }
             }
             WindowEvent::Resized(size) => {
-                self.handle_resize(size);
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if let Some(state) = &mut self.state {
+                    if size.width > 0 && size.height > 0 {
+                        if let Err(e) = state.swapchain.resize(size.width, size.height) {
+                            tracing::error!("Failed to resize swapchain: {e}");
+                            return;
+                        }
+                        if let Err(e) = state.rebuild_display_scheme() {
+                            tracing::error!("Failed to rebuild display scheme: {e}");
+                        }
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
-                if self.swapchain.is_none() {
-                    return;
-                }
-                if let Err(e) = self.render_frame() {
-                    tracing::error!("Render error: {e}");
-                }
-                if demo_frame_limit().is_some_and(|n| self.frame_count >= n) {
-                    self.window = None;
-                    self.swapchain = None;
-                    event_loop.exit();
-                    return;
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if let Some(state) = &mut self.state {
+                    if let Err(e) = state.render() {
+                        tracing::error!("Render error: {e}");
+                    }
+                    if demo_frame_limit().is_some_and(|n| state.frame_count >= n) {
+                        event_loop.exit();
+                        return;
+                    }
                 }
             }
             _ => {}
@@ -424,6 +403,6 @@ fn main() -> anyhow::Result<()> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new()?)?;
+    event_loop.run_app(&mut App::default())?;
     Ok(())
 }

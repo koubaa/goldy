@@ -19,6 +19,15 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
+    /// Clear recorded nodes and retention cache while preserving scheme identity.
+    /// </summary>
+    public void BeginRerecord()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        NativeMethods.SchemeBeginRerecord(Handle);
+    }
+
+    /// <summary>
     /// Begin recording a compute dispatch node. Finish with <see cref="SchemeComputeNodeScope.Dispose"/>.
     /// </summary>
     public SchemeComputeNodeScope ComputeNode(string label, ComputePipeline pipeline)

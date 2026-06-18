@@ -662,6 +662,14 @@ struct GoldySampler *goldy_sampler_create_default(const struct GoldyDevice *devi
 // The pointer must be valid and not used after this call.
 void goldy_sampler_destroy(struct GoldySampler *sampler);
 
+// Clear recorded nodes and retention cache while preserving scheme identity.
+//
+// Use before re-recording structural nodes after a resize or ping-pong flip.
+//
+// # Safety
+// `scheme` must be valid.
+void goldy_scheme_begin_rerecord(struct GoldyScheme *scheme);
+
 // Begin recording a compute dispatch node.
 //
 // # Safety

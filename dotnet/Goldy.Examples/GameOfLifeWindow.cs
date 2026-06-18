@@ -5,6 +5,7 @@ namespace Goldy.Examples;
 
 /// <summary>
 /// Windowed Conway's Game of Life — hybrid Scheme (compute ping-pong + render + present).
+/// Ping-pong cell grids live in one retained record buffer (fields "a" / "b").
 /// </summary>
 static class GameOfLifeWindow
 {
@@ -14,47 +15,66 @@ static class GameOfLifeWindow
     const uint WorkgroupsX = (GridWidth + 7) / 8;
     const uint WorkgroupsY = (GridHeight + 7) / 8;
 
+    static uint FieldUnit(string name) => name == "a" ? 0u : 1u;
+
     static void RunComputeStep(
         Context ctx,
-        Buffer readBuf,
-        Buffer writeBuf,
+        Buffer cells,
+        string readField,
+        string writeField,
         ComputePipeline pipeline)
     {
+        using var read = cells.Field(FieldUnit(readField));
+        using var write = cells.Field(FieldUnit(writeField));
         using var scheme = new Scheme(ctx);
         using (var node = scheme.ComputeNode("game_of_life", pipeline))
         {
             node
-                .WithField(readBuf, 0, NodeAccess.Read, ResourceAccess.ReadWrite)
-                .WithField(writeBuf, 0, NodeAccess.Write, ResourceAccess.Write);
+                .WithParcel(read, NodeAccess.Read, ResourceAccess.ReadWrite)
+                .WithParcel(write, NodeAccess.Write, ResourceAccess.Write);
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
         using var _ = scheme.Submit();
     }
 
-    static (Scheme scheme, SchemeRenderTargetLease rt, PresentGrant present) RecordDisplayScheme(
-        Context ctx,
+    static PresentGrant RecordDisplayScheme(
+        Scheme scheme,
+        Buffer cells,
+        string currentField,
+        RenderPipeline renderPipeline,
+        SchemeRenderTargetLease sceneRt,
+        PresentLease screen)
+    {
+        using var current = cells.Field(FieldUnit(currentField));
+        using (var pass = scheme.RenderPass("game_of_life_render", sceneRt))
+        {
+            pass
+                .WithParcel(current, NodeAccess.Read)
+                .Clear(Color.Black)
+                .SetPipeline(renderPipeline)
+                .BindResourceIndex(cells.UnitResourceIndex(FieldUnit(currentField), ResourceAccess.ReadWrite))
+                .DrawFullscreen();
+        }
+        scheme.CopyToPresent(sceneRt, screen);
+        return scheme.GrantPresent(screen);
+    }
+
+    static (SchemeRenderTargetLease rt, PresentGrant present) RebuildDisplayScheme(
+        Scheme displayScheme,
         SwapchainPool swapchain,
-        Buffer currentBuf,
+        Buffer cells,
+        string currentField,
         RenderPipeline renderPipeline,
         PresentLease screen)
     {
-        var scheme = new Scheme(ctx);
-        var rt = scheme.LeaseRenderTarget(
+        displayScheme.BeginRerecord();
+        var rt = displayScheme.LeaseRenderTarget(
             Math.Max(swapchain.Width, 1u),
             Math.Max(swapchain.Height, 1u),
             swapchain.Format);
-        using (var pass = scheme.RenderPass("game_of_life_render", rt))
-        {
-            pass
-                .WithField(currentBuf, 0, NodeAccess.Read)
-                .Clear(Color.Black)
-                .SetPipeline(renderPipeline)
-                .BindResourceIndex(currentBuf.UnitResourceIndex(0, ResourceAccess.Read))
-                .DrawFullscreen();
-        }
-        scheme.CopyToPresent(rt, screen);
-        var present = scheme.GrantPresent(screen);
-        return (scheme, rt, present);
+        var present = RecordDisplayScheme(
+            displayScheme, cells, currentField, renderPipeline, rt, screen);
+        return (rt, present);
     }
 
     public static unsafe void Run()
@@ -93,10 +113,11 @@ static class GameOfLifeWindow
             var renderSrc = ShaderPaths.Load("game_of_life_render.slang");
 
             var initial = CreateInitialState();
-            var zeros = new uint[CellCount];
             using var retainedPool = new RetainedPool(device);
-            using var bufA = retainedPool.AcquireBuffer<uint>(initial, BufferKind.Scattered);
-            using var bufB = retainedPool.AcquireBuffer<uint>(zeros, BufferKind.Scattered);
+            using var record = retainedPool.Record();
+            record.EmplaceField<uint>("a", initial);
+            record.EmplaceField<uint>("b", initial);
+            using var cells = record.Build(retainedPool);
 
             using var computeShader = new ShaderModule(device, computeSrc);
             using var renderShader = new ShaderModule(device, renderSrc);
@@ -112,9 +133,13 @@ static class GameOfLifeWindow
                 });
 
             var useBufferA = true;
-            var currentBuf = bufA;
-            var (displayScheme, sceneRt, present) = RecordDisplayScheme(
-                ctx, swapchain, currentBuf, renderPipeline, screen);
+            var displayScheme = new Scheme(ctx);
+            var sceneRt = displayScheme.LeaseRenderTarget(
+                Math.Max(swapchain.Width, 1u),
+                Math.Max(swapchain.Height, 1u),
+                swapchain.Format);
+            var present = RecordDisplayScheme(
+                displayScheme, cells, "a", renderPipeline, sceneRt, screen);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -128,9 +153,9 @@ static class GameOfLifeWindow
                         swapchain.Resize(w, h);
                         sceneRt.Dispose();
                         present.Dispose();
-                        displayScheme.Dispose();
-                        (displayScheme, sceneRt, present) = RecordDisplayScheme(
-                            ctx, swapchain, currentBuf, renderPipeline, screen);
+                        var currentField = useBufferA ? "a" : "b";
+                        (sceneRt, present) = RebuildDisplayScheme(
+                            displayScheme, swapchain, cells, currentField, renderPipeline, screen);
                     }
                 }
 
@@ -138,20 +163,15 @@ static class GameOfLifeWindow
                 if ((now - lastUpdate).TotalMilliseconds > 33)
                 {
                     lastUpdate = now;
-                    var readBuf = useBufferA ? bufA : bufB;
-                    var writeBuf = useBufferA ? bufB : bufA;
-                    RunComputeStep(ctx, readBuf, writeBuf, computePipeline);
+                    var readField = useBufferA ? "a" : "b";
+                    var writeField = useBufferA ? "b" : "a";
+                    RunComputeStep(ctx, cells, readField, writeField, computePipeline);
                     useBufferA = !useBufferA;
-                    var newBuf = useBufferA ? bufA : bufB;
-                    if (!ReferenceEquals(newBuf, currentBuf))
-                    {
-                        currentBuf = newBuf;
-                        sceneRt.Dispose();
-                        present.Dispose();
-                        displayScheme.Dispose();
-                        (displayScheme, sceneRt, present) = RecordDisplayScheme(
-                            ctx, swapchain, currentBuf, renderPipeline, screen);
-                    }
+                    var currentField = useBufferA ? "a" : "b";
+                    sceneRt.Dispose();
+                    present.Dispose();
+                    (sceneRt, present) = RebuildDisplayScheme(
+                        displayScheme, swapchain, cells, currentField, renderPipeline, screen);
                 }
 
                 using var submission = displayScheme.Submit();

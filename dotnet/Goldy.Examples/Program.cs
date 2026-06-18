@@ -21,6 +21,10 @@ class Program
             case "gol":
                 Goldy.Examples.GameOfLifeWindow.Run();
                 break;
+            case "gameoflife-headless":
+            case "gol-headless":
+                Goldy.Examples.GameOfLifeHeadless.Run();
+                break;
             default:
                 PrintUsage();
                 break;
@@ -37,5 +41,6 @@ class Program
         Console.WriteLine("  triangle           - Windowed triangle (Scheme + present, default)");
         Console.WriteLine("  triangle-headless  - Headless triangle + readback (CI)");
         Console.WriteLine("  gameoflife         - Windowed Conway's Game of Life (hybrid Scheme)");
+        Console.WriteLine("  gameoflife-headless - Headless Game of Life smoke test (CI)");
     }
 }

@@ -174,6 +174,13 @@ impl PyScheme {
         })
     }
 
+    /// Clear recorded nodes and retention cache while preserving scheme identity.
+    fn begin_rerecord(&self) -> PyResult<()> {
+        self.ensure_no_active_recorder()?;
+        self.inner.borrow_mut().begin_rerecord();
+        Ok(())
+    }
+
     #[pyo3(signature = (width, height, format, depth_format=None))]
     fn lease_render_target(
         &self,
