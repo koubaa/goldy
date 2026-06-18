@@ -18,12 +18,14 @@
 
 #[path = "common/submission.rs"]
 mod submission;
+#[path = "common/upload.rs"]
+mod upload;
 
 use goldy::{
     types::{BufferFlags, ResourceAccess},
-    write_to_parcel, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance,
-    NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags,
-    TextureFormat, TextureKind,
+    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
+    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
+    TextureKind,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -59,7 +61,8 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 ///
 /// The worker scheme (`records == 1`; `resubmit_hits == N-1` on non-Metal backends) observes each frame's
 /// data through the shared input parcel — serialized by queue order on the same context.
-/// This is the pattern [`goldy::write_to_parcel`] packages as a property-only dispatch.
+/// Upload uses a persistent upload [`Scheme`] (same `scheme_id` each frame) so foreign topology
+/// registration does not churn the retained worker.
 #[test]
 fn upload_graph_feeds_retained_worker_without_rerecord() {
     let device = make_device();
@@ -91,9 +94,10 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
 
     let grant = worker.grant_read(&output).expect("grant_read");
     const FRAMES: u32 = 3;
+    let mut upload = Scheme::new(&ctx);
     for submission in 1..=FRAMES {
-        // Separate upload submission per frame via the property-only-dispatch API.
-        write_to_parcel(&ctx, &input, 0, bytemuck::cast_slice(&[submission; 8])).expect("write_to_parcel");
+        // Separate upload submission per frame via a persistent upload scheme.
+        upload::upload_parcel(&mut upload, &input, bytemuck::cast_slice(&[submission; 8])).expect("upload_parcel");
 
         let frame = worker.submit().expect("submit worker");
         for v in read_grant_u32(&grant, &frame, 8) {

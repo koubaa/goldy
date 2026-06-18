@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
-    use crate::buffer::{Allocation, BufferPool};
+    use crate::buffer::BufferPool;
     use crate::device::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::types::{BufferFlags, ResourceAccess};
     use crate::{BufferKind, DeviceType, NodeAccess};

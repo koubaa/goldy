@@ -427,7 +427,7 @@ fn clear_then_dispatch_reads_zeros() {
     // Build a graph: clear buf → copy buf→out
     // The analyzer must insert a barrier between the clear and the copy.
     let mut graph = TaskGraph::new();
-    graph.clear_parcel(&*buf, 0, 64 * 4);
+    graph.clear_parcel(&*buf, 0, 64 * 4).unwrap();
     graph
         .node("copy", &copy_pipe)
         .with_buffer(&*buf, NodeAccess::Read)
@@ -474,7 +474,7 @@ fn write_then_dispatch_reads_uploaded_data() {
 
     // Build a graph: write known_data into buf → copy buf→out
     let mut graph = TaskGraph::new();
-    graph.write_parcel(&*buf, 0, data_bytes);
+    graph.write_parcel(&*buf, 0, data_bytes).unwrap();
     graph
         .node("copy", &copy_pipe)
         .with_buffer(&*buf, NodeAccess::Read)
@@ -587,7 +587,7 @@ fn stress_clear_then_dispatch_large() {
     let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
-    graph.clear_parcel(&*buf, 0, (N * 4) as u64);
+    graph.clear_parcel(&*buf, 0, (N * 4) as u64).unwrap();
     graph
         .node("copy", &copy_pipe)
         .with_buffer(&*buf, NodeAccess::Read)
@@ -695,8 +695,8 @@ fn stress_clear_write_dispatch_chain() {
     let data_bytes: Vec<u8> = bytemuck::cast_slice(&known_data).to_vec();
 
     let mut graph = TaskGraph::new();
-    graph.clear_parcel(&*buf, 0, (N * 4) as u64);
-    graph.write_parcel(&*buf, 0, data_bytes);
+    graph.clear_parcel(&*buf, 0, (N * 4) as u64).unwrap();
+    graph.write_parcel(&*buf, 0, data_bytes).unwrap();
     graph
         .node("copy", &copy_pipe)
         .with_buffer(&*buf, NodeAccess::Read)
@@ -862,7 +862,7 @@ void cs_main(Scattered<uint> args, ThreadId id) {
     let args_idx = args.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
-    graph.clear_parcel(&*buf, 0, (N * 4) as u64);
+    graph.clear_parcel(&*buf, 0, (N * 4) as u64).unwrap();
     graph
         .node("write_args", &write_args_pipe)
         .with_buffer(&*args, NodeAccess::Write)
@@ -874,7 +874,8 @@ void cs_main(Scattered<uint> args, ThreadId id) {
         .with_buffer(&*out, NodeAccess::Write)
         .with_buffer(&*args, NodeAccess::Read)
         .with_resource_slots_slice(&[buf_idx, out_idx])
-        .dispatch_indirect_parcel(&*args, 0);
+        .dispatch_indirect_parcel(&*args, 0)
+        .unwrap();
 
     graph.dispatch(&ctx).unwrap();
 
@@ -934,7 +935,7 @@ fn stress_alternating_write_dispatch() {
 
     let mut graph = TaskGraph::new();
     // Phase 1: write data1 → copy to out1
-    graph.write_parcel(&*buf, 0, bytes1);
+    graph.write_parcel(&*buf, 0, bytes1).unwrap();
     graph
         .node("copy1", &copy_pipe)
         .with_buffer(&*buf, NodeAccess::Read)
@@ -942,7 +943,7 @@ fn stress_alternating_write_dispatch() {
         .with_resource_slots_slice(&[buf_idx, out1_idx])
         .dispatch((N / 64) as u32, 1, 1);
     // Phase 2: write data2 (overwrites buf) → copy to out2
-    graph.write_parcel(&*buf, 0, bytes2);
+    graph.write_parcel(&*buf, 0, bytes2).unwrap();
     graph
         .node("copy2", &copy_pipe)
         .with_buffer(&*buf, NodeAccess::Read)

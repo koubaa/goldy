@@ -5,11 +5,12 @@
 
 #[path = "common/submission.rs"]
 mod submission;
+#[path = "common/upload.rs"]
+mod upload;
 
 use goldy::{
-    types::ResourceAccess, write_to_parcel, BackendType, BufferKind, ComputePipeline, Context, Device,
-    DeviceDescriptor, Grant, Instance, NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, Submission,
+    types::ResourceAccess, BackendType, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant,
+    Instance, NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -176,8 +177,9 @@ fn retained_reader_observes_independent_writer_across_resubmits() {
 
     let (mut reader, grant) = retained_copy_reader(&ctx, &pipe, &src, &dst);
 
+    let mut upload = Scheme::new(&ctx);
     for value in [11u32, 22, 33] {
-        write_to_parcel(&ctx, &src, 0, bytemuck::bytes_of(&value)).expect("upload src");
+        upload::upload_parcel(&mut upload, &src, bytemuck::bytes_of(&value)).expect("upload src");
         let submission = reader.submit().expect("retained resubmit");
         assert_eq!(
             read_u32(&grant, &submission),
@@ -209,13 +211,14 @@ fn retained_waw_overwrites_independent_upload() {
         .dispatch(1, 1, 1);
     let grant = worker.grant_read(&src).expect("grant");
 
-    for upload in [99u32, 88, 77] {
-        write_to_parcel(&ctx, &src, 0, bytemuck::bytes_of(&upload)).expect("upload src");
+    let mut upload_scheme = Scheme::new(&ctx);
+    for upload_value in [99u32, 88, 77] {
+        upload::upload_parcel(&mut upload_scheme, &src, bytemuck::bytes_of(&upload_value)).expect("upload src");
         let submission = worker.submit().expect("retained resubmit");
         assert_eq!(
             read_u32(&grant, &submission),
             42,
-            "retained overwrite must win over upload (upload={upload})"
+            "retained overwrite must win over upload (upload={upload_value})"
         );
     }
 
@@ -240,8 +243,9 @@ fn retained_reader_cross_context_observes_independent_writer() {
 
     let (mut reader, grant) = retained_copy_reader(&ctx_consumer, &pipe, &src, &dst);
 
+    let mut upload = Scheme::new(&ctx_producer);
     for value in [5u32, 15, 25] {
-        write_to_parcel(&ctx_producer, &src, 0, bytemuck::bytes_of(&value)).expect("upload src");
+        upload::upload_parcel(&mut upload, &src, bytemuck::bytes_of(&value)).expect("upload src");
         let submission = reader.submit().expect("cross-context resubmit");
         assert_eq!(
             read_u32(&grant, &submission),

@@ -435,7 +435,7 @@ fn test_compute_batched_clear_before_dispatch() {
     let output_buf = test_alloc_buffer_with_data(&device, &vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
-    graph.clear_parcel(&*input_buf, 0, 0);
+    graph.clear_parcel(&*input_buf, 0, 0).unwrap();
     graph
         .node("n0", &pipeline)
         .with_resources(&[&input_buf, &output_buf])
@@ -478,7 +478,7 @@ fn test_compute_clear_between_dispatches() {
         .node("n0", &copy_pipeline)
         .with_resources(&[&input_buf, &output_buf])
         .dispatch(1, 1, 1);
-    graph.clear_parcel(&*output_buf, 0, 0);
+    graph.clear_parcel(&*output_buf, 0, 0).unwrap();
     graph
         .node("n1", &inc_pipeline)
         .with_resources(&[&output_buf])
@@ -522,7 +522,8 @@ fn test_compute_dispatch_indirect() {
     graph
         .node("n0", &pipeline)
         .with_resources(&[&data_buf])
-        .dispatch_indirect_parcel(&*args_buf, 0);
+        .dispatch_indirect_parcel(&*args_buf, 0)
+        .unwrap();
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
@@ -551,7 +552,8 @@ fn test_dispatch_indirect_invalid_buffer() {
         graph
             .node("indirect", &pipeline)
             .with_resources(&[&data_buf])
-            .dispatch_indirect_parcel(&*temp, 0);
+            .dispatch_indirect_parcel(&*temp, 0)
+            .unwrap();
     }
     let result = graph.dispatch(&ctx);
     assert!(
@@ -2002,7 +2004,7 @@ fn test_regular_buffer_write_then_copy() {
 
     let mut graph = TaskGraph::new();
 
-    graph.clear_parcel(&*scratch, 0, byte_size);
+    graph.clear_parcel(&*scratch, 0, byte_size).unwrap();
 
     graph
         .node("write_iota", &write_pipeline)
