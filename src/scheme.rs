@@ -316,6 +316,7 @@ enum GrantReadKind {
 enum GrantSource {
     Buffer {
         source: BufferHandle,
+        src_offset: u64,
         #[allow(dead_code)]
         source_backing: Arc<Allocation>,
         byte_size: u64,
@@ -875,9 +876,15 @@ impl Scheme {
                     staging_handles.push(staging);
                 }
                 match &grant.source {
-                    GrantSource::Buffer { source, byte_size, .. } => {
+                    GrantSource::Buffer {
+                        source,
+                        src_offset,
+                        byte_size,
+                        ..
+                    } => {
                         copy_cmds.push(GpuCommand::CopyBuffer {
                             src: *source,
+                            src_offset: *src_offset,
                             dst: staging,
                             size: *byte_size,
                         });
@@ -1115,6 +1122,7 @@ impl Scheme {
         self.grants.push(GrantInfo {
             source: GrantSource::Buffer {
                 source,
+                src_offset: parcel.source_offset(),
                 source_backing,
                 byte_size,
             },

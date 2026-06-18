@@ -1242,12 +1242,17 @@ pub(super) fn submit(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2);
                     }
                 }
-                GpuCommand::CopyBuffer { src, dst, size } => {
+                GpuCommand::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    size,
+                } => {
                     let _tz = tracy_zone!("vk.copy_buffer");
                     let (src_buf, dst_buf) = {
                         let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                         let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                        if *size > src_state.size || *size > dst_state.size {
+                        if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
                             anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                         }
                         (src_state.buffer, dst_state.buffer)
@@ -1262,7 +1267,7 @@ pub(super) fn submit(
                             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         let region = vk::BufferCopy {
-                            src_offset: 0,
+                            src_offset: *src_offset,
                             dst_offset: 0,
                             size: *size,
                         };
@@ -2167,12 +2172,17 @@ fn submit_graph_impl(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep2);
                     }
                 }
-                GpuCommand::CopyBuffer { src, dst, size } => {
+                GpuCommand::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    size,
+                } => {
                     let _tz = tracy_zone!("vk.copy_buffer");
                     let (src_buf, dst_buf) = {
                         let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                         let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                        if *size > src_state.size || *size > dst_state.size {
+                        if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
                             anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                         }
                         (src_state.buffer, dst_state.buffer)
@@ -2187,7 +2197,7 @@ fn submit_graph_impl(
                             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         let region = vk::BufferCopy {
-                            src_offset: 0,
+                            src_offset: *src_offset,
                             dst_offset: 0,
                             size: *size,
                         };

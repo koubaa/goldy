@@ -171,7 +171,7 @@ impl RetainedPool {
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
         Ok(Buffer::from_partitioned(
-            pool,
+            Arc::new(pool.into_backing()),
             views,
             field_names,
             guard,

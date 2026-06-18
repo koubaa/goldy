@@ -2115,3 +2115,112 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
     let expected: Vec<u32> = input.iter().map(|v| v + OFFSET).collect();
     assert_eq!(result, expected);
 }
+
+// ---------------------------------------------------------------------------
+// Migrated from compute_integration.rs — partitioned buffer field binding
+// ---------------------------------------------------------------------------
+
+/// Two fields in one buffer. Shader copies from field A to field B.
+#[test]
+fn scheme_buffer_view_copy_between_sub_regions() {
+    use goldy::{ordinal, Init};
+
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let pipeline = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, COPY_SHADER).expect("compile shader"),
+    )
+    .expect("create pipeline");
+
+    const N: usize = 64;
+    let mut src = vec![0u32; N];
+    for (i, slot) in src.iter_mut().enumerate() {
+        *slot = (i + 1) as u32;
+    }
+    let dst = vec![0u32; N];
+
+    let mut pool = RetainedPool::new(Arc::new(device));
+    let cells = pool
+        .acquire_record([ordinal(Init::data(&src)), ordinal(Init::data(&dst))])
+        .expect("acquire_record");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("n0", &pipeline)
+        .with_parcel(&cells[0], NodeAccess::ReadWrite)
+        .with_parcel(&cells[1], NodeAccess::Write)
+        .with_views(&[
+            cells[0].handle(ResourceAccess::ReadWrite).expect("src"),
+            cells[1].handle(ResourceAccess::Write).expect("dst"),
+        ])
+        .dispatch(1, 1, 1);
+    let grant = scheme.grant_read(&cells[1]).expect("grant_read");
+    let submission = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &submission, N);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(
+            val,
+            (i + 1) as u32,
+            "dest[{}]: expected {} (copied from source field), got {}",
+            i,
+            i + 1,
+            val
+        );
+    }
+}
+
+/// Shader doubles values in one field — the sibling field must be untouched.
+#[test]
+fn scheme_buffer_view_isolation() {
+    use goldy::{ordinal, Init};
+
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let pipeline = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, IN_PLACE_DOUBLE_SHADER).expect("compile shader"),
+    )
+    .expect("create pipeline");
+
+    const N: usize = 64;
+    let sentinel = vec![100u32; N];
+    let mut work = vec![0u32; N];
+    for (i, slot) in work.iter_mut().enumerate() {
+        *slot = (i + 1) as u32;
+    }
+
+    let mut pool = RetainedPool::new(Arc::new(device));
+    let cells = pool
+        .acquire_record([ordinal(Init::data(&sentinel)), ordinal(Init::data(&work))])
+        .expect("acquire_record");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("n0", &pipeline)
+        .with_parcel(&cells[1], NodeAccess::Write)
+        .with_views(&[cells[1].handle(ResourceAccess::Write).expect("work")])
+        .dispatch(1, 1, 1);
+    let grant_sentinel = scheme.grant_read(&cells[0]).expect("grant sentinel");
+    let grant_work = scheme.grant_read(&cells[1]).expect("grant work");
+    let submission = scheme.submit().expect("submit");
+
+    let sentinel_vals = read_grant_u32(&grant_sentinel, &submission, N);
+    assert!(
+        sentinel_vals.iter().all(|&v| v == 100),
+        "sentinel field must be untouched"
+    );
+
+    let result = read_grant_u32(&grant_work, &submission, N);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = ((i + 1) as u32) * 2;
+        assert_eq!(
+            val, expected,
+            "field[{}]: expected {} (doubled), got {}",
+            i, expected, val
+        );
+    }
+}

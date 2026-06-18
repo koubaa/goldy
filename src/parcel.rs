@@ -4,7 +4,7 @@
 //! dispatches and render passes. Each parcel is independently dependency-tracked.
 
 use crate::backend::{BufferHandle, ContextHandle};
-use crate::buffer::{Allocation, BufferPool, BufferSource, BufferView, StructuredBufferElement};
+use crate::buffer::{Allocation, BufferSource, BufferView, StructuredBufferElement};
 use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
@@ -63,6 +63,7 @@ enum ParcelBacking {
     BufferRange {
         view: BufferView,
         parent: BufferHandle,
+        parent_backing: Arc<Allocation>,
         offset: u64,
         len: u64,
     },
@@ -88,11 +89,13 @@ impl Clone for Parcel {
                 ParcelBacking::BufferRange {
                     view,
                     parent,
+                    parent_backing,
                     offset,
                     len,
                 } => ParcelBacking::BufferRange {
                     view: view.clone(),
                     parent: *parent,
+                    parent_backing: Arc::clone(parent_backing),
                     offset: *offset,
                     len: *len,
                 },
@@ -120,6 +123,7 @@ impl Parcel {
     pub(crate) fn from_buffer_range(
         view: BufferView,
         parent: BufferHandle,
+        parent_backing: Arc<Allocation>,
         offset: u64,
         len: u64,
         home_device: Weak<DeviceInner>,
@@ -128,6 +132,7 @@ impl Parcel {
             backing: ParcelBacking::BufferRange {
                 view,
                 parent,
+                parent_backing,
                 offset,
                 len,
             },
@@ -262,7 +267,7 @@ impl Parcel {
     pub(crate) fn grant_buffer_keepalive(&self) -> Result<Arc<Allocation>, anyhow::Error> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => Ok(Arc::clone(b)),
-            ParcelBacking::BufferRange { .. } => anyhow::bail!("grant_read requires whole-buffer parcel"),
+            ParcelBacking::BufferRange { parent_backing, .. } => Ok(Arc::clone(parent_backing)),
             ParcelBacking::Texture(_) => anyhow::bail!("grant_read requires buffer parcel"),
         }
     }
@@ -336,7 +341,7 @@ impl BufferSource for Parcel {
 enum BufferStorage {
     Single(Arc<Allocation>),
     Partitioned {
-        pool: BufferPool,
+        parent: Arc<Allocation>,
         field_names: Vec<Option<String>>,
     },
 }
@@ -369,23 +374,23 @@ impl Buffer {
     }
 
     pub(crate) fn from_partitioned(
-        pool: BufferPool,
+        parent: Arc<Allocation>,
         views: Vec<BufferView>,
         field_names: Vec<Option<String>>,
         bookkeeping: BookkeepingGuard,
         home_device: Weak<DeviceInner>,
     ) -> Self {
-        let backing = pool.backing_buffer().gpu_buffer_handle();
+        let backing = parent.gpu_buffer_handle();
         let units = views
             .into_iter()
             .map(|view| {
                 let offset = view.offset();
                 let len = view.size();
-                Parcel::from_buffer_range(view, backing, offset, len, home_device.clone())
+                Parcel::from_buffer_range(view, backing, Arc::clone(&parent), offset, len, home_device.clone())
             })
             .collect();
         Self {
-            storage: BufferStorage::Partitioned { pool, field_names },
+            storage: BufferStorage::Partitioned { parent, field_names },
             units,
             bookkeeping: Some(bookkeeping),
             home_device,
@@ -442,7 +447,7 @@ impl Buffer {
     pub fn byte_size(&self) -> u64 {
         match &self.storage {
             BufferStorage::Single(b) => b.byte_size(),
-            BufferStorage::Partitioned { pool, .. } => pool.capacity(),
+            BufferStorage::Partitioned { parent, .. } => parent.byte_size(),
         }
     }
 
@@ -532,7 +537,7 @@ impl Buffer {
     pub(crate) fn backing_handle(&self) -> BufferHandle {
         match &self.storage {
             BufferStorage::Single(b) => b.gpu_buffer_handle(),
-            BufferStorage::Partitioned { pool, .. } => pool.backing_buffer().gpu_buffer_handle(),
+            BufferStorage::Partitioned { parent, .. } => parent.gpu_buffer_handle(),
         }
     }
 }

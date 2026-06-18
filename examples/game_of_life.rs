@@ -1,26 +1,22 @@
-//! Conway's Game of Life - Compute + Graphics Example
+//! Conway's Game of Life — hybrid Scheme (compute + render + present).
 //!
-//! Demonstrates a unified task graph:
-//! 1. Compute shader running cellular automaton rules (ping-pong buffers)
-//! 2. Graphics shader rendering the grid to an offscreen target
-//! 3. Swapchain blit and present
-//!
-//! Ping-pong cell grids live in one retained record buffer (two fields, one backing
-//! allocation). When the transient pool lands, this example is a candidate to re-migrate.
+//! Ping-pong cell grids live in one retained record buffer (fields `"a"` / `"b"`).
+//! Each simulation step runs an ephemeral compute scheme; the display scheme is
+//! rebuilt when the active field flips.
 //!
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, Color, ComputePipeline, DeviceDescriptor, Init, Instance, NodeAccess, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    field, Buffer, Color, ComputePipeline, Context, DeviceDescriptor, Grant, Init, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    ResourceAccess, RetainedPool, Scheme, ShaderModule, ShaderResourceSlot, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
@@ -30,51 +26,57 @@ const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: u32 = GRID_WIDTH * GRID_HEIGHT;
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
-
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-
-    let mut app = App::default();
-    event_loop.run_app(&mut app)?;
-
+fn run_compute_step(
+    ctx: &Context,
+    cells: &Buffer,
+    read_field: &str,
+    write_field: &str,
+    pipeline: &ComputePipeline,
+) -> Result<()> {
+    let mut scheme = Scheme::new(ctx);
+    scheme
+        .node("game_of_life", pipeline)
+        .with_parcel(&cells[read_field], NodeAccess::Read)
+        .with_parcel(&cells[write_field], NodeAccess::Write)
+        .with_views(&[
+            cells[read_field]
+                .handle(ResourceAccess::ReadWrite)
+                .expect("read field UAV"),
+            cells[write_field]
+                .handle(ResourceAccess::Write)
+                .expect("write field UAV"),
+        ])
+        .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
+    scheme.submit()?;
     Ok(())
 }
 
-#[derive(Default)]
-struct App {
-    state: Option<RenderState>,
+fn record_display_scheme(
+    scheme: &mut Scheme,
+    cells: &Buffer,
+    current_field: &str,
+    render_pipeline: &RenderPipeline,
+    scene_rt: &Lease<LeaseRenderTarget>,
+    screen: &goldy::PresentLease,
+) -> PresentGrant {
+    let current = &cells[current_field];
+    let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
+    pass.with_parcel(current, NodeAccess::Read);
+    pass.clear(Color::BLACK);
+    pass.set_pipeline(render_pipeline);
+    pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+        parcel: current,
+        access: NodeAccess::ReadWrite,
+    }]);
+    pass.draw(0..3, 0..1);
+    pass.finish();
+    scheme.copy_to_present(scene_rt, screen);
+    scheme.grant_present(screen)
 }
 
-struct RenderState {
-    window: Arc<Window>,
-    device: Arc<goldy::Device>,
-    surface: Surface,
-    scene_rt: RenderTarget,
-    frame_graph: TaskGraph,
-    compute_pipeline: ComputePipeline,
-    render_pipeline: RenderPipeline,
-    _retained_pool: RetainedPool,
-    /// Record buffer: fields "a" and "b" are ping-pong cell grids in one backing buffer.
-    cells: Buffer,
-    // State: true = A is current (read from A, write to B)
-    use_buffer_a: bool,
-    frame_count: u32,
-    last_update: std::time::Instant,
-    start_time: std::time::Instant,
-}
-
-/// Create initial pattern (glider gun + some random cells)
 fn create_initial_state() -> Vec<u32> {
     let mut cells = vec![0u32; CELL_COUNT as usize];
 
-    // Gosper Glider Gun (creates infinite gliders)
     let gun = [
         (1, 5),
         (1, 6),
@@ -114,7 +116,6 @@ fn create_initial_state() -> Vec<u32> {
         (36, 4),
     ];
 
-    // Place glider gun
     let offset_x = 10;
     let offset_y = 10;
     for (x, y) in gun.iter() {
@@ -125,9 +126,7 @@ fn create_initial_state() -> Vec<u32> {
         }
     }
 
-    // Add some random cells in the lower right
-    let seed = 42u64;
-    let mut rng = seed;
+    let mut rng = 42u64;
     for y in 60..100 {
         for x in 60..100 {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -140,23 +139,57 @@ fn create_initial_state() -> Vec<u32> {
     cells
 }
 
-impl RenderState {
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
-    }
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = App::default();
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct App {
+    state: Option<RenderState>,
+}
+
+struct RenderState {
+    window: Arc<Window>,
+    ctx: Context,
+    swapchain: SwapchainPool,
+    screen: goldy::PresentLease,
+    scene_rt: Lease<LeaseRenderTarget>,
+    display_scheme: Scheme,
+    present: PresentGrant,
+    compute_pipeline: ComputePipeline,
+    render_pipeline: RenderPipeline,
+    _retained_pool: RetainedPool,
+    cells: Buffer,
+    use_buffer_a: bool,
+    frame_count: u32,
+    last_update: std::time::Instant,
+    start_time: std::time::Instant,
+}
+
+impl RenderState {
     fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Instance::new()?;
-
         let device = Arc::new(
             instance
                 .request_adapter(&RequestAdapterOptions::default())?
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
@@ -176,10 +209,15 @@ impl RenderState {
             &RenderPipelineDesc {
                 vertex_layout: VertexBufferLayout::default(),
                 topology: PrimitiveTopology::TriangleList,
-                target_format: surface.format(),
+                target_format: swapchain.format(),
                 ..Default::default()
             },
         )?;
+
+        let mut display_scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = display_scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let present = record_display_scheme(&mut display_scheme, &cells, "a", &render_pipeline, &scene_rt, &screen);
 
         println!("Game of Life initialized: {}x{} grid", GRID_WIDTH, GRID_HEIGHT);
         println!("Features Gosper Glider Gun + random cells");
@@ -187,10 +225,12 @@ impl RenderState {
 
         Ok(Self {
             window,
-            device,
-            surface,
+            ctx,
+            swapchain,
+            screen,
             scene_rt,
-            frame_graph: TaskGraph::new(),
+            display_scheme,
+            present,
             compute_pipeline,
             render_pipeline,
             _retained_pool: retained_pool,
@@ -202,55 +242,43 @@ impl RenderState {
         })
     }
 
+    fn rebuild_display_scheme(&mut self) -> Result<()> {
+        let current_field = if self.use_buffer_a { "a" } else { "b" };
+        self.display_scheme.begin_rerecord();
+        let (width, height) = self.swapchain.size();
+        self.scene_rt =
+            self.display_scheme
+                .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)?;
+        self.present = record_display_scheme(
+            &mut self.display_scheme,
+            &self.cells,
+            current_field,
+            &self.render_pipeline,
+            &self.scene_rt,
+            &self.screen,
+        );
+        Ok(())
+    }
+
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
         let now = std::time::Instant::now();
         let should_update = now.duration_since(self.last_update).as_millis() > 33;
 
-        self.frame_graph.clear();
-
         if should_update {
             self.last_update = now;
 
             let (read_field, write_field) = if self.use_buffer_a { ("a", "b") } else { ("b", "a") };
-
-            self.frame_graph
-                .node("game_of_life", &self.compute_pipeline)
-                .with_parcel(&self.cells[read_field], NodeAccess::Read)
-                .with_parcel(&self.cells[write_field], NodeAccess::Write)
-                .with_resource_slots_slice(&[
-                    self.cells[read_field]
-                        .resource_index(ResourceAccess::ReadWrite)
-                        .unwrap(),
-                    self.cells[write_field].resource_index(ResourceAccess::Write).unwrap(),
-                ])
-                .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
-
+            run_compute_step(&self.ctx, &self.cells, read_field, write_field, &self.compute_pipeline)?;
             self.use_buffer_a = !self.use_buffer_a;
+            self.rebuild_display_scheme()?;
         }
 
-        let current_field = if self.use_buffer_a { "a" } else { "b" };
-        let current = &self.cells[current_field];
-
-        let mut pass = self.frame_graph.render_pass("game_of_life_render", &self.scene_rt);
-        pass.with_parcel(current, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&self.render_pipeline);
-        pass.with_resource_slots(&[current.resource_index(ResourceAccess::ReadWrite).unwrap()]);
-        pass.draw(0..3, 0..1);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
-
-        let frame = self.surface.begin()?;
-        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let submission = self.display_scheme.submit()?;
+        self.present.consume(&submission)?;
 
         self.window.request_redraw();
-
         Ok(())
     }
 }
@@ -315,9 +343,13 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        state.surface.resize(size.width, size.height).ok();
-                        state.scene_rt =
-                            RenderState::create_scene_rt(&state.device, &state.surface).expect("resize scene RT");
+                        if let Err(e) = state.swapchain.resize(size.width, size.height) {
+                            tracing::error!("Failed to resize swapchain: {e}");
+                            return;
+                        }
+                        if let Err(e) = state.rebuild_display_scheme() {
+                            tracing::error!("Failed to rebuild display scheme: {e}");
+                        }
                     }
                 }
             }

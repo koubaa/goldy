@@ -617,6 +617,7 @@ pub enum GpuCommand {
     /// Copy bytes from `src` buffer into `dst` buffer (grant-read staging path).
     CopyBuffer {
         src: BufferHandle,
+        src_offset: u64,
         dst: BufferHandle,
         size: u64,
     },

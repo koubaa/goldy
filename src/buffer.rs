@@ -880,6 +880,11 @@ impl BufferPool {
         self.backing.size().saturating_sub(self.offset)
     }
 
+    /// Consume the pool and return its backing allocation.
+    pub(crate) fn into_backing(self) -> Allocation {
+        self.backing
+    }
+
     /// Get a reference to the backing buffer (e.g., for bulk writes or clears).
     pub(crate) fn backing_buffer(&self) -> &Allocation {
         &self.backing

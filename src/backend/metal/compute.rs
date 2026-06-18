@@ -775,18 +775,26 @@ pub(super) fn record_commands_to_buffer(
                     MTLOrigin { x: 0, y: 0, z: 0 },
                 );
             }
-            GpuCommand::CopyBuffer { src, dst, size } => {
+            GpuCommand::CopyBuffer {
+                src,
+                src_offset,
+                dst,
+                size,
+            } => {
                 ensure_blit_buf!(*src);
                 ensure_blit_buf!(*dst);
                 let (src_mtl, dst_mtl) = {
                     let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                     let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                    if *size > src_state.size || *size > dst_state.size {
+                    if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
                         anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                     }
                     (src_state.buffer.clone(), dst_state.buffer.clone())
                 };
-                guard.blit.unwrap().copy_from_buffer(&src_mtl, 0, &dst_mtl, 0, *size);
+                guard
+                    .blit
+                    .unwrap()
+                    .copy_from_buffer(&src_mtl, *src_offset, &dst_mtl, 0, *size);
             }
             GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                 ensure_blit_buf!(*dst);

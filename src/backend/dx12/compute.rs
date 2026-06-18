@@ -1361,12 +1361,17 @@ fn record_gpu_command(
                 ts.last_layout = dst_post_state.1;
             }
         }
-        GpuCommand::CopyBuffer { src, dst, size } => {
+        GpuCommand::CopyBuffer {
+            src,
+            src_offset,
+            dst,
+            size,
+        } => {
             let _tz = tracy_zone!("dx12.copy_buffer");
             let (src_resource, dst_resource) = {
                 let src_buf = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                 let dst_buf = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                if *size > src_buf.size || *size > dst_buf.size {
+                if src_offset.saturating_add(*size) > src_buf.size || *size > dst_buf.size {
                     anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                 }
                 (src_buf.resource.clone(), dst_buf.resource.clone())
@@ -1392,7 +1397,7 @@ fn record_gpu_command(
                     barriers::drop_buffer_barriers(&mut b_to_copy);
                 }
             }
-            unsafe { cl.CopyBufferRegion(&dst_resource, 0, &src_resource, 0, *size) };
+            unsafe { cl.CopyBufferRegion(&dst_resource, 0, &src_resource, *src_offset, *size) };
         }
         GpuCommand::CopyTextureToReadback { src, dst, layout } => {
             let _tz = tracy_zone!("dx12.copy_texture_to_readback");
