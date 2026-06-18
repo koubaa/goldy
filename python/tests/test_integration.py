@@ -70,12 +70,14 @@ def test_parcel_creation_numpy(device):
     ], dtype=np.float32)
 
     pool = goldy.RetainedPool(device)
-    parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
-    assert parcel.byte_size == vertices.nbytes
+    vertex_buffer = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    assert vertex_buffer.byte_size == vertices.nbytes
+    assert vertex_buffer[0].byte_size == vertices.nbytes
 
     indices = np.array([0, 1, 2], dtype=np.uint16)
-    index_parcel = pool.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
-    assert index_parcel.byte_size == indices.nbytes
+    index_buffer = pool.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
+    assert index_buffer.byte_size == indices.nbytes
+    assert index_buffer[0].byte_size == indices.nbytes
 
 
 def test_parcel_write(device):

@@ -78,24 +78,27 @@ class TestRetainedPool:
 
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
-        assert parcel.byte_size == 16
+        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert buffer.byte_size == 16
+        assert buffer[0].byte_size == 16
 
     def test_acquire_from_int32(self, device):
         import goldy
 
         data = np.array([1, 2, 3], dtype=np.int32)
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
-        assert parcel.byte_size == 12
+        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert buffer.byte_size == 12
+        assert buffer[0].byte_size == 12
 
     def test_acquire_from_uint16(self, device):
         import goldy
 
         data = np.array([0, 1, 2, 3, 4, 5], dtype=np.uint16)
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
-        assert parcel.byte_size == 12
+        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert buffer.byte_size == 12
+        assert buffer[0].byte_size == 12
 
     def test_write_parcel(self, device):
         import goldy

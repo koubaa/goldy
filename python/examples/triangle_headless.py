@@ -53,7 +53,7 @@ def main():
         dtype=np.float32,
     )
     retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
     readback = retained_pool.acquire_texture(
         100,
         100,

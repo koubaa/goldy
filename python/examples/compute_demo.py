@@ -40,7 +40,8 @@ def main():
     print(f"Input data (first 10): {input_data[:10]}")
     
     retained_pool = goldy.RetainedPool(device)
-    parcel = retained_pool.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
+    buffer = retained_pool.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
+    parcel = buffer[0]
     print(f"Created parcel: {parcel.byte_size} bytes")
     
     # Compile compute shader

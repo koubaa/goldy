@@ -95,7 +95,7 @@ def main() -> int:
         dtype=np.float32,
     )
     retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
     scheme = goldy.Scheme(ctx)
     scene_rt = scheme.lease_render_target(
