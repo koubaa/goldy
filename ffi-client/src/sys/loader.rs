@@ -113,7 +113,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_destroy: FnGoldySchemeDestroy,
     pub goldy_scheme_len: FnGoldySchemeLen,
     pub goldy_scheme_is_dirty: FnGoldySchemeIsDirty,
-    pub goldy_scheme_begin_rerecord: FnGoldySchemeBeginRerecord,
     pub goldy_scheme_replay_stats: FnGoldySchemeReplayStats,
     pub goldy_scheme_compute_node_begin: FnGoldySchemeComputeNodeBegin,
     pub goldy_scheme_compute_node_with_parcel: FnGoldySchemeComputeNodeWithParcel,
@@ -360,7 +359,6 @@ impl GoldyFfi {
             goldy_scheme_destroy: sym!("goldy_scheme_destroy", FnGoldySchemeDestroy),
             goldy_scheme_len: sym!("goldy_scheme_len", FnGoldySchemeLen),
             goldy_scheme_is_dirty: sym!("goldy_scheme_is_dirty", FnGoldySchemeIsDirty),
-            goldy_scheme_begin_rerecord: sym!("goldy_scheme_begin_rerecord", FnGoldySchemeBeginRerecord),
             goldy_scheme_replay_stats: sym!("goldy_scheme_replay_stats", FnGoldySchemeReplayStats),
             goldy_scheme_compute_node_begin: sym!("goldy_scheme_compute_node_begin", FnGoldySchemeComputeNodeBegin),
             goldy_scheme_compute_node_with_parcel: sym!(

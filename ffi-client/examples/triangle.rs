@@ -176,52 +176,48 @@ impl App {
                 tracing::error!("Failed to resize swapchain: {e}");
                 return;
             }
-            if let (Some(ctx), Some(swapchain), Some(shader), Some(vertex_buffer), Some(screen), Some(device)) = (
-                self.ctx.as_ref(),
-                self.swapchain.as_ref(),
-                self.shader.as_ref(),
-                self.vertex_buffer.as_ref(),
-                self.screen.as_ref(),
-                self.device.as_ref(),
+        }
+        if let (Some(ctx), Some(swapchain), Some(shader), Some(vertex_buffer), Some(screen), Some(device)) = (
+            self.ctx.as_ref(),
+            self.swapchain.as_ref(),
+            self.shader.as_ref(),
+            self.vertex_buffer.as_ref(),
+            self.screen.as_ref(),
+            self.device.as_ref(),
+        ) {
+            match RenderPipeline::new(
+                device,
+                shader,
+                shader,
+                &RenderPipelineDesc {
+                    vertex_layout: Vertex2D::layout(),
+                    target_format: swapchain.format(),
+                    ..Default::default()
+                },
             ) {
-                let pipeline = RenderPipeline::new(
-                    device,
-                    shader,
-                    shader,
-                    &RenderPipelineDesc {
-                        vertex_layout: Vertex2D::layout(),
-                        target_format: swapchain.format(),
-                        ..Default::default()
-                    },
-                )
-                .ok();
-                if let Some(pipeline) = pipeline {
-                    self.pipeline = Some(pipeline);
+                Ok(pipeline) => self.pipeline = Some(pipeline),
+                Err(e) => {
+                    tracing::error!("Failed to rebuild pipeline on resize: {e}");
+                    return;
                 }
-                if let Some(pipeline) = self.pipeline.as_ref() {
-                    let mut scheme = match Scheme::new(ctx) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!("Failed to recreate scheme on resize: {e}");
-                            return;
-                        }
-                    };
-                    let (width, height) = swapchain.size();
-                    if let Ok(rt) =
-                        scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)
-                    {
-                        let bg_color = Color {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.2,
-                            a: 1.0,
-                        };
-                        if let Ok(present) = record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color)
-                        {
-                            self.scheme = Some(scheme);
-                            self.scene_rt = Some(rt);
-                            self.present = Some(present);
-                        }
+            }
+            if let Some(pipeline) = self.pipeline.as_ref() {
+                let mut scheme = match Scheme::new(ctx) {
+                    Ok(scheme) => scheme,
+                    Err(e) => {
+                        tracing::error!("Failed to create scheme on resize: {e}");
+                        return;
+                    }
+                };
+                let (width, height) = swapchain.size();
+                if let Ok(rt) =
+                    scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)
+                {
+                    let bg_color = Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 };
+                    if let Ok(present) = record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color) {
+                        self.scheme = Some(scheme);
+                        self.scene_rt = Some(rt);
+                        self.present = Some(present);
                     }
                 }
             }

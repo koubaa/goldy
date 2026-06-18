@@ -260,22 +260,23 @@ impl RenderState {
 
     fn rebuild_display_scheme(&mut self) -> goldy_ffi_client::Result<()> {
         let current_field = if self.use_buffer_a { "a" } else { "b" };
-        self.display_scheme.begin_rerecord();
+        let mut display_scheme = Scheme::new(&self.ctx)?;
         let (width, height) = self.swapchain.size();
-        self.scene_rt = self.display_scheme.lease_render_target(
+        self.scene_rt = display_scheme.lease_render_target(
             width.max(1),
             height.max(1),
             self.swapchain.format(),
             None::<DepthFormat>,
         )?;
         self.present = record_display_scheme(
-            &mut self.display_scheme,
+            &mut display_scheme,
             &self.cells,
             current_field,
             &self.render_pipeline,
             &self.scene_rt,
             &self.screen,
         )?;
+        self.display_scheme = display_scheme;
         Ok(())
     }
 

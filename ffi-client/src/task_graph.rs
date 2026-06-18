@@ -130,15 +130,31 @@ impl RenderPassBuilder<'_> {
     }
 
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) -> &mut Self {
+        let parcel = buffer.field(0).expect("buffer has no field 0");
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_set_vertex_buffer_parcel(self.graph.ptr, slot, buffer.as_ptr())
+            sys::goldy_task_graph_render_pass_set_vertex_buffer_parcel(self.graph.ptr, slot, parcel.as_ptr())
+        });
+        self
+    }
+
+    pub fn set_vertex_buffer_parcel(&mut self, slot: u32, parcel: &Parcel) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_render_pass_set_vertex_buffer_parcel(self.graph.ptr, slot, parcel.as_ptr())
         });
         self
     }
 
     pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) -> &mut Self {
+        let parcel = buffer.field(0).expect("buffer has no field 0");
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_set_index_buffer(self.graph.ptr, buffer.as_ptr(), format.into())
+            sys::goldy_task_graph_render_pass_set_index_buffer(self.graph.ptr, parcel.as_ptr(), format.into())
+        });
+        self
+    }
+
+    pub fn set_index_buffer_parcel(&mut self, parcel: &Parcel, format: IndexFormat) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_task_graph_render_pass_set_index_buffer(self.graph.ptr, parcel.as_ptr(), format.into())
         });
         self
     }

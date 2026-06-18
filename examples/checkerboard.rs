@@ -179,21 +179,22 @@ impl App {
             if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
                 if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
                     self.pipeline = Some(pipeline);
-                    if let (Some(scheme), Some(pipeline), Some(uniform), Some(screen)) = (
-                        self.scheme.as_mut(),
+                    if let (Some(ctx), Some(pipeline), Some(uniform), Some(screen)) = (
+                        self.ctx.as_ref(),
                         self.pipeline.as_ref(),
                         self.uniform.as_ref(),
                         self.screen.as_ref(),
                     ) {
-                        scheme.begin_rerecord();
+                        let mut scheme = Scheme::new(ctx);
 
                         let (width, height) = swapchain.size();
 
                         if let Ok(rt) =
                             scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
                         {
-                            let present = Self::record_scheme(scheme, pipeline, uniform, &rt, screen);
+                            let present = Self::record_scheme(&mut scheme, pipeline, uniform, &rt, screen);
 
+                            self.scheme = Some(scheme);
                             self.present = Some(present);
 
                             self.scene_rt = Some(rt);

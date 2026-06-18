@@ -28,6 +28,11 @@ struct TextureKey {
 }
 
 /// A parked resource awaiting epoch retirement.
+///
+/// Reuse and drain currently happen as soon as [`Context::parcel_ready`] is true.
+/// A future optimization could keep entries warm for a heuristic number of frames
+/// past readiness before reissuing or dropping them, reducing allocation churn on
+/// intermittent resize or ping-pong flip patterns.
 struct PendingEntry {
     hold: RetainedHold,
     ready_after: ReferenceTable,

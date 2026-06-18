@@ -188,12 +188,6 @@ void handle_resize(GpuState& gpu, GLFWwindow* window) {
     }
     gpu.swapchain.resize(w, h);
 
-    gpu.scheme = goldy::Scheme(gpu.ctx);
-    auto [new_w, new_h] = gpu.swapchain.size();
-    new_w = std::max(new_w, 1u);
-    new_h = std::max(new_h, 1u);
-    gpu.scene_rt = gpu.scheme.lease_render_target(new_w, new_h, gpu.swapchain.format());
-
     GoldyRenderPipelineDesc pipeline_desc{};
     pipeline_desc.topology = GOLDY_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     pipeline_desc.target_format = gpu.swapchain.format();
@@ -206,6 +200,12 @@ void handle_resize(GpuState& gpu, GLFWwindow* window) {
     pipeline_desc.vertex_attribute_count = static_cast<uint32_t>(std::size(attributes));
     pipeline_desc.vertex_stride = sizeof(Vertex);
     gpu.pipeline = goldy::RenderPipeline(gpu.device, gpu.shader, gpu.shader, pipeline_desc);
+
+    gpu.scheme = goldy::Scheme(gpu.ctx);
+    auto [new_w, new_h] = gpu.swapchain.size();
+    new_w = std::max(new_w, 1u);
+    new_h = std::max(new_h, 1u);
+    gpu.scene_rt = gpu.scheme.lease_render_target(new_w, new_h, gpu.swapchain.format());
 
     const goldy::Color bg_color{0.1f, 0.1f, 0.2f, 1.0f};
     gpu.present = record_scheme(

@@ -150,10 +150,6 @@ impl Scheme {
         unsafe { sys::goldy_scheme_is_dirty(self.ptr) }
     }
 
-    pub fn begin_rerecord(&mut self) {
-        unsafe { sys::goldy_scheme_begin_rerecord(self.ptr) }
-    }
-
     pub fn replay_stats(&self) -> Result<ReplayStats> {
         let mut stats = GoldyReplayStats::default();
         check(unsafe { sys::goldy_scheme_replay_stats(self.ptr, &mut stats) })?;
@@ -356,15 +352,31 @@ impl SchemeRenderPassBuilder<'_> {
     }
 
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) -> &mut Self {
+        let parcel = buffer.field(0).expect("buffer has no field 0");
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_set_vertex_buffer_parcel(self.scheme.ptr, slot, buffer.as_ptr())
+            sys::goldy_scheme_render_pass_set_vertex_buffer_parcel(self.scheme.ptr, slot, parcel.as_ptr())
+        });
+        self
+    }
+
+    pub fn set_vertex_buffer_parcel(&mut self, slot: u32, parcel: &Parcel) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_scheme_render_pass_set_vertex_buffer_parcel(self.scheme.ptr, slot, parcel.as_ptr())
         });
         self
     }
 
     pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) -> &mut Self {
+        let parcel = buffer.field(0).expect("buffer has no field 0");
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_set_index_buffer(self.scheme.ptr, buffer.as_ptr(), format.into())
+            sys::goldy_scheme_render_pass_set_index_buffer(self.scheme.ptr, parcel.as_ptr(), format.into())
+        });
+        self
+    }
+
+    pub fn set_index_buffer_parcel(&mut self, parcel: &Parcel, format: IndexFormat) -> &mut Self {
+        expect_ok(unsafe {
+            sys::goldy_scheme_render_pass_set_index_buffer(self.scheme.ptr, parcel.as_ptr(), format.into())
         });
         self
     }

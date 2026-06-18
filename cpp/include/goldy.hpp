@@ -1623,8 +1623,6 @@ public:
 
     bool is_dirty() const { return goldy_scheme_is_dirty(ptr_.get()); }
 
-    void begin_rerecord() { goldy_scheme_begin_rerecord(ptr_.get()); }
-
     [[nodiscard]] ReadGrant grant_read(const Parcel& parcel) {
         GoldyReadGrant* grant = goldy_scheme_grant_read(ptr_.get(), parcel.get());
         if (!grant) {

@@ -224,7 +224,7 @@ goldy::PresentGrant record_display_scheme(
 
 void rebuild_display_scheme(GpuState& gpu) {
     const char* current_field = gpu.use_buffer_a ? "a" : "b";
-    gpu.display_scheme.begin_rerecord();
+    gpu.display_scheme = goldy::Scheme(gpu.ctx);
     auto [width, height] = gpu.swapchain.size();
     width = std::max(width, 1u);
     height = std::max(height, 1u);

@@ -141,15 +141,12 @@ impl RenderState {
     }
 
     fn rerecord_scheme(&mut self) {
-        self.scheme.begin_rerecord();
+        let mut scheme = Scheme::new(&self.ctx);
         let (width, height) = self.swapchain.size();
-        if let Ok(rt) = self
-            .scheme
-            .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)
-        {
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
             self.scene_rt = rt;
             self.present = Self::record_scheme(
-                &mut self.scheme,
+                &mut scheme,
                 &self.compute_pipeline,
                 &self.render_pipeline,
                 &self.instance_buffer,
@@ -157,6 +154,7 @@ impl RenderState {
                 &self.scene_rt,
                 &self.screen,
             );
+            self.scheme = scheme;
         }
     }
 
@@ -319,24 +317,14 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.swapchain.resize(size.width, size.height).ok();
-                        state.scheme.begin_rerecord();
-                        let (width, height) = state.swapchain.size();
-                        if let Ok(rt) = state.scheme.lease_render_target(
-                            width.max(1),
-                            height.max(1),
-                            state.swapchain.format(),
-                            None,
+                        if let Ok(pipeline) = RenderState::create_render_pipeline(
+                            &state.device,
+                            &state.render_shader,
+                            &state.swapchain,
                         ) {
-                            state.scene_rt = rt;
-                            if let Ok(pipeline) = RenderState::create_render_pipeline(
-                                &state.device,
-                                &state.render_shader,
-                                &state.swapchain,
-                            ) {
-                                state.render_pipeline = pipeline;
-                            }
-                            state.rerecord_scheme();
+                            state.render_pipeline = pipeline;
                         }
+                        state.rerecord_scheme();
                     }
                 }
             }

@@ -59,22 +59,22 @@ static class GameOfLifeWindow
         return scheme.GrantPresent(screen);
     }
 
-    static (SchemeRenderTargetLease rt, PresentGrant present) RebuildDisplayScheme(
-        Scheme displayScheme,
+    static (Scheme scheme, SchemeRenderTargetLease rt, PresentGrant present) RebuildDisplayScheme(
+        Context ctx,
         SwapchainPool swapchain,
         Buffer cells,
         string currentField,
         RenderPipeline renderPipeline,
         PresentLease screen)
     {
-        displayScheme.BeginRerecord();
+        var displayScheme = new Scheme(ctx);
         var rt = displayScheme.LeaseRenderTarget(
             Math.Max(swapchain.Width, 1u),
             Math.Max(swapchain.Height, 1u),
             swapchain.Format);
         var present = RecordDisplayScheme(
             displayScheme, cells, currentField, renderPipeline, rt, screen);
-        return (rt, present);
+        return (displayScheme, rt, present);
     }
 
     public static unsafe void Run()
@@ -153,9 +153,10 @@ static class GameOfLifeWindow
                         swapchain.Resize(w, h);
                         sceneRt.Dispose();
                         present.Dispose();
+                        displayScheme.Dispose();
                         var currentField = useBufferA ? "a" : "b";
-                        (sceneRt, present) = RebuildDisplayScheme(
-                            displayScheme, swapchain, cells, currentField, renderPipeline, screen);
+                        (displayScheme, sceneRt, present) = RebuildDisplayScheme(
+                            ctx, swapchain, cells, currentField, renderPipeline, screen);
                     }
                 }
 
@@ -170,8 +171,9 @@ static class GameOfLifeWindow
                     var currentField = useBufferA ? "a" : "b";
                     sceneRt.Dispose();
                     present.Dispose();
-                    (sceneRt, present) = RebuildDisplayScheme(
-                        displayScheme, swapchain, cells, currentField, renderPipeline, screen);
+                    displayScheme.Dispose();
+                    (displayScheme, sceneRt, present) = RebuildDisplayScheme(
+                        ctx, swapchain, cells, currentField, renderPipeline, screen);
                 }
 
                 using var submission = displayScheme.Submit();

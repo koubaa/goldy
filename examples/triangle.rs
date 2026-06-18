@@ -159,17 +159,18 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain), Some(shader), Some(scheme)) =
-                (&self.device, &self.swapchain, &self.shader, self.scheme.as_mut())
-            {
+            if let (Some(ctx), Some(device), Some(swapchain), Some(shader), Some(vertex_buffer), Some(screen)) = (
+                self.ctx.as_ref(),
+                self.device.as_ref(),
+                self.swapchain.as_ref(),
+                self.shader.as_ref(),
+                self.vertex_buffer.as_ref(),
+                self.screen.as_ref(),
+            ) {
                 if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
                     self.pipeline = Some(pipeline);
-                    if let (Some(pipeline), Some(vertex_buffer), Some(screen)) = (
-                        self.pipeline.as_ref(),
-                        self.vertex_buffer.as_ref(),
-                        self.screen.as_ref(),
-                    ) {
-                        scheme.begin_rerecord();
+                    if let Some(pipeline) = self.pipeline.as_ref() {
+                        let mut scheme = Scheme::new(ctx);
                         let (width, height) = swapchain.size();
                         if let Ok(rt) =
                             scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
@@ -180,7 +181,8 @@ impl App {
                                 b: 0.2,
                                 a: 1.0,
                             };
-                            let present = Self::record_scheme(scheme, pipeline, vertex_buffer, &rt, screen, bg_color);
+                            let present = Self::record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color);
+                            self.scheme = Some(scheme);
                             self.present = Some(present);
                             self.scene_rt = Some(rt);
                         }

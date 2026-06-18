@@ -118,17 +118,19 @@ impl App {
         if vertex_count == self.recorded_vertex_count && bg_color == self.recorded_bg_color {
             return;
         }
-        if let (Some(scheme), Some(pipeline), Some(vertex_parcel), Some(swapchain), Some(screen)) = (
-            self.scheme.as_mut(),
+        if let (Some(ctx), Some(pipeline), Some(vertex_parcel), Some(swapchain), Some(screen)) = (
+            self.ctx.as_ref(),
             self.pipeline.as_ref(),
             self.vertex_parcel.as_ref(),
             self.swapchain.as_ref(),
             self.screen.as_ref(),
         ) {
-            scheme.begin_rerecord();
+            let mut scheme = Scheme::new(ctx);
             let (width, height) = swapchain.size();
             if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None) {
-                let present = Self::record_scheme(scheme, pipeline, vertex_parcel, vertex_count, bg_color, &rt, screen);
+                let present =
+                    Self::record_scheme(&mut scheme, pipeline, vertex_parcel, vertex_count, bg_color, &rt, screen);
+                self.scheme = Some(scheme);
                 self.present = Some(present);
                 self.recorded_vertex_count = vertex_count;
                 self.recorded_bg_color = bg_color;
@@ -232,25 +234,26 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(swapchain), Some(shader), Some(scheme)) =
-                (&self.device, &self.swapchain, &self.shader, self.scheme.as_mut())
-            {
+            if let (Some(ctx), Some(device), Some(swapchain), Some(shader), Some(vertex_parcel), Some(screen)) = (
+                self.ctx.as_ref(),
+                self.device.as_ref(),
+                self.swapchain.as_ref(),
+                self.shader.as_ref(),
+                self.vertex_parcel.as_ref(),
+                self.screen.as_ref(),
+            ) {
                 if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
                     self.pipeline = Some(pipeline);
-                    if let (Some(pipeline), Some(vertex_parcel), Some(screen)) = (
-                        self.pipeline.as_ref(),
-                        self.vertex_parcel.as_ref(),
-                        self.screen.as_ref(),
-                    ) {
+                    if let Some(pipeline) = self.pipeline.as_ref() {
                         let bg_color = self.clock_state.background_color();
                         let vertex_count = self.recorded_vertex_count.max(1);
-                        scheme.begin_rerecord();
+                        let mut scheme = Scheme::new(ctx);
                         let (width, height) = swapchain.size();
                         if let Ok(rt) =
                             scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
                         {
                             let present = Self::record_scheme(
-                                scheme,
+                                &mut scheme,
                                 pipeline,
                                 vertex_parcel,
                                 vertex_count,
@@ -258,6 +261,7 @@ impl App {
                                 &rt,
                                 screen,
                             );
+                            self.scheme = Some(scheme);
                             self.present = Some(present);
                             self.recorded_vertex_count = vertex_count;
                             self.recorded_bg_color = bg_color;

@@ -485,10 +485,10 @@ pub unsafe fn goldy_task_graph_render_pass_finish(graph: *mut GoldyTaskGraph) ->
 
 pub unsafe fn goldy_task_graph_render_pass_set_index_buffer(
     graph: *mut GoldyTaskGraph,
-    buffer: *const GoldyBuffer,
+    parcel: *const GoldyParcel,
     format: GoldyIndexFormat,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_set_index_buffer)(graph, buffer, format)
+    (lib().goldy_task_graph_render_pass_set_index_buffer)(graph, parcel, format)
 }
 
 pub unsafe fn goldy_task_graph_render_pass_set_pipeline(
@@ -501,9 +501,9 @@ pub unsafe fn goldy_task_graph_render_pass_set_pipeline(
 pub unsafe fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
     graph: *mut GoldyTaskGraph,
     slot: u32,
-    buffer: *const GoldyBuffer,
+    parcel: *const GoldyParcel,
 ) -> GoldyResult {
-    (lib().goldy_task_graph_render_pass_set_vertex_buffer_parcel)(graph, slot, buffer)
+    (lib().goldy_task_graph_render_pass_set_vertex_buffer_parcel)(graph, slot, parcel)
 }
 
 pub unsafe fn goldy_scheme_create(ctx: *const GoldyContext) -> *mut GoldyScheme {
@@ -520,10 +520,6 @@ pub unsafe fn goldy_scheme_len(scheme: *const GoldyScheme) -> u32 {
 
 pub unsafe fn goldy_scheme_is_dirty(scheme: *const GoldyScheme) -> bool {
     (lib().goldy_scheme_is_dirty)(scheme)
-}
-
-pub unsafe fn goldy_scheme_begin_rerecord(scheme: *mut GoldyScheme) {
-    (lib().goldy_scheme_begin_rerecord)(scheme)
 }
 
 pub unsafe fn goldy_scheme_replay_stats(scheme: *const GoldyScheme, out_stats: *mut GoldyReplayStats) -> GoldyResult {
@@ -679,17 +675,17 @@ pub unsafe fn goldy_scheme_render_pass_set_pipeline(
 pub unsafe fn goldy_scheme_render_pass_set_vertex_buffer_parcel(
     scheme: *mut GoldyScheme,
     slot: u32,
-    buffer: *const GoldyBuffer,
+    parcel: *const GoldyParcel,
 ) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_set_vertex_buffer_parcel)(scheme, slot, buffer)
+    (lib().goldy_scheme_render_pass_set_vertex_buffer_parcel)(scheme, slot, parcel)
 }
 
 pub unsafe fn goldy_scheme_render_pass_set_index_buffer(
     scheme: *mut GoldyScheme,
-    buffer: *const GoldyBuffer,
+    parcel: *const GoldyParcel,
     format: GoldyIndexFormat,
 ) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_set_index_buffer)(scheme, buffer, format)
+    (lib().goldy_scheme_render_pass_set_index_buffer)(scheme, parcel, format)
 }
 
 pub unsafe fn goldy_scheme_render_pass_draw(

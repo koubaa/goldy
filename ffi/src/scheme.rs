@@ -172,19 +172,6 @@ pub unsafe extern "C" fn goldy_scheme_is_dirty(scheme: *const GoldyScheme) -> bo
     (*scheme).inner.is_dirty()
 }
 
-/// Clear recorded nodes and retention cache while preserving scheme identity.
-///
-/// Use before re-recording structural nodes after a resize or ping-pong flip.
-///
-/// # Safety
-/// `scheme` must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_begin_rerecord(scheme: *mut GoldyScheme) {
-    if !scheme.is_null() {
-        (*scheme).inner.begin_rerecord();
-    }
-}
-
 /// Submission outcome counters.
 ///
 /// # Safety

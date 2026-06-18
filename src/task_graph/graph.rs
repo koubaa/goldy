@@ -1239,13 +1239,6 @@ impl IrSubmitState {
         apply_partition_epoch_stamps(&self.resource_stamps, &self.stamp_targets, ctx, ir, waves, tv);
     }
 
-    /// Clear compiled schedule cache and stamp targets for in-place scheme re-record.
-    pub fn reset(&mut self) {
-        self.schedule_cache = None;
-        self.stamp_targets.clear();
-        self.resource_stamps.clear();
-    }
-
     /// Drop cached retention keys so the next submit re-records retained partitions.
     pub fn invalidate_retention(&mut self) {
         if let Some(entry) = &mut self.schedule_cache {

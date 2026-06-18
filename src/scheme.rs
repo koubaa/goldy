@@ -663,8 +663,7 @@ impl Scheme {
 
     /// Declare a render-target lease owned by this scheme (N=1).
     ///
-    /// The backing render target is held until the scheme is dropped or [`Self::begin_rerecord`]
-    /// clears it. Structural mutation.
+    /// The backing render target is held until the scheme is dropped. Structural mutation.
     pub fn lease_render_target(
         &mut self,
         width: u32,
@@ -809,35 +808,6 @@ impl Scheme {
         let submission = self.finish_submit_frame(tv, surface_frames)?;
         self.last_submitted_tv = Some(submission.timeline_value());
         Ok(submission)
-    }
-
-    /// Clear recorded nodes and retention cache while preserving scheme identity.
-    ///
-    /// Use before re-recording structural nodes after a resize or other topology change.
-    /// `last_submitted_tv` is preserved so the next submit waits for the prior
-    /// submission before resubmitting retained command lists.
-    pub fn begin_rerecord(&mut self) {
-        self.ir = GraphIR::default();
-        self.submit_state.reset();
-        self.grants.clear();
-        self.present_grants.clear();
-        self.next_grant_id = 0;
-        self.retention_key = None;
-        self.dirty = true;
-        self.prev_topology_parcels.clear();
-
-        let ctx = self.ctx.clone();
-        for mut parcel in self.leases.drain(..) {
-            let ready_after = parcel.last_referenced();
-            parcel.release_bookkeeping();
-            ctx.with_transient_pool(|pool| {
-                pool.adopt(StampedParcel {
-                    hold: crate::retained_pool::RetainedHold::Texture(parcel),
-                    ready_after,
-                });
-            });
-        }
-        self.rt_leases.clear();
     }
 
     fn finish_submit_frame(
@@ -1074,6 +1044,9 @@ impl Drop for Scheme {
         for grant in &self.grants {
             grant.staging_pool.mark_scheme_dropped_and_drain();
         }
+
+        use crate::task_graph::cross_submit::clear_scheme_topology_registration;
+        clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
 
         let ctx = self.ctx.clone();
         for mut parcel in self.leases.drain(..) {
@@ -2997,40 +2970,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             before,
             "dropped Submission must not trigger swapchain present"
         );
-    }
-
-    #[test]
-    fn begin_rerecord_clears_retention_and_allows_resubmit() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
-        let shader = mock_shader(&device);
-        let pipeline = mock_pipeline(&device, &shader);
-        let parcel = retained_buffer(&mut pool);
-
-        let mut scheme = Scheme::new(&ctx);
-        scheme
-            .node("write", &pipeline)
-            .with_parcel(&parcel, NodeAccess::Write)
-            .with_present(&lease)
-            .dispatch(1, 1, 1);
-        let present = scheme.grant_present(&lease);
-
-        let submission = scheme.submit().expect("initial submit");
-        present.consume(&submission).expect("present");
-
-        scheme.begin_rerecord();
-        assert!(scheme.is_dirty());
-        scheme
-            .node("write", &pipeline)
-            .with_parcel(&parcel, NodeAccess::Write)
-            .with_present(&lease)
-            .dispatch(2, 2, 1);
-        let present2 = scheme.grant_present(&lease);
-
-        let submission2 = scheme.submit().expect("post-rerecord submit");
-        present2.consume(&submission2).expect("present after rerecord");
     }
 
     #[test]

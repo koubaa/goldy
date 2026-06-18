@@ -273,9 +273,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_destroy")]
     internal static partial void SchemeDestroy(nint scheme);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_begin_rerecord")]
-    internal static partial void SchemeBeginRerecord(nint scheme);
-
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_begin", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial GoldyResult SchemeComputeNodeBegin(nint scheme, string label, nint pipeline);
 

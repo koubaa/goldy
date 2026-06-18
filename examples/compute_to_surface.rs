@@ -130,15 +130,16 @@ fn record_scheme(
 }
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
-    state.scheme.begin_rerecord();
+    let mut scheme = Scheme::new(&state.ctx);
     state.present = record_scheme(
-        &mut state.scheme,
+        &mut scheme,
         &state.compute_pipeline,
         &state.uniform_buffer,
         &state.screen,
         width,
         height,
     );
+    state.scheme = scheme;
 }
 
 impl App {

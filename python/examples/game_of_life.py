@@ -134,14 +134,14 @@ def record_display_scheme(
 
 
 def rebuild_display_scheme(
-    display_scheme: goldy.Scheme,
+    ctx: goldy.Context,
     swapchain: goldy.SwapchainPool,
     cells: goldy.Buffer,
     current_field: str,
     render_pipeline: goldy.RenderPipeline,
     screen: goldy.PresentLease,
-) -> tuple[goldy.SchemeRenderTargetLease, goldy.PresentGrant]:
-    display_scheme.begin_rerecord()
+) -> tuple[goldy.Scheme, goldy.SchemeRenderTargetLease, goldy.PresentGrant]:
+    display_scheme = goldy.Scheme(ctx)
     scene_rt = display_scheme.lease_render_target(
         max(swapchain.width, 1),
         max(swapchain.height, 1),
@@ -150,7 +150,7 @@ def rebuild_display_scheme(
     present = record_display_scheme(
         display_scheme, cells, current_field, render_pipeline, scene_rt, screen
     )
-    return scene_rt, present
+    return display_scheme, scene_rt, present
 
 
 def main() -> int:
@@ -230,8 +230,8 @@ def main() -> int:
                         ),
                     )
                     current_field = "a" if use_buffer_a else "b"
-                    scene_rt, present = rebuild_display_scheme(
-                        display_scheme,
+                    display_scheme, scene_rt, present = rebuild_display_scheme(
+                        ctx,
                         swapchain,
                         cells,
                         current_field,
@@ -247,8 +247,8 @@ def main() -> int:
                 run_compute_step(ctx, cells, read_field, write_field, compute_pipeline)
                 use_buffer_a = not use_buffer_a
                 current_field = "a" if use_buffer_a else "b"
-                scene_rt, present = rebuild_display_scheme(
-                    display_scheme,
+                display_scheme, scene_rt, present = rebuild_display_scheme(
+                    ctx,
                     swapchain,
                     cells,
                     current_field,

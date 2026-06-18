@@ -280,21 +280,19 @@ impl WindowState {
     }
 
     fn rerecord_scheme(&mut self) {
-        self.scheme.begin_rerecord();
+        let mut scheme = Scheme::new(&self.ctx);
         let (width, height) = self.swapchain.size();
-        if let Ok(rt) = self
-            .scheme
-            .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)
-        {
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
             self.scene_rt = rt;
             self.present = Self::record_scheme(
-                &mut self.scheme,
+                &mut scheme,
                 &self.pipeline,
                 &self.vertex_parcel,
                 &self.scene_rt,
                 &self.screen,
                 self.effect_type.title(),
             );
+            self.scheme = scheme;
         }
     }
 
@@ -403,23 +401,12 @@ impl WindowState {
     fn handle_resize(&mut self, device: &goldy::Device, width: u32, height: u32) {
         if width > 0 && height > 0 {
             let _ = self.swapchain.resize(width, height);
-            self.scheme.begin_rerecord();
-            let (width, height) = self.swapchain.size();
-            match self
-                .scheme
-                .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)
-            {
-                Ok(rt) => {
-                    self.scene_rt = rt;
-                    match Self::create_pipeline(device, &self.shader, &self.swapchain) {
-                        Ok(pipeline) => {
-                            self.pipeline = pipeline;
-                            self.rerecord_scheme();
-                        }
-                        Err(e) => tracing::error!("[{}] Failed to recreate pipeline: {}", self.effect_type.title(), e),
-                    }
+            match Self::create_pipeline(device, &self.shader, &self.swapchain) {
+                Ok(pipeline) => {
+                    self.pipeline = pipeline;
+                    self.rerecord_scheme();
                 }
-                Err(e) => tracing::error!("[{}] Failed to recreate scene RT: {}", self.effect_type.title(), e),
+                Err(e) => tracing::error!("[{}] Failed to recreate pipeline: {}", self.effect_type.title(), e),
             }
         }
     }

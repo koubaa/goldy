@@ -16,15 +16,14 @@ static class TriangleWindow
         public float R, G, B, A;
     }
 
-    static (Scheme scheme, SchemeRenderTargetLease rt, PresentGrant present) RecordScheme(
-        Context ctx,
+    static (SchemeRenderTargetLease rt, PresentGrant present) RecordScheme(
+        Scheme scheme,
         SwapchainPool swapchain,
         RenderPipeline pipeline,
         Parcel vertexParcel,
         PresentLease screen,
         Color bg)
     {
-        var scheme = new Scheme(ctx);
         var rt = scheme.LeaseRenderTarget(
             Math.Max(swapchain.Width, 1u),
             Math.Max(swapchain.Height, 1u),
@@ -40,7 +39,7 @@ static class TriangleWindow
         }
         scheme.CopyToPresent(rt, screen);
         var present = scheme.GrantPresent(screen);
-        return (scheme, rt, present);
+        return (rt, present);
     }
 
     public static unsafe void Run()
@@ -92,7 +91,8 @@ static class TriangleWindow
             using var vertexParcel = vertexBuffer.Field(0);
 
             var bg = new Color(0.1f, 0.1f, 0.2f, 1.0f);
-            var (scheme, sceneRt, present) = RecordScheme(ctx, swapchain, pipeline, vertexParcel, screen, bg);
+            var scheme = new Scheme(ctx);
+            var (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -107,7 +107,8 @@ static class TriangleWindow
                         sceneRt.Dispose();
                         present.Dispose();
                         scheme.Dispose();
-                        (scheme, sceneRt, present) = RecordScheme(ctx, swapchain, pipeline, vertexParcel, screen, bg);
+                        scheme = new Scheme(ctx);
+                        (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
                     }
                 }
 
