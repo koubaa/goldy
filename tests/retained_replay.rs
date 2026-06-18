@@ -323,7 +323,7 @@ fn lease_texture_scheme_resubmits_without_rerecord() {
         .expect("lease handle");
     scheme
         .node("write_tex", &pipeline)
-        .with_lease(&lease, NodeAccess::Write)
+        .with_parcel(&lease, NodeAccess::Write)
         .with_views(&[handle])
         .dispatch(1, 1, 1);
 

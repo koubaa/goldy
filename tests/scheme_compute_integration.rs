@@ -1145,6 +1145,140 @@ fn scheme_regular_buffer_write_then_copy() {
     assert_eq!(read_grant_u32(&grant, &frame, N), expected);
 }
 
+#[test]
+fn scheme_transient_buffer_write_then_copy() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let write_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("shader"),
+    )
+    .expect("write pipeline");
+    let copy_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, COPY_SHADER).expect("shader"),
+    )
+    .expect("copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let output = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output");
+
+    let mut scheme = Scheme::new(&ctx);
+    let scratch = scheme.lease_buffer(byte_size).expect("lease scratch");
+
+    scheme
+        .node("write_iota", &write_pipe)
+        .with_parcel(&scratch, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    scheme
+        .node("copy_out", &copy_pipe)
+        .with_parcel(&scratch, NodeAccess::Read)
+        .with_parcel(&output, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+
+    let grant = scheme.grant_read(&output).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let expected: Vec<u32> = (1..=N as u32).collect();
+    assert_eq!(read_grant_u32(&grant, &frame, N), expected);
+}
+
+const WRITE_SCALE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    if (id.x < 64) data[id.x] = (id.x + 1u) * 100u;
+}
+"#;
+
+#[test]
+/// Scheme-world analog of `test_transient_buffer_aliased_disjoint_waves` (TaskGraph).
+///
+/// In the TaskGraph model, two transients with disjoint wave lifetimes are aliased onto the
+/// same heap offset within a single submission via graph coloring. Scheme deliberately does
+/// not support within-submission aliasing; instead two separate schemes with a buffer lease
+/// each reuse the same physical backing *across* submissions once the prior epoch retires
+/// (pool high-water recycling). This test verifies that cross-submission correctness:
+/// each scheme observes only its own writes and the outputs are independent.
+fn scheme_transient_buffer_recycling() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let iota_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, WRITE_IOTA_SHADER).expect("shader"),
+    )
+    .expect("iota pipeline");
+    let scale_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, WRITE_SCALE_SHADER).expect("shader"),
+    )
+    .expect("scale pipeline");
+    let copy_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, COPY_SHADER).expect("shader"),
+    )
+    .expect("copy pipeline");
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let output_a = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output_a");
+    let output_b = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("output_b");
+
+    let expected_iota: Vec<u32> = (1..=N as u32).collect();
+    let expected_scale: Vec<u32> = (1..=N as u32).map(|i| i * 100).collect();
+
+    {
+        let mut scheme = Scheme::new(&ctx);
+        let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_a");
+        scheme
+            .node("write_iota", &iota_pipe)
+            .with_parcel(&scratch, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("copy_a", &copy_pipe)
+            .with_parcel(&scratch, NodeAccess::Read)
+            .with_parcel(&output_a, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let grant = scheme.grant_read(&output_a).expect("grant_a");
+        let frame = scheme.submit().expect("submit_a");
+        assert_eq!(read_grant_u32(&grant, &frame, N), expected_iota);
+    }
+
+    {
+        let mut scheme = Scheme::new(&ctx);
+        let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_b");
+        scheme
+            .node("write_scale", &scale_pipe)
+            .with_parcel(&scratch, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme
+            .node("copy_b", &copy_pipe)
+            .with_parcel(&scratch, NodeAccess::Read)
+            .with_parcel(&output_b, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+
+        let grant = scheme.grant_read(&output_b).expect("grant_b");
+        let frame = scheme.submit().expect("submit_b");
+        assert_eq!(read_grant_u32(&grant, &frame, N), expected_scale);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Duplicated from compute_integration.rs
 // ---------------------------------------------------------------------------

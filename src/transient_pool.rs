@@ -11,7 +11,7 @@ use crate::context::Context;
 use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping};
 use crate::retained_pool::{RetainedHold, StampedParcel};
 use crate::timeline::ReferenceTable;
-use crate::types::{TextureFlags, TextureFormat, TextureKind};
+use crate::types::{BufferFlags, BufferKind, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::ParcelType;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -27,14 +27,46 @@ struct TextureKey {
     flags: TextureFlags,
 }
 
-/// A parked resource awaiting epoch retirement.
+/// A parked texture resource awaiting epoch retirement.
 ///
 /// Reuse and drain currently happen as soon as [`Context::parcel_ready`] is true.
 /// A future optimization could keep entries warm for a heuristic number of frames
 /// past readiness before reissuing or dropping them, reducing allocation churn on
 /// intermittent resize or ping-pong flip patterns.
-struct PendingEntry {
-    hold: RetainedHold,
+struct TexturePendingEntry {
+    parcel: Parcel,
+    ready_after: ReferenceTable,
+}
+
+/// Recycle-bin key for buffer parcels: buffers are interchangeable iff size, kind, and flags match.
+///
+/// Keying on size alone would allow an adopted non-Scattered buffer (from
+/// [`crate::retained_pool::RetainedPool::release_buffer`]) to be handed out to a
+/// [`TransientPool::acquire_buffer`] caller that expects a specific kind — which would produce
+/// wrong descriptor categories or silent garbage in the shader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BufferKey {
+    size: u64,
+    kind: BufferKind,
+    flags: BufferFlags,
+}
+
+impl BufferKey {
+    fn from_parcel(parcel: &Parcel) -> Self {
+        let (kind, flags) = parcel
+            .buffer_descriptor()
+            .expect("BufferKey::from_parcel requires a whole-buffer parcel");
+        Self {
+            size: parcel.byte_size(),
+            kind,
+            flags,
+        }
+    }
+}
+
+/// A parked buffer parcel awaiting epoch retirement; reissued by [`TransientPool::acquire_buffer`].
+struct BufferBinEntry {
+    parcel: Parcel,
     ready_after: ReferenceTable,
 }
 
@@ -44,9 +76,10 @@ pub struct TransientPool {
     pending: Arc<PoolBookkeeping>,
     /// Bytes held by clients through this pool (guard-decremented on drop).
     outstanding: Arc<PoolBookkeeping>,
-    texture_bins: HashMap<TextureKey, Vec<PendingEntry>>,
-    /// Non-reusable intake (buffer resources): held until ready, then dropped.
-    holding: Vec<PendingEntry>,
+    texture_bins: HashMap<TextureKey, Vec<TexturePendingEntry>>,
+    /// Buffer parcels keyed by `(size, kind, flags)`; entries stay until reissued by
+    /// [`Self::acquire_buffer`] (never dropped by [`Self::drain_ready`] — high-water model).
+    buffer_bins: HashMap<BufferKey, Vec<BufferBinEntry>>,
 }
 
 impl TransientPool {
@@ -55,7 +88,7 @@ impl TransientPool {
             pending: Arc::new(PoolBookkeeping::new()),
             outstanding: Arc::new(PoolBookkeeping::new()),
             texture_bins: HashMap::new(),
-            holding: Vec::new(),
+            buffer_bins: HashMap::new(),
         }
     }
 
@@ -78,11 +111,9 @@ impl TransientPool {
         if let Some(bin) = self.texture_bins.get_mut(&key) {
             if let Some(pos) = bin.iter().position(|e| ctx.parcel_ready(&e.ready_after)) {
                 let entry = bin.swap_remove(pos);
-                let RetainedHold::Texture(mut parcel) = entry.hold else {
-                    unreachable!("texture bin holds texture parcels");
-                };
-                let bytes = parcel.byte_size();
+                let bytes = entry.parcel.byte_size();
                 self.pending.subtract(ParcelType::Texture, bytes);
+                let mut parcel = entry.parcel;
                 parcel.attach_bookkeeping(BookkeepingGuard::new(
                     Arc::downgrade(&self.outstanding),
                     ParcelType::Texture,
@@ -103,43 +134,94 @@ impl TransientPool {
         Ok(Parcel::from_texture(tex, guard, Arc::downgrade(&ctx.device().inner)))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn recycle(&mut self, mut parcel: Parcel) {
-        let ready_after = parcel.last_referenced();
-        parcel.release_bookkeeping();
-        self.park(StampedParcel {
-            hold: RetainedHold::Texture(parcel),
-            ready_after,
-        });
+    /// Acquire a one-submission buffer lease backing parcel, reusing a retired bin entry when possible.
+    ///
+    /// `kind` and `flags` must match the values used to originally allocate any reused entry;
+    /// they are also forwarded to the backend when a fresh allocation is needed.
+    pub fn acquire_buffer(&mut self, ctx: &Context, size: u64, kind: BufferKind, flags: BufferFlags) -> Result<Parcel> {
+        let key = BufferKey { size, kind, flags };
+        if let Some(bin) = self.buffer_bins.get_mut(&key) {
+            if let Some(pos) = bin.iter().position(|e| ctx.parcel_ready(&e.ready_after)) {
+                let entry = bin.swap_remove(pos);
+                let bytes = entry.parcel.byte_size();
+                self.pending.subtract(ParcelType::Buffer, bytes);
+                let mut parcel = entry.parcel;
+                parcel.attach_bookkeeping(BookkeepingGuard::new(
+                    Arc::downgrade(&self.outstanding),
+                    ParcelType::Buffer,
+                    bytes,
+                ));
+                self.outstanding.add(ParcelType::Buffer, bytes);
+                return Ok(parcel);
+            }
+        }
+
+        let alloc = ctx
+            .device()
+            .alloc_buffer(size, kind, None, flags)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let bytes = alloc.byte_size();
+        self.outstanding.add(ParcelType::Buffer, bytes);
+        let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Buffer, bytes);
+        let mut parcel = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
+        parcel.attach_bookkeeping(guard);
+        Ok(parcel)
+    }
+
+    /// Return a scheme-held buffer lease parcel to the pool after its epoch retires.
+    ///
+    /// Called from [`crate::Scheme::drop`] for each buffer-backed lease. The parcel's
+    /// bookkeeping must already be released by the caller.
+    pub(crate) fn return_buffer_parcel(&mut self, parcel: Parcel, ready_after: ReferenceTable) {
+        let bytes = parcel.byte_size();
+        let key = BufferKey::from_parcel(&parcel);
+        self.pending.add(ParcelType::Buffer, bytes);
+        self.buffer_bins
+            .entry(key)
+            .or_default()
+            .push(BufferBinEntry { parcel, ready_after });
     }
 
     pub(crate) fn adopt(&mut self, stamped: StampedParcel) {
-        self.park(stamped);
-    }
-
-    fn park(&mut self, stamped: StampedParcel) {
         let StampedParcel { hold, ready_after } = stamped;
-        let bytes = hold.byte_size();
-        match hold.texture_descriptor() {
-            Some((width, height, format, access, flags)) => {
-                self.pending.add(ParcelType::Texture, bytes);
-                let key = TextureKey {
-                    width,
-                    height,
-                    format,
-                    access,
-                    flags,
+        match hold {
+            RetainedHold::Texture(parcel) => {
+                self.park_texture(parcel, ready_after);
+            }
+            RetainedHold::Buffer(buffer) => {
+                let bytes = buffer.byte_size();
+                let key = BufferKey {
+                    size: bytes,
+                    kind: buffer.access(),
+                    flags: buffer.flags(),
                 };
-                self.texture_bins
+                let parcel = buffer
+                    .into_transient_parcel()
+                    .expect("buffer bin intake requires single-unit buffer");
+                self.pending.add(ParcelType::Buffer, bytes);
+                self.buffer_bins
                     .entry(key)
                     .or_default()
-                    .push(PendingEntry { hold, ready_after });
-            }
-            None => {
-                self.pending.add(ParcelType::Buffer, bytes);
-                self.holding.push(PendingEntry { hold, ready_after });
+                    .push(BufferBinEntry { parcel, ready_after });
             }
         }
+    }
+
+    fn park_texture(&mut self, parcel: Parcel, ready_after: ReferenceTable) {
+        let bytes = parcel.byte_size();
+        let (width, height, format, access, flags) = parcel.texture_descriptor().expect("texture hold has descriptor");
+        let key = TextureKey {
+            width,
+            height,
+            format,
+            access,
+            flags,
+        };
+        self.pending.add(ParcelType::Texture, bytes);
+        self.texture_bins
+            .entry(key)
+            .or_default()
+            .push(TexturePendingEntry { parcel, ready_after });
     }
 
     pub fn drain_ready(&mut self, ctx: &Context) -> usize {
@@ -148,7 +230,7 @@ impl TransientPool {
         for bin in self.texture_bins.values_mut() {
             bin.retain(|e| {
                 if ctx.parcel_ready(&e.ready_after) {
-                    pending.subtract(ParcelType::Texture, e.hold.byte_size());
+                    pending.subtract(ParcelType::Texture, e.parcel.byte_size());
                     released += 1;
                     false
                 } else {
@@ -157,15 +239,9 @@ impl TransientPool {
             });
         }
         self.texture_bins.retain(|_, bin| !bin.is_empty());
-        self.holding.retain(|e| {
-            if ctx.parcel_ready(&e.ready_after) {
-                pending.subtract(ParcelType::Buffer, e.hold.byte_size());
-                released += 1;
-                false
-            } else {
-                true
-            }
-        });
+        // buffer_bins: high-water model — entries stay until reissued by acquire_buffer.
+        // Prune empty Vecs left behind after full reuse to keep the map tidy.
+        self.buffer_bins.retain(|_, bin| !bin.is_empty());
         released
     }
 
@@ -178,7 +254,7 @@ impl TransientPool {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.texture_bins.values().map(Vec::len).sum::<usize>() + self.holding.len()
+        self.texture_bins.values().map(Vec::len).sum::<usize>() + self.buffer_bins.values().map(Vec::len).sum::<usize>()
     }
 }
 
@@ -227,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn adopted_buffer_is_held_not_reissued() {
+    fn adopted_buffer_bins_and_reissues_via_acquire_buffer() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
         let mut retained = RetainedPool::new(device.clone());
@@ -240,12 +316,81 @@ mod tests {
                 None,
             )
             .unwrap();
+        let handle_before = b.whole().buffer_handle().unwrap();
         retained.release_buffer(&ctx, b);
         assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1);
         assert!(ctx.with_transient_pool(|t| t.pending_bytes().buffer >= 64));
 
         let released = ctx.with_transient_pool(|t| t.drain_ready(&ctx));
-        assert_eq!(released, 1);
-        assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 0);
+        assert_eq!(released, 0, "buffer bins are never drained");
+
+        let p = ctx
+            .with_transient_pool(|pool| {
+                pool.acquire_buffer(
+                    &ctx,
+                    64,
+                    crate::types::BufferKind::Scattered,
+                    crate::types::BufferFlags::empty(),
+                )
+            })
+            .expect("reuse binned buffer");
+        assert_eq!(
+            p.buffer_handle(),
+            Some(handle_before),
+            "adopted buffer parcel is reusable from buffer_bins"
+        );
+    }
+
+    /// Tests the [`super::TransientPool::return_buffer_parcel`] → [`super::TransientPool::acquire_buffer`]
+    /// round-trip: this is the path taken by [`crate::Scheme::drop`] when returning a buffer lease.
+    #[test]
+    fn return_buffer_parcel_reissues_on_acquire() {
+        use crate::parcel::Parcel;
+        use std::sync::Arc;
+
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+
+        // Acquire a fresh parcel directly from the pool (simulates lease_buffer allocation).
+        let mut p = ctx
+            .with_transient_pool(|pool| {
+                pool.acquire_buffer(
+                    &ctx,
+                    64,
+                    crate::types::BufferKind::Scattered,
+                    crate::types::BufferFlags::empty(),
+                )
+            })
+            .expect("initial acquire");
+        let handle_before = p.buffer_handle().expect("buffer handle");
+
+        // Simulate Scheme::drop: release bookkeeping then return the parcel.
+        let ready_after = p.last_referenced();
+        p.release_bookkeeping();
+        ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ready_after));
+
+        assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1, "parcel is pending");
+
+        // Re-acquire — the epoch table is empty so parcel is immediately ready.
+        let p2 = ctx
+            .with_transient_pool(|pool| {
+                pool.acquire_buffer(
+                    &ctx,
+                    64,
+                    crate::types::BufferKind::Scattered,
+                    crate::types::BufferFlags::empty(),
+                )
+            })
+            .expect("reuse after return");
+        assert_eq!(
+            p2.buffer_handle(),
+            Some(handle_before),
+            "return_buffer_parcel → acquire_buffer must reuse the same GPU buffer"
+        );
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            0,
+            "bin emptied after reuse"
+        );
     }
 }

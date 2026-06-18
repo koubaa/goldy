@@ -10,7 +10,7 @@ use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
 use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue, WRITE_KINDS_TRANSFER};
-use crate::types::{ResourceAccess, ResourceHandle};
+use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
 use std::borrow::Cow;
 use std::ops::{Deref, Index};
@@ -287,6 +287,18 @@ impl Parcel {
         self.bookkeeping = Some(guard);
     }
 
+    /// Kind and flags for whole-buffer parcels; `None` for views and textures.
+    ///
+    /// Used by [`crate::transient_pool::TransientPool`] to key the buffer recycle bin on
+    /// the full descriptor (not just size) so that buffers with different `BufferKind` or
+    /// `BufferFlags` never alias.
+    pub(crate) fn buffer_descriptor(&self) -> Option<(BufferKind, BufferFlags)> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => Some((b.access(), b.flags())),
+            _ => None,
+        }
+    }
+
     pub(crate) fn texture_descriptor(
         &self,
     ) -> Option<(
@@ -509,6 +521,18 @@ impl Buffer {
 
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
+    }
+
+    /// Peel a single-unit buffer into a transient-pool parcel (no bookkeeping).
+    pub(crate) fn into_transient_parcel(mut self) -> anyhow::Result<Parcel> {
+        if self.is_partitioned() {
+            anyhow::bail!("into_transient_parcel requires a single-unit buffer");
+        }
+        self.release_bookkeeping();
+        match self.storage {
+            BufferStorage::Single(arc) => Ok(Parcel::from_whole_buffer(arc, self.home_device)),
+            BufferStorage::Partitioned { .. } => unreachable!(),
+        }
     }
 
     /// Iterate all bindable parcels for dependency registration.

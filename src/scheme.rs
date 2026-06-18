@@ -455,6 +455,9 @@ pub struct LeaseId(pub(crate) u32);
 /// Marker type for texture leases acquired via [`Scheme::lease_texture`].
 pub struct LeaseTexture;
 
+/// Marker type for buffer leases acquired via [`Scheme::lease_buffer`].
+pub struct LeaseBuffer;
+
 /// Marker type for render-target leases acquired via [`Scheme::lease_render_target`].
 pub struct LeaseRenderTarget;
 
@@ -652,6 +655,41 @@ impl Scheme {
         let backing = self
             .ctx
             .with_transient_pool(|pool| pool.acquire_texture(&self.ctx, width, height, format, access, flags))
+            .map_err(|e| self.ctx.classify(e))?;
+        let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
+        self.leases.push(backing);
+        Ok(Lease {
+            id,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Declare a transient buffer lease backed by the context's transient pool (N=1).
+    ///
+    /// The backing parcel is held until the scheme is dropped. Structural mutation.
+    pub fn lease_buffer(&mut self, size: u64) -> Result<Lease<LeaseBuffer>, GoldyError> {
+        self.lease_buffer_with(
+            size,
+            crate::types::BufferKind::Scattered,
+            crate::types::BufferFlags::empty(),
+        )
+    }
+
+    /// Like [`Self::lease_buffer`] but with explicit kind and flags.
+    ///
+    /// Use this when the shader requires a buffer kind other than `Scattered` (e.g.
+    /// `Broadcast` for uniform buffers). The pool bins buffers by `(size, kind, flags)`,
+    /// so only identically-described buffers are ever reused across submissions.
+    pub fn lease_buffer_with(
+        &mut self,
+        size: u64,
+        kind: crate::types::BufferKind,
+        flags: crate::types::BufferFlags,
+    ) -> Result<Lease<LeaseBuffer>, GoldyError> {
+        self.dirty = true;
+        let backing = self
+            .ctx
+            .with_transient_pool(|pool| pool.acquire_buffer(&self.ctx, size, kind, flags))
             .map_err(|e| self.ctx.classify(e))?;
         let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
         self.leases.push(backing);
@@ -1052,12 +1090,16 @@ impl Drop for Scheme {
         for mut parcel in self.leases.drain(..) {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
-            ctx.with_transient_pool(|pool| {
-                pool.adopt(StampedParcel {
-                    hold: crate::retained_pool::RetainedHold::Texture(parcel),
-                    ready_after,
+            if parcel.texture_descriptor().is_some() {
+                ctx.with_transient_pool(|pool| {
+                    pool.adopt(StampedParcel {
+                        hold: crate::retained_pool::RetainedHold::Texture(parcel),
+                        ready_after,
+                    });
                 });
-            });
+            } else {
+                ctx.with_transient_pool(|pool| pool.return_buffer_parcel(parcel, ready_after));
+            }
         }
         self.rt_leases.clear();
     }
@@ -1204,6 +1246,55 @@ fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     }
 }
 
+/// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, and scheme-held leases.
+pub(crate) trait SchemeBindable {
+    fn resolve(
+        &self,
+        scheme: &Scheme,
+        access: ResourceAccess,
+    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>);
+}
+
+impl SchemeBindable for Parcel {
+    fn resolve(
+        &self,
+        _: &Scheme,
+        access: ResourceAccess,
+    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
+        (self.resource_id(), self.resource_index(access), self.stamp_handle())
+    }
+}
+
+impl SchemeBindable for crate::Buffer {
+    fn resolve(
+        &self,
+        _: &Scheme,
+        access: ResourceAccess,
+    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
+        let parcel = self.whole();
+        (
+            parcel.resource_id(),
+            parcel.resource_index(access),
+            parcel.stamp_handle(),
+        )
+    }
+}
+
+impl<T> SchemeBindable for Lease<T> {
+    fn resolve(
+        &self,
+        scheme: &Scheme,
+        access: ResourceAccess,
+    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
+        let parcel = &scheme.leases[self.id.0 as usize];
+        (
+            parcel.resource_id(),
+            parcel.resource_index(access),
+            parcel.stamp_handle(),
+        )
+    }
+}
+
 /// Builder for a single compute dispatch node within a [`Scheme`].
 pub struct SchemeNodeBuilder<'a> {
     scheme: &'a mut Scheme,
@@ -1215,24 +1306,23 @@ pub struct SchemeNodeBuilder<'a> {
 }
 
 impl<'a> SchemeNodeBuilder<'a> {
-    /// Declare that this node accesses a retained [`crate::Parcel`] deed.
+    /// Declare that this node accesses a bindable resource (retained deed or scheme-held lease).
     ///
-    /// The parcel's bindless index is appended to `resource_slots` in call order.
+    /// The resource's bindless index is appended to `resource_slots` in call order.
     /// The nth call corresponds to the nth resource-kind parameter in the shader signature.
-    pub fn with_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
-        self.scheme.submit_state.register_parcel_stamp(parcel);
-        self.bindings.push(ResourceBinding {
-            resource: parcel.resource_id(),
-            access,
-        });
+    #[allow(private_bounds)]
+    pub fn with_parcel(mut self, bindable: &impl SchemeBindable, access: NodeAccess) -> Self {
         let resource_access = node_access_to_resource_access(access);
-        let index = parcel.resource_index(resource_access).unwrap_or_else(|| {
+        let (resource, slot, stamp) = bindable.resolve(self.scheme, resource_access);
+        let slot = slot.unwrap_or_else(|| {
             panic!(
-                "with_parcel: parcel has no descriptor for {access:?} access; \
+                "with_parcel: resource has no descriptor for {access:?} access; \
                  check BufferKind/TextureKind is compatible with NodeAccess"
             );
         });
-        self.resource_slots.push(index);
+        self.scheme.submit_state.register_stamp_parts(resource, stamp);
+        self.bindings.push(ResourceBinding { resource, access });
+        self.resource_slots.push(slot);
         self
     }
 
@@ -1244,20 +1334,6 @@ impl<'a> SchemeNodeBuilder<'a> {
                 resource: parcel.resource_id(),
                 access,
             });
-        }
-        self
-    }
-
-    /// Declare that this node accesses a scheme-held texture [`Lease`].
-    pub fn with_lease(mut self, lease: &Lease<LeaseTexture>, access: NodeAccess) -> Self {
-        let idx = lease.id.0 as usize;
-        let backing = &self.scheme.leases[idx];
-        let resource = backing.resource_id();
-        self.scheme.submit_state.register_parcel_stamp(backing);
-        self.bindings.push(ResourceBinding { resource, access });
-        let resource_access = node_access_to_resource_access(access);
-        if let Some(handle) = backing.handle(resource_access) {
-            self.resource_slots.push(handle.index());
         }
         self
     }
@@ -1697,7 +1773,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _handle = scheme.leases[0].handle(ResourceAccess::Write).expect("lease handle");
         scheme
             .node("write_tex", &pipeline)
-            .with_lease(&lease, NodeAccess::Write)
+            .with_parcel(&lease, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         (scheme, lease)
@@ -3012,7 +3088,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    #[should_panic(expected = "with_parcel: parcel has no descriptor")]
+    #[should_panic(expected = "with_parcel: resource has no descriptor")]
     fn with_parcel_panics_on_incompatible_access() {
         let device = mock_device();
         let ctx = device.create_context().expect("context");
