@@ -1,6 +1,6 @@
 //! Scheme screenshot tests — duplicated from `screenshot_tests.rs`.
 //!
-//! Reuses the same reference PNGs; original TaskGraph tests remain until ekrano migration.
+//! Reuses the same reference PNGs. TaskGraph originals are marked legacy in `screenshot_tests.rs`.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 mod common;

@@ -1927,6 +1927,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 /// 4. `graph.dispatch(&ctx)` resolves transients via the device-owned
 ///    placement heap (view creation, bindless patching, submission).
 /// 5. Read back output and verify values.
+// Legacy TaskGraph — migrated: `scheme_transient_buffer_write_then_copy`
 #[test]
 fn test_transient_buffer_write_then_copy() {
     use goldy::{NodeAccess, TaskGraph};
@@ -2043,6 +2044,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 /// Two transients with disjoint wave lifetimes alias the same heap offset via graph
 /// coloring. Wave 0 writes `t0`; wave 1 overwrites the aliased bytes via `t1` with a
 /// different pattern; wave 2 copies `t1` to a regular output buffer.
+// Legacy TaskGraph — TaskGraph-only intra-submission heap aliasing; cross-submission coverage: `scheme_transient_buffer_recycling`
 #[test]
 fn test_transient_buffer_aliased_disjoint_waves() {
     use goldy::{NodeAccess, TaskGraph};

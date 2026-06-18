@@ -1,5 +1,8 @@
 //! Integration tests for the windowed surface graph path (render pass + swapchain copy).
 //!
+//! Legacy TaskGraph path. Scheme coverage: `scheme_render_integration.rs`.
+//! Delete this file when ekrano migrates (Phase 2).
+//!
 //! Full `Surface::submit_graph_to_frame` requires a live WSI window (see `examples/triangle.rs`).
 //! These tests exercise the same render-pass graph submission against an offscreen
 //! `RenderTarget` and verify pixels via CPU readback.
@@ -31,6 +34,7 @@ fn make_device() -> Option<goldy::Device> {
 }
 
 /// Same graph shape as `examples/triangle.rs` (render_pass → submit), without swapchain acquire.
+// Legacy TaskGraph — migrated: `scheme_render_pass_triangle_readback`
 #[test]
 fn render_pass_task_graph_triangle_readback() {
     let Some(device) = make_device() else {
