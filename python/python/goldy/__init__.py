@@ -9,13 +9,13 @@ Example:
     >>> instance = goldy.Instance()
     >>> device = instance.request_adapter().request_device()
     >>> 
-    >>> # Graphics via TaskGraph (headless)
-    >>> target = goldy.RenderTarget(device, 800, 600, goldy.TextureFormat.RGBA8_UNORM)
-    >>> graph = goldy.TaskGraph()
-    >>> with graph.render_pass("clear", target) as rp:
+    >>> # Graphics via Scheme (headless)
+    >>> ctx = goldy.Context(device)
+    >>> scheme = goldy.Scheme(ctx)
+    >>> rt = scheme.lease_render_target(800, 600, goldy.TextureFormat.RGBA8_UNORM)
+    >>> with scheme.render_pass("clear", rt) as rp:
     ...     rp.clear(goldy.Color.CORNFLOWER_BLUE)
-    >>> graph.dispatch(device)
-    >>> pixels = target.read_to_cpu()
+    >>> submission = scheme.submit()
 """
 
 import os as _os
@@ -71,9 +71,6 @@ from goldy._goldy import (
     RenderPipeline,
     RenderPipelineDesc,
     RenderTarget,
-    TaskGraph,
-    RenderPass,
-    ComputeNode,
     Scheme,
     SchemeComputeNode,
     SchemeRenderPass,
@@ -83,7 +80,6 @@ from goldy._goldy import (
     PresentLease,
     PresentGrant,
     SwapchainPool,
-    SwapchainOutput,
     NodeAccess,
     ResourceAccess,
     write_to_parcel,
@@ -128,9 +124,6 @@ __all__ = [
     "RenderPipeline",
     "RenderPipelineDesc",
     "RenderTarget",
-    "TaskGraph",
-    "RenderPass",
-    "ComputeNode",
     "Scheme",
     "SchemeComputeNode",
     "SchemeRenderPass",
@@ -140,7 +133,6 @@ __all__ = [
     "PresentLease",
     "PresentGrant",
     "SwapchainPool",
-    "SwapchainOutput",
     "NodeAccess",
     "ResourceAccess",
     "write_to_parcel",

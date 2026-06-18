@@ -16,7 +16,6 @@ mod scheme;
 mod shader;
 mod surface;
 mod swapchain_pool;
-mod task_graph;
 mod types;
 
 pub use compute::*;
@@ -32,5 +31,4 @@ pub use scheme::*;
 pub use shader::*;
 pub use surface::*;
 pub use swapchain_pool::*;
-pub use task_graph::*;
 pub use types::*;

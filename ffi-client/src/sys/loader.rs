@@ -65,32 +65,7 @@ pub(crate) struct GoldyFfi {
     pub goldy_surface_height: FnGoldySurfaceHeight,
     pub goldy_surface_present: FnGoldySurfacePresent,
     pub goldy_surface_resize: FnGoldySurfaceResize,
-    pub goldy_surface_submit_graph_to_frame: FnGoldySurfaceSubmitGraphToFrame,
     pub goldy_surface_width: FnGoldySurfaceWidth,
-    pub goldy_task_graph_clear: FnGoldyTaskGraphClear,
-    pub goldy_task_graph_copy_render_target_to_swapchain: FnGoldyTaskGraphCopyRenderTargetToSwapchain,
-    pub goldy_task_graph_create: FnGoldyTaskGraphCreate,
-    pub goldy_task_graph_declare_swapchain_output: FnGoldyTaskGraphDeclareSwapchainOutput,
-    pub goldy_task_graph_compute_node_begin: FnGoldyTaskGraphComputeNodeBegin,
-    pub goldy_task_graph_compute_node_with_parcel: FnGoldyTaskGraphComputeNodeWithParcel,
-    pub goldy_task_graph_compute_node_with_resource_slots: FnGoldyTaskGraphComputeNodeWithResourceSlots,
-    pub goldy_task_graph_compute_node_with_param: FnGoldyTaskGraphComputeNodeWithParam,
-    pub goldy_task_graph_compute_node_dispatch: FnGoldyTaskGraphComputeNodeDispatch,
-    pub goldy_task_graph_destroy: FnGoldyTaskGraphDestroy,
-    pub goldy_task_graph_dispatch: FnGoldyTaskGraphDispatch,
-    pub goldy_task_graph_write_parcel: FnGoldyTaskGraphWriteParcel,
-    pub goldy_task_graph_render_pass_begin: FnGoldyTaskGraphRenderPassBegin,
-    pub goldy_task_graph_render_pass_with_parcel: FnGoldyTaskGraphRenderPassWithParcel,
-    pub goldy_task_graph_render_pass_with_views: FnGoldyTaskGraphRenderPassWithViews,
-    pub goldy_task_graph_render_pass_clear: FnGoldyTaskGraphRenderPassClear,
-    pub goldy_task_graph_render_pass_clear_depth: FnGoldyTaskGraphRenderPassClearDepth,
-    pub goldy_task_graph_render_pass_draw: FnGoldyTaskGraphRenderPassDraw,
-    pub goldy_task_graph_render_pass_draw_fullscreen: FnGoldyTaskGraphRenderPassDrawFullscreen,
-    pub goldy_task_graph_render_pass_draw_indexed: FnGoldyTaskGraphRenderPassDrawIndexed,
-    pub goldy_task_graph_render_pass_finish: FnGoldyTaskGraphRenderPassFinish,
-    pub goldy_task_graph_render_pass_set_index_buffer: FnGoldyTaskGraphRenderPassSetIndexBuffer,
-    pub goldy_task_graph_render_pass_set_pipeline: FnGoldyTaskGraphRenderPassSetPipeline,
-    pub goldy_task_graph_render_pass_set_vertex_buffer_parcel: FnGoldyTaskGraphRenderPassSetVertexBufferParcel,
     pub goldy_retained_pool_acquire_buffer: FnGoldyRetainedPoolAcquireBuffer,
     pub goldy_retained_pool_create: FnGoldyRetainedPoolCreate,
     pub goldy_retained_pool_destroy: FnGoldyRetainedPoolDestroy,
@@ -107,8 +82,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_buffer_field: FnGoldyBufferField,
     pub goldy_parcel_byte_size: FnGoldyParcelByteSize,
     pub goldy_parcel_destroy: FnGoldyParcelDestroy,
-    pub goldy_task_graph_compute_node_with_buffer_unit: FnGoldyTaskGraphComputeNodeWithBufferUnit,
-    pub goldy_task_graph_render_pass_with_buffer_unit: FnGoldyTaskGraphRenderPassWithBufferUnit,
     pub goldy_scheme_create: FnGoldySchemeCreate,
     pub goldy_scheme_destroy: FnGoldySchemeDestroy,
     pub goldy_scheme_len: FnGoldySchemeLen,
@@ -242,92 +215,7 @@ impl GoldyFfi {
             goldy_surface_height: sym!("goldy_surface_height", FnGoldySurfaceHeight),
             goldy_surface_present: sym!("goldy_surface_present", FnGoldySurfacePresent),
             goldy_surface_resize: sym!("goldy_surface_resize", FnGoldySurfaceResize),
-            goldy_surface_submit_graph_to_frame: sym!(
-                "goldy_surface_submit_graph_to_frame",
-                FnGoldySurfaceSubmitGraphToFrame
-            ),
             goldy_surface_width: sym!("goldy_surface_width", FnGoldySurfaceWidth),
-            goldy_task_graph_clear: sym!("goldy_task_graph_clear", FnGoldyTaskGraphClear),
-            goldy_task_graph_copy_render_target_to_swapchain: sym!(
-                "goldy_task_graph_copy_render_target_to_swapchain",
-                FnGoldyTaskGraphCopyRenderTargetToSwapchain
-            ),
-            goldy_task_graph_create: sym!("goldy_task_graph_create", FnGoldyTaskGraphCreate),
-            goldy_task_graph_declare_swapchain_output: sym!(
-                "goldy_task_graph_declare_swapchain_output",
-                FnGoldyTaskGraphDeclareSwapchainOutput
-            ),
-            goldy_task_graph_compute_node_begin: sym!(
-                "goldy_task_graph_compute_node_begin",
-                FnGoldyTaskGraphComputeNodeBegin
-            ),
-            goldy_task_graph_compute_node_with_parcel: sym!(
-                "goldy_task_graph_compute_node_with_parcel",
-                FnGoldyTaskGraphComputeNodeWithParcel
-            ),
-            goldy_task_graph_compute_node_with_resource_slots: sym!(
-                "goldy_task_graph_compute_node_with_resource_slots",
-                FnGoldyTaskGraphComputeNodeWithResourceSlots
-            ),
-            goldy_task_graph_compute_node_with_param: sym!(
-                "goldy_task_graph_compute_node_with_param",
-                FnGoldyTaskGraphComputeNodeWithParam
-            ),
-            goldy_task_graph_compute_node_dispatch: sym!(
-                "goldy_task_graph_compute_node_dispatch",
-                FnGoldyTaskGraphComputeNodeDispatch
-            ),
-            goldy_task_graph_destroy: sym!("goldy_task_graph_destroy", FnGoldyTaskGraphDestroy),
-            goldy_task_graph_dispatch: sym!("goldy_task_graph_dispatch", FnGoldyTaskGraphDispatch),
-            goldy_task_graph_write_parcel: sym!("goldy_task_graph_write_parcel", FnGoldyTaskGraphWriteParcel),
-            goldy_task_graph_render_pass_begin: sym!(
-                "goldy_task_graph_render_pass_begin",
-                FnGoldyTaskGraphRenderPassBegin
-            ),
-            goldy_task_graph_render_pass_with_parcel: sym!(
-                "goldy_task_graph_render_pass_with_parcel",
-                FnGoldyTaskGraphRenderPassWithParcel
-            ),
-            goldy_task_graph_render_pass_with_views: sym!(
-                "goldy_task_graph_render_pass_with_views",
-                FnGoldyTaskGraphRenderPassWithViews
-            ),
-            goldy_task_graph_render_pass_clear: sym!(
-                "goldy_task_graph_render_pass_clear",
-                FnGoldyTaskGraphRenderPassClear
-            ),
-            goldy_task_graph_render_pass_clear_depth: sym!(
-                "goldy_task_graph_render_pass_clear_depth",
-                FnGoldyTaskGraphRenderPassClearDepth
-            ),
-            goldy_task_graph_render_pass_draw: sym!(
-                "goldy_task_graph_render_pass_draw",
-                FnGoldyTaskGraphRenderPassDraw
-            ),
-            goldy_task_graph_render_pass_draw_fullscreen: sym!(
-                "goldy_task_graph_render_pass_draw_fullscreen",
-                FnGoldyTaskGraphRenderPassDrawFullscreen
-            ),
-            goldy_task_graph_render_pass_draw_indexed: sym!(
-                "goldy_task_graph_render_pass_draw_indexed",
-                FnGoldyTaskGraphRenderPassDrawIndexed
-            ),
-            goldy_task_graph_render_pass_finish: sym!(
-                "goldy_task_graph_render_pass_finish",
-                FnGoldyTaskGraphRenderPassFinish
-            ),
-            goldy_task_graph_render_pass_set_index_buffer: sym!(
-                "goldy_task_graph_render_pass_set_index_buffer",
-                FnGoldyTaskGraphRenderPassSetIndexBuffer
-            ),
-            goldy_task_graph_render_pass_set_pipeline: sym!(
-                "goldy_task_graph_render_pass_set_pipeline",
-                FnGoldyTaskGraphRenderPassSetPipeline
-            ),
-            goldy_task_graph_render_pass_set_vertex_buffer_parcel: sym!(
-                "goldy_task_graph_render_pass_set_vertex_buffer_parcel",
-                FnGoldyTaskGraphRenderPassSetVertexBufferParcel
-            ),
             goldy_retained_pool_acquire_buffer: sym!(
                 "goldy_retained_pool_acquire_buffer",
                 FnGoldyRetainedPoolAcquireBuffer
@@ -347,14 +235,6 @@ impl GoldyFfi {
             goldy_buffer_field: sym!("goldy_buffer_field", FnGoldyBufferField),
             goldy_parcel_byte_size: sym!("goldy_parcel_byte_size", FnGoldyParcelByteSize),
             goldy_parcel_destroy: sym!("goldy_parcel_destroy", FnGoldyParcelDestroy),
-            goldy_task_graph_compute_node_with_buffer_unit: sym!(
-                "goldy_task_graph_compute_node_with_buffer_unit",
-                FnGoldyTaskGraphComputeNodeWithBufferUnit
-            ),
-            goldy_task_graph_render_pass_with_buffer_unit: sym!(
-                "goldy_task_graph_render_pass_with_buffer_unit",
-                FnGoldyTaskGraphRenderPassWithBufferUnit
-            ),
             goldy_scheme_create: sym!("goldy_scheme_create", FnGoldySchemeCreate),
             goldy_scheme_destroy: sym!("goldy_scheme_destroy", FnGoldySchemeDestroy),
             goldy_scheme_len: sym!("goldy_scheme_len", FnGoldySchemeLen),

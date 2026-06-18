@@ -105,4 +105,114 @@ public class SchemeTests
             // No GPU in CI — skip gracefully.
         }
     }
+
+    [Fact]
+    public void Scheme_ClearRenderTarget_ReadbackIsRed()
+    {
+        try
+        {
+            using var instance = new Instance();
+            using var device = instance.RequestAdapter().RequestDevice();
+            using var ctx = device.CreateContext();
+            using var retainedPool = new RetainedPool(device);
+            using var readback = retainedPool.AcquireTexture(
+                2,
+                2,
+                TextureFormat.Rgba8Unorm,
+                TextureKind.Direct,
+                TextureFlags.CopySrc | TextureFlags.CopyDst);
+
+            using var scheme = new Scheme(ctx);
+            using var rt = scheme.LeaseRenderTarget(2, 2, TextureFormat.Rgba8Unorm);
+            using (var pass = scheme.RenderPass("clear", rt))
+                pass.Clear(Color.Red);
+
+            scheme.CopyToTexture(rt, readback);
+            using var grant = scheme.GrantReadTexture(readback);
+            using var submission = scheme.Submit();
+            var pixels = grant.Consume(submission);
+
+            Assert.Equal(2u * 2u * 4u, (uint)pixels.Length);
+            for (var i = 0; i < pixels.Length; i += 4)
+            {
+                Assert.Equal(255, pixels[i]);
+                Assert.Equal(0, pixels[i + 1]);
+                Assert.Equal(0, pixels[i + 2]);
+                Assert.Equal(255, pixels[i + 3]);
+            }
+        }
+        catch (GoldyException ex) when (ex.Message.Contains("adapter", StringComparison.OrdinalIgnoreCase))
+        {
+            // No GPU in CI — skip gracefully.
+        }
+    }
+
+    [Fact]
+    public void Scheme_Triangle_ReadbackHasColor()
+    {
+        try
+        {
+            using var instance = new Instance();
+            using var device = instance.RequestAdapter().RequestDevice();
+            using var ctx = device.CreateContext();
+
+            using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
+            using var pipeline = new RenderPipeline(
+                device,
+                shader,
+                shader,
+                new RenderPipelineDesc
+                {
+                    VertexAttributes = VertexLayouts.Vertex2D,
+                    VertexStride = 24,
+                    TargetFormat = TextureFormat.Rgba8Unorm,
+                });
+
+            ReadOnlySpan<Vertex2D> vertices =
+            [
+                new() { Px = 0.0f, Py = -0.5f, R = 1, G = 0, B = 0, A = 1 },
+                new() { Px = -0.5f, Py = 0.5f, R = 0, G = 1, B = 0, A = 1 },
+                new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
+            ];
+            using var retainedPool = new RetainedPool(device);
+            using var vertexBuffer = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+            using var vertexParcel = vertexBuffer.Field(0);
+            using var readback = retainedPool.AcquireTexture(
+                64,
+                64,
+                TextureFormat.Rgba8Unorm,
+                TextureKind.Direct,
+                TextureFlags.CopySrc | TextureFlags.CopyDst);
+
+            using var scheme = new Scheme(ctx);
+            using var rt = scheme.LeaseRenderTarget(64, 64, TextureFormat.Rgba8Unorm);
+            using (var pass = scheme.RenderPass("triangle", rt))
+            {
+                pass
+                    .WithParcel(vertexParcel, NodeAccess.Read)
+                    .Clear(Color.Black)
+                    .SetPipeline(pipeline)
+                    .SetVertexBuffer(0, vertexParcel)
+                    .Draw(3);
+            }
+
+            scheme.CopyToTexture(rt, readback);
+            using var grant = scheme.GrantReadTexture(readback);
+            using var submission = scheme.Submit();
+            var pixels = grant.Consume(submission);
+
+            Assert.Contains(pixels, b => b > 0);
+        }
+        catch (GoldyException ex) when (ex.Message.Contains("adapter", StringComparison.OrdinalIgnoreCase))
+        {
+            // No GPU in CI — skip gracefully.
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Vertex2D
+    {
+        public float Px, Py;
+        public float R, G, B, A;
+    }
 }

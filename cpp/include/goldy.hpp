@@ -72,7 +72,6 @@ class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
 class Surface;
-class TaskGraph;
 class Scheme;
 class SchemeRenderTargetLease;
 class PresentGrant;
@@ -255,10 +254,6 @@ struct RenderTargetDeleter {
 
 struct SurfaceDeleter {
     void operator()(GoldySurface* p) const { if (p) goldy_surface_destroy(p); }
-};
-
-struct TaskGraphDeleter {
-    void operator()(GoldyTaskGraph* p) const { if (p) goldy_task_graph_destroy(p); }
 };
 
 struct SchemeDeleter {
@@ -1046,7 +1041,7 @@ private:
 /**
  * @brief An acquired swapchain frame.
  *
- * Consumed by Surface::present() or updated by Surface::submit_graph_to_frame().
+ * Consumed by Surface::present().
  */
 class SurfaceFrame {
 public:
@@ -1144,11 +1139,6 @@ public:
     }
 
     /**
-     * @brief Submit a recorded task graph to an acquired frame.
-     */
-    SurfaceFrame submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame);
-
-    /**
      * @brief Present a frame to the screen (consumes the frame).
      */
     void present(SurfaceFrame frame);
@@ -1158,212 +1148,6 @@ public:
 private:
     std::unique_ptr<GoldySurface, detail::SurfaceDeleter> ptr_;
 };
-
-// =============================================================================
-// TaskGraph
-// =============================================================================
-
-/**
- * @brief Non-owning token from TaskGraph::declare_swapchain_output().
- *
- * Points at storage inside the parent graph; do not free. Pass to
- * copy_render_target_to_swapchain() only.
- */
-class SwapchainOutput {
-public:
-    explicit SwapchainOutput(GoldySwapchainOutput* ptr) : ptr_(ptr) {}
-
-    SwapchainOutput(const SwapchainOutput&) = default;
-    SwapchainOutput& operator=(const SwapchainOutput&) = default;
-    SwapchainOutput(SwapchainOutput&&) = default;
-    SwapchainOutput& operator=(SwapchainOutput&&) = default;
-
-    GoldySwapchainOutput* get() const { return ptr_; }
-
-private:
-    GoldySwapchainOutput* ptr_ = nullptr;
-};
-
-/**
- * @brief GPU task graph for render passes, compute nodes, and swapchain blits.
- */
-class TaskGraph {
-public:
-    class RenderPass;
-
-    TaskGraph() {
-        GoldyTaskGraph* ptr = goldy_task_graph_create();
-        if (!ptr) {
-            throw Exception::from_last_error();
-        }
-        ptr_.reset(ptr);
-    }
-
-    TaskGraph(const TaskGraph&) = delete;
-    TaskGraph& operator=(const TaskGraph&) = delete;
-    TaskGraph(TaskGraph&&) = default;
-    TaskGraph& operator=(TaskGraph&&) = default;
-
-    void clear() {
-        detail::throw_on_result(goldy_task_graph_clear(ptr_.get()));
-    }
-
-    void dispatch(const Device& device) {
-        detail::throw_on_result(goldy_task_graph_dispatch(ptr_.get(), device.get()));
-    }
-
-    [[nodiscard]] SwapchainOutput declare_swapchain_output() {
-        GoldySwapchainOutput* token = goldy_task_graph_declare_swapchain_output(ptr_.get());
-        if (!token) {
-            throw Exception::from_last_error();
-        }
-        return SwapchainOutput(token);
-    }
-
-    void copy_render_target_to_swapchain(const RenderTarget& src, const SwapchainOutput& swapchain) {
-        detail::throw_on_result(goldy_task_graph_copy_render_target_to_swapchain(
-            ptr_.get(), src.get(), swapchain.get()));
-    }
-
-    [[nodiscard]] RenderPass render_pass(const char* label, const RenderTarget& target);
-
-    class ComputeNode;
-    [[nodiscard]] ComputeNode compute_node(const char* label, const ComputePipeline& pipeline);
-
-    void write_parcel(const Parcel& parcel, uint64_t offset, std::span<const uint8_t> data);
-
-    GoldyTaskGraph* get() const { return ptr_.get(); }
-
-private:
-    friend class RenderPass;
-    std::unique_ptr<GoldyTaskGraph, detail::TaskGraphDeleter> ptr_;
-};
-
-/**
- * @brief RAII scope for recording one offscreen render pass on a task graph.
- *
- * Calls render_pass_finish on destruction if finish() was not called explicitly.
- */
-class TaskGraph::RenderPass {
-public:
-    RenderPass(TaskGraph& graph, const char* label, const RenderTarget& target)
-        : graph_(graph) {
-        detail::throw_on_result(goldy_task_graph_render_pass_begin(
-            graph_.ptr_.get(), label, target.get()));
-        active_ = true;
-    }
-
-    ~RenderPass() noexcept {
-        if (active_) {
-            // Do not throw from a destructor.
-            goldy_task_graph_render_pass_finish(graph_.ptr_.get());
-            active_ = false;
-        }
-    }
-
-    RenderPass(const RenderPass&) = delete;
-    RenderPass& operator=(const RenderPass&) = delete;
-    RenderPass(RenderPass&&) = delete;
-    RenderPass& operator=(RenderPass&&) = delete;
-
-    RenderPass& with_parcel(const Parcel& parcel, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_render_pass_with_parcel(
-            graph_.ptr_.get(), parcel.get(), static_cast<GoldyNodeAccess>(access)));
-        return *this;
-    }
-
-    RenderPass& with_field(const Buffer& buffer, uint32_t unit, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_render_pass_with_field(
-            graph_.ptr_.get(), buffer.get(), unit, static_cast<GoldyNodeAccess>(access)));
-        return *this;
-    }
-
-    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint32_t unit = 0) {
-        return set_vertex_buffer_parcel(slot, buffer.field(unit));
-    }
-
-    RenderPass& bind_resource_index(uint32_t scattered_index) {
-        const uint32_t pair[2] = {0, scattered_index};
-        detail::throw_on_result(goldy_task_graph_render_pass_with_views(
-            graph_.ptr_.get(), pair, 1));
-        return *this;
-    }
-
-    RenderPass& clear(const Color& color) {
-        detail::throw_on_result(goldy_task_graph_render_pass_clear(graph_.ptr_.get(), color));
-        return *this;
-    }
-
-    RenderPass& clear_depth(float depth = 1.0f) {
-        detail::throw_on_result(goldy_task_graph_render_pass_clear_depth(graph_.ptr_.get(), depth));
-        return *this;
-    }
-
-    RenderPass& set_pipeline(const RenderPipeline& pipeline) {
-        detail::throw_on_result(goldy_task_graph_render_pass_set_pipeline(
-            graph_.ptr_.get(), pipeline.get()));
-        return *this;
-    }
-
-    RenderPass& set_vertex_buffer_parcel(uint32_t slot, const Parcel& parcel) {
-        detail::throw_on_result(goldy_task_graph_render_pass_set_vertex_buffer_parcel(
-            graph_.ptr_.get(), slot, parcel.get()));
-        return *this;
-    }
-
-    RenderPass& set_index_buffer(const Parcel& parcel, GoldyIndexFormat format) {
-        detail::throw_on_result(goldy_task_graph_render_pass_set_index_buffer(
-            graph_.ptr_.get(), parcel.get(), format));
-        return *this;
-    }
-
-    RenderPass& draw(uint32_t first_vertex, uint32_t vertex_count,
-                     uint32_t first_instance = 0, uint32_t instance_count = 1) {
-        detail::throw_on_result(goldy_task_graph_render_pass_draw(
-            graph_.ptr_.get(), first_vertex, vertex_count, first_instance, instance_count));
-        return *this;
-    }
-
-    RenderPass& draw_indexed(uint32_t first_index, uint32_t index_count, int32_t base_vertex = 0,
-                               uint32_t first_instance = 0, uint32_t instance_count = 1) {
-        detail::throw_on_result(goldy_task_graph_render_pass_draw_indexed(
-            graph_.ptr_.get(), first_index, index_count, base_vertex, first_instance, instance_count));
-        return *this;
-    }
-
-    RenderPass& draw_fullscreen() {
-        detail::throw_on_result(goldy_task_graph_render_pass_draw_fullscreen(graph_.ptr_.get()));
-        return *this;
-    }
-
-    void finish() {
-        if (!active_) {
-            return;
-        }
-        detail::throw_on_result(goldy_task_graph_render_pass_finish(graph_.ptr_.get()));
-        active_ = false;
-    }
-
-private:
-    TaskGraph& graph_;
-    bool active_ = false;
-};
-
-inline TaskGraph::RenderPass TaskGraph::render_pass(const char* label, const RenderTarget& target) {
-    return RenderPass(*this, label, target);
-}
-
-inline void TaskGraph::write_parcel(const Parcel& parcel, uint64_t offset, std::span<const uint8_t> data) {
-    detail::throw_on_result(goldy_task_graph_write_parcel(
-        ptr_.get(), parcel.get(), offset, data.data(), data.size()));
-}
-
-inline SurfaceFrame Surface::submit_graph_to_frame(TaskGraph& graph, SurfaceFrame frame) {
-    GoldySurfaceFrame* raw = frame.release();
-    detail::throw_on_result(
-        goldy_surface_submit_graph_to_frame(ptr_.get(), graph.get(), raw));
-    return SurfaceFrame(raw);
-}
 
 inline void Surface::present(SurfaceFrame frame) {
     detail::throw_on_result(goldy_surface_present(ptr_.get(), frame.release()));
@@ -1873,67 +1657,6 @@ inline Scheme::RenderPass Scheme::render_pass(const char* label, const SchemeRen
     return RenderPass(*this, label, target);
 }
 
-/**
- * @brief RAII scope for recording one compute dispatch node on a task graph.
- */
-class TaskGraph::ComputeNode {
-public:
-    ComputeNode(TaskGraph& graph, const char* label, const ComputePipeline& pipeline,
-                uint32_t wg_x = 1, uint32_t wg_y = 1, uint32_t wg_z = 1)
-        : graph_(graph), wg_x_(wg_x), wg_y_(wg_y), wg_z_(wg_z) {
-        detail::throw_on_result(goldy_task_graph_compute_node_begin(
-            graph_.ptr_.get(), label, pipeline.get()));
-        active_ = true;
-    }
-
-    ~ComputeNode() noexcept {
-        if (active_) {
-            goldy_task_graph_compute_node_dispatch(graph_.ptr_.get(), wg_x_, wg_y_, wg_z_);
-            active_ = false;
-        }
-    }
-
-    ComputeNode(const ComputeNode&) = delete;
-    ComputeNode& operator=(const ComputeNode&) = delete;
-    ComputeNode(ComputeNode&&) = delete;
-    ComputeNode& operator=(ComputeNode&&) = delete;
-
-    ComputeNode& with_parcel(const Parcel& parcel, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_compute_node_with_parcel(
-            graph_.ptr_.get(), parcel.get(), static_cast<GoldyNodeAccess>(access)));
-        return *this;
-    }
-
-    ComputeNode& with_field(const Buffer& buffer, uint32_t unit, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_compute_node_with_field(
-            graph_.ptr_.get(), buffer.get(), unit, static_cast<GoldyNodeAccess>(access)));
-        return *this;
-    }
-
-    ComputeNode& with_resource_slots(std::span<const uint32_t> indices) {
-        detail::throw_on_result(goldy_task_graph_compute_node_with_resource_slots(
-            graph_.ptr_.get(), indices.data(), static_cast<uint32_t>(indices.size())));
-        return *this;
-    }
-
-    void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
-        if (!active_) return;
-        detail::throw_on_result(goldy_task_graph_compute_node_dispatch(
-            graph_.ptr_.get(), x, y, z));
-        active_ = false;
-    }
-
-private:
-    TaskGraph& graph_;
-    uint32_t wg_x_;
-    uint32_t wg_y_;
-    uint32_t wg_z_;
-    bool active_ = false;
-};
-
-inline TaskGraph::ComputeNode TaskGraph::compute_node(const char* label, const ComputePipeline& pipeline) {
-    return ComputeNode(*this, label, pipeline);
-}
 
 // =============================================================================
 // Sampler

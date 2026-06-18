@@ -3,7 +3,7 @@
 #[path = "scheme_graphics.rs"]
 mod scheme_graphics;
 
-pub use scheme_graphics::GoldySchemeRenderTargetLease;
+pub use scheme_graphics::*;
 
 use crate::compute::GoldyComputePipeline;
 use crate::context::GoldyContext;

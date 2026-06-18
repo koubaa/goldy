@@ -238,9 +238,6 @@ typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 // Opaque handle to a swapchain pool.
 typedef struct GoldySwapchainPool GoldySwapchainPool;
 
-// Opaque handle to a Goldy TaskGraph.
-typedef struct GoldyTaskGraph GoldyTaskGraph;
-
 // Adapter info.
 typedef struct GoldyAdapterInfo {
     uint32_t id;
@@ -313,13 +310,6 @@ typedef struct GoldyReplayStats {
     uint64_t records;
     uint64_t resubmit_hits;
 } GoldyReplayStats;
-
-// Opaque token returned by [`goldy_task_graph_declare_swapchain_output`].
-//
-// Carries no data; exists for type safety at the C ABI boundary.
-typedef struct GoldySwapchainOutput {
-    uint8_t _private[0];
-} GoldySwapchainOutput;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1058,18 +1048,6 @@ enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
                                       uint32_t width,
                                       uint32_t height);
 
-// Submit a task graph that writes to an already-acquired swapchain frame.
-//
-// The graph must include [`goldy_task_graph_declare_swapchain_output`] and
-// [`goldy_task_graph_copy_render_target_to_swapchain`] (or another swapchain
-// binding). Updates `frame` in place with any parcel stamp targets from the graph.
-//
-// # Safety
-// All pointers must be valid. No render pass may be open on `graph`.
-enum GoldyResult goldy_surface_submit_graph_to_frame(const struct GoldySurface *surface,
-                                                     struct GoldyTaskGraph *graph,
-                                                     struct GoldySurfaceFrame *frame);
-
 // Get the surface width.
 //
 // # Safety
@@ -1141,225 +1119,6 @@ enum GoldyResult goldy_swapchain_pool_resize(struct GoldySwapchainPool *pool,
 // # Safety
 // `pool` must be valid.
 uint32_t goldy_swapchain_pool_width(const struct GoldySwapchainPool *pool);
-
-// Reset the graph to empty while retaining internal capacity.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_clear(struct GoldyTaskGraph *graph);
-
-// Begin recording a compute dispatch node.
-//
-// Only one recorder (render pass or compute node) may be open at a time per graph.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_begin(struct GoldyTaskGraph *graph,
-                                                     const char *label,
-                                                     const struct GoldyComputePipeline *pipeline);
-
-// Finalize the active compute node with a direct dispatch.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_compute_node_dispatch(struct GoldyTaskGraph *graph,
-                                                        uint32_t workgroups_x,
-                                                        uint32_t workgroups_y,
-                                                        uint32_t workgroups_z);
-
-enum GoldyResult goldy_task_graph_compute_node_with_buffer_unit(struct GoldyTaskGraph *graph,
-                                                                const struct GoldyBuffer *buffer,
-                                                                uint32_t unit,
-                                                                enum GoldyNodeAccess access);
-
-// Bind one field of a partitioned retained buffer to the active compute node.
-enum GoldyResult goldy_task_graph_compute_node_with_field(struct GoldyTaskGraph *graph,
-                                                          const struct GoldyBuffer *buffer,
-                                                          uint32_t unit,
-                                                          enum GoldyNodeAccess access);
-
-// Append one scalar virtual-main parameter for the active compute node.
-//
-// # Safety
-// The graph pointer must be valid and a compute node must be active.
-enum GoldyResult goldy_task_graph_compute_node_with_param(struct GoldyTaskGraph *graph,
-                                                          uint32_t value);
-
-// Declare a graph dependency on a retained parcel for the active compute node.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_with_parcel(struct GoldyTaskGraph *graph,
-                                                           const struct GoldyParcel *parcel,
-                                                           enum GoldyNodeAccess access);
-
-// Set bindless resource slot indices for the active compute node.
-//
-// # Safety
-// All pointers must be valid. `indices` must contain `count` elements.
-enum GoldyResult goldy_task_graph_compute_node_with_resource_slots(struct GoldyTaskGraph *graph,
-                                                                   const uint32_t *indices,
-                                                                   uint32_t count);
-
-// Add a render-target → swapchain blit node to the graph.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_copy_render_target_to_swapchain(struct GoldyTaskGraph *graph,
-                                                                  const struct GoldyRenderTarget *src,
-                                                                  const struct GoldySwapchainOutput *_swapchain);
-
-// Create a new task graph.
-struct GoldyTaskGraph *goldy_task_graph_create(void);
-
-// Declare that this graph will copy to the swapchain at submit time.
-//
-// Returns a pointer to a per-graph sentinel (not heap-allocated). The pointer is
-// valid until the graph is destroyed and must be passed to
-// [`goldy_task_graph_copy_render_target_to_swapchain`].
-//
-// # Safety
-// The graph pointer must be valid.
-struct GoldySwapchainOutput *goldy_task_graph_declare_swapchain_output(struct GoldyTaskGraph *graph);
-
-// Destroy a task graph.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_task_graph_destroy(struct GoldyTaskGraph *graph);
-
-// Analyze the graph, submit GPU work, and block until complete.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_dispatch(struct GoldyTaskGraph *graph,
-                                           const struct GoldyDevice *device);
-
-// Number of task nodes recorded in the graph (for tests and diagnostics).
-//
-// # Safety
-// The graph pointer must be valid.
-uint32_t goldy_task_graph_len(const struct GoldyTaskGraph *graph);
-
-// Begin recording an offscreen render pass on `target`.
-//
-// Only one render pass may be open at a time per graph.
-//
-// # Safety
-// All pointers must be valid. `target` must outlive the graph recording session.
-enum GoldyResult goldy_task_graph_render_pass_begin(struct GoldyTaskGraph *graph,
-                                                    const char *label,
-                                                    const struct GoldyRenderTarget *target);
-
-// Clear the color attachment in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_clear(struct GoldyTaskGraph *graph,
-                                                    struct GoldyColor color);
-
-// Clear the depth attachment in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_clear_depth(struct GoldyTaskGraph *graph,
-                                                          float depth);
-
-// Draw non-indexed primitives in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_draw(struct GoldyTaskGraph *graph,
-                                                   uint32_t first_vertex,
-                                                   uint32_t vertex_count,
-                                                   uint32_t first_instance,
-                                                   uint32_t instance_count);
-
-// Draw a fullscreen triangle (3 vertices, 1 instance) in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_draw_fullscreen(struct GoldyTaskGraph *graph);
-
-// Draw indexed primitives in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_draw_indexed(struct GoldyTaskGraph *graph,
-                                                           uint32_t first_index,
-                                                           uint32_t index_count,
-                                                           int32_t base_vertex,
-                                                           uint32_t first_instance,
-                                                           uint32_t instance_count);
-
-// Finalize the active render pass and append it to the graph.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_finish(struct GoldyTaskGraph *graph);
-
-// Bind an index buffer parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid. `parcel` must be a buffer parcel (whole or field unit).
-enum GoldyResult goldy_task_graph_render_pass_set_index_buffer(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyParcel *parcel,
-                                                               enum GoldyIndexFormat format);
-
-// Set the render pipeline for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_set_pipeline(struct GoldyTaskGraph *graph,
-                                                           const struct GoldyRenderPipeline *pipeline);
-
-// Bind a vertex buffer slot from a retained buffer parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid. `parcel` must be a buffer parcel (whole or field unit).
-enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer_parcel(struct GoldyTaskGraph *graph,
-                                                                       uint32_t slot,
-                                                                       const struct GoldyParcel *parcel);
-
-enum GoldyResult goldy_task_graph_render_pass_with_buffer_unit(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyBuffer *buffer,
-                                                               uint32_t unit,
-                                                               enum GoldyNodeAccess access);
-
-// Bind one field of a partitioned retained buffer to the active render pass.
-enum GoldyResult goldy_task_graph_render_pass_with_field(struct GoldyTaskGraph *graph,
-                                                         const struct GoldyBuffer *buffer,
-                                                         uint32_t unit,
-                                                         enum GoldyNodeAccess access);
-
-// Declare a graph dependency on a retained parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_with_parcel(struct GoldyTaskGraph *graph,
-                                                          const struct GoldyParcel *parcel,
-                                                          enum GoldyNodeAccess access);
-
-// Bind typed resource handles (category + index pairs) for the active render pass.
-//
-// `indices` is a flat array of u32 values: `[category0, index0, category1, index1, ...]`.
-// Use `GoldyResourceCategory::Scattered` (0) for buffer views.
-//
-// # Safety
-// All pointers must be valid. `indices` must contain `handle_count * 2` elements.
-enum GoldyResult goldy_task_graph_render_pass_with_views(struct GoldyTaskGraph *graph,
-                                                         const uint32_t *indices,
-                                                         uint32_t handle_count);
-
-// Add a CPU→GPU upload node targeting a retained buffer parcel.
-//
-// # Safety
-// All pointers must be valid. `data` must point to at least `size` bytes when non-null.
-enum GoldyResult goldy_task_graph_write_parcel(struct GoldyTaskGraph *graph,
-                                               const struct GoldyParcel *parcel,
-                                               uint64_t offset,
-                                               const uint8_t *data,
-                                               size_t size);
 
 #ifdef __cplusplus
 }  // extern "C"

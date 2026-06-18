@@ -17,13 +17,13 @@ mod error;
 mod instance;
 mod parcel;
 mod pipeline;
+mod pyutil;
 mod render_target;
 mod retained_pool;
 mod scheme;
 mod shader;
 mod surface;
 mod swapchain_pool;
-mod task_graph;
 mod types;
 
 use pyo3::prelude::*;
@@ -76,10 +76,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
     m.add_class::<render_target::PyRenderTarget>()?;
-    m.add_class::<task_graph::PyTaskGraph>()?;
-    m.add_class::<task_graph::PyRenderPass>()?;
-    m.add_class::<task_graph::PySwapchainOutput>()?;
-    m.add_class::<task_graph::PyComputeNode>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;

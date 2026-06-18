@@ -21,7 +21,6 @@ mod shader_module;
 mod surface;
 mod swapchain_pool;
 mod sys;
-mod task_graph;
 mod types;
 
 pub use adapter::Adapter;
@@ -42,7 +41,6 @@ pub use scheme::{
 pub use shader_module::ShaderModule;
 pub use surface::{Frame, Surface};
 pub use swapchain_pool::SwapchainPool;
-pub use task_graph::{ComputeNodeBuilder, RenderPassBuilder, SwapchainOutputHandle, TaskGraph};
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
     NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,

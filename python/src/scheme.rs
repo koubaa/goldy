@@ -5,7 +5,7 @@ use crate::compute::PyComputePipeline;
 use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::pipeline::PyRenderPipeline;
-use crate::task_graph::parse_index_range;
+use crate::pyutil::parse_index_range;
 use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyResourceAccess, PyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget, PresentGrant, ReadGrant};
 use goldy::swapchain_pool::PresentLease;

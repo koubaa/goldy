@@ -2,39 +2,13 @@
 
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
-use crate::task_graph::PyTaskGraph;
 use crate::types::PyTextureFormat;
 use pyo3::prelude::*;
 
 /// A GPU surface for zero-copy presentation to a window.
 ///
-/// Unlike RenderTarget, a Surface presents directly to the display
-/// without any CPU-side copies. This is the optimal path for windowed
-/// rendering.
-///
-/// Example with GLFW:
-///     >>> import glfw
-///     >>> import goldy
-///     >>>
-///     >>> glfw.init()
-///     >>> glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)  # No OpenGL
-///     >>> window = glfw.create_window(800, 600, "Goldy", None, None)
-///     >>>
-///     >>> instance = goldy.Instance()
-///     >>> device = instance.request_adapter().request_device()
-///     >>> surface = goldy.Surface.from_glfw(device, window)
-///     >>>
-///     >>> frame_graph = goldy.TaskGraph()
-///     >>> while not glfw.window_should_close(window):
-///     ...     frame_graph.clear()
-///     ...     with frame_graph.render_pass("main", scene_rt) as rp:
-///     ...         rp.clear(goldy.Color.CORNFLOWER_BLUE)
-///     ...     swapchain = frame_graph.declare_swapchain_output()
-///     ...     frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
-///     ...     frame = surface.acquire()
-///     ...     surface.submit_graph_to_frame(frame_graph, frame)
-///     ...     surface.present(frame)
-///     ...     glfw.poll_events()
+/// Windowed rendering uses [`SwapchainPool`] + present-on-scheme (`copy_to_present`,
+/// `grant_present`) rather than task-graph swapchain tokens.
 #[pyclass(name = "Surface", module = "goldy")]
 pub struct PySurface {
     inner: goldy::Surface,
@@ -150,21 +124,6 @@ impl PySurface {
     fn acquire(&mut self) -> PyResult<PySurfaceFrame> {
         let frame = self.inner.acquire().into_py_result()?;
         Ok(PySurfaceFrame { inner: Some(frame) })
-    }
-
-    /// Submit a task graph to an acquired frame, then present with [`Self::present`].
-    fn submit_graph_to_frame(&mut self, graph: &PyTaskGraph, frame: &mut PySurfaceFrame) -> PyResult<()> {
-        graph.ensure_no_active_recorder()?;
-        let frame_val = frame
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Frame already consumed"))?;
-        let updated = self
-            .inner
-            .submit_graph_to_frame(&mut graph.inner.borrow_mut(), frame_val)
-            .into_py_result()?;
-        frame.inner = Some(updated);
-        Ok(())
     }
 
     /// Present a rendered frame to the display.

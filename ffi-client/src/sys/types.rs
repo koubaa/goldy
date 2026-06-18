@@ -21,12 +21,6 @@ pub enum GoldySwapchainPool {}
 pub enum GoldyShaderModule {}
 pub enum GoldySurface {}
 pub enum GoldySurfaceFrame {}
-pub enum GoldyTaskGraph {}
-
-#[repr(C)]
-pub struct GoldySwapchainOutput {
-    pub _private: [u8; 0],
-}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
