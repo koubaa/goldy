@@ -287,12 +287,7 @@ impl RenderState {
         self.is_snow = !self.is_snow;
 
         let particles = Self::create_particles(self.is_snow);
-        write_to_parcel(
-            &self.ctx,
-            &self.particle_buffer,
-            0,
-            bytemuck::cast_slice(&particles),
-        )?;
+        write_to_parcel(&self.ctx, &self.particle_buffer, 0, bytemuck::cast_slice(&particles))?;
 
         self.window.set_title(&format!(
             "Goldy - {} (Space to toggle)",
