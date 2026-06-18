@@ -269,7 +269,16 @@ impl App {
             if let Some(swapchain) = &self.swapchain {
                 let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(ctx), Some(device), Some(swapchain), Some(shader), Some(vertex_buffer), Some(texture), Some(sampler), Some(screen)) = (
+            if let (
+                Some(ctx),
+                Some(device),
+                Some(swapchain),
+                Some(shader),
+                Some(vertex_buffer),
+                Some(texture),
+                Some(sampler),
+                Some(screen),
+            ) = (
                 self.ctx.as_ref(),
                 self.device.as_ref(),
                 self.swapchain.as_ref(),
@@ -287,8 +296,15 @@ impl App {
                         if let Ok(rt) =
                             scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
                         {
-                            let present =
-                                Self::record_scheme(&mut scheme, pipeline, vertex_buffer, texture, sampler, &rt, screen);
+                            let present = Self::record_scheme(
+                                &mut scheme,
+                                pipeline,
+                                vertex_buffer,
+                                texture,
+                                sampler,
+                                &rt,
+                                screen,
+                            );
                             self.scheme = Some(scheme);
                             self.present = Some(present);
                             self.scene_rt = Some(rt);

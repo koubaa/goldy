@@ -181,7 +181,8 @@ impl App {
                                 b: 0.2,
                                 a: 1.0,
                             };
-                            let present = Self::record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color);
+                            let present =
+                                Self::record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color);
                             self.scheme = Some(scheme);
                             self.present = Some(present);
                             self.scene_rt = Some(rt);

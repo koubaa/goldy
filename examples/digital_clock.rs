@@ -128,8 +128,15 @@ impl App {
             let mut scheme = Scheme::new(ctx);
             let (width, height) = swapchain.size();
             if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None) {
-                let present =
-                    Self::record_scheme(&mut scheme, pipeline, vertex_parcel, vertex_count, bg_color, &rt, screen);
+                let present = Self::record_scheme(
+                    &mut scheme,
+                    pipeline,
+                    vertex_parcel,
+                    vertex_count,
+                    bg_color,
+                    &rt,
+                    screen,
+                );
                 self.scheme = Some(scheme);
                 self.present = Some(present);
                 self.recorded_vertex_count = vertex_count;

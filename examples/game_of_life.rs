@@ -247,8 +247,7 @@ impl RenderState {
         let mut display_scheme = Scheme::new(&self.ctx);
         let (width, height) = self.swapchain.size();
         self.scene_rt =
-            display_scheme
-                .lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)?;
+            display_scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None)?;
         self.present = record_display_scheme(
             &mut display_scheme,
             &self.cells,

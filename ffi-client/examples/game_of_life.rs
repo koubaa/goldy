@@ -220,20 +220,9 @@ impl RenderState {
 
         let mut display_scheme = Scheme::new(&ctx)?;
         let (width, height) = swapchain.size();
-        let scene_rt = display_scheme.lease_render_target(
-            width.max(1),
-            height.max(1),
-            swapchain.format(),
-            None::<DepthFormat>,
-        )?;
-        let present = record_display_scheme(
-            &mut display_scheme,
-            &cells,
-            "a",
-            &render_pipeline,
-            &scene_rt,
-            &screen,
-        )?;
+        let scene_rt =
+            display_scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)?;
+        let present = record_display_scheme(&mut display_scheme, &cells, "a", &render_pipeline, &scene_rt, &screen)?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
         println!("Features Gosper Glider Gun + random cells");
@@ -290,13 +279,7 @@ impl RenderState {
             self.last_update = now;
 
             let (read_field, write_field) = if self.use_buffer_a { ("a", "b") } else { ("b", "a") };
-            run_compute_step(
-                &self.ctx,
-                &self.cells,
-                read_field,
-                write_field,
-                &self.compute_pipeline,
-            )?;
+            run_compute_step(&self.ctx, &self.cells, read_field, write_field, &self.compute_pipeline)?;
             self.use_buffer_a = !self.use_buffer_a;
             self.rebuild_display_scheme()?;
         }

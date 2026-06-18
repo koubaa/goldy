@@ -317,11 +317,9 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.swapchain.resize(size.width, size.height).ok();
-                        if let Ok(pipeline) = RenderState::create_render_pipeline(
-                            &state.device,
-                            &state.render_shader,
-                            &state.swapchain,
-                        ) {
+                        if let Ok(pipeline) =
+                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.swapchain)
+                        {
                             state.render_pipeline = pipeline;
                         }
                         state.rerecord_scheme();

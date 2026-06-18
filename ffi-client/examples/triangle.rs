@@ -213,7 +213,12 @@ impl App {
                 if let Ok(rt) =
                     scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)
                 {
-                    let bg_color = Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 };
+                    let bg_color = Color {
+                        r: 0.1,
+                        g: 0.1,
+                        b: 0.2,
+                        a: 1.0,
+                    };
                     if let Ok(present) = record_scheme(&mut scheme, pipeline, vertex_buffer, &rt, screen, bg_color) {
                         self.scheme = Some(scheme);
                         self.scene_rt = Some(rt);
