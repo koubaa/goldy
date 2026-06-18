@@ -17,6 +17,13 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Maximum number of ready (epoch-retired) entries to keep per buffer bin.
+///
+/// At N=1, depth=1 (the only proven config), one warm spare is enough to avoid
+/// re-allocating on immediate reuse. Excess ready entries are dropped on
+/// each frame-boundary [`Context::boundary_crossed`] → [`Self::drain_ready`] call.
+const MAX_BUFFER_BIN_READY_SPARES: usize = 1;
+
 /// Recycle-bin key: parcels are interchangeable iff their allocation descriptors match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TextureKey {
@@ -77,9 +84,15 @@ pub struct TransientPool {
     /// Bytes held by clients through this pool (guard-decremented on drop).
     outstanding: Arc<PoolBookkeeping>,
     texture_bins: HashMap<TextureKey, Vec<TexturePendingEntry>>,
-    /// Buffer parcels keyed by `(size, kind, flags)`; entries stay until reissued by
-    /// [`Self::acquire_buffer`] (never dropped by [`Self::drain_ready`] — high-water model).
+    /// Buffer parcels keyed by `(size, kind, flags)`; excess ready entries are trimmed by
+    /// [`Self::drain_ready`] (see [`MAX_BUFFER_BIN_READY_SPARES`]).
     buffer_bins: HashMap<BufferKey, Vec<BufferBinEntry>>,
+    /// Monotonic count of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`].
+    ///
+    /// Does **not** increment when a retired bin entry is reused. Exposed via
+    /// [`crate::Context::transient_buffer_alloc_count`] for tests that verify the recycling
+    /// path fires (alloc count stays flat across a reuse cycle).
+    buffer_alloc_count: usize,
 }
 
 impl TransientPool {
@@ -89,6 +102,7 @@ impl TransientPool {
             outstanding: Arc::new(PoolBookkeeping::new()),
             texture_bins: HashMap::new(),
             buffer_bins: HashMap::new(),
+            buffer_alloc_count: 0,
         }
     }
 
@@ -160,6 +174,7 @@ impl TransientPool {
             .device()
             .alloc_buffer(size, kind, None, flags)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.buffer_alloc_count += 1;
         let bytes = alloc.byte_size();
         self.outstanding.add(ParcelType::Buffer, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Buffer, bytes);
@@ -189,15 +204,11 @@ impl TransientPool {
                 self.park_texture(parcel, ready_after);
             }
             RetainedHold::Buffer(buffer) => {
-                let bytes = buffer.byte_size();
-                let key = BufferKey {
-                    size: bytes,
-                    kind: buffer.access(),
-                    flags: buffer.flags(),
-                };
                 let parcel = buffer
                     .into_transient_parcel()
                     .expect("buffer bin intake requires single-unit buffer");
+                let bytes = parcel.byte_size();
+                let key = BufferKey::from_parcel(&parcel);
                 self.pending.add(ParcelType::Buffer, bytes);
                 self.buffer_bins
                     .entry(key)
@@ -239,10 +250,38 @@ impl TransientPool {
             });
         }
         self.texture_bins.retain(|_, bin| !bin.is_empty());
-        // buffer_bins: high-water model — entries stay until reissued by acquire_buffer.
-        // Prune empty Vecs left behind after full reuse to keep the map tidy.
-        self.buffer_bins.retain(|_, bin| !bin.is_empty());
+        released += self.trim_buffer_bins(ctx);
         released
+    }
+
+    /// Drop excess epoch-retired buffer bin entries beyond [`MAX_BUFFER_BIN_READY_SPARES`].
+    ///
+    /// In-flight (not-ready) entries are never dropped — only ready spares above the cap.
+    /// Returns the number of entries dropped.
+    fn trim_buffer_bins(&mut self, ctx: &Context) -> usize {
+        let mut trimmed = 0;
+        for bin in self.buffer_bins.values_mut() {
+            let mut ready_indices: Vec<usize> = bin
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| ctx.parcel_ready(&e.ready_after))
+                .map(|(i, _)| i)
+                .collect();
+            ready_indices.sort_unstable();
+
+            let excess = ready_indices.len().saturating_sub(MAX_BUFFER_BIN_READY_SPARES);
+            // Consume the highest-indexed ready entries first (descending). Removing by
+            // descending index means each swap_remove only disturbs elements at higher
+            // positions, so lower indices remain stable for subsequent iterations.
+            let to_drop = ready_indices.split_off(ready_indices.len().saturating_sub(excess));
+            for idx in to_drop.into_iter().rev() {
+                let entry = bin.swap_remove(idx);
+                self.pending.subtract(ParcelType::Buffer, entry.parcel.byte_size());
+                trimmed += 1;
+            }
+        }
+        self.buffer_bins.retain(|_, bin| !bin.is_empty());
+        trimmed
     }
 
     pub fn pending_bytes(&self) -> BytesByKind {
@@ -255,6 +294,12 @@ impl TransientPool {
 
     pub fn pending_count(&self) -> usize {
         self.texture_bins.values().map(Vec::len).sum::<usize>() + self.buffer_bins.values().map(Vec::len).sum::<usize>()
+    }
+
+    /// Total number of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`] since
+    /// construction. Does not count bin reuses. Monotonically increasing.
+    pub fn buffer_alloc_count(&self) -> usize {
+        self.buffer_alloc_count
     }
 }
 
@@ -281,6 +326,30 @@ mod tests {
             TextureKind::Interpolated,
             TextureFlags::COPY_DST | TextureFlags::COPY_SRC,
         )
+    }
+
+    const TEST_BUFFER_SIZE: u64 = 64;
+    const SCATTERED_EMPTY: (BufferKind, BufferFlags) =
+        (BufferKind::Scattered, BufferFlags::empty());
+
+    fn park_ready_buffer(ctx: &Context) {
+        let alloc = ctx
+            .device()
+            .alloc_buffer(TEST_BUFFER_SIZE, SCATTERED_EMPTY.0, None, SCATTERED_EMPTY.1)
+            .expect("alloc");
+        let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
+        ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ReferenceTable::new()));
+    }
+
+    fn park_not_ready_buffer(ctx: &Context) {
+        let mut ready_after = ReferenceTable::new();
+        crate::timeline::mark_reference(&mut ready_after, ctx.test_backend_handle(), u64::MAX);
+        let alloc = ctx
+            .device()
+            .alloc_buffer(TEST_BUFFER_SIZE, SCATTERED_EMPTY.0, None, SCATTERED_EMPTY.1)
+            .expect("alloc");
+        let p = Parcel::from_whole_buffer(Arc::new(alloc), Arc::downgrade(&ctx.device().inner));
+        ctx.with_transient_pool(|pool| pool.return_buffer_parcel(p, ready_after));
     }
 
     #[test]
@@ -322,7 +391,10 @@ mod tests {
         assert!(ctx.with_transient_pool(|t| t.pending_bytes().buffer >= 64));
 
         let released = ctx.with_transient_pool(|t| t.drain_ready(&ctx));
-        assert_eq!(released, 0, "buffer bins are never drained");
+        assert_eq!(
+            released, 0,
+            "1 ready entry is within the cap (<= MAX_BUFFER_BIN_READY_SPARES); nothing trimmed"
+        );
 
         let p = ctx
             .with_transient_pool(|pool| {
@@ -345,9 +417,6 @@ mod tests {
     /// round-trip: this is the path taken by [`crate::Scheme::drop`] when returning a buffer lease.
     #[test]
     fn return_buffer_parcel_reissues_on_acquire() {
-        use crate::parcel::Parcel;
-        use std::sync::Arc;
-
         let device = test_device();
         let ctx = device.create_context().unwrap();
 
@@ -391,6 +460,70 @@ mod tests {
             ctx.with_transient_pool(|t| t.pending_count()),
             0,
             "bin emptied after reuse"
+        );
+    }
+
+    #[test]
+    fn buffer_bin_trim_drops_excess_ready_entries() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+
+        for _ in 0..=MAX_BUFFER_BIN_READY_SPARES {
+            park_ready_buffer(&ctx);
+        }
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            MAX_BUFFER_BIN_READY_SPARES + 1
+        );
+
+        ctx.with_transient_pool(|pool| pool.drain_ready(&ctx));
+
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            MAX_BUFFER_BIN_READY_SPARES,
+            "one excess ready entry must be trimmed"
+        );
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_bytes().buffer),
+            (MAX_BUFFER_BIN_READY_SPARES as u64) * TEST_BUFFER_SIZE
+        );
+    }
+
+    #[test]
+    fn buffer_bin_trim_preserves_not_ready_entries() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+
+        park_not_ready_buffer(&ctx);
+        park_not_ready_buffer(&ctx);
+        park_ready_buffer(&ctx);
+
+        ctx.with_transient_pool(|pool| pool.drain_ready(&ctx));
+
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            3,
+            "in-flight entries and the single ready spare within cap must survive trim"
+        );
+    }
+
+    #[test]
+    fn buffer_bin_trim_drops_excess_but_preserves_not_ready() {
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+
+        park_not_ready_buffer(&ctx);
+        park_not_ready_buffer(&ctx);
+        for _ in 0..3 {
+            park_ready_buffer(&ctx);
+        }
+
+        ctx.with_transient_pool(|pool| pool.drain_ready(&ctx));
+
+        assert_eq!(
+            ctx.with_transient_pool(|t| t.pending_count()),
+            3,
+            "2 not-ready + 1 ready spare; 2 excess ready entries dropped"
         );
     }
 }

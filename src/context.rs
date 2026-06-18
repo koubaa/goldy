@@ -124,6 +124,15 @@ impl Context {
         self.with_transient_pool(|pool| pool.outstanding_bytes())
     }
 
+    /// Total number of fresh GPU buffer allocations made by this context's transient pool.
+    ///
+    /// Does not increment when a retired bin entry is reused. Monotonically increasing.
+    /// Useful in tests to assert that the pool's recycling path fires (alloc count stays
+    /// flat across a lease reuse cycle, mirroring [`Self::transient_texture_create_count`]).
+    pub fn transient_buffer_alloc_count(&self) -> usize {
+        self.with_transient_pool(|pool| pool.buffer_alloc_count())
+    }
+
     pub(crate) fn classify(&self, e: anyhow::Error) -> GoldyError {
         if self.device().is_device_lost() {
             return GoldyError::DeviceLost;

@@ -667,6 +667,16 @@ impl Scheme {
     /// Declare a transient buffer lease backed by the context's transient pool (N=1).
     ///
     /// The backing parcel is held until the scheme is dropped. Structural mutation.
+    ///
+    /// # Write-first invariant
+    ///
+    /// The pool may reissue a previously-used buffer parcel whose epoch has retired.
+    /// The recycled bytes are **not** cleared. The first node that accesses this lease
+    /// must declare [`NodeAccess::Write`] (or `ReadWrite`), never pure `Read` — otherwise
+    /// the shader observes the previous tenant's data.
+    ///
+    /// A full inaugural-write shape check (unique-minimal-write scheme validation per
+    /// design §8) is not yet implemented; callers are responsible for this invariant today.
     pub fn lease_buffer(&mut self, size: u64) -> Result<Lease<LeaseBuffer>, GoldyError> {
         self.lease_buffer_with(
             size,
@@ -680,6 +690,9 @@ impl Scheme {
     /// Use this when the shader requires a buffer kind other than `Scattered` (e.g.
     /// `Broadcast` for uniform buffers). The pool bins buffers by `(size, kind, flags)`,
     /// so only identically-described buffers are ever reused across submissions.
+    ///
+    /// See [`Self::lease_buffer`] for the write-first invariant that applies to all buffer
+    /// leases regardless of kind.
     pub fn lease_buffer_with(
         &mut self,
         size: u64,
@@ -1287,6 +1300,11 @@ impl<T> SchemeBindable for Lease<T> {
         access: ResourceAccess,
     ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
         let parcel = &scheme.leases[self.id.0 as usize];
+        // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
+        // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
+        // from a previous submission; a Read-only first access would observe stale data.
+        // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
+        // the unique-minimal-write shape-check lands (design §8).
         (
             parcel.resource_id(),
             parcel.resource_index(access),

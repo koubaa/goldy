@@ -1242,6 +1242,8 @@ fn scheme_transient_buffer_recycling() {
     let expected_iota: Vec<u32> = (1..=N as u32).collect();
     let expected_scale: Vec<u32> = (1..=N as u32).map(|i| i * 100).collect();
 
+    let alloc_count_before = ctx.transient_buffer_alloc_count();
+
     {
         let mut scheme = Scheme::new(&ctx);
         let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_a");
@@ -1259,10 +1261,30 @@ fn scheme_transient_buffer_recycling() {
         let frame = scheme.submit().expect("submit_a");
         assert_eq!(read_grant_u32(&grant, &frame, N), expected_iota);
     }
+    // scheme dropped here — backing parcel returned to pool with ready epoch
+
+    assert_eq!(
+        ctx.transient_buffer_alloc_count(),
+        alloc_count_before + 1,
+        "first lease must have triggered one fresh allocation"
+    );
+    assert!(
+        ctx.transient_outstanding_bytes().buffer == 0,
+        "outstanding drops to zero once scheme releases the lease"
+    );
 
     {
         let mut scheme = Scheme::new(&ctx);
         let scratch = scheme.lease_buffer(byte_size).expect("lease scratch_b");
+        assert_eq!(
+            ctx.transient_buffer_alloc_count(),
+            alloc_count_before + 1,
+            "second lease must reuse the retired bin entry — alloc count stays flat"
+        );
+        assert!(
+            ctx.transient_outstanding_bytes().buffer >= byte_size,
+            "reused backing is counted as outstanding again"
+        );
         scheme
             .node("write_scale", &scale_pipe)
             .with_parcel(&scratch, NodeAccess::Write)
