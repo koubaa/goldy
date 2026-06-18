@@ -2,7 +2,8 @@
 
 use std::ffi::c_char;
 
-pub enum GoldyMosaicBuilder {}
+pub enum GoldyRecordBuilder {}
+pub enum GoldyBuffer {}
 pub enum GoldyParcel {}
 pub enum GoldyRetainedPool {}
 pub enum GoldyComputePipeline {}

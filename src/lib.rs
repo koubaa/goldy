@@ -66,8 +66,8 @@ pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, Allocatio
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
-pub use parcel::{BytesByKind, MosaicSlot, Parcel};
-pub use retained_pool::{MosaicBuilder, RetainedPool, StampedParcel};
+pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField};
+pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
 #[allow(deprecated)]
 pub use scheme::{
     write_to_parcel, Grant, GrantBuffer, GrantTexture, Lease, LeaseRenderTarget, LeaseTexture, Loan, PresentGrant,
@@ -79,7 +79,7 @@ pub use transient_pool::TransientPool;
 pub use vram_allocator::{DeferredPayload, ParcelType};
 
 // Re-export main types
-pub use buffer::{Buffer, BufferPool, BufferSource, BufferView, StructuredBufferElement};
+pub use buffer::{BufferPool, BufferSource, BufferView, StructuredBufferElement};
 pub use common_types::{FrameUniforms, Instance2D, Particle2D, Particle3D, Transform2D};
 pub use compute::ComputePipeline;
 pub use signal::{OversubscribedReason, Signal};

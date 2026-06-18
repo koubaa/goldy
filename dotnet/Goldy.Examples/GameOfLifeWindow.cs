@@ -16,16 +16,16 @@ static class GameOfLifeWindow
 
     static void RunComputeStep(
         Context ctx,
-        Parcel readBuf,
-        Parcel writeBuf,
+        Buffer readBuf,
+        Buffer writeBuf,
         ComputePipeline pipeline)
     {
         using var scheme = new Scheme(ctx);
         using (var node = scheme.ComputeNode("game_of_life", pipeline))
         {
             node
-                .WithParcel(readBuf, NodeAccess.Read, ResourceAccess.ReadWrite)
-                .WithParcel(writeBuf, NodeAccess.Write, ResourceAccess.Write);
+                .WithField(readBuf, 0, NodeAccess.Read, ResourceAccess.ReadWrite)
+                .WithField(writeBuf, 0, NodeAccess.Write, ResourceAccess.Write);
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
         using var _ = scheme.Submit();
@@ -34,7 +34,7 @@ static class GameOfLifeWindow
     static (Scheme scheme, SchemeRenderTargetLease rt, PresentGrant present) RecordDisplayScheme(
         Context ctx,
         SwapchainPool swapchain,
-        Parcel currentBuf,
+        Buffer currentBuf,
         RenderPipeline renderPipeline,
         PresentLease screen)
     {
@@ -46,10 +46,10 @@ static class GameOfLifeWindow
         using (var pass = scheme.RenderPass("game_of_life_render", rt))
         {
             pass
-                .WithParcel(currentBuf, NodeAccess.Read)
+                .WithField(currentBuf, 0, NodeAccess.Read)
                 .Clear(Color.Black)
                 .SetPipeline(renderPipeline)
-                .BindResourceIndex(currentBuf.ResourceIndex(ResourceAccess.Read))
+                .BindResourceIndex(currentBuf.UnitResourceIndex(0, ResourceAccess.Read))
                 .DrawFullscreen();
         }
         scheme.CopyToPresent(rt, screen);

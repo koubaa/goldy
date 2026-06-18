@@ -11,11 +11,12 @@
 //! # Example
 //!
 //! ```no_run
-//! # use goldy::{Context, GpuGuard};
-//! # use goldy::buffer::Buffer;
+//! # use goldy::{Context, GpuGuard, RetainedPool, BufferKind, BufferFlags};
 //! # use goldy::task_graph::TaskGraph;
-//! # fn example(context: &Context, buf: Buffer) -> anyhow::Result<()> {
-//! let mut graph = TaskGraph::new(); // ... build your graph using buf ...
+//! # use std::sync::Arc;
+//! # fn example(context: &Context, pool: &mut RetainedPool) -> anyhow::Result<()> {
+//! let buf = pool.acquire_buffer(256, BufferKind::Scattered, None, BufferFlags::empty(), None)?;
+//! let mut graph = TaskGraph::new(); // ... build your graph using &*buf ...
 //! let tv = context.submit(&mut graph)?;
 //!
 //! let mut guard = GpuGuard::new(context, tv);

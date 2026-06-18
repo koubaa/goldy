@@ -5,14 +5,14 @@
 //! 2. Graphics shader rendering the grid to an offscreen target
 //! 3. Swapchain blit and present
 //!
-//! Ping-pong cell grids live in one retained mosaic parcel (two sub-views, one backing
+//! Ping-pong cell grids live in one retained record buffer (two fields, one backing
 //! allocation). When the transient pool lands, this example is a candidate to re-migrate.
 //!
 //! Run with: `cargo run --example game_of_life`
 
 use anyhow::Result;
 use goldy::{
-    Color, ComputePipeline, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, Parcel, PrimitiveTopology,
+    field, Buffer, Color, ComputePipeline, DeviceDescriptor, Init, Instance, NodeAccess, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -29,9 +29,6 @@ mod common;
 const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: u32 = GRID_WIDTH * GRID_HEIGHT;
-
-const SLOT_A: MosaicSlot = MosaicSlot(0);
-const SLOT_B: MosaicSlot = MosaicSlot(1);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -64,8 +61,8 @@ struct RenderState {
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
-    /// Mosaic parcel: slot A and slot B are ping-pong cell grids in one backing buffer.
-    cells: Parcel,
+    /// Record buffer: fields "a" and "b" are ping-pong cell grids in one backing buffer.
+    cells: Buffer,
     // State: true = A is current (read from A, write to B)
     use_buffer_a: bool,
     frame_count: u32,
@@ -133,7 +130,6 @@ fn create_initial_state() -> Vec<u32> {
     let mut rng = seed;
     for y in 60..100 {
         for x in 60..100 {
-            // Simple LCG for deterministic randomness
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
             if (rng >> 32).is_multiple_of(4) {
                 cells[(y * GRID_WIDTH + x) as usize] = 1;
@@ -162,23 +158,17 @@ impl RenderState {
         let surface = Surface::new(&ctx, window.as_ref())?;
         let scene_rt = Self::create_scene_rt(&device, &surface)?;
 
-        // Load shaders
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life.slang"))?;
-
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/game_of_life_render.slang"))?;
 
-        // One retained mosaic: two ping-pong views in a single backing allocation.
         let initial_state = create_initial_state();
         let mut retained_pool = RetainedPool::new(device.clone());
-        let mut mosaic = retained_pool.mosaic();
-        mosaic.emplace::<u32>(&initial_state);
-        mosaic.emplace::<u32>(&initial_state);
-        let cells = mosaic.build()?;
+        let cells = retained_pool.acquire_record([
+            field("a", Init::data(&initial_state)),
+            field("b", Init::data(&initial_state)),
+        ])?;
 
-        // Create compute pipeline
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
-
-        // Create render pipeline
         let render_pipeline = RenderPipeline::new(
             &device,
             &render_shader,
@@ -215,45 +205,39 @@ impl RenderState {
     fn render(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        // Update simulation ~30 times per second
         let now = std::time::Instant::now();
         let should_update = now.duration_since(self.last_update).as_millis() > 33;
 
-        // TODO(retained-graph): per-frame clear()+rebuild — see `TaskGraph::clear` docs.
         self.frame_graph.clear();
 
         if should_update {
             self.last_update = now;
 
-            let (read_slot, write_slot) = if self.use_buffer_a {
-                (SLOT_A, SLOT_B)
-            } else {
-                (SLOT_B, SLOT_A)
-            };
-            let read_view = self.cells.view(read_slot);
-            let write_view = self.cells.view(write_slot);
+            let (read_field, write_field) = if self.use_buffer_a { ("a", "b") } else { ("b", "a") };
 
             self.frame_graph
                 .node("game_of_life", &self.compute_pipeline)
-                .with_buffer_view(read_view, NodeAccess::Read)
-                .with_buffer_view(write_view, NodeAccess::Write)
+                .with_parcel(&self.cells[read_field], NodeAccess::Read)
+                .with_parcel(&self.cells[write_field], NodeAccess::Write)
                 .with_resource_slots_slice(&[
-                    read_view.resource_index(ResourceAccess::ReadWrite).unwrap(),
-                    write_view.resource_index(ResourceAccess::Write).unwrap(),
+                    self.cells[read_field]
+                        .resource_index(ResourceAccess::ReadWrite)
+                        .unwrap(),
+                    self.cells[write_field].resource_index(ResourceAccess::Write).unwrap(),
                 ])
                 .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
 
             self.use_buffer_a = !self.use_buffer_a;
         }
 
-        let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
-        let current_view = self.cells.view(current_slot);
+        let current_field = if self.use_buffer_a { "a" } else { "b" };
+        let current = &self.cells[current_field];
 
         let mut pass = self.frame_graph.render_pass("game_of_life_render", &self.scene_rt);
-        pass.with_buffer_view(current_view, NodeAccess::Read);
+        pass.with_parcel(current, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&self.render_pipeline);
-        pass.with_resource_slots(&[current_view.resource_index(ResourceAccess::ReadWrite).unwrap()]);
+        pass.with_resource_slots(&[current.resource_index(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..3, 0..1);
         pass.finish_recorded();
 
@@ -302,7 +286,7 @@ impl ApplicationHandler for App {
             match RenderState::new(window.clone()) {
                 Ok(state) => {
                     self.state = Some(state);
-                    window.request_redraw(); // Trigger initial render
+                    window.request_redraw();
                 }
                 Err(e) => {
                     tracing::error!("Failed to create render state: {:#}", e);
@@ -332,18 +316,16 @@ impl ApplicationHandler for App {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
                         state.surface.resize(size.width, size.height).ok();
-                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
-                            state.scene_rt = rt;
-                        }
+                        state.scene_rt =
+                            RenderState::create_scene_rt(&state.device, &state.surface).expect("resize scene RT");
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(state) = &mut self.state {
                     if let Err(e) = state.render() {
-                        tracing::error!("Render error: {}", e);
+                        tracing::error!("Render error: {:#}", e);
                     }
-                    state.window.request_redraw(); // Continue render loop
                 }
             }
             _ => {}

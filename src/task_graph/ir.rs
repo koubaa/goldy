@@ -235,16 +235,17 @@ impl GraphIR {
     /// Used by the graph-colored transient path to guarantee that the
     /// placement-heap region is zeroed before any dispatch reads from it.
     pub fn prepend_clear_buffer(&mut self, buffer: &crate::Buffer, offset: u64, size: u64) {
+        let handle = buffer.backing_handle();
         self.nodes.insert(
             0,
             TaskNode {
                 label: "clear_transient_region",
                 bindings: vec![ResourceBinding {
-                    resource: super::ResourceId::Buffer(buffer.handle),
+                    resource: super::ResourceId::Buffer(handle),
                     access: NodeAccess::Write,
                 }],
                 kind: NodeKind::ClearBuffer {
-                    buffer: buffer.handle,
+                    buffer: handle,
                     offset,
                     size,
                 },

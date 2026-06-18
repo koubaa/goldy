@@ -8,12 +8,12 @@ pub use scheme_graphics::GoldySchemeRenderTargetLease;
 use crate::compute::GoldyComputePipeline;
 use crate::context::GoldyContext;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
-use crate::retained_pool::GoldyParcel;
+use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel};
 use crate::types::{GoldyNodeAccess, GoldyResourceAccess};
 use goldy::scheme::{ReadGrant, Scheme};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord};
 use goldy::types::ResourceAccess;
-use goldy::{Grant, GrantBuffer, GrantTexture, MosaicSlot, ParcelType};
+use goldy::{Grant, GrantBuffer, GrantTexture, ParcelType};
 use std::ffi::CStr;
 
 /// Opaque per-submission token returned by [`goldy_scheme_submit`].
@@ -251,19 +251,19 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel(
     }
 }
 
-/// Declare a mosaic sub-view for the active compute node.
+/// Declare a buffer unit for the active compute node (shader binding + dependency).
 ///
 /// # Safety
 /// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel_view(
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_buffer_unit(
     scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
-    slot: u32,
+    buffer: *const GoldyBuffer,
+    unit: u32,
     node_access: GoldyNodeAccess,
     resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
-    if scheme.is_null() || parcel.is_null() {
+    if scheme.is_null() || buffer.is_null() {
         return GoldyResult::NullPointer;
     }
     let node = match active_compute_mut(&mut *scheme) {
@@ -271,14 +271,29 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel_view(
         Err(e) => return e,
     };
     let res_access = map_resource_access(resource_access);
-    let mosaic_slot = MosaicSlot(slot);
-    match node.with_parcel_view(&(*parcel).inner, mosaic_slot, map_node_access(node_access), res_access) {
+    let parcel = match buffer_unit_at(buffer, unit) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match node.with_parcel(parcel, map_node_access(node_access), res_access) {
         Some(_) => GoldyResult::Ok,
         None => {
-            set_last_error("Mosaic view has no resource index for the requested access");
+            set_last_error("Buffer unit has no resource index for the requested access");
             GoldyResult::InvalidArgument
         }
     }
+}
+
+/// Bind one field of a partitioned retained buffer to the active compute node.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_field(
+    scheme: *mut GoldyScheme,
+    buffer: *const GoldyBuffer,
+    unit: u32,
+    node_access: GoldyNodeAccess,
+    resource_access: GoldyResourceAccess,
+) -> GoldyResult {
+    goldy_scheme_compute_node_with_buffer_unit(scheme, buffer, unit, node_access, resource_access)
 }
 
 /// Append one scalar virtual-main parameter for the active compute node.

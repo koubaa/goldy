@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -92,8 +92,8 @@ struct RenderState {
     frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
-    star_buffer: Parcel,
-    params_buffer: Parcel,
+    star_buffer: Buffer,
+    params_buffer: Buffer,
     render_pipeline: RenderPipeline,
     speed: f32,
     frame_count: f32,
@@ -206,7 +206,7 @@ impl RenderState {
         pass.with_parcel(&self.star_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&self.render_pipeline);
-        pass.with_resource_slots(&[self.star_buffer.resource_index(ResourceAccess::Read).unwrap()]);
+        pass.with_resource_slots(&[self.star_buffer.resource_index(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..6, 0..NUM_STARS);
         pass.finish_recorded();
 

@@ -1,9 +1,9 @@
+use crate::buffer::Buffer;
 use crate::compute::ComputePipeline;
 use crate::context::Context;
 use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::pipeline::RenderPipeline;
-use crate::retained_pool::MosaicSlot;
 use crate::sys::{
     self, GoldyPresentGrant, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme,
     GoldySchemeRenderTargetLease, GoldySchemeSubmission,
@@ -176,9 +176,9 @@ impl Scheme {
         Ok(SchemeRenderTargetLease { ptr })
     }
 
-    /// Record a read easement over a buffer parcel (once per scheme).
-    pub fn grant_read(&mut self, parcel: &Parcel) -> Result<ReadGrant> {
-        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read(self.ptr, parcel.as_ptr()) });
+    /// Record a read easement over a retained buffer (once per scheme).
+    pub fn grant_read(&mut self, buffer: &Buffer) -> Result<ReadGrant> {
+        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read(self.ptr, buffer.as_ptr()) });
         Ok(ReadGrant { ptr })
     }
 
@@ -261,23 +261,32 @@ impl ComputeNodeBuilder<'_> {
         self
     }
 
-    pub fn with_parcel_view(
+    pub fn with_buffer_unit(
         &mut self,
-        parcel: &Parcel,
-        slot: MosaicSlot,
+        buffer: &Buffer,
+        unit: u32,
         node_access: NodeAccess,
         resource_access: ResourceAccess,
     ) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_with_parcel_view(
+            sys::goldy_scheme_compute_node_with_buffer_unit(
                 self.scheme.ptr,
-                parcel.as_ptr(),
-                slot.0,
+                buffer.as_ptr(),
+                unit,
                 node_access.into(),
                 resource_access.into(),
             )
         });
         self
+    }
+
+    pub fn with_buffer(
+        &mut self,
+        buffer: &Buffer,
+        node_access: NodeAccess,
+        resource_access: ResourceAccess,
+    ) -> &mut Self {
+        self.with_buffer_unit(buffer, 0, node_access, resource_access)
     }
 
     pub fn with_param(&mut self, value: u32) -> &mut Self {
@@ -316,11 +325,15 @@ impl SchemeRenderPassBuilder<'_> {
         self
     }
 
-    pub fn with_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer_unit(&mut self, buffer: &Buffer, unit: u32, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_with_parcel_view(self.scheme.ptr, parcel.as_ptr(), slot.0, access.into())
+            sys::goldy_scheme_render_pass_with_buffer_unit(self.scheme.ptr, buffer.as_ptr(), unit, access.into())
         });
         self
+    }
+
+    pub fn with_buffer(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
+        self.with_buffer_unit(buffer, 0, access)
     }
 
     pub fn clear(&mut self, color: Color) -> &mut Self {
@@ -338,16 +351,16 @@ impl SchemeRenderPassBuilder<'_> {
         self
     }
 
-    pub fn set_vertex_buffer_parcel(&mut self, slot: u32, parcel: &Parcel) -> &mut Self {
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_set_vertex_buffer_parcel(self.scheme.ptr, slot, parcel.as_ptr())
+            sys::goldy_scheme_render_pass_set_vertex_buffer_parcel(self.scheme.ptr, slot, buffer.as_ptr())
         });
         self
     }
 
-    pub fn set_index_buffer_parcel(&mut self, parcel: &Parcel, format: IndexFormat) -> &mut Self {
+    pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_set_index_buffer(self.scheme.ptr, parcel.as_ptr(), format.into())
+            sys::goldy_scheme_render_pass_set_index_buffer(self.scheme.ptr, buffer.as_ptr(), format.into())
         });
         self
     }

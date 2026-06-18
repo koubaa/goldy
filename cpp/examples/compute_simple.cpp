@@ -42,7 +42,7 @@ int main() {
 
         std::array<float, 64> data{};
         goldy::RetainedPool pool(device);
-        goldy::Parcel buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer buffer = pool.acquire_buffer_with_data(
             std::span<const float>(data),
             goldy::BufferKind::Scattered);
 
@@ -53,7 +53,7 @@ int main() {
         goldy::Scheme scheme(ctx);
         {
             auto node = scheme.compute_node("double", pipeline);
-            node.with_parcel(buffer, goldy::NodeAccess::ReadWrite, goldy::ResourceAccess::Write);
+            node.with_buffer(buffer, goldy::NodeAccess::ReadWrite, goldy::ResourceAccess::Write);
             node.dispatch(1, 1, 1);
         }
         auto grant = scheme.grant_read(buffer);

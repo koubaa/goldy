@@ -6,7 +6,8 @@
 use goldy::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat, Instance,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    ShaderModule, ShaderResourceSlot, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
@@ -18,8 +19,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn graph_render(
@@ -120,7 +119,7 @@ fn test_vulkan_render_and_readback() {
     let vertex_buffer = test_alloc_buffer_with_data(&device, &vertices, BufferKind::Scattered);
 
     graph_render(&device, &target, "triangle", |pass| {
-        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(&*vertex_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -263,8 +262,8 @@ fn test_indexed_drawing() {
     let index_buffer = test_alloc_buffer_with_data(&device, &indices, BufferKind::Scattered);
 
     graph_render(&device, &target, "indexed_u16", |pass| {
-        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
-        pass.with_buffer(&index_buffer, NodeAccess::Read);
+        pass.with_parcel(&*vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(&*index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -348,8 +347,8 @@ fn test_indexed_drawing_uint32() {
     let index_buffer = test_alloc_buffer_with_data(&device, &indices, BufferKind::Scattered);
 
     graph_render(&device, &target, "indexed_u32", |pass| {
-        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
-        pass.with_buffer(&index_buffer, NodeAccess::Read);
+        pass.with_parcel(&*vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(&*index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -478,8 +477,8 @@ fn test_depth_occlusion_red_beats_green() {
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(&device, &target, "depth_red_wins", |pass| {
-        pass.with_buffer(&red_vb, NodeAccess::Read);
-        pass.with_buffer(&green_vb, NodeAccess::Read);
+        pass.with_parcel(&*red_vb, NodeAccess::Read);
+        pass.with_parcel(&*green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -579,8 +578,8 @@ fn test_depth_occlusion_green_beats_red() {
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(&device, &target, "depth_green_wins", |pass| {
-        pass.with_buffer(&red_vb, NodeAccess::Read);
-        pass.with_buffer(&green_vb, NodeAccess::Read);
+        pass.with_parcel(&*red_vb, NodeAccess::Read);
+        pass.with_parcel(&*green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -694,10 +693,13 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     .expect("create pipeline");
 
     graph_render(&device, &target, "bindless_read", |pass| {
-        pass.with_buffer(&buffer, NodeAccess::Read);
+        pass.with_parcel(&*buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &*buffer,
+            access: NodeAccess::ReadWrite,
+        }]);
         pass.set_pipeline(&pipeline);
-        pass.with_resources(&[&buffer]);
         pass.draw(0..3, 0..1);
     });
 

@@ -39,17 +39,17 @@ fn swapchain_from_window(ctx: &Context, window: &Window) -> goldy_ffi_client::Re
 fn record_scheme(
     scheme: &mut Scheme,
     pipeline: &RenderPipeline,
-    vertex_buffer: &goldy_ffi_client::Parcel,
+    vertex_buffer: &goldy_ffi_client::Buffer,
     scene_rt: &SchemeRenderTargetLease,
     screen: &goldy_ffi_client::PresentLease,
     bg_color: Color,
 ) -> goldy_ffi_client::Result<PresentGrant> {
     {
         let mut pass = scheme.render_pass("triangle", scene_rt);
-        pass.with_parcel(vertex_buffer, NodeAccess::Read);
+        pass.with_buffer(vertex_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer_parcel(0, vertex_buffer);
+        pass.set_vertex_buffer(0, vertex_buffer);
         pass.draw(0..3, 0..1);
         pass.finish_recorded();
     }
@@ -62,7 +62,7 @@ struct App {
     ctx: Option<Context>,
     device: Option<goldy_ffi_client::Device>,
     _retained_pool: Option<RetainedPool>,
-    vertex_buffer: Option<goldy_ffi_client::Parcel>,
+    vertex_buffer: Option<goldy_ffi_client::Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,

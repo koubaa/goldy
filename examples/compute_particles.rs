@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, PrimitiveTopology,
     RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
     ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -70,8 +70,8 @@ struct RenderState {
     frame_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
-    particle_buffer: Parcel,
-    params_buffer: Parcel,
+    particle_buffer: Buffer,
+    params_buffer: Buffer,
     render_pipeline: RenderPipeline,
     frame_count: u32,
     start_time: std::time::Instant,
@@ -190,7 +190,7 @@ impl RenderState {
         pass.with_parcel(&self.particle_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
-        pass.with_resource_slots(&[self.particle_buffer.resource_index(ResourceAccess::Read).unwrap()]);
+        pass.with_resource_slots(&[self.particle_buffer.resource_index(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish_recorded();
 

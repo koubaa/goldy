@@ -53,10 +53,10 @@ def main() -> int:
     initial = initial_cells()
     zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
     retained_pool = goldy.RetainedPool(device)
-    mosaic = retained_pool.mosaic()
-    mosaic.emplace(initial)
-    mosaic.emplace(zeros)
-    cells = mosaic.build(retained_pool)
+    record = retained_pool.acquire_record()
+    record.emplace(initial)
+    record.emplace(zeros)
+    cells = record.build(retained_pool)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
     render_shader = goldy.ShaderModule.from_slang(device, render_src)
@@ -83,16 +83,16 @@ def main() -> int:
     scheme = goldy.Scheme(ctx)
     node = scheme.node("game_of_life", compute_pipeline)
     (
-        node.with_parcel_view(cells, SLOT_A, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
-        .with_parcel_view(cells, SLOT_B, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        node.with_buffer_unit(cells, SLOT_A, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .with_buffer_unit(cells, SLOT_B, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
 
     rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
-    render_idx = cells.mosaic_view_resource_index(SLOT_B, goldy.ResourceAccess.READ_WRITE)
+    render_idx = cells.unit_resource_index(SLOT_B, goldy.ResourceAccess.READ_WRITE)
     with scheme.render_pass("game_of_life_render", rt) as rp:
         (
-            rp.with_parcel_view(cells, SLOT_B, goldy.NodeAccess.READ)
+            rp.with_buffer_unit(cells, SLOT_B, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .bind_resource_index(render_idx)
@@ -105,7 +105,7 @@ def main() -> int:
     pixels = grant.consume(submission)
 
     cells_out = np.frombuffer(
-        cells.mosaic_view_read_to_cpu(SLOT_B, device), dtype=np.uint32
+        cells.unit_read_to_cpu(SLOT_B, device), dtype=np.uint32
     )
     assert cells_out.shape == (CELL_COUNT,)
     live = count_live(cells_out)

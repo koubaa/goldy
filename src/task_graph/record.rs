@@ -7,7 +7,7 @@ use super::graph::TaskGraph;
 use super::ir::{DispatchDim, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use super::ResourceId;
 use crate::backend::RenderCommand;
-use crate::buffer::{Buffer, BufferSource, BufferView};
+use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
 use crate::pipeline::RenderPipeline;
@@ -44,9 +44,21 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn with_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    /// Register dependency on all parcels of a buffer without emitting a descriptor.
+    pub fn with_buffer_dependency(&mut self, buffer: &crate::Buffer, access: NodeAccess) -> &mut Self {
+        for parcel in buffer.parcels() {
+            self.stamp_targets.push(parcel.stamp_handle());
+            self.bindings.push(ResourceBinding {
+                resource: parcel.resource_id(),
+                access,
+            });
+        }
+        self
+    }
+
+    pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
-            resource: ResourceId::Buffer(buf.handle),
+            resource: parcel.resource_id(),
             access,
         });
         self
@@ -88,7 +100,7 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &Buffer, offset: u64) -> &mut Self {
+    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &impl BufferSource, offset: u64) -> &mut Self {
         self.commands.push(RenderCommand::SetVertexBuffer {
             slot,
             buffer: buffer.source_handle(),
@@ -148,7 +160,8 @@ impl RenderPassRecord {
         self.draw(0, 6, 0, count)
     }
 
-    pub fn with_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+    #[allow(dead_code)] // legacy bind-resources render path
+    pub(crate) fn with_resources(&mut self, buffers: &[&Allocation]) -> &mut Self {
         self.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
@@ -241,9 +254,9 @@ impl ComputeNodeRecord {
         self.register_parcel_binding(parcel, access)
     }
 
-    pub fn with_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
-            resource: ResourceId::Buffer(buf.handle),
+            resource: parcel.resource_id(),
             access,
         });
         self
@@ -287,21 +300,12 @@ impl ComputeNodeRecord {
         Some(self)
     }
 
-    /// Declare a mosaic sub-view as a graph dependency and shader binding slot atomically.
-    ///
-    /// Like [`Self::with_parcel`] but for a single mosaic tile. Returns `None` if the
-    /// view has no slot for `resource_access`.
-    pub fn with_parcel_view(
-        &mut self,
-        parcel: &crate::Parcel,
-        slot: crate::MosaicSlot,
-        node_access: NodeAccess,
-        resource_access: crate::types::ResourceAccess,
-    ) -> Option<&mut Self> {
-        let idx = parcel.mosaic_view_resource_index(slot, resource_access)?;
-        self.register_buffer_view_binding(parcel.view(slot), node_access);
-        self.resource_slots.push(idx);
-        Some(self)
+    /// Register dependency on all parcels of a buffer without emitting shader slots.
+    pub fn with_buffer_dependency(&mut self, buffer: &crate::Buffer, access: NodeAccess) -> &mut Self {
+        for parcel in buffer.parcels() {
+            self.register_parcel_binding(parcel, access);
+        }
+        self
     }
 
     /// Append one scalar virtual-main parameter (region B).

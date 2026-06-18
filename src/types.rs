@@ -383,7 +383,7 @@ bitflags! {
         /// Optimize this buffer for CPU readback.
         ///
         /// On backends with shared storage memory (Vulkan `HOST_VISIBLE`, Metal Shared),
-        /// [`crate::buffer::Buffer::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
+        /// [`crate::buffer::Allocation::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
         /// On Direct3D 12, storage buffers live on GPU-local memory; `read_to_cpu` performs a
         /// GPU copy to a pre-allocated READBACK heap and waits for completion.
         ///

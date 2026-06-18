@@ -5,9 +5,11 @@
 //!
 //! Run with: cargo run --example compute_to_surface
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, write_to_parcel, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance, Parcel,
+    task_graph::NodeAccess, write_to_parcel, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance,
     PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
 };
 use std::sync::Arc;
@@ -103,7 +105,7 @@ struct RenderState {
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
-    uniform_buffer: Parcel,
+    uniform_buffer: Buffer,
     start_time: std::time::Instant,
     vsync: bool,
     frame_count: u32,
@@ -112,7 +114,7 @@ struct RenderState {
 fn record_scheme(
     scheme: &mut Scheme,
     pipeline: &ComputePipeline,
-    uniform: &Parcel,
+    uniform: &Buffer,
     screen: &goldy::PresentLease,
     width: u32,
     height: u32,

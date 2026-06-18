@@ -10,13 +10,13 @@
 //! - **Textures** — [`TexturePool`] → `Device::alloc_texture`
 //!
 //! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
-//! a `Weak` back-reference to the allocator. When the [`Buffer`] or [`Texture`] is dropped,
+//! a `Weak` back-reference to the allocator. When the [`Allocation`] or [`Texture`] is dropped,
 //! [`VramAllocator::notify_freed`] is called automatically so the allocator can update its
-//! byte counters. Sub-parcels ([`crate::buffer::BufferView`]) carry no deed and are never
+//! byte counters. Sub-parcels ([`crate::buffer::AllocationView`]) carry no deed and are never
 //! accounted.
 //!
 //! External callers use `Device::alloc_buffer` / `Device::alloc_texture` (and the
-//! `alloc_buffer_with_*` helpers). Raw `Buffer::new_with_stride_and_flags` is
+//! `alloc_buffer_with_*` helpers). Raw `Allocation::new_with_stride_and_flags` is
 //! `pub(crate)` for allocator backends and in-crate tests only.
 //!
 //! **Deferred-reclamation ring.** The allocator also owns the timeline-gated reclamation ring.
@@ -57,7 +57,7 @@
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`BufferPool`]: crate::buffer::BufferPool
-//! [`Buffer`]: crate::buffer::Buffer
+//! [`Allocation`]: crate::buffer::Allocation
 //! [`Texture`]: crate::texture::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
@@ -68,7 +68,7 @@
 //! [`BudgetPolicy`]: crate::allocation_policy::BudgetPolicy
 
 use crate::allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, NoPolicy};
-use crate::buffer::Buffer;
+use crate::buffer::Allocation;
 use crate::device::Device;
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
@@ -92,10 +92,13 @@ use std::sync::{Arc, Mutex, RwLock};
 ///
 /// ```no_run
 /// # use goldy::vram_allocator::DeferredPayload;
-/// # use goldy::buffer::Buffer;
-/// # fn example(buf: Buffer, view: goldy::buffer::BufferView) {
+/// # use goldy::{BufferPool, Device};
+/// # fn example(device: &Device) -> anyhow::Result<()> {
+/// let mut pool = BufferPool::new(device, 4096)?;
+/// let view = pool.alloc::<u32>(16)?;
 /// let mut payload = DeferredPayload::new();
-/// payload.push(buf).push(view);
+/// payload.push(view);
+/// # Ok(())
 /// # }
 /// ```
 pub struct DeferredPayload(pub(crate) Vec<Box<dyn Any + Send>>);
@@ -148,11 +151,11 @@ pub enum ParcelType {
 /// [`VramAllocator::notify_freed`] so allocation policies can update accounting.
 #[derive(Clone)]
 pub(crate) struct ParcelDeed {
-    allocator: std::sync::Weak<dyn VramAllocator>,
+    allocator: std::sync::Weak<dyn VramAllocatorAlloc>,
 }
 
 impl ParcelDeed {
-    pub(crate) fn new(allocator: std::sync::Weak<dyn VramAllocator>) -> Self {
+    pub(crate) fn new(allocator: std::sync::Weak<dyn VramAllocatorAlloc>) -> Self {
         Self { allocator }
     }
 
@@ -176,36 +179,6 @@ impl ParcelDeed {
 /// Use [`AtomicI64`](std::sync::atomic::AtomicI64) / [`AtomicU64`](std::sync::atomic::AtomicU64) for lock-free counters,
 /// or a `Mutex` for more complex state.
 pub trait VramAllocator: Send + Sync {
-    /// Allocate a GPU buffer.
-    ///
-    /// The default implementation calls the raw `Buffer::new_with_stride_and_flags` constructor directly.
-    /// Custom implementations may allocate from a placement heap, enforce a budget, or
-    /// track the allocation for telemetry.
-    fn alloc_buffer(
-        &self,
-        device: &Device,
-        size: u64,
-        access: BufferKind,
-        element_stride: Option<u32>,
-        flags: BufferFlags,
-    ) -> Result<Buffer> {
-        Buffer::new_with_stride_and_flags(device, size, access, element_stride, flags)
-    }
-
-    /// Allocate a GPU buffer with a pre-reserved capacity hint.
-    ///
-    /// The default implementation calls the raw `Buffer::new_with_capacity_hint_and_flags` constructor.
-    fn alloc_buffer_with_capacity(
-        &self,
-        device: &Device,
-        initial_size: u64,
-        expected_max: u64,
-        access: BufferKind,
-        flags: BufferFlags,
-    ) -> Result<Buffer> {
-        Buffer::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)
-    }
-
     /// Allocate a GPU texture.
     ///
     /// The default implementation calls the raw `Texture::new` constructor directly.
@@ -223,9 +196,9 @@ pub trait VramAllocator: Send + Sync {
 
     /// Notify the allocator that a deed-holding parcel has been freed.
     ///
-    /// Called automatically from [`Buffer::drop`] / [`Texture::drop`] when the parcel
+    /// Called automatically from [`Allocation::drop`] / [`Texture::drop`] when the parcel
     /// was allocated through the device's [`VramAllocator`] (and carries a deed).
-    /// Borrowing sub-parcels (e.g. [`crate::buffer::BufferView`]) never call this.
+    /// Borrowing sub-parcels (e.g. [`crate::buffer::AllocationView`]) never call this.
     ///
     /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
     /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
@@ -313,6 +286,33 @@ pub trait VramAllocator: Send + Sync {
     }
 }
 
+/// Crate-internal buffer allocation hooks for [`Device::alloc_buffer`].
+pub(crate) trait VramAllocatorAlloc: VramAllocator {
+    /// Allocate a GPU buffer.
+    fn alloc_buffer(
+        &self,
+        device: &Device,
+        size: u64,
+        access: BufferKind,
+        element_stride: Option<u32>,
+        flags: BufferFlags,
+    ) -> Result<Allocation> {
+        Allocation::new_with_stride_and_flags(device, size, access, element_stride, flags)
+    }
+
+    /// Allocate a GPU buffer with a pre-reserved capacity hint.
+    fn alloc_buffer_with_capacity(
+        &self,
+        device: &Device,
+        initial_size: u64,
+        expected_max: u64,
+        access: BufferKind,
+        flags: BufferFlags,
+    ) -> Result<Allocation> {
+        Allocation::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)
+    }
+}
+
 // -----------------------------------------------------------------------
 // Default implementation
 // -----------------------------------------------------------------------
@@ -374,7 +374,7 @@ impl Default for DefaultVramAllocator {
     }
 }
 
-impl VramAllocator for DefaultVramAllocator {
+impl VramAllocatorAlloc for DefaultVramAllocator {
     fn alloc_buffer(
         &self,
         device: &Device,
@@ -382,14 +382,14 @@ impl VramAllocator for DefaultVramAllocator {
         access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
-    ) -> Result<Buffer> {
+    ) -> Result<Allocation> {
         let req = AllocRequest {
             reserved_estimate: size,
             committed_estimate: size,
             kind: ParcelType::Buffer,
         };
         self.with_policy_read(|policy| policy.before_alloc(&req))?;
-        let buf = Buffer::new_with_stride_and_flags(device, size, access, element_stride, flags)?;
+        let buf = Allocation::new_with_stride_and_flags(device, size, access, element_stride, flags)?;
         self.with_policy_read(|policy| {
             policy.after_alloc(&AllocCommit::from_buffer(&buf));
         });
@@ -403,7 +403,7 @@ impl VramAllocator for DefaultVramAllocator {
         expected_max: u64,
         access: BufferKind,
         flags: BufferFlags,
-    ) -> Result<Buffer> {
+    ) -> Result<Allocation> {
         let estimate = expected_max.max(initial_size);
         let req = AllocRequest {
             reserved_estimate: estimate,
@@ -411,13 +411,15 @@ impl VramAllocator for DefaultVramAllocator {
             kind: ParcelType::Buffer,
         };
         self.with_policy_read(|policy| policy.before_alloc(&req))?;
-        let buf = Buffer::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)?;
+        let buf = Allocation::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)?;
         self.with_policy_read(|policy| {
             policy.after_alloc(&AllocCommit::from_buffer(&buf));
         });
         Ok(buf)
     }
+}
 
+impl VramAllocator for DefaultVramAllocator {
     fn alloc_texture(
         &self,
         device: &Device,

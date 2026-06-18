@@ -5,7 +5,7 @@
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life_headless`
 
 use goldy_ffi_client::{
-    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, RenderPipeline,
+    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory, ResourceHandle, RetainedPool, Scheme,
     ShaderModule, TextureFlags, TextureFormat, TextureKind,
 };
@@ -14,8 +14,8 @@ const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: usize = (GRID_WIDTH * GRID_HEIGHT) as usize;
 
-const SLOT_A: MosaicSlot = MosaicSlot(0);
-const SLOT_B: MosaicSlot = MosaicSlot(1);
+const UNIT_A: u32 = 0;
+const UNIT_B: u32 = 1;
 
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
@@ -45,10 +45,7 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     let initial = initial_cells();
     let mut retained_pool = RetainedPool::new(&device)?;
-    let mut mosaic = retained_pool.mosaic()?;
-    mosaic.emplace_pod::<u32>(&initial)?;
-    mosaic.emplace_pod::<u32>(&initial)?;
-    let cells = mosaic.build(&mut retained_pool)?;
+    let cells = retained_pool.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
 
     let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
     let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -76,19 +73,19 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     {
         let mut node = scheme.compute_node("game_of_life", &compute_pipeline);
-        node.with_parcel_view(&cells, SLOT_A, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.with_parcel_view(&cells, SLOT_B, NodeAccess::Write, ResourceAccess::Write);
+        node.with_buffer_unit(&cells, UNIT_A, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.with_buffer_unit(&cells, UNIT_B, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 
     let rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
     {
-        let render_idx = cells.mosaic_view_resource_index(SLOT_B, ResourceAccess::ReadWrite)?;
+        let render_idx = cells.unit_resource_index(UNIT_B, ResourceAccess::ReadWrite)?;
         let mut pass = scheme.render_pass("game_of_life_render", &rt);
-        pass.with_parcel_view(&cells, SLOT_B, NodeAccess::Read);
+        pass.with_buffer_unit(&cells, UNIT_B, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&render_pipeline);
-        pass.with_views(&[ResourceHandle {
+        pass.bind_resources_typed(&[ResourceHandle {
             category: ResourceCategory::Scattered,
             index: render_idx,
         }]);
@@ -101,7 +98,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let submission = scheme.submit()?;
     let pixels = grant.consume(&submission)?;
 
-    let bytes = cells.mosaic_view_read_to_cpu(SLOT_B, &device)?;
+    let bytes = cells.unit_read_to_cpu(UNIT_B, &device)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&bytes);
     assert_eq!(count_live(cells_out), 4, "still-life block should remain 4 live cells");
 

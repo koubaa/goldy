@@ -1,5 +1,6 @@
 //! Python wrappers for TaskGraph and render-pass recording.
 
+use crate::buffer::PyBuffer;
 use crate::compute::PyComputePipeline;
 use crate::device::PyDevice;
 use crate::error::{GoldyError, IntoPyResult};
@@ -144,7 +145,7 @@ impl PyTaskGraph {
         self.ensure_no_active_recorder()?;
         self.inner
             .borrow_mut()
-            .write_parcel(parcel.inner.as_ref(), offset, data.to_vec())
+            .write_parcel(parcel.inner.as_parcel(), offset, data.to_vec())
             .into_py_result()?;
         Ok(())
     }
@@ -235,22 +236,48 @@ impl PyRenderPass {
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.with_parcel(parcel.inner.as_ref(), access.into());
+            pass.with_parcel(parcel.inner.as_parcel(), access.into());
         })?;
         Ok(slf)
     }
 
-    /// Declare a mosaic sub-view dependency for this render pass.
-    fn with_parcel_view<'py>(
+    /// Declare a buffer unit dependency for this render pass.
+    fn with_buffer_unit<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        parcel: &PyParcel,
-        slot: u32,
+        buffer: &PyBuffer,
+        unit: u32,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
+        let idx = unit as usize;
+        if idx >= buffer.inner.unit_count() {
+            return Err(GoldyError::new_err(format!(
+                "buffer unit index {unit} out of range (unit_count={})",
+                buffer.inner.unit_count()
+            )));
+        }
         slf.graph.borrow(py).with_active_pass(|pass| {
-            let view = parcel.inner.view(goldy::MosaicSlot(slot));
-            pass.with_buffer_view(view, access.into());
+            pass.with_parcel(buffer.inner.unit(idx), access.into());
+        })?;
+        Ok(slf)
+    }
+
+    /// Declare a named buffer field dependency for this render pass.
+    fn with_field<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        name: &str,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let parcel_ptr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buffer.inner.field(name) as *const goldy::Parcel
+        })) {
+            Ok(p) => p,
+            Err(_) => return Err(GoldyError::new_err(format!("unknown buffer field {name:?}"))),
+        };
+        slf.graph.borrow(py).with_active_pass(|pass| {
+            pass.with_parcel(unsafe { &*parcel_ptr }, access.into());
         })?;
         Ok(slf)
     }
@@ -268,10 +295,11 @@ impl PyRenderPass {
         let resource_access = resource_access_for_shader(access);
         let handle = parcel
             .inner
+            .as_parcel()
             .handle(resource_access)
             .ok_or_else(|| GoldyError::new_err("bindless resource handle unavailable"))?;
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.with_parcel(parcel.inner.as_ref(), access.into());
+            pass.with_parcel(parcel.inner.as_parcel(), access.into());
             pass.with_views(&[handle]);
         })?;
         Ok(slf)
@@ -318,7 +346,7 @@ impl PyRenderPass {
         parcel: &PyParcel,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.set_vertex_buffer(slot, parcel.inner.as_ref());
+            pass.set_vertex_buffer(slot, parcel.inner.as_parcel());
         })?;
         Ok(slf)
     }
@@ -330,7 +358,7 @@ impl PyRenderPass {
         format: PyIndexFormat,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_pass(|pass| {
-            pass.set_index_buffer(parcel.inner.as_ref(), format.into());
+            pass.set_index_buffer(parcel.inner.as_parcel(), format.into());
         })?;
         Ok(slf)
     }
@@ -454,22 +482,48 @@ impl PyComputeNode {
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.graph.borrow(py).with_active_compute(|node| {
-            node.with_parcel(parcel.inner.as_ref(), access.into());
+            node.with_parcel_access(parcel.inner.as_parcel(), access.into());
         })?;
         Ok(slf)
     }
 
-    /// Declare a mosaic sub-view dependency for this compute node.
-    fn with_parcel_view<'py>(
+    /// Declare a buffer unit dependency for this compute node.
+    fn with_buffer_unit<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        parcel: &PyParcel,
-        slot: u32,
+        buffer: &PyBuffer,
+        unit: u32,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
+        let idx = unit as usize;
+        if idx >= buffer.inner.unit_count() {
+            return Err(GoldyError::new_err(format!(
+                "buffer unit index {unit} out of range (unit_count={})",
+                buffer.inner.unit_count()
+            )));
+        }
         slf.graph.borrow(py).with_active_compute(|node| {
-            let view = parcel.inner.view(goldy::MosaicSlot(slot));
-            node.with_buffer_view(view, access.into());
+            node.with_parcel_access(buffer.inner.unit(idx), access.into());
+        })?;
+        Ok(slf)
+    }
+
+    /// Declare a named buffer field dependency for this compute node.
+    fn with_field<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        name: &str,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let parcel_ptr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buffer.inner.field(name) as *const goldy::Parcel
+        })) {
+            Ok(p) => p,
+            Err(_) => return Err(GoldyError::new_err(format!("unknown buffer field {name:?}"))),
+        };
+        slf.graph.borrow(py).with_active_compute(|node| {
+            node.with_parcel_access(unsafe { &*parcel_ptr }, access.into());
         })?;
         Ok(slf)
     }

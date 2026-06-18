@@ -62,7 +62,7 @@ int main() {
         };
 
         goldy::RetainedPool pool(device);
-        goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -94,10 +94,10 @@ int main() {
             kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
         {
             auto pass = scheme.render_pass("triangle", rt);
-            pass.with_parcel(vertex_buffer, goldy::NodeAccess::Read)
+            pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read)
                 .clear(goldy::Color::black())
                 .set_pipeline(pipeline)
-                .set_vertex_buffer_parcel(0, vertex_buffer)
+                .set_vertex_buffer(0, vertex_buffer)
                 .draw(0, 3);
         }
 

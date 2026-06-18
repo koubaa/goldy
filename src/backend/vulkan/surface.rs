@@ -471,6 +471,17 @@ fn wait_surface_gpu_idle(state: &super::types::VulkanState, surface_handle: Surf
     if max_timeline > 0 {
         super::context::wait_until_device_seq_at_least(state, device_handle, max_timeline);
     }
+
+    // Timeline retirement covers compute/copy submits, but `queuePresent` may still be
+    // waiting on `render_finished_semaphore` after the copy submit returns. Drain the
+    // queue before destroying per-frame binary semaphores (VUID-vkDestroySemaphore).
+    if let Some(ld) = state.devices.get(&device_handle) {
+        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
+        unsafe {
+            let _ = ld.device.queue_wait_idle(ld.queue);
+        }
+    }
 }
 
 /// Destroy a surface and all associated resources.

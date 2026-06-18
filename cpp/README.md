@@ -151,7 +151,7 @@ On Windows, if MSVC cannot find `stdarg.h`, either:
 | `goldy::Device` | GPU device handle |
 | `goldy::RetainedPool` | Deed-governed pool for retained GPU parcels |
 | `goldy::Parcel` | Retained buffer or texture parcel |
-| `goldy::MosaicBuilder` | Build multi-view mosaic parcels |
+| `goldy::RecordBuilder` | Build partitioned buffer records (multiple field parcels) |
 | `goldy::ShaderModule` | Compiled Slang shader |
 | `goldy::RenderPipeline` | Graphics pipeline |
 | `goldy::RenderTarget` | Offscreen render target (readback) |

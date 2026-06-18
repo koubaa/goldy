@@ -4,9 +4,11 @@
 //!
 //! Run with: `cargo run --example mandelbrot`
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use goldy::{
-    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    shaders, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RetainedPool, Scheme, ShaderModule, SwapchainPool,
 };
 use std::sync::Arc;
@@ -36,7 +38,7 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
-    uniform: Option<Parcel>,
+    uniform: Option<Buffer>,
     window: Option<Arc<Window>>,
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
@@ -91,7 +93,7 @@ impl App {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        uniform: &Parcel,
+        uniform: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {

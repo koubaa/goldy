@@ -176,19 +176,27 @@ public sealed class SchemeComputeNodeScope : IDisposable
         return this;
     }
 
-    public SchemeComputeNodeScope WithParcelView(
-        Parcel parcel,
-        uint slot,
+    public SchemeComputeNodeScope WithField(
+        Buffer buffer,
+        uint unit,
         NodeAccess nodeAccess,
         ResourceAccess resourceAccess)
     {
         EnsureOpen();
-        var result = NativeMethods.SchemeComputeNodeWithParcelView(
-            _scheme.Handle, parcel.Handle, slot, nodeAccess, resourceAccess);
+        ArgumentNullException.ThrowIfNull(buffer);
+        var result = NativeMethods.SchemeComputeNodeWithField(
+            _scheme.Handle, buffer.Handle, unit, nodeAccess, resourceAccess);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme compute_node_with_parcel_view");
+            throw GoldyException.FromLastError("Scheme compute_node_with_field");
         return this;
     }
+
+    public SchemeComputeNodeScope WithBufferUnit(
+        Buffer buffer,
+        uint unit,
+        NodeAccess nodeAccess,
+        ResourceAccess resourceAccess) =>
+        WithField(buffer, unit, nodeAccess, resourceAccess);
 
     public SchemeComputeNodeScope WithParam(uint value)
     {
@@ -241,14 +249,18 @@ public sealed class SchemeRenderPassScope : IDisposable
         return this;
     }
 
-    public SchemeRenderPassScope WithParcelView(Parcel parcel, uint slot, NodeAccess access)
+    public SchemeRenderPassScope WithField(Buffer buffer, uint unit, NodeAccess access)
     {
         EnsureOpen();
-        var result = NativeMethods.SchemeRenderPassWithParcelView(_scheme.Handle, parcel.Handle, slot, access);
+        ArgumentNullException.ThrowIfNull(buffer);
+        var result = NativeMethods.SchemeRenderPassWithField(_scheme.Handle, buffer.Handle, unit, access);
         if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Scheme render_pass_with_parcel_view");
+            throw GoldyException.FromLastError("Scheme render_pass_with_field");
         return this;
     }
+
+    public SchemeRenderPassScope WithBufferUnit(Buffer buffer, uint unit, NodeAccess access) =>
+        WithField(buffer, unit, access);
 
     public SchemeRenderPassScope BindResourceIndex(uint scatteredIndex)
     {

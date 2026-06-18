@@ -59,7 +59,7 @@ struct GpuState {
     goldy::Context ctx;
     goldy::Device device;
     goldy::RetainedPool pool;
-    goldy::Parcel cells;
+    goldy::Buffer cells;
     goldy::ShaderModule compute_shader;
     goldy::ShaderModule render_shader;
     goldy::ComputePipeline compute_pipeline;
@@ -176,16 +176,16 @@ goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow
 
 void run_compute_step(
     const goldy::Context& ctx,
-    const goldy::Parcel& cells,
+    const goldy::Buffer& cells,
     uint32_t read_slot,
     uint32_t write_slot,
     const goldy::ComputePipeline& pipeline) {
     goldy::Scheme scheme(ctx);
     {
         auto node = scheme.compute_node("game_of_life", pipeline);
-        node.with_parcel_view(
+        node.with_field(
             cells, read_slot, goldy::NodeAccess::Read, goldy::ResourceAccess::ReadWrite);
-        node.with_parcel_view(
+        node.with_field(
             cells, write_slot, goldy::NodeAccess::Write, goldy::ResourceAccess::Write);
         node.dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1);
     }
@@ -195,7 +195,7 @@ void run_compute_step(
 DisplayState record_display_scheme(
     const goldy::Context& ctx,
     const goldy::SwapchainPool& swapchain,
-    const goldy::Parcel& cells,
+    const goldy::Buffer& cells,
     uint32_t current_slot,
     const goldy::RenderPipeline& render_pipeline,
     const goldy::PresentLease& screen) {
@@ -206,10 +206,10 @@ DisplayState record_display_scheme(
     goldy::SchemeRenderTargetLease scene_rt =
         scheme.lease_render_target(width, height, swapchain.format());
     const uint32_t cells_idx =
-        cells.mosaic_view_resource_index(current_slot, goldy::ResourceAccess::ReadWrite);
+        cells.unit_resource_index(current_slot, goldy::ResourceAccess::ReadWrite);
     {
         auto pass = scheme.render_pass("game_of_life_render", scene_rt);
-        pass.with_parcel_view(cells, current_slot, goldy::NodeAccess::Read)
+        pass.with_field(cells, current_slot, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(render_pipeline)
             .bind_resource_index(cells_idx)
@@ -226,10 +226,10 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
 
     goldy::Context ctx(device);
     goldy::RetainedPool pool(device);
-    auto mosaic = pool.mosaic();
-    mosaic.emplace(initial);
-    mosaic.emplace(zeros);
-    goldy::Parcel cells = mosaic.build(pool);
+    auto record = pool.record();
+    record.emplace_named("a", initial);
+    record.emplace_named("b", zeros);
+    goldy::Buffer cells = record.build(pool);
 
     goldy::ShaderModule compute_shader(device, find_shader("game_of_life.slang"));
     goldy::ShaderModule render_shader(device, find_shader("game_of_life_render.slang"));

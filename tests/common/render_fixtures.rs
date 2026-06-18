@@ -18,8 +18,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn graph_render(
@@ -229,7 +227,7 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
         if use_buffer_a {
             graph
                 .node("gol_update", &compute_pipeline)
-                .with_resources(&[&buffer_a, &buffer_b])
+                .with_resources(&[&*buffer_a, &*buffer_b])
                 .dispatch(workgroups_x, workgroups_y, 1);
         } else {
             graph
@@ -246,15 +244,21 @@ pub fn render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
 
     graph_render(device, &target, "gol_render", |pass| {
         if use_buffer_a {
-            pass.with_buffer(&buffer_a, NodeAccess::Read);
+            pass.with_parcel(&*buffer_a, NodeAccess::Read);
             pass.clear(Color::BLACK);
+            pass.with_shader_resources(&[goldy::ShaderResourceSlot::Parcel {
+                parcel: &*buffer_a,
+                access: NodeAccess::ReadWrite,
+            }]);
             pass.set_pipeline(&render_pipeline);
-            pass.with_resources(&[&buffer_a]);
         } else {
-            pass.with_buffer(&buffer_b, NodeAccess::Read);
+            pass.with_parcel(&*buffer_b, NodeAccess::Read);
             pass.clear(Color::BLACK);
+            pass.with_shader_resources(&[goldy::ShaderResourceSlot::Parcel {
+                parcel: &*buffer_b,
+                access: NodeAccess::ReadWrite,
+            }]);
             pass.set_pipeline(&render_pipeline);
-            pass.with_resources(&[&buffer_b]);
         }
         pass.draw(0..3, 0..1);
     });

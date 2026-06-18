@@ -10,7 +10,7 @@
 //! when clean.
 
 use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureHandle, TextureReadbackLayout};
-use crate::buffer::{Buffer, BufferSource};
+use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
@@ -317,7 +317,7 @@ enum GrantSource {
     Buffer {
         source: BufferHandle,
         #[allow(dead_code)]
-        source_backing: Arc<Buffer>,
+        source_backing: Arc<Allocation>,
         byte_size: u64,
     },
     Texture {
@@ -830,7 +830,10 @@ impl Scheme {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
             ctx.with_transient_pool(|pool| {
-                pool.adopt(StampedParcel { parcel, ready_after });
+                pool.adopt(StampedParcel {
+                    hold: crate::retained_pool::RetainedHold::Texture(parcel),
+                    ready_after,
+                });
             });
         }
         self.rt_leases.clear();
@@ -1070,7 +1073,10 @@ impl Drop for Scheme {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
             ctx.with_transient_pool(|pool| {
-                pool.adopt(StampedParcel { parcel, ready_after });
+                pool.adopt(StampedParcel {
+                    hold: crate::retained_pool::RetainedHold::Texture(parcel),
+                    ready_after,
+                });
             });
         }
         self.rt_leases.clear();
@@ -1239,8 +1245,24 @@ impl<'a> SchemeNodeBuilder<'a> {
             access,
         });
         let resource_access = node_access_to_resource_access(access);
-        if let Some(index) = parcel.resource_index(resource_access) {
-            self.resource_slots.push(index);
+        let index = parcel.resource_index(resource_access).unwrap_or_else(|| {
+            panic!(
+                "with_parcel: parcel has no descriptor for {access:?} access; \
+                 check BufferKind/TextureKind is compatible with NodeAccess"
+            );
+        });
+        self.resource_slots.push(index);
+        self
+    }
+
+    /// Register dependency on all parcels of a buffer without emitting shader slots.
+    pub fn with_buffer_dependency(mut self, buffer: &crate::Buffer, access: NodeAccess) -> Self {
+        self.scheme.submit_state.register_buffer_stamps(buffer);
+        for parcel in buffer.parcels() {
+            self.bindings.push(ResourceBinding {
+                resource: parcel.resource_id(),
+                access,
+            });
         }
         self
     }
@@ -1351,8 +1373,24 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             access,
         });
         let resource_access = node_access_to_resource_access(access);
-        if let Some(handle) = parcel.handle(resource_access) {
-            self.push_constant_handles.push(handle);
+        let handle = parcel.handle(resource_access).unwrap_or_else(|| {
+            panic!(
+                "with_parcel: parcel has no descriptor for {access:?} access; \
+                 check BufferKind/TextureKind is compatible with NodeAccess"
+            );
+        });
+        self.push_constant_handles.push(handle);
+        self
+    }
+
+    /// Register dependency on all parcels of a buffer without push-constant binding.
+    pub fn with_buffer_dependency(&mut self, buffer: &crate::Buffer, access: NodeAccess) -> &mut Self {
+        self.scheme.submit_state.register_buffer_stamps(buffer);
+        for parcel in buffer.parcels() {
+            self.bindings.push(ResourceBinding {
+                resource: parcel.resource_id(),
+                access,
+            });
         }
         self
     }
@@ -1607,7 +1645,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("create render pipeline")
     }
 
-    fn retained_buffer_parcel(pool: &mut RetainedPool) -> Parcel {
+    fn retained_buffer(pool: &mut RetainedPool) -> crate::Buffer {
         pool.acquire_buffer(
             32,
             crate::types::BufferKind::Scattered,
@@ -1615,20 +1653,24 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             crate::types::BufferFlags::empty(),
             None,
         )
-        .expect("alloc buffer parcel")
+        .expect("alloc buffer")
     }
 
-    fn recording_scheme_with_parcel(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> (Scheme, Parcel) {
+    fn recording_scheme_with_parcel(
+        device: &Arc<Device>,
+        pool: &mut RetainedPool,
+        ctx: &Context,
+    ) -> (Scheme, crate::Buffer) {
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
-        let parcel = retained_buffer_parcel(pool);
+        let buffer = retained_buffer(pool);
 
         let mut scheme = Scheme::new(ctx);
         scheme
             .node("a", &pipeline)
-            .with_parcel(&parcel, NodeAccess::Write)
+            .with_parcel(&*buffer, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        (scheme, parcel)
+        (scheme, buffer)
     }
 
     fn recording_scheme(device: &Arc<Device>, pool: &mut RetainedPool, ctx: &Context) -> Scheme {
@@ -1639,7 +1681,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(device);
         let pipeline = mock_pipeline(device, &shader);
-        let parcel = retained_buffer_parcel(pool);
+        let parcel = retained_buffer(pool);
 
         let mut scheme = Scheme::new(&ctx);
         assert!(scheme.is_dirty(), "new scheme starts dirty");
@@ -1718,7 +1760,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel2 = retained_buffer_parcel(&mut pool);
+        let parcel2 = retained_buffer(&mut pool);
         scheme
             .node("b", &pipeline)
             .with_parcel(&parcel2, NodeAccess::Write)
@@ -1745,7 +1787,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         assert!(parcel.is_settled(&ctx), "never-referenced parcel is settled");
     }
 
@@ -1796,7 +1838,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -2056,7 +2098,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let mut pool = RetainedPool::new(device_a.clone());
         let ctx_a = device_a.create_context().unwrap();
         let ctx_b = device_b.create_context().unwrap();
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let mut scheme = Scheme::new(&ctx_b);
         let err = match scheme.grant_read(&parcel) {
             Ok(_) => panic!("cross-device grant must fail"),
@@ -2071,7 +2113,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
 
         let mut scheme_a = Scheme::new(&ctx);
         let grant_a = scheme_a.grant_read(&parcel).expect("grant_a");
@@ -2419,7 +2461,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -2957,7 +2999,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
 
         let mut scheme = Scheme::new(&ctx);
         scheme
@@ -3020,5 +3062,30 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             partitions.iter().any(|p| p.has_present),
             "some partition must touch present lease"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "with_parcel: parcel has no descriptor")]
+    fn with_parcel_panics_on_incompatible_access() {
+        let device = mock_device();
+        let ctx = device.create_context().expect("context");
+        let mut pool = RetainedPool::new(device.clone());
+        let texture = pool
+            .acquire_texture(
+                4,
+                4,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Interpolated,
+                crate::types::TextureFlags::empty(),
+                None,
+            )
+            .expect("texture");
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("bad_bind", &pipeline)
+            .with_parcel(&texture, NodeAccess::Write)
+            .dispatch(1, 1, 1);
     }
 }

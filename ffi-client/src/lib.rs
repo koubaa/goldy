@@ -6,6 +6,7 @@
 //! task-graph recording.
 
 mod adapter;
+mod buffer;
 mod compute;
 mod context;
 mod device;
@@ -24,6 +25,7 @@ mod task_graph;
 mod types;
 
 pub use adapter::Adapter;
+pub use buffer::Buffer;
 pub use compute::ComputePipeline;
 pub use context::Context;
 pub use device::Device;
@@ -32,7 +34,7 @@ pub use instance::{AdapterInfo, Instance};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use render_target::RenderTarget;
-pub use retained_pool::{MosaicBuilder, MosaicSlot, RetainedPool};
+pub use retained_pool::{RecordBuilder, RecordField, RetainedPool};
 pub use scheme::{
     ComputeNodeBuilder as SchemeComputeNodeBuilder, PresentGrant, PresentLease, ReadGrant, ReplayStats, Scheme,
     SchemeRenderPassBuilder, SchemeRenderTargetLease, SchemeSubmission,

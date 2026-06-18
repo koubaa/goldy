@@ -5,12 +5,14 @@
 //!
 //! Run with: cargo run --example depth_quads
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    write_to_parcel, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor,
-    Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState,
+    DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -73,8 +75,8 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
-    warm_parcel: Option<Parcel>,
-    cool_parcel: Option<Parcel>,
+    warm_parcel: Option<Buffer>,
+    cool_parcel: Option<Buffer>,
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
     present: Option<PresentGrant>,
@@ -131,8 +133,8 @@ impl App {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        warm_parcel: &Parcel,
-        cool_parcel: &Parcel,
+        warm_parcel: &Buffer,
+        cool_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {

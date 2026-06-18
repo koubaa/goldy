@@ -9,6 +9,7 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::wrong_self_convention)]
 
+mod buffer;
 mod bytes_util;
 mod compute;
 mod device;
@@ -67,9 +68,10 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheme::PyPresentLease>()?;
     m.add_class::<scheme::PyPresentGrant>()?;
     m.add_class::<swapchain_pool::PySwapchainPool>()?;
+    m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;
-    m.add_class::<retained_pool::PyMosaicBuilder>()?;
+    m.add_class::<retained_pool::PyRecordBuilder>()?;
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;

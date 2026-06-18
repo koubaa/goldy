@@ -4,9 +4,11 @@
 //!
 //! Run with: cargo run --example multi_window
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use goldy::{
-    shaders, write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    shaders, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
@@ -237,7 +239,7 @@ struct WindowState {
     paused_at: f32,
     time_multiplier: f32,
     _retained_pool: RetainedPool,
-    vertex_parcel: Parcel,
+    vertex_parcel: Buffer,
     has_focus: bool,
 }
 
@@ -261,7 +263,7 @@ impl WindowState {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        vertex_parcel: &Parcel,
+        vertex_parcel: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
         label: &'static str,

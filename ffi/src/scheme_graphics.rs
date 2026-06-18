@@ -2,13 +2,13 @@
 
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
-use crate::retained_pool::GoldyParcel;
+use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel};
 use crate::scheme::{GoldyPresentGrant, GoldyReadGrant, GoldyScheme, GoldySchemeSubmission, ReadGrantInner};
 use crate::types::{GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget};
 use goldy::task_graph::{NodeAccess, RenderPassRecord};
 use goldy::types::{ResourceCategory, ResourceHandle};
-use goldy::{Grant, MosaicSlot, ParcelType};
+use goldy::{Grant, ParcelType};
 use std::ffi::CStr;
 
 /// Opaque handle to a scheme-held render-target lease.
@@ -125,26 +125,38 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_begin(
     GoldyResult::Ok
 }
 
-/// Declare a mosaic sub-view dependency for the active render pass.
-///
-/// # Safety
-/// All pointers must be valid.
+/// Declare a buffer unit dependency for the active render pass.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_with_parcel_view(
+pub unsafe extern "C" fn goldy_scheme_render_pass_with_buffer_unit(
     scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
-    slot: u32,
+    buffer: *const GoldyBuffer,
+    unit: u32,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    if scheme.is_null() || parcel.is_null() {
+    if scheme.is_null() || buffer.is_null() {
         return GoldyResult::NullPointer;
     }
     let pass = match active_render_pass_mut(&mut *scheme) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    pass.with_buffer_view((*parcel).inner.view(MosaicSlot(slot)), map_node_access(access));
+    let parcel = match buffer_unit_at(buffer, unit) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    pass.with_parcel(parcel, map_node_access(access));
     GoldyResult::Ok
+}
+
+/// Bind one field of a partitioned retained buffer to the active render pass.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_scheme_render_pass_with_field(
+    scheme: *mut GoldyScheme,
+    buffer: *const GoldyBuffer,
+    unit: u32,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    goldy_scheme_render_pass_with_buffer_unit(scheme, buffer, unit, access)
 }
 
 /// Declare a graph dependency on a retained parcel for the active render pass.

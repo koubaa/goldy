@@ -1,42 +1,57 @@
 //! Gate-free retained allocation pool — the public door for deed-held GPU memory.
 //!
 //! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
-//! [`RetainedPool::mosaic`] are the supported ways to create retained parcels. Parcels are
-//! opaque [`Parcel`] values; relinquish via [`RetainedPool::release`] or by dropping the parcel.
-//!
-//! Reuse-gate, transient pool, and backpressure are deferred.
+//! [`RetainedPool::acquire_record`] are the supported ways to create retained resources.
+//! Buffers are acquired aggregates; bind their [`Parcel`] units. Relinquish via
+//! [`RetainedPool::release`] or by dropping.
 
 use crate::buffer::{BufferPool, StructuredBufferElement};
 use crate::context::Context;
 use crate::device::Device;
-use crate::parcel::{BookkeepingGuard, BytesByKind, MosaicSlot, Parcel, PoolBookkeeping};
+use crate::parcel::{BookkeepingGuard, Buffer, BytesByKind, Init, Parcel, PoolBookkeeping, RecordField};
 use crate::timeline::ReferenceTable;
 use crate::types::{BufferKind, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::ParcelType;
 use anyhow::Result;
 use std::sync::Arc;
 
-struct MosaicSpec {
-    data: Option<Vec<u8>>,
-    count: u64,
-    stride: u32,
+/// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
+pub enum RetainedHold {
+    Buffer(Buffer),
+    Texture(Parcel),
 }
 
-/// Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
-pub struct MosaicBuilder<'a> {
-    device: &'a Arc<Device>,
-    bookkeeping: &'a Arc<PoolBookkeeping>,
-    specs: Vec<MosaicSpec>,
+impl RetainedHold {
+    pub fn byte_size(&self) -> u64 {
+        match self {
+            RetainedHold::Buffer(b) => b.byte_size(),
+            RetainedHold::Texture(p) => p.byte_size(),
+        }
+    }
+
+    pub fn last_referenced(&self) -> ReferenceTable {
+        match self {
+            RetainedHold::Buffer(b) => b.last_referenced(),
+            RetainedHold::Texture(p) => p.last_referenced(),
+        }
+    }
+
+    pub fn texture_descriptor(&self) -> Option<(u32, u32, TextureFormat, TextureKind, TextureFlags)> {
+        match self {
+            RetainedHold::Buffer(_) => None,
+            RetainedHold::Texture(p) => p.texture_descriptor(),
+        }
+    }
 }
 
-/// A parcel relinquished from the retained pool, stamped for handoff to the transient pool.
+/// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
 pub struct StampedParcel {
-    pub parcel: Parcel,
-    /// Per-context timelines after which the parcel may be reused; empty if never referenced.
+    pub hold: RetainedHold,
+    /// Per-context timelines after which the resource may be reused; empty if never referenced.
     pub ready_after: ReferenceTable,
 }
 
-/// Deed-governed pool: allocates retained parcels; no epoch gate while held.
+/// Deed-governed pool: allocates retained resources; no epoch gate while held.
 pub struct RetainedPool {
     device: Arc<Device>,
     bookkeeping: Arc<PoolBookkeeping>,
@@ -51,8 +66,7 @@ impl RetainedPool {
         }
     }
 
-    /// Allocate a retained texture. `init: Some(data)` performs a one-shot staged upload into
-    /// device-local memory (not permanently host-visible).
+    /// Allocate a retained texture parcel. `init: Some(data)` performs a one-shot staged upload.
     pub fn acquire_texture(
         &mut self,
         width: u32,
@@ -72,18 +86,10 @@ impl RetainedPool {
         self.wrap_texture(tex)
     }
 
-    /// Begin building a retained mosaic parcel (one backing buffer, multiple sub-views).
-    pub fn mosaic(&mut self) -> MosaicBuilder<'_> {
-        MosaicBuilder {
-            device: &self.device,
-            bookkeeping: &self.bookkeeping,
-            specs: Vec::new(),
-        }
-    }
-
     /// Allocate a retained buffer. `init: Some(data)` performs a one-shot staged upload.
     ///
-    /// For in-place per-frame CPU rewrites, use [`crate::TaskGraph::write_parcel`] on the returned parcel.
+    /// For in-place per-frame CPU rewrites, use [`crate::TaskGraph::write_parcel`] on the
+    /// buffer's whole parcel (`&*buffer` or `buffer.whole()`).
     pub fn acquire_buffer(
         &mut self,
         size: u64,
@@ -91,7 +97,7 @@ impl RetainedPool {
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
         init: Option<&[u8]>,
-    ) -> Result<Parcel> {
+    ) -> Result<Buffer> {
         let buf = self.alloc_raw_buffer(size, access, element_stride, flags, init)?;
         self.wrap_buffer(buf)
     }
@@ -101,7 +107,7 @@ impl RetainedPool {
         &mut self,
         data: &[T],
         access: BufferKind,
-    ) -> Result<Parcel> {
+    ) -> Result<Buffer> {
         self.acquire_buffer_with_data_and_flags(data, access, crate::types::BufferFlags::empty())
     }
 
@@ -111,7 +117,7 @@ impl RetainedPool {
         data: &[T],
         access: BufferKind,
         flags: crate::types::BufferFlags,
-    ) -> Result<Parcel> {
+    ) -> Result<Buffer> {
         let stride = std::mem::size_of::<T>() as u32;
         let bytes = bytemuck::cast_slice(data);
         self.acquire_buffer(bytes.len() as u64, access, Some(stride), flags, Some(bytes))
@@ -123,9 +129,54 @@ impl RetainedPool {
         element_count: u64,
         access: BufferKind,
         flags: crate::types::BufferFlags,
-    ) -> Result<Parcel> {
+    ) -> Result<Buffer> {
         let stride = std::mem::size_of::<T>() as u32;
         self.acquire_buffer(element_count * stride as u64, access, Some(stride), flags, None)
+    }
+
+    /// Allocate a retained buffer partitioned into named or ordinal fields.
+    pub fn acquire_record(&mut self, fields: impl IntoIterator<Item = RecordField>) -> Result<Buffer> {
+        let fields: Vec<RecordField> = fields.into_iter().collect();
+        assert!(!fields.is_empty(), "acquire_record requires at least one field");
+
+        let pairs: Vec<(usize, usize)> = fields
+            .iter()
+            .map(|f| match &f.init {
+                Init::Data { count, stride, .. } | Init::Reserve { count, stride } => {
+                    (*count as usize, *stride as usize)
+                }
+            })
+            .collect();
+        let total = BufferPool::padded_size(&pairs);
+        let mut pool = BufferPool::new(&self.device, total)?;
+
+        let mut views = Vec::with_capacity(fields.len());
+        let mut field_names = Vec::with_capacity(fields.len());
+        for field in &fields {
+            let (count, stride, data) = match &field.init {
+                Init::Data { bytes, count, stride } => (*count, *stride, Some(bytes.as_slice())),
+                Init::Reserve { count, stride } => (*count, *stride, None),
+            };
+            let size = count * stride as u64;
+            let view = pool.alloc_bytes(size, Some(stride))?;
+            if let Some(data) = data {
+                view.write_data(data)?;
+            }
+            views.push(view);
+            field_names.push(field.name.as_ref().map(|n| n.to_string()));
+        }
+
+        let bytes = pool.capacity();
+        let kind = ParcelType::Buffer;
+        self.bookkeeping.add(kind, bytes);
+        let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
+        Ok(Buffer::from_partitioned(
+            pool,
+            views,
+            field_names,
+            guard,
+            self.home_device(),
+        ))
     }
 
     fn alloc_raw_buffer(
@@ -135,7 +186,7 @@ impl RetainedPool {
         element_stride: Option<u32>,
         flags: crate::types::BufferFlags,
         init: Option<&[u8]>,
-    ) -> Result<crate::buffer::Buffer> {
+    ) -> Result<crate::buffer::Allocation> {
         if let Some(data) = init {
             self.device
                 .alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride.unwrap_or(1), flags)
@@ -147,15 +198,19 @@ impl RetainedPool {
         }
     }
 
-    /// Release a held parcel into the context transient pool for epoch-gated reuse.
-    pub fn release(&mut self, ctx: &Context, parcel: Parcel) {
-        let stamped = self.transfer_out(ctx, parcel);
+    /// Release a held texture parcel into the context transient pool for epoch-gated reuse.
+    pub fn release_texture(&mut self, ctx: &Context, parcel: Parcel) {
+        let stamped = self.transfer_out_texture(ctx, parcel);
         ctx.with_transient_pool(|pool| pool.adopt(stamped));
     }
 
-    /// Internal release path. Returns stamped metadata for the transient pool;
-    /// public clients should call [`Self::release`] instead.
-    pub(crate) fn transfer_out(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
+    /// Release a held buffer into the context transient pool for epoch-gated reuse.
+    pub fn release_buffer(&mut self, ctx: &Context, buffer: Buffer) {
+        let stamped = self.transfer_out_buffer(ctx, buffer);
+        ctx.with_transient_pool(|pool| pool.adopt(stamped));
+    }
+
+    pub(crate) fn transfer_out_texture(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
         if let Some(home) = parcel.home_device().upgrade() {
             debug_assert!(
                 Arc::ptr_eq(&home, &ctx.device().inner),
@@ -164,7 +219,25 @@ impl RetainedPool {
         }
         let ready_after = parcel.last_referenced();
         parcel.release_bookkeeping();
-        StampedParcel { parcel, ready_after }
+        StampedParcel {
+            hold: RetainedHold::Texture(parcel),
+            ready_after,
+        }
+    }
+
+    pub(crate) fn transfer_out_buffer(&mut self, ctx: &Context, mut buffer: Buffer) -> StampedParcel {
+        if let Some(home) = buffer.home_device().upgrade() {
+            debug_assert!(
+                Arc::ptr_eq(&home, &ctx.device().inner),
+                "transfer_out: buffer home_device must match submitting context's device"
+            );
+        }
+        let ready_after = buffer.last_referenced();
+        buffer.release_bookkeeping();
+        StampedParcel {
+            hold: RetainedHold::Buffer(buffer),
+            ready_after,
+        }
     }
 
     /// Committed bytes currently held through this pool, by [`ParcelType`].
@@ -184,92 +257,12 @@ impl RetainedPool {
         Ok(Parcel::from_texture(tex, guard, self.home_device()))
     }
 
-    fn wrap_buffer(&self, buf: crate::buffer::Buffer) -> Result<Parcel> {
+    fn wrap_buffer(&self, buf: crate::buffer::Allocation) -> Result<Buffer> {
         let bytes = buf.byte_size();
         let kind = ParcelType::Buffer;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
-        Ok(Parcel::from_buffer(buf, guard, self.home_device()))
-    }
-}
-
-impl<'a> MosaicBuilder<'a> {
-    /// Reserve space for `count` elements of type `T` (no initial upload).
-    pub fn reserve<T: StructuredBufferElement>(&mut self, count: u64) -> MosaicSlot {
-        self.reserve_bytes(count, std::mem::size_of::<T>() as u32)
-    }
-
-    /// Reserve raw bytes (`count * stride`, no initial upload).
-    pub fn reserve_bytes(&mut self, count: u64, stride: u32) -> MosaicSlot {
-        let slot = MosaicSlot(self.specs.len() as u32);
-        self.specs.push(MosaicSpec {
-            data: None,
-            count,
-            stride,
-        });
-        slot
-    }
-
-    /// Reserve space and upload `data` in one step.
-    pub fn emplace<T: StructuredBufferElement>(&mut self, data: &[T]) -> MosaicSlot {
-        let stride = std::mem::size_of::<T>() as u32;
-        let slot = MosaicSlot(self.specs.len() as u32);
-        self.specs.push(MosaicSpec {
-            data: Some(bytemuck::cast_slice(data).to_vec()),
-            count: data.len() as u64,
-            stride,
-        });
-        slot
-    }
-
-    /// Reserve space and upload raw bytes (`data.len()` must equal `count * stride`).
-    pub fn emplace_bytes(&mut self, data: &[u8], count: u64, stride: u32) -> MosaicSlot {
-        let expected = count.saturating_mul(stride as u64) as usize;
-        assert_eq!(
-            data.len(),
-            expected,
-            "emplace_bytes: data len {} != count * stride ({expected})",
-            data.len()
-        );
-        let slot = MosaicSlot(self.specs.len() as u32);
-        self.specs.push(MosaicSpec {
-            data: Some(data.to_vec()),
-            count,
-            stride,
-        });
-        slot
-    }
-
-    /// Allocate the backing buffer, carve sub-views, and return the mosaic parcel.
-    pub fn build(self) -> Result<Parcel> {
-        let pairs: Vec<(usize, usize)> = self
-            .specs
-            .iter()
-            .map(|s| (s.count as usize, s.stride as usize))
-            .collect();
-        let total = BufferPool::padded_size(&pairs);
-        let mut pool = BufferPool::new(self.device, total)?;
-
-        let mut views = Vec::with_capacity(self.specs.len());
-        for spec in &self.specs {
-            let size = spec.count * spec.stride as u64;
-            let view = pool.alloc_bytes(size, Some(spec.stride))?;
-            if let Some(data) = &spec.data {
-                view.write_data(data.as_slice())?;
-            }
-            views.push(view);
-        }
-
-        let bytes = pool.capacity();
-        let kind = ParcelType::Buffer;
-        self.bookkeeping.add(kind, bytes);
-        let guard = BookkeepingGuard::new(Arc::downgrade(self.bookkeeping), kind, bytes);
-        Ok(Parcel::from_mosaic(
-            pool,
-            views,
-            guard,
-            Arc::downgrade(&self.device.inner),
-        ))
+        Ok(Buffer::from_single(buf, guard, self.home_device()))
     }
 }
 
@@ -277,6 +270,7 @@ impl<'a> MosaicBuilder<'a> {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
+    use crate::parcel::{field, Init};
     use crate::types::{ResourceAccess, TextureFormat};
 
     fn test_device() -> Arc<Device> {
@@ -306,18 +300,9 @@ mod tests {
     }
 
     #[test]
-    fn acquire_texture_with_init_uploads() {
-        let mut pool = RetainedPool::new(test_device());
-        let (fmt, acc, flags) = rgba_interpolated();
-        let data = vec![0u8; 32 * 32 * 4];
-        let p = pool.acquire_texture(32, 32, fmt, acc, flags, Some(&data)).unwrap();
-        assert_eq!(p.byte_size(), 32 * 32 * 4);
-    }
-
-    #[test]
     fn acquire_buffer_without_init_allocates() {
         let mut pool = RetainedPool::new(test_device());
-        let p = pool
+        let b = pool
             .acquire_buffer(
                 256,
                 BufferKind::Scattered,
@@ -326,146 +311,90 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(p.kind(), ParcelType::Buffer);
-        assert_eq!(p.byte_size(), 256);
+        assert_eq!(b.kind(), ParcelType::Buffer);
+        assert_eq!(b.byte_size(), 256);
         assert!(pool.bytes_by_kind().buffer >= 256);
+        assert_eq!(b.unit_count(), 1);
     }
 
     #[test]
-    fn mark_referenced_is_monotonic_max() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
-        let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        let h = ctx.backend_handle();
-        p.mark_referenced(h, 10);
-        p.mark_referenced(h, 5);
-        assert_eq!(p.last_referenced_on(h), Some(10));
-        p.mark_referenced(h, 20);
-        assert_eq!(p.last_referenced_on(h), Some(20));
+    fn acquire_record_builds_partitioned_buffer() {
+        let mut pool = RetainedPool::new(test_device());
+        let cells = pool
+            .acquire_record([
+                field("a", Init::data(&[1u32, 2, 3])),
+                field("b", Init::reserve::<u32>(4)),
+            ])
+            .unwrap();
+        assert!(cells.is_partitioned());
+        assert_eq!(cells.unit_count(), 2);
+        assert!(cells["a"].resource_index(ResourceAccess::Write).is_some());
+        assert!(cells["b"].resource_index(ResourceAccess::Write).is_some());
     }
 
     #[test]
-    fn transfer_out_referenced_has_ready_after() {
+    #[should_panic(expected = "cannot bind a partitioned buffer as one descriptor")]
+    fn partitioned_buffer_whole_panics() {
+        let mut pool = RetainedPool::new(test_device());
+        let cells = pool
+            .acquire_record([field("a", Init::data(&[1u32])), field("b", Init::reserve::<u32>(1))])
+            .unwrap();
+        let _ = cells.whole();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot bind a partitioned buffer as one descriptor")]
+    fn partitioned_buffer_deref_panics() {
+        use crate::Parcel;
+
+        let mut pool = RetainedPool::new(test_device());
+        let cells = pool
+            .acquire_record([field("a", Init::data(&[1u32])), field("b", Init::reserve::<u32>(1))])
+            .unwrap();
+        let _parcel: &Parcel = &*cells;
+    }
+
+    #[test]
+    fn detach_allocation_succeeds_on_single_unit_buffer() {
+        let mut pool = RetainedPool::new(test_device());
+        let buffer = pool
+            .acquire_buffer(
+                64,
+                BufferKind::Scattered,
+                None,
+                crate::types::BufferFlags::empty(),
+                None,
+            )
+            .unwrap();
+        buffer.detach_allocation().expect("detach should succeed");
+    }
+
+    #[test]
+    fn transfer_out_buffer_referenced_has_ready_after() {
         let device = test_device();
         let ctx = test_ctx(&device);
         let mut pool = RetainedPool::new(device);
-        let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        p.mark_referenced(ctx.backend_handle(), 42);
-        let stamped = pool.transfer_out(&ctx, p);
+        let b = pool
+            .acquire_buffer(
+                64,
+                BufferKind::Scattered,
+                None,
+                crate::types::BufferFlags::empty(),
+                None,
+            )
+            .unwrap();
+        b.mark_referenced(ctx.backend_handle(), 42);
+        let stamped = pool.transfer_out_buffer(&ctx, b);
         assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&42));
-        assert_eq!(pool.bytes_by_kind().texture, 0);
-    }
-
-    #[test]
-    fn transfer_out_unreferenced_has_none_ready_after() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
-        let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        let stamped = pool.transfer_out(&ctx, p);
-        assert!(stamped.ready_after.is_empty());
-    }
-
-    #[test]
-    fn transfer_out_preserves_texture_handle() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
-        let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(8, 8, fmt, acc, flags, None).unwrap();
-        let h_before = p.texture_handle().unwrap();
-        let stamped = pool.transfer_out(&ctx, p);
-        assert_eq!(stamped.parcel.texture_handle(), Some(h_before));
-    }
-
-    #[test]
-    fn bytes_by_kind_zero_after_transfer_and_drop() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
-        let (fmt, acc, flags) = rgba_interpolated();
-        let p = pool.acquire_texture(16, 16, fmt, acc, flags, None).unwrap();
-        assert!(pool.bytes_by_kind().texture > 0);
-        let stamped = pool.transfer_out(&ctx, p);
-        assert_eq!(pool.bytes_by_kind().texture, 0);
-        drop(stamped);
-    }
-
-    #[test]
-    fn mosaic_build_allocates_backing_and_views() {
-        let mut pool = RetainedPool::new(test_device());
-        let mut m = pool.mosaic();
-        let a = m.emplace(&[1u32, 2, 3]);
-        let b = m.reserve::<u32>(4);
-        let parcel = m.build().unwrap();
-
-        assert_eq!(parcel.kind(), ParcelType::Buffer);
-        assert!(parcel.byte_size() >= 3 * 4 + 4 * 4);
-        assert_eq!(parcel.view(a).size(), 12);
-        assert_eq!(parcel.view(b).size(), 16);
-    }
-
-    /// TODO(goldy#210): asserts via the public `resource_index`; move to the
-    /// crate-internal accessor when #210 lands.
-    #[test]
-    fn mosaic_emplace_uploads_and_reserve_leaves_space() {
-        let mut pool = RetainedPool::new(test_device());
-        let mut m = pool.mosaic();
-        let slot = m.emplace(&[42u32, 99]);
-        let _reserved = m.reserve::<u32>(8);
-        let parcel = m.build().unwrap();
-
-        assert!(parcel.view(slot).resource_index(ResourceAccess::Write).is_some());
-        assert_eq!(parcel.view(slot).offset(), 0);
-        assert!(parcel.view(slot).size() > 0);
-    }
-
-    #[test]
-    fn mosaic_bytes_by_kind_and_transfer_out() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
-        let mut m = pool.mosaic();
-        m.emplace(&[0u32; 16]);
-        let parcel = m.build().unwrap();
-        let bytes_before = parcel.byte_size();
-        assert!(pool.bytes_by_kind().buffer >= bytes_before);
-
-        let h_before = parcel.buffer_handle().unwrap();
-        let stamped = pool.transfer_out(&ctx, parcel);
         assert_eq!(pool.bytes_by_kind().buffer, 0);
-        assert_eq!(stamped.parcel.buffer_handle(), Some(h_before));
-        drop(stamped);
     }
 
     #[test]
-    fn mosaic_mark_referenced_is_monotonic() {
-        let device = test_device();
-        let ctx = test_ctx(&device);
-        let mut pool = RetainedPool::new(device);
-        let mut m = pool.mosaic();
-        m.emplace(&[1u32]);
-        let parcel = m.build().unwrap();
-        let h = ctx.backend_handle();
-        parcel.mark_referenced(h, 10);
-        parcel.mark_referenced(h, 5);
-        assert_eq!(parcel.last_referenced_on(h), Some(10));
-        parcel.mark_referenced(h, 20);
-        assert_eq!(parcel.last_referenced_on(h), Some(20));
-    }
-
-    /// `TaskGraph::write_parcel` is the runtime-internal realization of the planned
-    /// `parcel.write` (retained-graph proposal §3.6); these tests cover the mechanism.
-    #[test]
-    fn write_parcel_on_buffer_parcel_succeeds() {
+    fn write_parcel_on_whole_buffer_parcel_succeeds() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
         let mut pool = RetainedPool::new(device);
-        let parcel = pool
+        let buffer = pool
             .acquire_buffer(
                 16,
                 BufferKind::Scattered,
@@ -476,47 +405,9 @@ mod tests {
             .unwrap();
         let mut graph = crate::TaskGraph::new();
         assert!(graph
-            .write_parcel(&parcel, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
+            .write_parcel(&*buffer, 0, bytemuck::cast_slice(&[1u32, 2, 3, 4]).to_vec())
             .is_ok());
         graph.dispatch(&ctx).unwrap();
-    }
-
-    #[test]
-    fn write_parcel_on_texture_parcel_errors() {
-        let mut pool = RetainedPool::new(test_device());
-        let (fmt, acc, flags) = rgba_interpolated();
-        let parcel = pool.acquire_texture(4, 4, fmt, acc, flags, None).unwrap();
-        let mut graph = crate::TaskGraph::new();
-        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
-        assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
-    }
-
-    #[test]
-    fn write_parcel_on_mosaic_parcel_errors() {
-        let mut pool = RetainedPool::new(test_device());
-        let mut m = pool.mosaic();
-        m.emplace(&[1u32]);
-        let parcel = m.build().unwrap();
-        let mut graph = crate::TaskGraph::new();
-        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
-        assert!(err.to_string().contains("only valid for non-mosaic buffer parcels"));
-    }
-
-    /// TODO(goldy#210): exercises the *public* `resource_index`, which should be
-    /// internal. When #210 lands this test asserts the crate-internal accessor instead.
-    #[test]
-    fn resource_index_read_on_scattered_buffer_parcel() {
-        let mut pool = RetainedPool::new(test_device());
-        let parcel = pool
-            .acquire_buffer(
-                64,
-                BufferKind::Scattered,
-                Some(4),
-                crate::types::BufferFlags::empty(),
-                None,
-            )
-            .unwrap();
-        assert!(parcel.resource_index(ResourceAccess::Read).is_some());
     }
 
     #[test]

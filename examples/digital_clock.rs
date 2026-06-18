@@ -6,11 +6,13 @@
 //!
 //! Run with: `cargo run --example digital_clock`
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
-    ShaderModule, SwapchainPool,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -33,7 +35,7 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
-    vertex_parcel: Option<Parcel>,
+    vertex_parcel: Option<Buffer>,
 
     window: Option<Arc<Window>>,
     swapchain: Option<SwapchainPool>,
@@ -95,7 +97,7 @@ impl App {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        vertex_parcel: &Parcel,
+        vertex_parcel: &Buffer,
         vertex_count: u32,
         bg_color: Color,
         scene_rt: &Lease<LeaseRenderTarget>,

@@ -5,11 +5,10 @@ use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
 use crate::render_target::GoldyRenderTarget;
-use crate::retained_pool::GoldyParcel;
+use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel};
 use crate::types::{GoldyColor, GoldyIndexFormat, GoldyNodeAccess};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord, SwapchainOutputHandle, TaskGraph};
 use goldy::types::{ResourceCategory, ResourceHandle};
-use goldy::MosaicSlot;
 use std::ffi::CStr;
 use std::ptr;
 
@@ -162,26 +161,37 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_begin(
     GoldyResult::Ok
 }
 
-/// Declare a mosaic sub-view dependency for the active render pass.
-///
-/// # Safety
-/// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_render_pass_with_parcel_view(
+pub unsafe extern "C" fn goldy_task_graph_render_pass_with_buffer_unit(
     graph: *mut GoldyTaskGraph,
-    parcel: *const GoldyParcel,
-    slot: u32,
+    buffer: *const GoldyBuffer,
+    unit: u32,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    if graph.is_null() || parcel.is_null() {
+    if graph.is_null() || buffer.is_null() {
         return GoldyResult::NullPointer;
     }
     let pass = match active_pass_mut(&mut *graph) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    pass.with_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
+    let parcel = match buffer_unit_at(buffer, unit) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    pass.with_parcel(parcel, node_access(access));
     GoldyResult::Ok
+}
+
+/// Bind one field of a partitioned retained buffer to the active render pass.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_render_pass_with_field(
+    graph: *mut GoldyTaskGraph,
+    buffer: *const GoldyBuffer,
+    unit: u32,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    goldy_task_graph_render_pass_with_buffer_unit(graph, buffer, unit, access)
 }
 
 /// Declare a graph dependency on a retained parcel for the active render pass.
@@ -309,7 +319,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_set_pipeline(
 /// Bind a vertex buffer slot from a retained buffer parcel for the active render pass.
 ///
 /// # Safety
-/// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
+/// All pointers must be valid. `parcel` must be a buffer parcel (whole or field unit).
 #[no_mangle]
 pub unsafe extern "C" fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
     graph: *mut GoldyTaskGraph,
@@ -330,7 +340,7 @@ pub unsafe extern "C" fn goldy_task_graph_render_pass_set_vertex_buffer_parcel(
 /// Bind an index buffer parcel for the active render pass.
 ///
 /// # Safety
-/// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
+/// All pointers must be valid. `parcel` must be a buffer parcel (whole or field unit).
 #[no_mangle]
 pub unsafe extern "C" fn goldy_task_graph_render_pass_set_index_buffer(
     graph: *mut GoldyTaskGraph,
@@ -459,26 +469,37 @@ pub unsafe extern "C" fn goldy_task_graph_compute_node_begin(
     GoldyResult::Ok
 }
 
-/// Declare a mosaic sub-view dependency for the active compute node.
-///
-/// # Safety
-/// All pointers must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn goldy_task_graph_compute_node_with_parcel_view(
+pub unsafe extern "C" fn goldy_task_graph_compute_node_with_buffer_unit(
     graph: *mut GoldyTaskGraph,
-    parcel: *const GoldyParcel,
-    slot: u32,
+    buffer: *const GoldyBuffer,
+    unit: u32,
     access: GoldyNodeAccess,
 ) -> GoldyResult {
-    if graph.is_null() || parcel.is_null() {
+    if graph.is_null() || buffer.is_null() {
         return GoldyResult::NullPointer;
     }
     let node = match active_compute_mut(&mut *graph) {
         Ok(n) => n,
         Err(e) => return e,
     };
-    node.with_buffer_view((*parcel).inner.view(MosaicSlot(slot)), node_access(access));
+    let parcel = match buffer_unit_at(buffer, unit) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    node.with_parcel_access(parcel, node_access(access));
     GoldyResult::Ok
+}
+
+/// Bind one field of a partitioned retained buffer to the active compute node.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_task_graph_compute_node_with_field(
+    graph: *mut GoldyTaskGraph,
+    buffer: *const GoldyBuffer,
+    unit: u32,
+    access: GoldyNodeAccess,
+) -> GoldyResult {
+    goldy_task_graph_compute_node_with_buffer_unit(graph, buffer, unit, access)
 }
 
 /// Declare a graph dependency on a retained parcel for the active compute node.

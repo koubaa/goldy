@@ -6,19 +6,19 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
+    goldy_buffer_destroy, goldy_buffer_unit_byte_size, goldy_buffer_unit_read_to_cpu, goldy_buffer_unit_resource_index,
     goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_device_destroy, goldy_instance_destroy,
-    goldy_mosaic_builder_build, goldy_mosaic_builder_create, goldy_mosaic_builder_emplace, goldy_parcel_destroy,
-    goldy_parcel_mosaic_view_read_to_cpu, goldy_parcel_mosaic_view_resource_index, goldy_parcel_mosaic_view_size,
+    goldy_record_builder_build, goldy_record_builder_create, goldy_record_builder_emplace,
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_render_target_buffer_size,
     goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_create, goldy_shader_destroy,
     goldy_task_graph_compute_node_begin, goldy_task_graph_compute_node_dispatch,
-    goldy_task_graph_compute_node_with_parcel_view, goldy_task_graph_compute_node_with_resource_slots,
+    goldy_task_graph_compute_node_with_field, goldy_task_graph_compute_node_with_resource_slots,
     goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
     goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw_fullscreen,
     goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline,
-    goldy_task_graph_render_pass_with_parcel_view, goldy_task_graph_render_pass_with_views, GoldyColor,
-    GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
+    goldy_task_graph_render_pass_with_field, goldy_task_graph_render_pass_with_views, GoldyColor, GoldyNodeAccess,
+    GoldyRenderPipelineDesc, GoldyResourceAccess, GoldyResult, GoldyTextureFormat,
 };
 use std::ffi::CString;
 
@@ -57,12 +57,13 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
         let pool = goldy_retained_pool_create(device);
         assert!(!pool.is_null(), "{}", last_ffi_message());
 
-        let mosaic = goldy_mosaic_builder_create();
-        assert!(!mosaic.is_null(), "{}", last_ffi_message());
+        let builder = goldy_record_builder_create();
+        assert!(!builder.is_null(), "{}", last_ffi_message());
 
         assert_eq!(
-            goldy_mosaic_builder_emplace(
-                mosaic,
+            goldy_record_builder_emplace(
+                builder,
+                std::ptr::null(),
                 initial.as_ptr() as *const u8,
                 initial.len() * cell_bytes,
                 CELL_COUNT as u64,
@@ -73,8 +74,9 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_mosaic_builder_emplace(
-                mosaic,
+            goldy_record_builder_emplace(
+                builder,
+                std::ptr::null(),
                 initial.as_ptr() as *const u8,
                 initial.len() * cell_bytes,
                 CELL_COUNT as u64,
@@ -85,7 +87,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let cells = goldy_mosaic_builder_build(mosaic, pool);
+        let cells = goldy_record_builder_build(builder, pool);
         assert!(!cells.is_null(), "{}", last_ffi_message());
 
         let compute_src = CString::new(COMPUTE_SHADER).unwrap();
@@ -110,8 +112,8 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
         let target = goldy_render_target_create(device, GRID_WIDTH, GRID_HEIGHT, GoldyTextureFormat::Rgba8Unorm);
         assert!(!target.is_null(), "{}", last_ffi_message());
 
-        let read_idx = goldy_parcel_mosaic_view_resource_index(cells, SLOT_A, GoldyResourceAccess::ReadWrite);
-        let write_idx = goldy_parcel_mosaic_view_resource_index(cells, SLOT_B, GoldyResourceAccess::Write);
+        let read_idx = goldy_buffer_unit_resource_index(cells, SLOT_A, GoldyResourceAccess::ReadWrite);
+        let write_idx = goldy_buffer_unit_resource_index(cells, SLOT_B, GoldyResourceAccess::Write);
         assert_ne!(read_idx, u32::MAX);
         assert_ne!(write_idx, u32::MAX);
 
@@ -126,13 +128,13 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_with_parcel_view(graph, cells, SLOT_A, GoldyNodeAccess::Read),
+            goldy_task_graph_compute_node_with_field(graph, cells, SLOT_A, GoldyNodeAccess::Read),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_compute_node_with_parcel_view(graph, cells, SLOT_B, GoldyNodeAccess::Write),
+            goldy_task_graph_compute_node_with_field(graph, cells, SLOT_B, GoldyNodeAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -151,7 +153,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let render_idx = goldy_parcel_mosaic_view_resource_index(cells, SLOT_B, GoldyResourceAccess::ReadWrite);
+        let render_idx = goldy_buffer_unit_resource_index(cells, SLOT_B, GoldyResourceAccess::ReadWrite);
         assert_ne!(render_idx, u32::MAX);
 
         let render_label = CString::new("game_of_life_render").unwrap();
@@ -162,7 +164,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_render_pass_with_parcel_view(graph, cells, SLOT_B, GoldyNodeAccess::Read),
+            goldy_task_graph_render_pass_with_field(graph, cells, SLOT_B, GoldyNodeAccess::Read),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -213,10 +215,10 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
 
-        let view_size = goldy_parcel_mosaic_view_size(cells, SLOT_B) as usize;
+        let view_size = goldy_buffer_unit_byte_size(cells, SLOT_B) as usize;
         let mut readback = vec![0u8; view_size];
         assert_eq!(
-            goldy_parcel_mosaic_view_read_to_cpu(cells, SLOT_B, device, readback.as_mut_ptr(), readback.len()),
+            goldy_buffer_unit_read_to_cpu(cells, SLOT_B, device, readback.as_mut_ptr(), readback.len()),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -254,7 +256,7 @@ fn task_graph_game_of_life_hybrid_simulate_and_render() {
         goldy_shader_destroy(render_shader);
         goldy_shader_destroy(compute_shader);
         goldy_render_target_destroy(target);
-        goldy_parcel_destroy(cells);
+        goldy_buffer_destroy(cells);
         goldy_retained_pool_destroy(pool);
         goldy_device_destroy(device);
         goldy_instance_destroy(instance);

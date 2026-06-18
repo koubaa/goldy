@@ -6,9 +6,9 @@
 
 use goldy::{
     types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, Parcel, PresentGrant,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule,
-    ShaderResourceSlot, SwapchainPool, Vertex2DUv,
+    Buffer, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, Parcel,
+    PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Sampler, Scheme,
+    ShaderModule, ShaderResourceSlot, SwapchainPool, Vertex2DUv,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -96,7 +96,7 @@ struct App {
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     _retained_pool: Option<RetainedPool>,
-    vertex_buffer: Option<Parcel>,
+    vertex_buffer: Option<Buffer>,
     texture: Option<Parcel>,
     sampler: Option<Sampler>,
     start_time: Instant,
@@ -145,7 +145,7 @@ impl App {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        vertex_buffer: &Parcel,
+        vertex_buffer: &Buffer,
         texture: &Parcel,
         sampler: &Sampler,
         scene_rt: &Lease<LeaseRenderTarget>,

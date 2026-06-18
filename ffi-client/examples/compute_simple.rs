@@ -39,7 +39,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let ctx = Context::new(&device)?;
     let mut scheme = Scheme::new(&ctx)?;
     let mut node = scheme.compute_node("double", &pipeline);
-    node.with_parcel(&buffer, NodeAccess::ReadWrite, ResourceAccess::Write);
+    node.with_buffer(&buffer, NodeAccess::ReadWrite, ResourceAccess::Write);
     node.dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buffer)?;
     let submission = scheme.submit()?;

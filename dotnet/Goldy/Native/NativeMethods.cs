@@ -327,9 +327,13 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_parcel")]
     internal static partial GoldyResult SchemeRenderPassWithParcel(nint scheme, nint parcel, NodeAccess access);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_parcel_view")]
-    internal static partial GoldyResult SchemeRenderPassWithParcelView(
-        nint scheme, nint parcel, uint slot, NodeAccess access);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_field")]
+    internal static partial GoldyResult SchemeRenderPassWithField(
+        nint scheme, nint buffer, uint unit, NodeAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_buffer_unit")]
+    internal static partial GoldyResult SchemeRenderPassWithBufferUnit(
+        nint scheme, nint buffer, uint unit, NodeAccess access);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_views")]
     internal static partial GoldyResult SchemeRenderPassWithViews(nint scheme, nint indices, uint handleCount);
@@ -353,9 +357,13 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_finish")]
     internal static partial GoldyResult SchemeRenderPassFinish(nint scheme);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_parcel_view")]
-    internal static partial GoldyResult SchemeComputeNodeWithParcelView(
-        nint scheme, nint parcel, uint slot, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_field")]
+    internal static partial GoldyResult SchemeComputeNodeWithField(
+        nint scheme, nint buffer, uint unit, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_buffer_unit")]
+    internal static partial GoldyResult SchemeComputeNodeWithBufferUnit(
+        nint scheme, nint buffer, uint unit, NodeAccess nodeAccess, ResourceAccess resourceAccess);
 
     [LibraryImport(LibName, EntryPoint = "goldy_present_grant_consume")]
     internal static partial GoldyResult PresentGrantConsume(nint grant, nint submission);
@@ -389,6 +397,50 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_acquire_buffer")]
     internal static partial nint RetainedPoolAcquireBuffer(
         nint pool, ulong size, BufferKind access, uint elementStride, nint data, nuint dataSize);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_destroy")]
+    internal static partial void BufferDestroy(nint buffer);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_byte_size")]
+    internal static partial ulong BufferByteSize(nint buffer);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_field")]
+    internal static partial nint BufferField(nint buffer, uint unit);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_count")]
+    internal static partial uint BufferUnitCount(nint buffer);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_byte_size")]
+    internal static partial ulong BufferUnitByteSize(nint buffer, uint unit);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_resource_index")]
+    internal static partial uint BufferUnitResourceIndex(nint buffer, uint unit, ResourceAccess access);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_read_to_cpu")]
+    internal static partial GoldyResult BufferUnitReadToCpu(
+        nint buffer, uint unit, nint device, nint output, nuint outputSize);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_record_builder_create")]
+    internal static partial nint RecordBuilderCreate();
+
+    [LibraryImport(LibName, EntryPoint = "goldy_record_builder_destroy")]
+    internal static partial void RecordBuilderDestroy(nint builder);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_record_builder_emplace", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial uint RecordBuilderEmplace(
+        nint builder,
+        string? name,
+        nint data,
+        nuint dataSize,
+        ulong elementCount,
+        uint elementStride);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_record_builder_reserve", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial uint RecordBuilderReserve(
+        nint builder, string? name, ulong elementCount, uint elementStride);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_record_builder_build")]
+    internal static partial nint RecordBuilderBuild(nint builder, nint pool);
 
     [LibraryImport(LibName, EntryPoint = "goldy_retained_pool_acquire_texture")]
     internal static partial nint RetainedPoolAcquireTexture(

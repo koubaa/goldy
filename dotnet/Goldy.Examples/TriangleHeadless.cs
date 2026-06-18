@@ -42,7 +42,8 @@ static class TriangleHeadless
             new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
         ];
         using var retainedPool = new RetainedPool(device);
-        using var vertexParcel = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+        using var vertexBuffer = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+        using var vertexParcel = vertexBuffer.Field(0);
         using var readback = retainedPool.AcquireTexture(
             100,
             100,

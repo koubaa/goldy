@@ -440,3 +440,48 @@ fn repeated_resubmit_of_b_never_dirties_a() {
     #[cfg(not(feature = "metal"))]
     assert_eq!(observer.replay_stats().resubmit_hits, RESUBMITS as u64);
 }
+
+/// Per-parcel cross-submit tracking: a scheme that reads field B must not be
+/// topology-dirtied when another scheme repeatedly writes disjoint field A.
+#[test]
+fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard() {
+    use goldy::{field, Init};
+
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let inc_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let inc_pipe = ComputePipeline::new(&device, &inc_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let record = pool
+        .acquire_record([field("a", Init::data(&[0u32; 1])), field("b", Init::data(&[0u32; 1]))])
+        .expect("acquire_record");
+
+    let mut worker = Scheme::new(&ctx);
+    worker
+        .node("inc_a", &inc_pipe)
+        .with_parcel(&record["a"], NodeAccess::ReadWrite)
+        .with_views(&[record["a"].handle(ResourceAccess::Write).expect("a uav")])
+        .dispatch(1, 1, 1);
+    worker.submit().expect("worker record");
+
+    let mut observer = Scheme::new(&ctx);
+    observer
+        .node("read_b", &read_pipe)
+        .with_parcel(&record["b"], NodeAccess::Read)
+        .with_views(&[record["b"].handle(ResourceAccess::Read).expect("b srv")])
+        .dispatch(1, 1, 1);
+    observer.submit().expect("observer record");
+    assert!(!observer.is_topology_dirty());
+
+    const RESUBMITS: u32 = 20;
+    for _ in 0..RESUBMITS {
+        worker.submit().expect("worker resubmit on field a");
+    }
+    assert!(
+        !observer.is_topology_dirty(),
+        "writes to disjoint field a must not dirty observer bound to field b"
+    );
+}

@@ -4,12 +4,13 @@
 //!
 //! Run with: cargo run --example instancing
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, write_to_parcel, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant,
-    Instance, Instance2D, Lease, LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool,
-    VertexBufferLayout,
+    types::ResourceAccess, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
+    Grant, Instance, Instance2D, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -73,8 +74,8 @@ struct RenderState {
     render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
-    instance_buffer: Parcel,
-    params_buffer: Parcel,
+    instance_buffer: Buffer,
+    params_buffer: Buffer,
     start_time: Instant,
     last_time: f32,
     frame_count: u32,
@@ -103,8 +104,8 @@ impl RenderState {
         scheme: &mut Scheme,
         compute_pipeline: &ComputePipeline,
         render_pipeline: &RenderPipeline,
-        instance_buffer: &Parcel,
-        params_buffer: &Parcel,
+        instance_buffer: &Buffer,
+        params_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {
@@ -126,10 +127,12 @@ impl RenderState {
         };
 
         let mut pass = scheme.render_pass("instancing", scene_rt);
-        pass.with_parcel(instance_buffer, NodeAccess::Read);
+        // Graph dependency only — do not push Read SRV into set_pipeline; after compute
+        // UAV writes, WARP reads zeros through the SRV slot (see scheme_compute_integration).
+        pass.with_buffer_dependency(&instance_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
-        pass.with_views(&[instance_buffer.handle(ResourceAccess::Read).unwrap()]);
+        pass.with_views(&[instance_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..6, 0..NUM_QUADS);
         pass.finish();
 

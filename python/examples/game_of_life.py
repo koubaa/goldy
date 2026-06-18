@@ -96,7 +96,7 @@ def create_initial_state() -> np.ndarray:
 
 def run_compute_step(
     ctx: goldy.Context,
-    cells: goldy.Parcel,
+    cells: goldy.Buffer,
     read_slot: int,
     write_slot: int,
     pipeline: goldy.ComputePipeline,
@@ -104,8 +104,8 @@ def run_compute_step(
     scheme = goldy.Scheme(ctx)
     node = scheme.node("game_of_life", pipeline)
     (
-        node.with_parcel_view(cells, read_slot, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
-        .with_parcel_view(cells, write_slot, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        node.with_buffer_unit(cells, read_slot, goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
+        .with_buffer_unit(cells, write_slot, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
     scheme.submit()
@@ -114,7 +114,7 @@ def run_compute_step(
 def record_display_scheme(
     ctx: goldy.Context,
     swapchain: goldy.SwapchainPool,
-    cells: goldy.Parcel,
+    cells: goldy.Buffer,
     current_slot: int,
     render_pipeline: goldy.RenderPipeline,
     screen: goldy.PresentLease,
@@ -125,10 +125,10 @@ def record_display_scheme(
         max(swapchain.height, 1),
         swapchain.format,
     )
-    render_idx = cells.mosaic_view_resource_index(current_slot, goldy.ResourceAccess.READ_WRITE)
+    render_idx = cells.unit_resource_index(current_slot, goldy.ResourceAccess.READ_WRITE)
     with scheme.render_pass("game_of_life_render", rt) as rp:
         (
-            rp.with_parcel_view(cells, current_slot, goldy.NodeAccess.READ)
+            rp.with_buffer_unit(cells, current_slot, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
             .bind_resource_index(render_idx)
@@ -167,10 +167,10 @@ def main() -> int:
     initial = create_initial_state()
     zeros = np.zeros(CELL_COUNT, dtype=np.uint32)
     retained_pool = goldy.RetainedPool(device)
-    mosaic = retained_pool.mosaic()
-    mosaic.emplace(initial)
-    mosaic.emplace(zeros)
-    cells = mosaic.build(retained_pool)
+    record = retained_pool.acquire_record()
+    record.emplace(initial)
+    record.emplace(zeros)
+    cells = record.build(retained_pool)
 
     compute_shader = goldy.ShaderModule.from_slang(device, compute_src)
     render_shader = goldy.ShaderModule.from_slang(device, render_src)

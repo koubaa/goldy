@@ -19,8 +19,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn make_device() -> Option<goldy::Device> {

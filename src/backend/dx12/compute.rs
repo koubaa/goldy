@@ -18,6 +18,17 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DE
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::types::ResourceCategory;
 
+/// WARP's buffer state tracker corrupts with precise enhanced/global barriers that
+/// name UAV/SRV access (see `buffer.rs` upload path). Use ALL/ALL/COMMON/COMMON.
+fn warp_full_global_barrier() -> D3D12_GLOBAL_BARRIER {
+    D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+    }
+}
+
 fn buffer_stride_for_bindless_index(
     buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
     device_handle: DeviceHandle,
@@ -1057,11 +1068,15 @@ fn record_gpu_command(
                     if access_before == D3D12_BARRIER_ACCESS_COMMON {
                         access_after = D3D12_BARRIER_ACCESS_COMMON;
                     }
-                    let g = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: slot_usage_to_dx12_sync(&usage.src, is_storage),
-                        SyncAfter: slot_usage_to_dx12_sync(&usage.dst, is_storage),
-                        AccessBefore: access_before,
-                        AccessAfter: access_after,
+                    let g = if is_storage {
+                        warp_full_global_barrier()
+                    } else {
+                        D3D12_GLOBAL_BARRIER {
+                            SyncBefore: slot_usage_to_dx12_sync(&usage.src, is_storage),
+                            SyncAfter: slot_usage_to_dx12_sync(&usage.dst, is_storage),
+                            AccessBefore: access_before,
+                            AccessAfter: access_after,
+                        }
                     };
                     unsafe { barriers::barrier_globals(cl7, &[g]) };
                 }
@@ -2126,7 +2141,12 @@ pub(super) fn submit_graph(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[compute_to_render]) };
+                    let pre_render_barrier = if use_global_buffer_barriers {
+                        warp_full_global_barrier()
+                    } else {
+                        compute_to_render
+                    };
+                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[pre_render_barrier]) };
 
                     let touched = super::render_target::record_render_pass_to_list(
                         state,

@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, Parcel, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    types::ResourceAccess, Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
@@ -71,7 +71,7 @@ struct RenderState {
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
-    line_buffer: Parcel,
+    line_buffer: Buffer,
     render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
     frame_count: u32,
@@ -101,7 +101,7 @@ impl RenderState {
         scheme: &mut Scheme,
         compute_pipeline: &ComputePipeline,
         render_pipeline: &RenderPipeline,
-        line_buffer: &Parcel,
+        line_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {

@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, Context, DeviceDescriptor, Instance, NodeAccess, Parcel,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, Context, DeviceDescriptor, Instance, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
     RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
 };
@@ -91,8 +91,8 @@ struct RenderState {
     upload_graph: TaskGraph,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
-    particle_buffer: Parcel,
-    params_buffer: Parcel,
+    particle_buffer: Buffer,
+    params_buffer: Buffer,
     render_pipeline: RenderPipeline,
     is_snow: bool,
     frame_count: f32,
@@ -256,7 +256,7 @@ impl RenderState {
         pass.clear(bg_color);
         pass.set_pipeline(&self.render_pipeline);
         pass.with_resource_slots(&[
-            self.particle_buffer.resource_index(ResourceAccess::Read).unwrap(),
+            self.particle_buffer.resource_index(ResourceAccess::ReadWrite).unwrap(),
             self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
         ]);
         pass.draw_quads(NUM_PARTICLES);

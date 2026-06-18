@@ -435,7 +435,7 @@ fn test_compute_batched_clear_before_dispatch() {
     let output_buf = test_alloc_buffer_with_data(&device, &vec![0xFFFF_FFFFu32; 64], BufferKind::Scattered);
 
     let mut graph = TaskGraph::new();
-    graph.clear_buffer(&input_buf, 0, 0);
+    graph.clear_parcel(&*input_buf, 0, 0);
     graph
         .node("n0", &pipeline)
         .with_resources(&[&input_buf, &output_buf])
@@ -478,7 +478,7 @@ fn test_compute_clear_between_dispatches() {
         .node("n0", &copy_pipeline)
         .with_resources(&[&input_buf, &output_buf])
         .dispatch(1, 1, 1);
-    graph.clear_buffer(&output_buf, 0, 0);
+    graph.clear_parcel(&*output_buf, 0, 0);
     graph
         .node("n1", &inc_pipeline)
         .with_resources(&[&output_buf])
@@ -522,7 +522,7 @@ fn test_compute_dispatch_indirect() {
     graph
         .node("n0", &pipeline)
         .with_resources(&[&data_buf])
-        .dispatch_indirect(&args_buf, 0);
+        .dispatch_indirect_parcel(&*args_buf, 0);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; 64 * 4];
@@ -551,7 +551,7 @@ fn test_dispatch_indirect_invalid_buffer() {
         graph
             .node("indirect", &pipeline)
             .with_resources(&[&data_buf])
-            .dispatch_indirect(&temp, 0);
+            .dispatch_indirect_parcel(&*temp, 0);
     }
     let result = graph.dispatch(&ctx);
     assert!(
@@ -666,6 +666,9 @@ void cs_main(Scattered<Particle> particles, ThreadId id) {
 /// Proves that sub-buffer descriptors with offset/range work end-to-end.
 #[test]
 fn test_buffer_view_copy_between_sub_regions() {
+    use goldy::{ordinal, Init, RetainedPool};
+    use std::sync::Arc;
+
     let device = make_device();
     let ctx = submission_context(&device);
 
@@ -673,44 +676,38 @@ fn test_buffer_view_copy_between_sub_regions() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     const N: usize = 64;
-    let mut data = vec![0u32; N * 2];
-    // First half: source values 1..=64
-    for (i, slot) in data.iter_mut().take(N).enumerate() {
+    let mut src = vec![0u32; N];
+    for (i, slot) in src.iter_mut().enumerate() {
         *slot = (i + 1) as u32;
     }
-    // Second half: zeros (destination)
+    let dst = vec![0u32; N];
 
-    let pool_buf = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let cells = pool
+        .acquire_record([ordinal(Init::data(&src)), ordinal(Init::data(&dst))])
+        .expect("acquire_record");
 
-    let view_a = pool_buf.create_view(0, (N * 4) as u64, Some(4)).expect("create view A");
-    let view_b = pool_buf
-        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
-        .expect("create view B");
-
-    // `COPY_SHADER` declares its source as `Scattered<uint>` (an `RWStructuredBuffer` /
-    // UAV on DX12), which reads through the UAV descriptor. Bind the UAV index — the SRV
-    // index (`ResourceAccess::Read`) would point a UAV-typed access at an SRV descriptor
-    // and read back garbage (zeros on WARP). `Read` is reserved for `BufRO<T>` params.
-    let idx_a = view_a
+    let idx_a = cells[0]
         .resource_index(ResourceAccess::ReadWrite)
         .expect("view A bindless index");
-    let idx_b = view_b
+    let idx_b = cells[1]
         .resource_index(ResourceAccess::Write)
         .expect("view B bindless index");
 
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
+        .with_parcel(&cells[0], NodeAccess::ReadWrite)
+        .with_parcel(&cells[1], NodeAccess::Write)
         .with_resource_slots_slice(&[idx_a, idx_b])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
-    // Read back the entire pool buffer and check the second half
-    let mut output = vec![0u8; N * 2 * 4];
-    pool_buf.read_to_cpu(&device, &mut output).expect("read_to_cpu");
+    let mut output = vec![0u8; N * 4];
+    cells[1].read_to_cpu(&device, &mut output).expect("read_to_cpu");
 
     let result: &[u32] = bytemuck::cast_slice(&output);
-    for (i, &val) in result[N..].iter().enumerate() {
+    for (i, &val) in result.iter().enumerate() {
         assert_eq!(
             val,
             (i + 1) as u32,
@@ -725,6 +722,9 @@ fn test_buffer_view_copy_between_sub_regions() {
 /// Shader doubles values in a view — the other half of the buffer must be untouched.
 #[test]
 fn test_buffer_view_isolation() {
+    use goldy::{ordinal, Init, RetainedPool};
+    use std::sync::Arc;
+
     let device = make_device();
     let ctx = submission_context(&device);
 
@@ -732,40 +732,41 @@ fn test_buffer_view_isolation() {
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
     const N: usize = 64;
-    let mut data = vec![0u32; N * 2];
-    data[..N].fill(100); // first half: sentinel
-    for (i, slot) in data[N..].iter_mut().enumerate() {
-        *slot = (i + 1) as u32; // second half: values to double
+    let sentinel = vec![100u32; N];
+    let mut work = vec![0u32; N];
+    for (i, slot) in work.iter_mut().enumerate() {
+        *slot = (i + 1) as u32;
     }
 
-    let pool_buf = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let cells = pool
+        .acquire_record([ordinal(Init::data(&sentinel)), ordinal(Init::data(&work))])
+        .expect("acquire_record");
 
-    // View only the second half
-    let view = pool_buf
-        .create_view((N * 4) as u64, (N * 4) as u64, Some(4))
-        .expect("create view");
-
-    let idx = view.resource_index(ResourceAccess::Write).expect("view bindless index");
+    let idx = cells[1]
+        .resource_index(ResourceAccess::Write)
+        .expect("view bindless index");
 
     let mut graph = TaskGraph::new();
     graph
         .node("n0", &pipeline)
+        .with_parcel(&cells[1], NodeAccess::Write)
         .with_resource_slots_slice(&[idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
-    let mut output = vec![0u8; N * 2 * 4];
-    pool_buf.read_to_cpu(&device, &mut output).expect("read_to_cpu");
+    let mut sentinel_out = vec![0u8; N * 4];
+    cells[0].read_to_cpu(&device, &mut sentinel_out).expect("read sentinel");
+    let sentinel_vals: &[u32] = bytemuck::cast_slice(&sentinel_out);
+    assert!(
+        sentinel_vals.iter().all(|&v| v == 100),
+        "sentinel half must be untouched"
+    );
 
+    let mut output = vec![0u8; N * 4];
+    cells[1].read_to_cpu(&device, &mut output).expect("read_to_cpu");
     let result: &[u32] = bytemuck::cast_slice(&output);
-
-    // First half must be untouched
-    for (i, &val) in result[..N].iter().enumerate() {
-        assert_eq!(val, 100, "sentinel[{}] was modified (expected 100, got {})", i, val);
-    }
-
-    // Second half must be doubled
-    for (i, &val) in result[N..].iter().enumerate() {
+    for (i, &val) in result.iter().enumerate() {
         let expected = ((i + 1) as u32) * 2;
         assert_eq!(
             val, expected,
@@ -794,7 +795,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
 
     // Write source data into the backing buffer at the correct offset
     let src_data: Vec<u32> = (1..=N as u32).collect();
-    pool.backing_buffer().write_data(0, &src_data).expect("write src data");
+    src_view.write_data(&src_data).expect("write src data");
 
     // `COPY_SHADER` reads its source as `Scattered<uint>` (UAV), so bind the UAV index.
     // `ResourceAccess::Read` would yield the SRV index, which only matches `BufRO<T>` params.
@@ -814,9 +815,7 @@ fn test_buffer_pool_alloc_and_dispatch() {
 
     // Read back entire pool and verify the destination region
     let mut output = vec![0u8; pool_size];
-    pool.backing_buffer()
-        .read_to_cpu(&device, &mut output)
-        .expect("readback");
+    pool.read_to_cpu(&device, &mut output).expect("readback");
 
     // Destination starts at 256 bytes (first aligned offset after 64*4=256)
     let dst_offset = 256usize;
@@ -841,9 +840,7 @@ fn test_buffer_pool_alloc_with_data() {
     assert_eq!(view.size(), (N * std::mem::size_of::<u32>()) as u64);
 
     let mut output = vec![0u8; total as usize];
-    pool.backing_buffer()
-        .read_to_cpu(&device, &mut output)
-        .expect("readback");
+    pool.read_to_cpu(&device, &mut output).expect("readback");
     let roundtripped: &[u32] = bytemuck::cast_slice(&output[..N * 4]);
     for (i, &val) in roundtripped.iter().enumerate() {
         assert_eq!(val, (i + 1) as u32, "mismatch at index {}", i);
@@ -1054,8 +1051,8 @@ void cs_main(BufRO<Pair> input, Scattered<Pair> output, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("typed_copy", &pipeline)
-        .with_buffer(&input_buf, NodeAccess::Read)
-        .with_buffer(&output_buf, NodeAccess::Write)
+        .with_buffer(&*input_buf, NodeAccess::Read)
+        .with_buffer(&*output_buf, NodeAccess::Write)
         .with_resource_slots_slice(&[srv, uav])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).expect("dispatch");
@@ -1183,13 +1180,13 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("write_tex", &pipeline)
-        .with_texture(&texture, NodeAccess::Write)
+        .with_parcel(&texture, NodeAccess::Write)
         .with_resource_slots_slice(&[tex_idx])
         .dispatch(wg_x, wg_y, 1);
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; (width * height * 4) as usize];
-    texture.read_to_cpu(&mut output).expect("readback");
+    texture.read_to_cpu(&device, &mut output).expect("readback");
 
     let nonzero = output.iter().filter(|&&b| b != 0).count();
     assert!(
@@ -1294,18 +1291,20 @@ fn test_write_buffer_reuse_across_submissions() {
     let data_b: Vec<u32> = (900..900 + N as u32).collect();
 
     let mut g1 = TaskGraph::new();
-    g1.write_buffer(&mid, 0, bytemuck::cast_slice(&data_a).to_vec());
+    g1.write_parcel(&*mid, 0, bytemuck::cast_slice(&data_a).to_vec())
+        .expect("write_parcel");
     g1.node("copy_a", &pipeline)
-        .with_buffer(&mid, NodeAccess::Read)
-        .with_buffer(&out_a, NodeAccess::Write)
+        .with_buffer(&*mid, NodeAccess::Read)
+        .with_buffer(&*out_a, NodeAccess::Write)
         .with_resource_slots_slice(&[idx_in, idx_out_a])
         .dispatch(1, 1, 1);
 
     let mut g2 = TaskGraph::new();
-    g2.write_buffer(&mid, 0, bytemuck::cast_slice(&data_b).to_vec());
+    g2.write_parcel(&*mid, 0, bytemuck::cast_slice(&data_b).to_vec())
+        .expect("write_parcel");
     g2.node("copy_b", &pipeline)
-        .with_buffer(&mid, NodeAccess::Read)
-        .with_buffer(&out_b, NodeAccess::Write)
+        .with_buffer(&*mid, NodeAccess::Read)
+        .with_buffer(&*out_b, NodeAccess::Write)
         .with_resource_slots_slice(&[idx_in, idx_out_b])
         .dispatch(1, 1, 1);
 
@@ -1396,7 +1395,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_uint", &pipeline)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots(vec![heap_idx])
         .with_param(EXPECTED)
         .dispatch(1, 1, 1);
@@ -1430,7 +1429,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_zero", &pipeline)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots(vec![heap_idx])
         .with_param(0u32)
         .dispatch(1, 1, 1);
@@ -1464,7 +1463,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_max", &pipeline)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots(vec![heap_idx])
         .with_param(u32::MAX)
         .dispatch(1, 1, 1);
@@ -1508,7 +1507,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_float", &pipeline)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots(vec![heap_idx])
         .with_param(bits)
         .dispatch(1, 1, 1);
@@ -1550,7 +1549,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_two", &pipeline)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots(vec![heap_idx])
         .with_param(A)
         .with_param(B)
@@ -1594,8 +1593,8 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
     let mut graph = TaskGraph::new();
     graph
         .node("uniform_offset", &pipeline)
-        .with_buffer(&inp, NodeAccess::Read)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_buffer(&*inp, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots(vec![inp_idx, out_idx])
         .with_param(OFFSET)
         .dispatch(1, 1, 1);
@@ -1745,8 +1744,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn test_alloc_buffer(
@@ -1760,8 +1757,6 @@ fn test_alloc_buffer(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer(size, kind, stride, flags, None)
         .expect("acquire_buffer")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn test_alloc_texture(
@@ -1771,13 +1766,11 @@ fn test_alloc_texture(
     format: goldy::types::TextureFormat,
     kind: goldy::types::TextureKind,
     flags: goldy::types::TextureFlags,
-) -> goldy::Texture {
+) -> goldy::Parcel {
     use std::sync::Arc;
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_texture(width, height, format, kind, flags, None)
         .expect("acquire_texture")
-        .detach_texture()
-        .expect("detach_texture")
 }
 
 fn test_alloc_buffer_with_bytes_stride_and_flags(
@@ -1791,8 +1784,6 @@ fn test_alloc_buffer_with_bytes_stride_and_flags(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer(data.len() as u64, kind, Some(stride), flags, Some(data))
         .expect("acquire_buffer")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn small_config() -> TransientAllocatorConfig {
@@ -1965,7 +1956,7 @@ fn test_transient_buffer_write_then_copy() {
     graph
         .node("copy_out", &copy_pipeline)
         .with_transient_buffer(tid, NodeAccess::ReadWrite)
-        .with_buffer(&output, NodeAccess::Write)
+        .with_buffer(&*output, NodeAccess::Write)
         .with_resource_slots_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
@@ -2011,18 +2002,18 @@ fn test_regular_buffer_write_then_copy() {
 
     let mut graph = TaskGraph::new();
 
-    graph.clear_buffer(&scratch, 0, byte_size);
+    graph.clear_parcel(&*scratch, 0, byte_size);
 
     graph
         .node("write_iota", &write_pipeline)
-        .with_buffer(&scratch, NodeAccess::Write)
+        .with_buffer(&*scratch, NodeAccess::Write)
         .with_resource_slots_slice(&[scratch_uav])
         .dispatch(1, 1, 1);
 
     graph
         .node("copy_out", &copy_pipeline)
-        .with_buffer(&scratch, NodeAccess::Read)
-        .with_buffer(&output, NodeAccess::Write)
+        .with_buffer(&*scratch, NodeAccess::Read)
+        .with_buffer(&*output, NodeAccess::Write)
         .with_resource_slots_slice(&[scratch_uav, output_uav])
         .dispatch(1, 1, 1);
 
@@ -2081,7 +2072,7 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     graph
         .node("wave0_iota", &iota_pipeline)
         .with_transient_buffer(t0, NodeAccess::Write)
-        .with_buffer(&bridge, NodeAccess::Write)
+        .with_buffer(&*bridge, NodeAccess::Write)
         .with_resource_slots_slice(&[u32::MAX])
         .dispatch(1, 1, 1);
 
@@ -2090,7 +2081,7 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     graph
         .node("wave1_scale", &scale_pipeline)
         .with_transient_buffer(t1, NodeAccess::Write)
-        .with_buffer(&bridge, NodeAccess::Read)
+        .with_buffer(&*bridge, NodeAccess::Read)
         .with_resource_slots_slice(&[u32::MAX])
         .dispatch(1, 1, 1);
 
@@ -2098,7 +2089,7 @@ fn test_transient_buffer_aliased_disjoint_waves() {
     graph
         .node("wave2_copy", &copy_pipeline)
         .with_transient_buffer(t1, NodeAccess::ReadWrite)
-        .with_buffer(&output, NodeAccess::Write)
+        .with_buffer(&*output, NodeAccess::Write)
         .with_resource_slots_slice(&[u32::MAX, output_uav])
         .dispatch(1, 1, 1);
 
@@ -2581,8 +2572,8 @@ void cs_main(Interpolated<float4> src, Filter smp, Scattered<uint> out, ThreadId
     let mut graph_enc2 = TaskGraph::new();
     graph_enc2
         .node("read", &read_pipeline)
-        .with_texture(&tex, NodeAccess::Read)
-        .with_buffer(&out, NodeAccess::Write)
+        .with_parcel(&tex, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
         .with_resource_slots_slice(&[
             sampled_idx,
             sampler.resource_index(ResourceAccess::Read).unwrap(),

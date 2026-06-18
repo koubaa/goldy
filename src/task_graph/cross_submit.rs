@@ -42,17 +42,23 @@ impl NetAccess {
     }
 }
 
-/// Canonical resource key for whole-resource v1 ledger (parent buffer / texture).
+/// Canonical resource key for per-unit ledger (whole buffer, buffer range, or texture).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceKey {
     Buffer(BufferHandle),
+    BufferRange {
+        parent: BufferHandle,
+        offset: u64,
+        len: u64,
+    },
     Texture(TextureHandle),
 }
 
 impl ResourceKey {
     pub fn from_resource_id(id: ResourceId) -> Option<Self> {
         match id {
-            ResourceId::Buffer(h) | ResourceId::BufferRange { parent: h, .. } => Some(Self::Buffer(h)),
+            ResourceId::Buffer(h) => Some(Self::Buffer(h)),
+            ResourceId::BufferRange { parent, offset, len } => Some(Self::BufferRange { parent, offset, len }),
             ResourceId::Texture(h) => Some(Self::Texture(h)),
             ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_) => None,
             // RenderTargets are scheme-owned leases (Lease<LeaseRenderTarget> is an opaque
@@ -64,6 +70,67 @@ impl ResourceKey {
             ResourceId::RenderTarget(_) | ResourceId::SwapchainOutput | ResourceId::PresentLease(_) => None,
         }
     }
+}
+
+/// True when two ledger keys refer to overlapping GPU memory for hazard analysis.
+pub(crate) fn resource_keys_alias(a: ResourceKey, b: ResourceKey) -> bool {
+    use crate::task_graph::analysis::ranges_overlap;
+    match (a, b) {
+        (ResourceKey::Buffer(x), ResourceKey::Buffer(y)) => x == y,
+        (ResourceKey::Buffer(h), ResourceKey::BufferRange { parent, .. })
+        | (ResourceKey::BufferRange { parent, .. }, ResourceKey::Buffer(h)) => h == parent,
+        (
+            ResourceKey::BufferRange {
+                parent: p1,
+                offset: o1,
+                len: l1,
+            },
+            ResourceKey::BufferRange {
+                parent: p2,
+                offset: o2,
+                len: l2,
+            },
+        ) => p1 == p2 && ranges_overlap(o1, l1, o2, l2),
+        (ResourceKey::Texture(x), ResourceKey::Texture(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Find and merge all ledger entries that alias `key`.
+///
+/// Returns an owned, merged [`LedgerEntry`] so that a range read against several
+/// independently-tracked producer ranges (e.g. both fields of a partitioned buffer)
+/// contributes barriers/waits from every producer, not just the first one found.
+fn find_ledger_entry(ledger: &LedgerSnapshot, key: ResourceKey) -> Option<LedgerEntry> {
+    // Fast path: exact match — clone once and return.
+    if let Some(entry) = ledger.get(&key) {
+        return Some(entry.clone());
+    }
+    // Fallback: merge every aliasing entry so no producer is silently dropped.
+    let mut merged: Option<LedgerEntry> = None;
+    for (ledger_key, entry) in ledger {
+        if !resource_keys_alias(*ledger_key, key) {
+            continue;
+        }
+        match &mut merged {
+            None => merged = Some(entry.clone()),
+            Some(m) => {
+                for (&ctx, &tv) in &entry.sync.last_write {
+                    let kinds = entry
+                        .sync
+                        .last_write_kinds
+                        .get(&ctx)
+                        .copied()
+                        .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER);
+                    m.sync.record_write(ctx, tv, kinds);
+                }
+                for (&ctx, &tv) in &entry.sync.last_reads {
+                    m.sync.record_read(ctx, tv);
+                }
+            }
+        }
+    }
+    merged
 }
 
 /// Snapshot of one resource's epoch ledger at submit time.
@@ -170,7 +237,7 @@ fn producer_slot_from_read(read_kinds: UsageKindFlags) -> SlotUsageSet {
 
 fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsage) {
     match key {
-        ResourceKey::Buffer(h) => {
+        ResourceKey::Buffer(h) | ResourceKey::BufferRange { parent: h, .. } => {
             if let Some((_, existing)) = barriers.buffers.iter_mut().find(|(bh, _)| *bh == h) {
                 existing.src.merge(
                     if usage.src.access.writes() {
@@ -227,7 +294,7 @@ pub fn compute_cross_submit_sync(
     let mut wait_map: HashMap<crate::backend::ContextHandle, u64> = HashMap::new();
 
     for (key, access) in net {
-        let Some(entry) = ledger.get(key) else {
+        let Some(entry) = find_ledger_entry(ledger, *key) else {
             continue;
         };
         let sync = &entry.sync;
@@ -878,13 +945,17 @@ mod tests {
     }
 
     #[test]
-    fn byte_range_disjoint_submissions_still_hazard_parent_v1() {
+    fn byte_range_disjoint_submissions_no_hazard() {
         use crate::task_graph::analysis::ranges_overlap;
         assert!(!ranges_overlap(0, 32, 64, 32));
         let ctx = 1;
         let parent: BufferHandle = 5;
-        let key = ResourceKey::Buffer(parent);
-        let ledger = ledger_with_write(ctx, key, 1);
+        let ledger_key = ResourceKey::BufferRange {
+            parent,
+            offset: 0,
+            len: 32,
+        };
+        let ledger = ledger_with_write(ctx, ledger_key, 1);
         let ir = single_binding_ir(
             ResourceId::BufferRange {
                 parent,
@@ -894,10 +965,281 @@ mod tests {
             NodeAccess::Read,
         );
         let sync = compute_cross_submit_sync(&net_access_per_resource(&ir), &ledger, ctx);
-        assert_eq!(
-            sync.prologue.buffers.len(),
-            1,
-            "v1 whole-resource ledger is conservative"
+        assert_eq!(sync.prologue.buffers.len(), 0, "disjoint buffer ranges must not hazard");
+    }
+
+    // ---- find_ledger_entry: multi-producer aliasing -------------------------
+    //
+    // The following tests guard the fix to find_ledger_entry: when a queried
+    // key aliases *several* ledger entries, all of them must contribute to the
+    // hazard analysis, not just the first one encountered.
+
+    fn range_ledger_with_two_writes(
+        parent: BufferHandle,
+        ctx_a: ContextHandle,
+        tv_a: u64,
+        kinds_a: UsageKindFlags,
+        ctx_b: ContextHandle,
+        tv_b: u64,
+        kinds_b: UsageKindFlags,
+    ) -> LedgerSnapshot {
+        let mut sync_a = ResourceSync::default();
+        sync_a.record_write(ctx_a, tv_a, kinds_a.bits());
+        let mut sync_b = ResourceSync::default();
+        sync_b.record_write(ctx_b, tv_b, kinds_b.bits());
+        let mut ledger = LedgerSnapshot::new();
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 0,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_a },
+        );
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 32,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_b },
+        );
+        ledger
+    }
+
+    /// A spanning range that overlaps two disjoint producer ranges (same ctx) must
+    /// barrier against the *later* of the two write epochs.
+    /// Before the fix, only the first-found aliasing entry contributed: the other
+    /// epoch was silently dropped, potentially emitting a barrier against a stale write.
+    #[test]
+    fn spanning_range_read_merges_both_same_ctx_producers_into_one_barrier() {
+        let ctx = 1;
+        let parent: BufferHandle = 10;
+        let ledger =
+            range_ledger_with_two_writes(parent, ctx, 5, UsageKindFlags::COMPUTE, ctx, 9, UsageKindFlags::COMPUTE);
+
+        // Reader spans the full [0, 64) — overlaps both [0,32) and [32,32).
+        let ir = single_binding_ir(
+            ResourceId::BufferRange {
+                parent,
+                offset: 0,
+                len: 64,
+            },
+            NodeAccess::Read,
+        );
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+
+        assert!(sync.waits.is_empty(), "same-ctx: no queue-wait expected");
+        assert_eq!(sync.prologue.buffers.len(), 1, "one barrier for the parent buffer");
+    }
+
+    /// Same scenario but both producers are on different contexts: the consumer must
+    /// emit a queue-wait against *both* producer contexts, not just the first alias.
+    #[test]
+    fn spanning_range_read_emits_waits_for_both_cross_ctx_producers() {
+        let producer_a = 1;
+        let producer_b = 2;
+        let consumer = 3;
+        let parent: BufferHandle = 10;
+        let ledger = range_ledger_with_two_writes(
+            parent,
+            producer_a,
+            5,
+            UsageKindFlags::COMPUTE,
+            producer_b,
+            7,
+            UsageKindFlags::COMPUTE,
+        );
+
+        let ir = single_binding_ir(
+            ResourceId::BufferRange {
+                parent,
+                offset: 0,
+                len: 64,
+            },
+            NodeAccess::Read,
+        );
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, consumer);
+
+        assert!(sync.prologue.is_empty(), "cross-ctx: no same-context barrier expected");
+        assert_eq!(sync.waits.len(), 2, "must wait on both producer contexts");
+        assert!(
+            sync.waits.iter().any(|e| e.context == producer_a && e.value == 5),
+            "wait on producer_a tv=5 missing"
+        );
+        assert!(
+            sync.waits.iter().any(|e| e.context == producer_b && e.value == 7),
+            "wait on producer_b tv=7 missing"
+        );
+    }
+
+    /// A partial-overlap read (covers only [0,48)) must still see *both* aliasing
+    /// producers (the second range [32,32) partially overlaps [0,48)).
+    #[test]
+    fn partial_overlap_read_sees_all_aliasing_producers() {
+        let producer_a = 1;
+        let producer_b = 2;
+        let consumer = 3;
+        let parent: BufferHandle = 10;
+        let ledger = range_ledger_with_two_writes(
+            parent,
+            producer_a,
+            3,
+            UsageKindFlags::COMPUTE,
+            producer_b,
+            8,
+            UsageKindFlags::TRANSFER,
+        );
+
+        // [0, 48) overlaps both [0,32) and [32,32).
+        let ir = single_binding_ir(
+            ResourceId::BufferRange {
+                parent,
+                offset: 0,
+                len: 48,
+            },
+            NodeAccess::Read,
+        );
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, consumer);
+
+        assert_eq!(sync.waits.len(), 2, "both producers must be seen");
+    }
+
+    /// Three-producer scenario: ledger has three disjoint ranges; a whole-parent
+    /// read keyed Buffer(parent) must alias all three and emit waits for all three.
+    #[test]
+    fn three_range_producers_all_contribute_to_whole_parent_read() {
+        let ctx_a = 1;
+        let ctx_b = 2;
+        let ctx_c = 3;
+        let consumer = 4;
+        let parent: BufferHandle = 20;
+
+        let mut sync_a = ResourceSync::default();
+        sync_a.record_write(ctx_a, 2, UsageKindFlags::COMPUTE.bits());
+        let mut sync_b = ResourceSync::default();
+        sync_b.record_write(ctx_b, 5, UsageKindFlags::COMPUTE.bits());
+        let mut sync_c = ResourceSync::default();
+        sync_c.record_write(ctx_c, 9, UsageKindFlags::TRANSFER.bits());
+
+        let mut ledger = LedgerSnapshot::new();
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 0,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_a },
+        );
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 32,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_b },
+        );
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 64,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_c },
+        );
+
+        // Consumer reads the whole parent — Buffer(parent) aliases all three ranges.
+        let ir = single_binding_ir(ResourceId::Buffer(parent), NodeAccess::Read);
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, consumer);
+
+        assert!(sync.prologue.is_empty());
+        assert_eq!(sync.waits.len(), 3, "all three cross-ctx producers must be waited on");
+        assert!(sync.waits.iter().any(|e| e.context == ctx_a && e.value == 2));
+        assert!(sync.waits.iter().any(|e| e.context == ctx_b && e.value == 5));
+        assert!(sync.waits.iter().any(|e| e.context == ctx_c && e.value == 9));
+    }
+
+    /// Same-ctx multi-producer: two writes from the same ctx at tv=3 and tv=9;
+    /// a spanning write (WAW) must see the max epoch (tv=9) as the existing write to
+    /// barrier against, not a stale tv=3 from whichever alias was found first.
+    #[test]
+    fn spanning_write_waw_sees_max_epoch_from_two_same_ctx_producers() {
+        let ctx = 1;
+        let parent: BufferHandle = 10;
+        let ledger =
+            range_ledger_with_two_writes(parent, ctx, 3, UsageKindFlags::COMPUTE, ctx, 9, UsageKindFlags::COMPUTE);
+
+        let ir = single_binding_ir(
+            ResourceId::BufferRange {
+                parent,
+                offset: 0,
+                len: 64,
+            },
+            NodeAccess::Write,
+        );
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+
+        assert!(sync.waits.is_empty(), "same-ctx WAW must emit a barrier, not a wait");
+        assert_eq!(sync.prologue.buffers.len(), 1, "WAW barrier required");
+        assert!(sync.prologue.buffers[0].1.dst.access.writes());
+    }
+
+    /// Regression guard: the existing disjoint-range no-hazard property must be
+    /// preserved — find_ledger_entry must not accidentally merge entries whose ranges
+    /// do not alias the queried key.
+    #[test]
+    fn non_overlapping_range_in_multi_producer_ledger_not_merged() {
+        let ctx = 1;
+        let parent: BufferHandle = 10;
+
+        // Producer writes [0,32) and [128,32) — two disjoint ranges.
+        // Consumer reads [64,32) — overlaps neither.
+        let mut sync_a = ResourceSync::default();
+        sync_a.record_write(ctx, 5, UsageKindFlags::COMPUTE.bits());
+        let mut sync_b = ResourceSync::default();
+        sync_b.record_write(ctx, 9, UsageKindFlags::COMPUTE.bits());
+
+        let mut ledger = LedgerSnapshot::new();
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 0,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_a },
+        );
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 128,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_b },
+        );
+
+        let ir = single_binding_ir(
+            ResourceId::BufferRange {
+                parent,
+                offset: 64,
+                len: 32,
+            },
+            NodeAccess::Read,
+        );
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+
+        assert!(
+            sync.prologue.is_empty(),
+            "non-overlapping producers must not contribute barriers"
+        );
+        assert!(
+            sync.waits.is_empty(),
+            "non-overlapping producers must not contribute waits"
         );
     }
 }

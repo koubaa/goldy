@@ -65,8 +65,9 @@ class Device;
 class Context;
 class Adapter;
 class RetainedPool;
+class Buffer;
 class Parcel;
-class MosaicBuilder;
+class RecordBuilder;
 class ShaderModule;
 class RenderPipeline;
 class RenderTarget;
@@ -228,12 +229,16 @@ struct RetainedPoolDeleter {
     void operator()(GoldyRetainedPool* p) const { if (p) goldy_retained_pool_destroy(p); }
 };
 
+struct BufferDeleter {
+    void operator()(GoldyBuffer* p) const { if (p) goldy_buffer_destroy(p); }
+};
+
 struct ParcelDeleter {
     void operator()(GoldyParcel* p) const { if (p) goldy_parcel_destroy(p); }
 };
 
-struct MosaicBuilderDeleter {
-    void operator()(GoldyMosaicBuilder* p) const { if (p) goldy_mosaic_builder_destroy(p); }
+struct RecordBuilderDeleter {
+    void operator()(GoldyRecordBuilder* p) const { if (p) goldy_record_builder_destroy(p); }
 };
 
 struct ShaderDeleter {
@@ -571,11 +576,11 @@ inline Adapter Instance::request_adapter(const RequestAdapterOptions& opts) {
 }
 
 // =============================================================================
-// RetainedPool / Parcel / MosaicBuilder
+// RetainedPool / Buffer / Parcel / RecordBuilder
 // =============================================================================
 
 /**
- * @brief Deed-governed pool for retained GPU parcels.
+ * @brief Deed-governed pool for retained GPU buffers and texture parcels.
  */
 class RetainedPool {
 public:
@@ -592,29 +597,27 @@ public:
     RetainedPool(RetainedPool&&) = default;
     RetainedPool& operator=(RetainedPool&&) = default;
 
-    [[nodiscard]] MosaicBuilder mosaic();
+    [[nodiscard]] RecordBuilder record();
 
     /**
-     * @brief Acquire an uninitialized buffer parcel.
+     * @brief Acquire an uninitialized retained buffer.
      */
-    [[nodiscard]] Parcel acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride = 1);
+    [[nodiscard]] Buffer acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride = 1);
 
     /**
-     * @brief Acquire a buffer parcel initialized with typed data.
+     * @brief Acquire a retained buffer initialized with typed data.
      */
     template<typename T>
-    [[nodiscard]] Parcel acquire_buffer_with_data(std::span<const T> data, BufferKind access);
+    [[nodiscard]] Buffer acquire_buffer_with_data(std::span<const T> data, BufferKind access);
 
     template<typename T, typename Allocator>
-    [[nodiscard]] Parcel acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access);
+    [[nodiscard]] Buffer acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access);
 
     /**
-     * @brief Acquire a buffer parcel initialized with raw bytes and an explicit element stride.
-     *
-     * Equivalent to `acquire_buffer` with initial data. Prefer `acquire_buffer_with_data` for typed slices.
+     * @brief Acquire a retained buffer initialized with raw bytes and an explicit element stride.
      */
-    [[nodiscard]] Parcel acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
-                                            uint32_t element_stride = 1);
+    [[nodiscard]] Buffer acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
+                                              uint32_t element_stride = 1);
 
     [[nodiscard]] Parcel acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
                                          GoldyTextureKind kind, GoldyTextureFlags flags,
@@ -627,7 +630,7 @@ private:
 };
 
 /**
- * @brief Opaque retained GPU parcel (buffer or texture).
+ * @brief Opaque retained GPU parcel (texture parcels; buffer units use Buffer + unit index).
  */
 class Parcel {
 public:
@@ -642,88 +645,88 @@ public:
 
     uint64_t byte_size() const { return goldy_parcel_byte_size(ptr_.get()); }
 
-    uint32_t mosaic_view_resource_index(uint32_t slot, ResourceAccess access) const {
-        uint32_t idx = goldy_parcel_mosaic_view_resource_index(
-            ptr_.get(), slot, static_cast<GoldyResourceAccess>(access));
-        if (idx == UINT32_MAX) {
-            throw Exception::from_last_error();
-        }
-        return idx;
-    }
-
-    uint64_t mosaic_view_size(uint32_t slot) const {
-        return goldy_parcel_mosaic_view_size(ptr_.get(), slot);
-    }
-
-    std::vector<uint8_t> mosaic_view_read_to_cpu(uint32_t slot, const Device& device) const {
-        std::vector<uint8_t> output(mosaic_view_size(slot));
-        detail::throw_on_result(goldy_parcel_mosaic_view_read_to_cpu(
-            ptr_.get(), slot, device.get(), output.data(), output.size()));
-        return output;
-    }
-
     GoldyParcel* get() const { return ptr_.get(); }
 
 private:
     std::unique_ptr<GoldyParcel, detail::ParcelDeleter> ptr_;
 };
 
-template<typename T>
-inline Parcel RetainedPool::acquire_buffer_with_data(std::span<const T> data, BufferKind access) {
-    GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
-        ptr_.get(),
-        data.size_bytes(),
-        static_cast<GoldyBufferKind>(access),
-        static_cast<uint32_t>(sizeof(T)),
-        reinterpret_cast<const uint8_t*>(data.data()),
-        data.size_bytes());
-    if (!ptr) {
-        throw Exception::from_last_error();
-    }
-    return Parcel(ptr);
-}
+/**
+ * @brief Acquired retained GPU buffer (possibly partitioned into bindable units).
+ */
+class Buffer {
+public:
+    Buffer() = default;
 
-template<typename T, typename Allocator>
-inline Parcel RetainedPool::acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
-    return acquire_buffer_with_data(std::span<const T>(data.data(), data.size()), access);
-}
+    explicit Buffer(GoldyBuffer* ptr) : ptr_(ptr) {}
 
-inline Parcel RetainedPool::acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
-                                                 uint32_t element_stride) {
-    GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
-        ptr_.get(),
-        data.size(),
-        static_cast<GoldyBufferKind>(access),
-        element_stride,
-        data.data(),
-        data.size());
-    if (!ptr) {
-        throw Exception::from_last_error();
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+    Buffer(Buffer&&) = default;
+    Buffer& operator=(Buffer&&) = default;
+
+    uint64_t byte_size() const { return goldy_buffer_byte_size(ptr_.get()); }
+
+    uint32_t unit_count() const { return goldy_buffer_unit_count(ptr_.get()); }
+
+    uint64_t unit_byte_size(uint32_t unit) const {
+        return goldy_buffer_unit_byte_size(ptr_.get(), unit);
     }
-    return Parcel(ptr);
-}
+
+    uint32_t unit_resource_index(uint32_t unit, ResourceAccess access) const {
+        uint32_t idx = goldy_buffer_unit_resource_index(
+            ptr_.get(), unit, static_cast<GoldyResourceAccess>(access));
+        if (idx == UINT32_MAX) {
+            throw Exception::from_last_error();
+        }
+        return idx;
+    }
+
+    std::vector<uint8_t> unit_read_to_cpu(uint32_t unit, const Device& device) const {
+        std::vector<uint8_t> output(unit_byte_size(unit));
+        detail::throw_on_result(goldy_buffer_unit_read_to_cpu(
+            ptr_.get(), unit, device.get(), output.data(), output.size()));
+        return output;
+    }
+
+    /**
+     * @brief Borrow one bindable unit as an owned parcel handle (source buffer must outlive GPU use).
+     */
+    [[nodiscard]] Parcel field(uint32_t unit) const;
+
+    GoldyBuffer* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyBuffer, detail::BufferDeleter> ptr_;
+};
 
 /**
- * @brief Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
+ * @brief Builder for a retained record buffer (one backing buffer, multiple sub-views).
  */
-class MosaicBuilder {
+class RecordBuilder {
 public:
-    MosaicBuilder() {
-        GoldyMosaicBuilder* ptr = goldy_mosaic_builder_create();
+    RecordBuilder() {
+        GoldyRecordBuilder* ptr = goldy_record_builder_create();
         if (!ptr) {
             throw Exception::from_last_error();
         }
         ptr_.reset(ptr);
     }
 
-    MosaicBuilder(const MosaicBuilder&) = delete;
-    MosaicBuilder& operator=(const MosaicBuilder&) = delete;
-    MosaicBuilder(MosaicBuilder&&) = default;
-    MosaicBuilder& operator=(MosaicBuilder&&) = default;
+    RecordBuilder(const RecordBuilder&) = delete;
+    RecordBuilder& operator=(const RecordBuilder&) = delete;
+    RecordBuilder(RecordBuilder&&) = default;
+    RecordBuilder& operator=(RecordBuilder&&) = default;
 
     template<typename T>
     uint32_t emplace(std::span<const T> data) {
-        return emplace_bytes(
+        return emplace_named(nullptr, data);
+    }
+
+    template<typename T>
+    uint32_t emplace_named(const char* name, std::span<const T> data) {
+        return emplace_named_bytes(
+            name,
             std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(data.data()), data.size_bytes()),
             data.size(),
             static_cast<uint32_t>(sizeof(T)));
@@ -734,32 +737,94 @@ public:
         return emplace(std::span<const T>(data.data(), data.size()));
     }
 
+    template<typename T, typename Allocator>
+    uint32_t emplace_named(const char* name, const std::vector<T, Allocator>& data) {
+        return emplace_named(name, std::span<const T>(data.data(), data.size()));
+    }
+
     uint32_t emplace_bytes(std::span<const uint8_t> data, uint64_t element_count, uint32_t element_stride) {
-        uint32_t slot = goldy_mosaic_builder_emplace(
-            ptr_.get(), data.data(), data.size(), element_count, element_stride);
+        return emplace_named_bytes(nullptr, data, element_count, element_stride);
+    }
+
+    uint32_t emplace_named_bytes(const char* name, std::span<const uint8_t> data,
+                                 uint64_t element_count, uint32_t element_stride) {
+        uint32_t slot = goldy_record_builder_emplace(
+            ptr_.get(), name, data.data(), data.size(), element_count, element_stride);
         if (slot == UINT32_MAX) {
             throw Exception::from_last_error();
         }
         return slot;
     }
 
-    [[nodiscard]] Parcel build(RetainedPool& pool);
+    uint32_t reserve(const char* name, uint64_t element_count, uint32_t element_stride) {
+        uint32_t slot = goldy_record_builder_reserve(
+            ptr_.get(), name, element_count, element_stride);
+        if (slot == UINT32_MAX) {
+            throw Exception::from_last_error();
+        }
+        return slot;
+    }
+
+    [[nodiscard]] Buffer build(RetainedPool& pool);
 
 private:
-    std::unique_ptr<GoldyMosaicBuilder, detail::MosaicBuilderDeleter> ptr_;
+    std::unique_ptr<GoldyRecordBuilder, detail::RecordBuilderDeleter> ptr_;
 };
 
-inline MosaicBuilder RetainedPool::mosaic() {
-    return MosaicBuilder{};
+inline Parcel Buffer::field(uint32_t unit) const {
+    GoldyParcel* parcel = goldy_buffer_field(ptr_.get(), unit);
+    if (!parcel) {
+        throw Exception::from_last_error();
+    }
+    return Parcel(parcel);
 }
 
-inline Parcel RetainedPool::acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride) {
-    GoldyParcel* ptr = goldy_retained_pool_acquire_buffer(
+template<typename T>
+inline Buffer RetainedPool::acquire_buffer_with_data(std::span<const T> data, BufferKind access) {
+    GoldyBuffer* ptr = goldy_retained_pool_acquire_buffer(
+        ptr_.get(),
+        data.size_bytes(),
+        static_cast<GoldyBufferKind>(access),
+        static_cast<uint32_t>(sizeof(T)),
+        reinterpret_cast<const uint8_t*>(data.data()),
+        data.size_bytes());
+    if (!ptr) {
+        throw Exception::from_last_error();
+    }
+    return Buffer(ptr);
+}
+
+template<typename T, typename Allocator>
+inline Buffer RetainedPool::acquire_buffer_with_data(const std::vector<T, Allocator>& data, BufferKind access) {
+    return acquire_buffer_with_data(std::span<const T>(data.data(), data.size()), access);
+}
+
+inline Buffer RetainedPool::acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
+                                                  uint32_t element_stride) {
+    GoldyBuffer* ptr = goldy_retained_pool_acquire_buffer(
+        ptr_.get(),
+        data.size(),
+        static_cast<GoldyBufferKind>(access),
+        element_stride,
+        data.data(),
+        data.size());
+    if (!ptr) {
+        throw Exception::from_last_error();
+    }
+    return Buffer(ptr);
+}
+
+inline RecordBuilder RetainedPool::record() {
+    return RecordBuilder{};
+}
+
+inline Buffer RetainedPool::acquire_buffer(uint64_t size, BufferKind access, uint32_t element_stride) {
+    GoldyBuffer* ptr = goldy_retained_pool_acquire_buffer(
         ptr_.get(), size, static_cast<GoldyBufferKind>(access), element_stride, nullptr, 0);
     if (!ptr) {
         throw Exception::from_last_error();
     }
-    return Parcel(ptr);
+    return Buffer(ptr);
 }
 
 inline Parcel RetainedPool::acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
@@ -774,12 +839,12 @@ inline Parcel RetainedPool::acquire_texture(uint32_t width, uint32_t height, Gol
     return Parcel(ptr);
 }
 
-inline Parcel MosaicBuilder::build(RetainedPool& pool) {
-    GoldyParcel* parcel = goldy_mosaic_builder_build(ptr_.release(), pool.get());
-    if (!parcel) {
+inline Buffer RecordBuilder::build(RetainedPool& pool) {
+    GoldyBuffer* buffer = goldy_record_builder_build(ptr_.release(), pool.get());
+    if (!buffer) {
         throw Exception::from_last_error();
     }
-    return Parcel(parcel);
+    return Buffer(buffer);
 }
 
 // =============================================================================
@@ -1207,10 +1272,14 @@ public:
         return *this;
     }
 
-    RenderPass& with_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_render_pass_with_parcel_view(
-            graph_.ptr_.get(), parcel.get(), slot, static_cast<GoldyNodeAccess>(access)));
+    RenderPass& with_field(const Buffer& buffer, uint32_t unit, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_render_pass_with_field(
+            graph_.ptr_.get(), buffer.get(), unit, static_cast<GoldyNodeAccess>(access)));
         return *this;
+    }
+
+    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint32_t unit = 0) {
+        return set_vertex_buffer_parcel(slot, buffer.field(unit));
     }
 
     RenderPass& bind_resource_index(uint32_t scattered_index) {
@@ -1562,6 +1631,10 @@ public:
         return ReadGrant{grant};
     }
 
+    [[nodiscard]] ReadGrant grant_read(const Buffer& buffer, uint32_t unit = 0) {
+        return grant_read(buffer.field(unit));
+    }
+
     [[nodiscard]] ReadGrant grant_read_texture(const Parcel& parcel) {
         GoldyReadGrant* grant = goldy_scheme_grant_read_texture(ptr_.get(), parcel.get());
         if (!grant) {
@@ -1648,13 +1721,17 @@ public:
         return *this;
     }
 
-    ComputeNode& with_parcel_view(const Parcel& parcel, uint32_t slot,
-                                     NodeAccess node_access, ResourceAccess resource_access) {
-        detail::throw_on_result(goldy_scheme_compute_node_with_parcel_view(
-            scheme_.ptr_.get(), parcel.get(), slot,
+    ComputeNode& with_field(const Buffer& buffer, uint32_t unit,
+                            NodeAccess node_access, ResourceAccess resource_access) {
+        detail::throw_on_result(goldy_scheme_compute_node_with_field(
+            scheme_.ptr_.get(), buffer.get(), unit,
             static_cast<GoldyNodeAccess>(node_access),
             static_cast<GoldyResourceAccess>(resource_access)));
         return *this;
+    }
+
+    ComputeNode& with_buffer(const Buffer& buffer, NodeAccess node_access, ResourceAccess resource_access) {
+        return with_field(buffer, 0, node_access, resource_access);
     }
 
     ComputeNode& with_param(uint32_t value) {
@@ -1711,10 +1788,18 @@ public:
         return *this;
     }
 
-    RenderPass& with_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
-        detail::throw_on_result(goldy_scheme_render_pass_with_parcel_view(
-            scheme_.ptr_.get(), parcel.get(), slot, static_cast<GoldyNodeAccess>(access)));
+    RenderPass& with_field(const Buffer& buffer, uint32_t unit, NodeAccess access) {
+        detail::throw_on_result(goldy_scheme_render_pass_with_field(
+            scheme_.ptr_.get(), buffer.get(), unit, static_cast<GoldyNodeAccess>(access)));
         return *this;
+    }
+
+    RenderPass& set_vertex_buffer(uint32_t slot, const Buffer& buffer, uint32_t unit = 0) {
+        return set_vertex_buffer_parcel(slot, buffer.field(unit));
+    }
+
+    RenderPass& set_index_buffer(const Buffer& buffer, GoldyIndexFormat format, uint32_t unit = 0) {
+        return set_index_buffer(buffer.field(unit), format);
     }
 
     RenderPass& bind_resource_index(uint32_t scattered_index) {
@@ -1819,9 +1904,9 @@ public:
         return *this;
     }
 
-    ComputeNode& with_parcel_view(const Parcel& parcel, uint32_t slot, NodeAccess access) {
-        detail::throw_on_result(goldy_task_graph_compute_node_with_parcel_view(
-            graph_.ptr_.get(), parcel.get(), slot, static_cast<GoldyNodeAccess>(access)));
+    ComputeNode& with_field(const Buffer& buffer, uint32_t unit, NodeAccess access) {
+        detail::throw_on_result(goldy_task_graph_compute_node_with_field(
+            graph_.ptr_.get(), buffer.get(), unit, static_cast<GoldyNodeAccess>(access)));
         return *this;
     }
 

@@ -13,7 +13,7 @@ use super::{
 use crate::backend::{
     BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, SubmitSync, TextureHandle,
 };
-use crate::buffer::{Buffer, BufferSource, BufferView};
+use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::error::GoldyError;
@@ -132,12 +132,12 @@ fn lcm(a: u64, b: u64) -> u64 {
 /// // Dispatch nodes declare what they read/write so the analyzer can insert
 /// // barriers automatically.
 /// graph.node("write_data", &pipeline_a)
-///     .with_buffer(&buf, NodeAccess::Write)
+///     .with_allocation(&buf, NodeAccess::Write)
 ///     .with_resource_slots_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.node("read_data", &pipeline_b)
-///     .with_buffer(&buf, NodeAccess::Read)
+///     .with_allocation(&buf, NodeAccess::Read)
 ///     .with_resource_slots_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
@@ -565,6 +565,47 @@ fn partition_waves_have_render(ir: &GraphIR, waves: &[Wave]) -> bool {
     })
 }
 
+/// Merge key for a compute partition and its immediately following render partition.
+fn merged_compute_render_fp(fp0: u64, fp1: u64) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    fp0.hash(&mut h);
+    fp1.hash(&mut h);
+    h.finish()
+}
+
+/// When the next partition is an offscreen render pass, emit and retain compute and render
+/// in one command buffer so the shared frame table and UAV→graphics barriers stay coherent.
+fn try_merge_compute_render_range(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    wave_ranges: &[std::ops::Range<usize>],
+    part_idx: usize,
+) -> Option<std::ops::Range<usize>> {
+    if part_idx + 1 >= wave_ranges.len() {
+        return None;
+    }
+    let r0 = wave_ranges[part_idx].clone();
+    let r1 = wave_ranges[part_idx + 1].clone();
+    let w0 = &schedule.waves[r0.clone()];
+    let w1 = &schedule.waves[r1.clone()];
+    if analysis::partition_waves_have_present(ir, w0)
+        || analysis::partition_waves_have_present(ir, w1)
+        || !partition_waves_can_retain(ir, w0)
+        || !partition_waves_can_retain(ir, w1)
+    {
+        return None;
+    }
+    let render0 = partition_waves_have_render(ir, w0);
+    let render1 = partition_waves_have_render(ir, w1);
+    if !render0 && render1 {
+        Some(r0.start..r1.end)
+    } else {
+        None
+    }
+}
+
 /// Emit graph commands for a retainable partition from the cache or by re-emitting.
 ///
 /// For render-pass partitions the cached `GraphCommand` list is used; re-emit only
@@ -764,22 +805,24 @@ pub(crate) fn submit_resolved_ir_and_retain(
 
     // Compute per-partition fingerprints up front so we can check them against the
     // cached keys without borrowing `cache` mutably yet.
-    let schedule = &cache.as_ref().unwrap().schedule;
-    let partition_fps: Vec<u64> = wave_ranges
-        .iter()
-        .enumerate()
-        .map(|(part_idx, range)| {
-            let waves = &schedule.waves[range.clone()];
-            let raw_fp = partition_fingerprint(ir, schedule, waves);
-            // Fold in partition index so identical adjacent partitions have distinct keys.
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            raw_fp.hash(&mut h);
-            part_idx.hash(&mut h);
-            h.finish()
-        })
-        .collect();
+    let partition_fps: Vec<u64> = {
+        let schedule = &cache.as_ref().unwrap().schedule;
+        wave_ranges
+            .iter()
+            .enumerate()
+            .map(|(part_idx, range)| {
+                let waves = &schedule.waves[range.clone()];
+                let raw_fp = partition_fingerprint(ir, schedule, waves);
+                // Fold in partition index so identical adjacent partitions have distinct keys.
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                raw_fp.hash(&mut h);
+                part_idx.hash(&mut h);
+                h.finish()
+            })
+            .collect()
+    };
 
     // Ensure the partition retention key vecs are sized correctly.
     // On a topology change (fp miss) the schedule was just rebuilt; reset keys.
@@ -798,7 +841,55 @@ pub(crate) fn submit_resolved_ir_and_retain(
     let mut last_tv = backend.gpu_progress(ctx);
     let mut result = PartitionSubmitResult::default();
 
-    for part_idx in 0..wave_ranges.len() {
+    let mut part_idx = 0usize;
+    while part_idx < wave_ranges.len() {
+        let merged_range = {
+            let schedule = &cache.as_ref().unwrap().schedule;
+            try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx)
+        };
+        if let Some(merged_range) = merged_range {
+            let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
+            let merged_waves = {
+                let schedule = &cache.as_ref().unwrap().schedule;
+                schedule.waves[merged_range.clone()].to_vec()
+            };
+            let sync = cross_sync_for_ir(submit_state, ir, ctx, &merged_waves);
+            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+
+            if cached_key == Some(merged_fp) {
+                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync.as_ref())? {
+                    last_tv = tv;
+                    result.resubmit_hits += 1;
+                    if let Some(state) = submit_state {
+                        state.apply_partition_reference_stamps(
+                            ctx,
+                            &context.device().inner,
+                            ir,
+                            &merged_waves,
+                            last_tv,
+                        );
+                    }
+                    part_idx += 2;
+                    continue;
+                }
+            }
+
+            let graph_cmds = analysis::emit_graph_commands_for_waves(ir, &merged_waves, None);
+            let _tz = crate::tracy_zone!("goldy.submit_partition_merged_compute_render");
+            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, merged_fp, sync.as_ref())?;
+            {
+                let entry = cache.as_mut().unwrap();
+                entry.partition_retention_keys[part_idx] = Some(merged_fp);
+                entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
+            }
+            result.records += 1;
+            if let Some(state) = submit_state {
+                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &merged_waves, last_tv);
+            }
+            part_idx += 2;
+            continue;
+        }
+
         let part_fp = partition_fps[part_idx];
         let range = wave_ranges[part_idx].clone();
         let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
@@ -816,6 +907,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
             if let Some(state) = submit_state {
                 state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
             }
+            part_idx += 1;
             continue;
         }
 
@@ -827,6 +919,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 if let Some(state) = submit_state {
                     state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
                 }
+                part_idx += 1;
                 continue;
             }
         }
@@ -841,6 +934,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         if let Some(state) = submit_state {
             state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
         }
+        part_idx += 1;
     }
 
     Ok((last_tv, result))
@@ -872,21 +966,23 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     TaskGraph::get_or_build_schedule(cache, ir, fp);
 
     let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
-    let schedule = &cache.as_ref().unwrap().schedule;
-    let partition_fps: Vec<u64> = wave_ranges
-        .iter()
-        .enumerate()
-        .map(|(part_idx, range)| {
-            let waves = &schedule.waves[range.clone()];
-            let raw_fp = partition_fingerprint(ir, schedule, waves);
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            raw_fp.hash(&mut h);
-            part_idx.hash(&mut h);
-            h.finish()
-        })
-        .collect();
+    let partition_fps: Vec<u64> = {
+        let schedule = &cache.as_ref().unwrap().schedule;
+        wave_ranges
+            .iter()
+            .enumerate()
+            .map(|(part_idx, range)| {
+                let waves = &schedule.waves[range.clone()];
+                let raw_fp = partition_fingerprint(ir, schedule, waves);
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                raw_fp.hash(&mut h);
+                part_idx.hash(&mut h);
+                h.finish()
+            })
+            .collect()
+    };
 
     {
         let entry = cache.as_mut().unwrap();
@@ -913,7 +1009,45 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     let mut last_tv = backend.gpu_progress(ctx);
     let mut result = PartitionSubmitResult::default();
 
-    for part_idx in 0..wave_ranges.len() {
+    let mut part_idx = 0usize;
+    while part_idx < wave_ranges.len() {
+        let merged_range = {
+            let schedule = &cache.as_ref().unwrap().schedule;
+            try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx)
+        };
+        if let Some(merged_range) = merged_range {
+            let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
+            let merged_waves = {
+                let schedule = &cache.as_ref().unwrap().schedule;
+                schedule.waves[merged_range.clone()].to_vec()
+            };
+            let sync = cross_sync_for_stamps(resource_stamps, ir, ctx, &merged_waves);
+            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+
+            if cached_key == Some(merged_fp) {
+                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync.as_ref())? {
+                    last_tv = tv;
+                    result.resubmit_hits += 1;
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                    part_idx += 2;
+                    continue;
+                }
+            }
+
+            let graph_cmds = analysis::emit_graph_commands_for_waves(ir, &merged_waves, None);
+            let _tz = crate::tracy_zone!("goldy.submit_partition_merged_compute_render");
+            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, merged_fp, sync.as_ref())?;
+            {
+                let entry = cache.as_mut().unwrap();
+                entry.partition_retention_keys[part_idx] = Some(merged_fp);
+                entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
+            }
+            result.records += 1;
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+            part_idx += 2;
+            continue;
+        }
+
         let part_fp = partition_fps[part_idx];
         let range = wave_ranges[part_idx].clone();
         let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
@@ -936,6 +1070,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let _tz = crate::tracy_zone!("goldy.submit_partition");
             last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
             apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+            part_idx += 1;
             continue;
         }
 
@@ -960,6 +1095,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 let _tz = crate::tracy_zone!("goldy.submit_partition");
                 last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                part_idx += 1;
                 continue;
             }
 
@@ -985,6 +1121,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     last_tv = tv;
                     result.resubmit_hits += 1;
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                    part_idx += 1;
                     continue;
                 }
             }
@@ -1007,6 +1144,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             }
             result.records += 1;
             apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+            part_idx += 1;
             continue;
         }
 
@@ -1016,6 +1154,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 last_tv = tv;
                 result.resubmit_hits += 1;
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                part_idx += 1;
                 continue;
             }
         }
@@ -1027,6 +1166,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
         cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
         result.records += 1;
         apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+        part_idx += 1;
     }
 
     Ok((last_tv, result))
@@ -1058,6 +1198,13 @@ impl IrSubmitState {
         } else {
             // Unkeyed resources (leases, etc.) still use the legacy conservative stamp.
             self.stamp_targets.push(stamp);
+        }
+    }
+
+    /// Register stamps for every parcel unit in a buffer (dependency tracking only).
+    pub fn register_buffer_stamps(&mut self, buffer: &crate::Buffer) {
+        for parcel in buffer.parcels() {
+            self.register_parcel_stamp(parcel);
         }
     }
 
@@ -1643,7 +1790,8 @@ impl TaskGraph {
     ///
     /// The node is declared as `NodeAccess::Write` on the buffer so the analyzer
     /// can insert barriers between this clear and any subsequent reader.
-    pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
+    #[allow(dead_code)] // heap_tests and task_graph unit tests
+    pub(crate) fn clear_buffer(&mut self, buffer: &Allocation, offset: u64, size: u64) {
         self.ir.nodes.push(TaskNode {
             label: "clear_buffer",
             bindings: vec![ResourceBinding {
@@ -1698,7 +1846,8 @@ impl TaskGraph {
     /// surrounding dispatches. The node is declared as `NodeAccess::Write` so
     /// the analyzer inserts the necessary barrier between this write and any
     /// subsequent reader, and serializes it after any prior reader (WAR).
-    pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: Vec<u8>) {
+    #[allow(dead_code)] // heap_tests and task_graph unit tests
+    pub(crate) fn write_buffer(&mut self, buffer: &Allocation, offset: u64, data: Vec<u8>) {
         self.ir.nodes.push(TaskNode {
             label: "write_buffer",
             bindings: vec![ResourceBinding {
@@ -1731,6 +1880,38 @@ impl TaskGraph {
                 buffer,
                 offset,
                 data: Arc::from(data),
+            },
+        });
+        Ok(())
+    }
+
+    /// Add a zero-fill node for a retained buffer [`crate::Parcel`].
+    ///
+    /// Like [`Self::clear_buffer`], but keys the analyzer binding from the parcel's
+    /// resource identity (whole buffer or buffer range).
+    pub fn clear_parcel(&mut self, parcel: &crate::Parcel, offset: u64, size: u64) -> Result<()> {
+        let buffer = parcel
+            .buffer_handle()
+            .ok_or_else(|| anyhow::anyhow!("clear_parcel requires a buffer parcel"))?;
+        let abs_offset = match parcel.resource_id() {
+            ResourceId::BufferRange { offset: base, .. } => base + offset,
+            _ => offset,
+        };
+        let clear_size = if size == 0 {
+            parcel.byte_size().saturating_sub(offset)
+        } else {
+            size
+        };
+        self.ir.nodes.push(TaskNode {
+            label: "clear_parcel",
+            bindings: vec![ResourceBinding {
+                resource: parcel.resource_id(),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer,
+                offset: abs_offset,
+                size: clear_size,
             },
         });
         Ok(())
@@ -2368,8 +2549,18 @@ pub struct NodeBuilder<'a> {
 }
 
 impl<'a> NodeBuilder<'a> {
-    /// Declare that this node accesses a buffer with the given logical access.
-    pub fn with_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
+    /// Declare that this node accesses a bindable buffer parcel with the given logical access.
+    pub fn with_buffer(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    /// Low-level binding for internal tests and transient paths using raw [`Allocation`].
+    #[allow(dead_code)]
+    pub(crate) fn with_allocation(mut self, buf: &Allocation, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -2466,18 +2657,18 @@ impl<'a> NodeBuilder<'a> {
     /// Bind buffer resource slots and declare read/write dependencies.
     ///
     /// Slot indices are each buffer's UAV bindless index in shader parameter order.
-    pub fn with_resources(mut self, buffers: &[&Buffer]) -> Self {
+    pub fn with_resources(mut self, parcels: &[&crate::Parcel]) -> Self {
         use crate::types::ResourceAccess;
-        let mut indices = Vec::with_capacity(buffers.len());
-        for buf in buffers {
+        let mut indices = Vec::with_capacity(parcels.len());
+        for parcel in parcels {
             self.bindings.push(ResourceBinding {
-                resource: ResourceId::Buffer(buf.handle),
+                resource: parcel.resource_id(),
                 access: NodeAccess::ReadWrite,
             });
-            let idx = buf
+            let idx = parcel
                 .resource_index(ResourceAccess::ReadWrite)
-                .or_else(|| buf.resource_index(ResourceAccess::Read))
-                .expect("with_resources: buffer has no bindless index");
+                .or_else(|| parcel.resource_index(ResourceAccess::Read))
+                .expect("with_resources: parcel has no bindless index");
             indices.push(idx);
         }
         self.resource_slots = indices;
@@ -2517,7 +2708,8 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Finalize the node with indirect dispatch (dimensions read from `buf` at `offset`).
-    pub fn dispatch_indirect(self, buf: &Buffer, offset: u64) {
+    #[allow(dead_code)] // compute_integration tests
+    pub(crate) fn dispatch_indirect(self, buf: &Allocation, offset: u64) {
         let node = TaskNode {
             label: self.label,
             bindings: self.bindings,
@@ -2532,6 +2724,25 @@ impl<'a> NodeBuilder<'a> {
             },
         };
         self.graph.ir.nodes.push(node);
+    }
+
+    /// Finalize the node with indirect dispatch using a retained buffer parcel.
+    pub fn dispatch_indirect_parcel(self, parcel: &crate::Parcel, offset: u64) -> Result<()> {
+        let handle = parcel
+            .buffer_handle()
+            .ok_or_else(|| anyhow::anyhow!("dispatch_indirect_parcel requires a buffer parcel"))?;
+        let node = TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Indirect { buffer: handle, offset },
+            },
+        };
+        self.graph.ir.nodes.push(node);
+        Ok(())
     }
 }
 
@@ -2610,7 +2821,16 @@ impl<'a> RenderPassBuilder<'a> {
     }
 
     /// Like [`Self::with_buffer`] but for use while recording on `&mut self`.
-    pub fn with_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_allocation(&mut self, buf: &Allocation, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -2715,7 +2935,8 @@ impl<'a> RenderPassBuilder<'a> {
         self.draw(0..6, 0..count)
     }
 
-    pub fn with_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+    #[allow(dead_code)] // legacy bind-resources render path
+    pub(crate) fn with_resources(&mut self, buffers: &[&Allocation]) -> &mut Self {
         self.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
@@ -2831,18 +3052,18 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("compute_write", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(1, 1, 1);
 
         let mut pass = graph.render_pass("draw", &target);
-        pass.with_buffer(&buf, NodeAccess::Read);
+        pass.with_allocation(&buf, NodeAccess::Read);
         pass.clear(Color::RED);
         pass.finish_recorded();
 
@@ -2862,7 +3083,7 @@ mod tests {
 
         let device = mock_device();
         let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_render_pipeline(&device, &shader);
@@ -2906,7 +3127,7 @@ mod tests {
     fn write_parcel_then_render_pass_inserts_barrier() {
         let device = mock_device();
         let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
@@ -2926,19 +3147,20 @@ mod tests {
     }
 
     #[test]
-    fn write_parcel_rejects_mosaic_parcel() {
+    fn write_parcel_rejects_partitioned_buffer_unit() {
+        use crate::{field, Init};
         let device = Arc::new(mock_device());
         let mut pool = crate::RetainedPool::new(device.clone());
-        let mut mosaic = pool.mosaic();
-        let _slot = mosaic.emplace(&[0u32, 1, 2, 3]);
-        let parcel = mosaic.build().unwrap();
+        let cells = pool
+            .acquire_record([
+                field("a", Init::data(&[0u32, 1, 2, 3])),
+                field("b", Init::reserve::<u32>(4)),
+            ])
+            .unwrap();
 
         let mut graph = TaskGraph::new();
-        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
-        assert!(
-            err.to_string().contains("non-mosaic buffer parcels"),
-            "unexpected error: {err}"
-        );
+        let err = graph.write_parcel(&cells["a"], 0, vec![0; 4]).unwrap_err();
+        assert!(err.to_string().contains("whole-buffer"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2965,7 +3187,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
@@ -3016,19 +3238,19 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 4, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 4, crate::BufferKind::Scattered).unwrap();
         let mut graph = TaskGraph::new();
         let t0 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
         let t1 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
         graph
             .node("w0", &pipeline)
             .with_transient_texture(t0, NodeAccess::Write)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("w1", &pipeline)
-            .with_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .with_transient_texture(t1, NodeAccess::Write)
             .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
@@ -3041,7 +3263,7 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 4, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 4, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         let t0 = graph.transient_buffer(256);
@@ -3049,12 +3271,12 @@ mod tests {
         graph
             .node("wave0", &pipeline)
             .with_transient_buffer(t0, NodeAccess::Write)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("wave1", &pipeline)
-            .with_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .with_transient_buffer(t1, NodeAccess::Write)
             .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
@@ -3106,19 +3328,19 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
-            .with_buffer(&buf_a, NodeAccess::Write)
+            .with_allocation(&buf_a, NodeAccess::Write)
             .with_resource_slots_slice(&[42])
             .dispatch(8, 1, 1);
         graph
             .node("read_write", &pipeline)
-            .with_buffer(&buf_a, NodeAccess::Read)
-            .with_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_a, NodeAccess::Read)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .with_resource_slots_slice(&[43])
             .dispatch(4, 1, 1);
 
@@ -3144,17 +3366,17 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
-            .with_buffer(&buf_a, NodeAccess::Write)
+            .with_allocation(&buf_a, NodeAccess::Write)
             .dispatch(8, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .with_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3176,12 +3398,12 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .with_buffer(&buf, NodeAccess::ReadWrite)
+            .with_allocation(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -3198,33 +3420,33 @@ mod tests {
         let p3 = mock_pipeline(&device, &shader);
         let p4 = mock_pipeline(&device, &shader);
 
-        let buf_x = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_y = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_z = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_x = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_y = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_z = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         // A writes X
         graph
             .node("A", &p1)
-            .with_buffer(&buf_x, NodeAccess::Write)
+            .with_allocation(&buf_x, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // B reads X, writes Y
         graph
             .node("B", &p2)
-            .with_buffer(&buf_x, NodeAccess::Read)
-            .with_buffer(&buf_y, NodeAccess::Write)
+            .with_allocation(&buf_x, NodeAccess::Read)
+            .with_allocation(&buf_y, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // C reads X, writes Z
         graph
             .node("C", &p3)
-            .with_buffer(&buf_x, NodeAccess::Read)
-            .with_buffer(&buf_z, NodeAccess::Write)
+            .with_allocation(&buf_x, NodeAccess::Read)
+            .with_allocation(&buf_z, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // D reads Y and Z
         graph
             .node("D", &p4)
-            .with_buffer(&buf_y, NodeAccess::Read)
-            .with_buffer(&buf_z, NodeAccess::Read)
+            .with_allocation(&buf_y, NodeAccess::Read)
+            .with_allocation(&buf_z, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3251,7 +3473,7 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -3259,7 +3481,7 @@ mod tests {
 
         graph
             .node("A", &pipeline)
-            .with_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
         assert!(!graph.is_empty());
         assert_eq!(graph.len(), 1);
@@ -3276,13 +3498,13 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf, 0, 256);
         graph
             .node("read", &pipeline)
-            .with_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3303,14 +3525,14 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf_a, 0, 256);
         graph
             .node("write_b", &pipeline)
-            .with_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3326,13 +3548,13 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_buffer(&buf, 0, vec![0u8; 256]);
         graph
             .node("read", &pipeline)
-            .with_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3351,14 +3573,14 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_buffer(&buf_a, 0, vec![0u8; 4]);
         graph
             .node("write_b", &pipeline)
-            .with_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3413,13 +3635,13 @@ mod tests {
             crate::types::TextureFlags::COPY_DST,
         )
         .unwrap();
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_texture(&tex, vec![0u8; 16]).unwrap();
         graph
             .node("writes_buf", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3429,8 +3651,8 @@ mod tests {
     #[test]
     fn multiple_clears_independent_same_wave() {
         let device = mock_device();
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf_a, 0, 256);
@@ -3450,7 +3672,7 @@ mod tests {
     #[test]
     fn is_empty_with_clear_node() {
         let device = mock_device();
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -3462,7 +3684,7 @@ mod tests {
     #[test]
     fn is_empty_with_write_node() {
         let device = mock_device();
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -3549,13 +3771,13 @@ mod tests {
         let p2 = mock_pipeline(&device, &shader);
         let p3 = mock_pipeline(&device, &shader);
 
-        let owned = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let owned = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
         let view = pool.alloc::<u32>(64).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .with_buffer(&owned, NodeAccess::Write)
+            .with_allocation(&owned, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
@@ -3563,7 +3785,7 @@ mod tests {
             .dispatch(1, 1, 1);
         graph
             .node("C", &p3)
-            .with_buffer(&owned, NodeAccess::Read)
+            .with_allocation(&owned, NodeAccess::Read)
             .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
@@ -3641,7 +3863,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .with_buffer(backing, NodeAccess::Write)
+            .with_allocation(backing, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
@@ -3825,17 +4047,17 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
@@ -3853,17 +4075,17 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(8, 8, 1); // different dims
 
@@ -3888,17 +4110,17 @@ mod tests {
         let shader = mock_shader(&device);
         let p1 = mock_pipeline(&device, &shader);
         let p2 = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &p1)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &p2) // different pipeline
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
@@ -3930,17 +4152,17 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .with_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .with_resource_slots_slice(&[2]) // different bindless slot
             .dispatch(4, 4, 1);
 
@@ -3960,7 +4182,7 @@ mod tests {
     // Parcel reference stamping at submit
     // -----------------------------------------------------------------------
 
-    fn retained_buffer_parcel(pool: &mut crate::RetainedPool) -> crate::Parcel {
+    fn retained_buffer(pool: &mut crate::RetainedPool) -> crate::Buffer {
         pool.acquire_buffer(
             256,
             crate::BufferKind::Scattered,
@@ -3976,7 +4198,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         assert!(parcel.last_referenced().is_empty());
 
         let shader = mock_shader(&device);
@@ -3997,7 +4219,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4028,8 +4250,8 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let p1 = retained_buffer_parcel(&mut pool);
-        let p2 = retained_buffer_parcel(&mut pool);
+        let p1 = retained_buffer(&mut pool);
+        let p2 = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4050,8 +4272,8 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let bound = retained_buffer_parcel(&mut pool);
-        let unbound = retained_buffer_parcel(&mut pool);
+        let bound = retained_buffer(&mut pool);
+        let unbound = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4070,7 +4292,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4081,7 +4303,7 @@ mod tests {
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
 
-        let stamped = pool.transfer_out(&ctx, parcel);
+        let stamped = pool.transfer_out_buffer(&ctx, parcel);
         assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&tv));
     }
 
@@ -4090,8 +4312,8 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device);
-        let parcel = retained_buffer_parcel(&mut pool);
-        let stamped = pool.transfer_out(&ctx, parcel);
+        let parcel = retained_buffer(&mut pool);
+        let stamped = pool.transfer_out_buffer(&ctx, parcel);
         assert!(stamped.ready_after.is_empty());
     }
 
@@ -4100,7 +4322,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4121,7 +4343,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4140,7 +4362,7 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4160,7 +4382,7 @@ mod tests {
         let ctx_a = device.create_context().unwrap();
         let ctx_b = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
@@ -4193,7 +4415,7 @@ mod tests {
 mod slice_retention_tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::buffer::Buffer;
+    use crate::buffer::Allocation;
     use crate::compute::ComputePipeline;
     use crate::device::Device;
     use crate::shader::ShaderModule;
@@ -4212,8 +4434,8 @@ mod slice_retention_tests {
         ComputePipeline::new(device, shader).unwrap()
     }
 
-    fn mock_buf(device: &Device) -> Buffer {
-        Buffer::new(device, 256, crate::BufferKind::Scattered).unwrap()
+    fn mock_buf(device: &Device) -> Allocation {
+        Allocation::new(device, 256, crate::BufferKind::Scattered).unwrap()
     }
 
     /// Read `retained_resubmit_count` from the mock backend.
@@ -4283,8 +4505,8 @@ mod slice_retention_tests {
         p_a: &ComputePipeline,
         p_b: &ComputePipeline,
         p_c: &ComputePipeline,
-        buf0: &Buffer,
-        buf1: &Buffer,
+        buf0: &Allocation,
+        buf1: &Allocation,
     ) -> GraphIR {
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {

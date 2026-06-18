@@ -4,10 +4,12 @@
 //!
 //! Run with: `cargo run --example waveform`
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use goldy::{
-    write_to_parcel, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
-    NodeAccess, Parcel, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,7 +69,7 @@ struct App {
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
-    channel_parcels: Option<[Parcel; NUM_CHANNELS]>,
+    channel_parcels: Option<[Buffer; NUM_CHANNELS]>,
     window: Option<Arc<Window>>,
     swapchain: Option<SwapchainPool>,
     screen: Option<goldy::PresentLease>,
@@ -119,7 +121,7 @@ impl App {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        channel_parcels: &[Parcel; NUM_CHANNELS],
+        channel_parcels: &[Buffer; NUM_CHANNELS],
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
     ) -> PresentGrant {

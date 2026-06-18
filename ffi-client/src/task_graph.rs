@@ -1,10 +1,10 @@
+use crate::buffer::Buffer;
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
-use crate::retained_pool::MosaicSlot;
 use crate::sys::{self, GoldySwapchainOutput, GoldyTaskGraph};
 use crate::types::{Color, IndexFormat, NodeAccess, ResourceHandle};
 use std::ffi::CString;
@@ -47,10 +47,10 @@ impl TaskGraph {
         check(unsafe { sys::goldy_task_graph_dispatch(self.ptr, device.as_ptr()) })
     }
 
-    /// Add a CPU→GPU write node for a retained buffer [`Parcel`].
-    pub fn write_parcel(&mut self, parcel: &Parcel, offset: u64, data: &[u8]) -> Result<()> {
+    /// Add a CPU→GPU write node for a retained [`Buffer`].
+    pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: &[u8]) -> Result<()> {
         check(unsafe {
-            sys::goldy_task_graph_write_parcel(self.ptr, parcel.as_ptr(), offset, data.as_ptr(), data.len())
+            sys::goldy_task_graph_write_parcel(self.ptr, buffer.as_ptr(), offset, data.as_ptr(), data.len())
         })
     }
 
@@ -108,11 +108,15 @@ impl RenderPassBuilder<'_> {
         self
     }
 
-    pub fn with_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer_unit(&mut self, buffer: &Buffer, unit: u32, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_with_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
+            sys::goldy_task_graph_render_pass_with_buffer_unit(self.graph.ptr, buffer.as_ptr(), unit, access.into())
         });
         self
+    }
+
+    pub fn with_buffer(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
+        self.with_buffer_unit(buffer, 0, access)
     }
 
     pub fn clear(&mut self, color: Color) -> &mut Self {
@@ -125,16 +129,16 @@ impl RenderPassBuilder<'_> {
         self
     }
 
-    pub fn set_vertex_buffer_parcel(&mut self, slot: u32, parcel: &Parcel) -> &mut Self {
+    pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &Buffer) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_set_vertex_buffer_parcel(self.graph.ptr, slot, parcel.as_ptr())
+            sys::goldy_task_graph_render_pass_set_vertex_buffer_parcel(self.graph.ptr, slot, buffer.as_ptr())
         });
         self
     }
 
-    pub fn set_index_buffer_parcel(&mut self, parcel: &Parcel, format: IndexFormat) -> &mut Self {
+    pub fn set_index_buffer(&mut self, buffer: &Buffer, format: IndexFormat) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_render_pass_set_index_buffer(self.graph.ptr, parcel.as_ptr(), format.into())
+            sys::goldy_task_graph_render_pass_set_index_buffer(self.graph.ptr, buffer.as_ptr(), format.into())
         });
         self
     }
@@ -200,11 +204,15 @@ impl ComputeNodeBuilder<'_> {
         self
     }
 
-    pub fn with_parcel_view(&mut self, parcel: &Parcel, slot: MosaicSlot, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer_unit(&mut self, buffer: &Buffer, unit: u32, access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_task_graph_compute_node_with_parcel_view(self.graph.ptr, parcel.as_ptr(), slot.0, access.into())
+            sys::goldy_task_graph_compute_node_with_buffer_unit(self.graph.ptr, buffer.as_ptr(), unit, access.into())
         });
         self
+    }
+
+    pub fn with_buffer(&mut self, buffer: &Buffer, access: NodeAccess) -> &mut Self {
+        self.with_buffer_unit(buffer, 0, access)
     }
 
     pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {

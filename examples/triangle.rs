@@ -5,8 +5,8 @@
 //! Run with: cargo run --example triangle --features examples
 
 use goldy::{
-    shader::builtins, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess,
-    Parcel, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    shader::builtins, Buffer, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
     ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
@@ -24,7 +24,7 @@ struct App {
     ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     _retained_pool: Option<RetainedPool>,
-    vertex_buffer: Option<Parcel>,
+    vertex_buffer: Option<Buffer>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     window: Option<Arc<Window>>,
@@ -77,7 +77,7 @@ impl App {
     fn record_scheme(
         scheme: &mut Scheme,
         pipeline: &RenderPipeline,
-        vertex_buffer: &Parcel,
+        vertex_buffer: &Buffer,
         scene_rt: &Lease<LeaseRenderTarget>,
         screen: &goldy::PresentLease,
         bg_color: Color,

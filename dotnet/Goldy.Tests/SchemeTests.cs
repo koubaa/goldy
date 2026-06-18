@@ -24,7 +24,7 @@ public class SchemeTests
 
             uint[] initial = Enumerable.Range(0, 64).Select(i => (uint)i).ToArray();
             using var retainedPool = new RetainedPool(device);
-            using var parcel = retainedPool.AcquireBuffer<uint>(initial, BufferKind.Scattered);
+            using var buffer = retainedPool.AcquireBuffer<uint>(initial, BufferKind.Scattered);
             using var shader = new ShaderModule(device, fillShader);
             using var pipeline = new ComputePipeline(device, shader);
             using var ctx = device.CreateContext();
@@ -33,11 +33,11 @@ public class SchemeTests
             using (var node = scheme.ComputeNode("fill", pipeline))
             {
                 node
-                    .WithParcel(parcel, NodeAccess.Write, ResourceAccess.Write)
+                    .WithField(buffer, 0, NodeAccess.Write, ResourceAccess.Write)
                     .Dispatch(1, 1, 1);
             }
 
-            using var grant = scheme.GrantRead(parcel);
+            using var grant = scheme.GrantRead(buffer.Field(0));
             using var frame = scheme.Submit();
             var bytes = grant.Consume(frame);
             var values = MemoryMarshal.Cast<byte, uint>(bytes);

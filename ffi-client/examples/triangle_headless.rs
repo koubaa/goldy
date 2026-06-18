@@ -63,10 +63,10 @@ fn main() -> goldy_ffi_client::Result<()> {
     let rt = scheme.lease_render_target(WIDTH, HEIGHT, TextureFormat::Rgba8Unorm, None::<DepthFormat>)?;
     {
         let mut pass = scheme.render_pass("triangle", &rt);
-        pass.with_parcel(&vertex_buffer, NodeAccess::Read);
+        pass.with_buffer(&vertex_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer_parcel(0, &vertex_buffer);
+        pass.set_vertex_buffer(0, &vertex_buffer);
         pass.draw(0..3, 0..1);
         pass.finish_recorded();
     }

@@ -1,11 +1,11 @@
 //! Conway's Game of Life — hybrid Scheme via goldy-ffi-client.
 //!
-//! Compute ping-pong on a mosaic parcel + offscreen render + copy-to-present.
+//! Compute ping-pong on a partitioned buffer + offscreen render + copy-to-present.
 //!
 //! Run from `goldy/ffi-client`: `cargo run --example game_of_life`
 
 use goldy_ffi_client::{
-    Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, MosaicSlot, NodeAccess, PresentGrant,
+    Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PresentGrant,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory,
     ResourceHandle, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule, SwapchainPool,
 };
@@ -23,8 +23,8 @@ const GRID_WIDTH: u32 = 128;
 const GRID_HEIGHT: u32 = 128;
 const CELL_COUNT: usize = (GRID_WIDTH * GRID_HEIGHT) as usize;
 
-const SLOT_A: MosaicSlot = MosaicSlot(0);
-const SLOT_B: MosaicSlot = MosaicSlot(1);
+const UNIT_A: u32 = 0;
+const UNIT_B: u32 = 1;
 
 const COMPUTE_SHADER: &str = include_str!("../../shaders/game_of_life.slang");
 const RENDER_SHADER: &str = include_str!("../../shaders/game_of_life_render.slang");
@@ -120,16 +120,16 @@ fn create_initial_state() -> Vec<u32> {
 
 fn run_compute_step(
     ctx: &Context,
-    cells: &goldy_ffi_client::Parcel,
-    read_slot: MosaicSlot,
-    write_slot: MosaicSlot,
+    cells: &Buffer,
+    read_unit: u32,
+    write_unit: u32,
     pipeline: &ComputePipeline,
 ) -> goldy_ffi_client::Result<()> {
     let mut scheme = Scheme::new(ctx)?;
     {
         let mut node = scheme.compute_node("game_of_life", pipeline);
-        node.with_parcel_view(cells, read_slot, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.with_parcel_view(cells, write_slot, NodeAccess::Write, ResourceAccess::Write);
+        node.with_buffer_unit(cells, read_unit, NodeAccess::Read, ResourceAccess::ReadWrite);
+        node.with_buffer_unit(cells, write_unit, NodeAccess::Write, ResourceAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
     scheme.submit()?;
@@ -139,21 +139,21 @@ fn run_compute_step(
 fn record_display_scheme(
     ctx: &Context,
     swapchain: &SwapchainPool,
-    cells: &goldy_ffi_client::Parcel,
-    current_slot: MosaicSlot,
+    cells: &Buffer,
+    current_unit: u32,
     render_pipeline: &RenderPipeline,
     screen: &goldy_ffi_client::PresentLease,
 ) -> goldy_ffi_client::Result<(Scheme, SchemeRenderTargetLease, PresentGrant)> {
     let mut scheme = Scheme::new(ctx)?;
     let (width, height) = swapchain.size();
     let rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None::<DepthFormat>)?;
-    let render_idx = cells.mosaic_view_resource_index(current_slot, ResourceAccess::ReadWrite)?;
+    let render_idx = cells.unit_resource_index(current_unit, ResourceAccess::ReadWrite)?;
     {
         let mut pass = scheme.render_pass("game_of_life_render", &rt);
-        pass.with_parcel_view(cells, current_slot, NodeAccess::Read);
+        pass.with_buffer_unit(cells, current_unit, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
-        pass.with_views(&[ResourceHandle {
+        pass.bind_resources_typed(&[ResourceHandle {
             category: ResourceCategory::Scattered,
             index: render_idx,
         }]);
@@ -178,7 +178,7 @@ struct App {
     compute_pipeline: Option<ComputePipeline>,
     render_pipeline: Option<RenderPipeline>,
     _retained_pool: Option<RetainedPool>,
-    cells: Option<goldy_ffi_client::Parcel>,
+    cells: Option<Buffer>,
     use_buffer_a: bool,
     frame_count: u32,
     last_update: std::time::Instant,
@@ -220,10 +220,7 @@ impl App {
 
         let initial = create_initial_state();
         let mut retained_pool = RetainedPool::new(&device)?;
-        let mut mosaic = retained_pool.mosaic()?;
-        mosaic.emplace_pod::<u32>(&initial)?;
-        mosaic.emplace_pod::<u32>(&initial)?;
-        let cells = mosaic.build(&mut retained_pool)?;
+        let cells = retained_pool.acquire_record_pod(&[("a", &initial), ("b", &initial)])?;
 
         let compute_shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let render_shader = ShaderModule::from_slang(&device, RENDER_SHADER)?;
@@ -239,9 +236,9 @@ impl App {
             },
         )?;
 
-        let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+        let current_unit = if self.use_buffer_a { UNIT_A } else { UNIT_B };
         let (display_scheme, scene_rt, present) =
-            record_display_scheme(&ctx, &swapchain, &cells, current_slot, &render_pipeline, &screen)?;
+            record_display_scheme(&ctx, &swapchain, &cells, current_unit, &render_pipeline, &screen)?;
 
         println!("Game of Life initialized: {GRID_WIDTH}x{GRID_HEIGHT} grid (ffi-client / Scheme)");
         println!("Press Escape or close window to exit");
@@ -269,27 +266,27 @@ impl App {
         if should_update {
             self.last_update = now;
 
-            let (read_slot, write_slot) = if self.use_buffer_a {
-                (SLOT_A, SLOT_B)
+            let (read_unit, write_unit) = if self.use_buffer_a {
+                (UNIT_A, UNIT_B)
             } else {
-                (SLOT_B, SLOT_A)
+                (UNIT_B, UNIT_A)
             };
 
             run_compute_step(
                 self.ctx.as_ref().unwrap(),
                 self.cells.as_ref().unwrap(),
-                read_slot,
-                write_slot,
+                read_unit,
+                write_unit,
                 self.compute_pipeline.as_ref().unwrap(),
             )?;
             self.use_buffer_a = !self.use_buffer_a;
 
-            let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+            let current_unit = if self.use_buffer_a { UNIT_A } else { UNIT_B };
             let (display_scheme, scene_rt, present) = record_display_scheme(
                 self.ctx.as_ref().unwrap(),
                 self.swapchain.as_ref().unwrap(),
                 self.cells.as_ref().unwrap(),
-                current_slot,
+                current_unit,
                 self.render_pipeline.as_ref().unwrap(),
                 self.screen.as_ref().unwrap(),
             )?;
@@ -318,9 +315,9 @@ impl App {
                 self.render_pipeline.as_ref(),
                 self.screen.as_ref(),
             ) {
-                let current_slot = if self.use_buffer_a { SLOT_A } else { SLOT_B };
+                let current_unit = if self.use_buffer_a { UNIT_A } else { UNIT_B };
                 if let Ok((scheme, rt, present)) =
-                    record_display_scheme(ctx, swapchain, cells, current_slot, render_pipeline, screen)
+                    record_display_scheme(ctx, swapchain, cells, current_unit, render_pipeline, screen)
                 {
                     self.display_scheme = Some(scheme);
                     self.scene_rt = Some(rt);

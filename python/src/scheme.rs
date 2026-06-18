@@ -1,5 +1,6 @@
 //! Python wrappers for [`goldy::Scheme`] and submission context.
 
+use crate::buffer::PyBuffer;
 use crate::compute::PyComputePipeline;
 use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
@@ -214,7 +215,7 @@ impl PyScheme {
         self.ensure_no_active_recorder()?;
         self.inner
             .borrow_mut()
-            .copy_to_texture(&src.inner, dst.inner.as_ref())
+            .copy_to_texture(&src.inner, dst.inner.as_parcel())
             .into_py_result()
     }
 
@@ -236,7 +237,7 @@ impl PyScheme {
         let grant = self
             .inner
             .borrow_mut()
-            .grant_read(parcel.inner.as_ref())
+            .grant_read(parcel.inner.as_parcel())
             .into_py_result()?;
         Ok(PyReadGrant {
             inner: PyReadGrantInner::Buffer(grant),
@@ -248,7 +249,7 @@ impl PyScheme {
         let grant = self
             .inner
             .borrow_mut()
-            .grant_read_texture(parcel.inner.as_ref())
+            .grant_read_texture(parcel.inner.as_parcel())
             .into_py_result()?;
         Ok(PyReadGrant {
             inner: PyReadGrantInner::Texture(grant),
@@ -339,18 +340,18 @@ impl PySchemeComputeNode {
             let node = active
                 .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
-            node.with_parcel(parcel.inner.as_ref(), node_access.into(), resource_access.into())
+            node.with_parcel(parcel.inner.as_parcel(), node_access.into(), resource_access.into())
                 .ok_or_else(|| GoldyError::new_err("Parcel has no resource index for the requested access"))?;
         }
         Ok(slf)
     }
 
-    #[pyo3(signature = (parcel, slot, node_access, resource_access))]
-    fn with_parcel_view<'py>(
+    #[pyo3(signature = (buffer, unit, node_access, resource_access))]
+    fn with_buffer_unit<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        parcel: &PyParcel,
-        slot: u32,
+        buffer: &PyBuffer,
+        unit: u32,
         node_access: PyNodeAccess,
         resource_access: PyResourceAccess,
     ) -> PyResult<PyRef<'py, Self>> {
@@ -360,13 +361,42 @@ impl PySchemeComputeNode {
             let node = active
                 .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
-            node.with_parcel_view(
-                parcel.inner.as_ref(),
-                goldy::MosaicSlot(slot),
-                node_access.into(),
-                resource_access.into(),
-            )
-            .ok_or_else(|| GoldyError::new_err("Mosaic view has no resource index for the requested access"))?;
+            let idx = unit as usize;
+            if idx >= buffer.inner.unit_count() {
+                return Err(GoldyError::new_err(format!(
+                    "buffer unit index {unit} out of range (unit_count={})",
+                    buffer.inner.unit_count()
+                )));
+            }
+            node.with_parcel(buffer.inner.unit(idx), node_access.into(), resource_access.into())
+                .ok_or_else(|| GoldyError::new_err("Buffer unit has no resource index for the requested access"))?;
+        }
+        Ok(slf)
+    }
+
+    #[pyo3(signature = (buffer, name, node_access, resource_access))]
+    fn with_field<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        name: &str,
+        node_access: PyNodeAccess,
+        resource_access: PyResourceAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        {
+            let scheme = slf.scheme.borrow(py);
+            let mut active = scheme.active_compute.borrow_mut();
+            let node = active
+                .as_mut()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
+            let parcel_ptr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                buffer.inner.field(name) as *const goldy::Parcel
+            })) {
+                Ok(p) => p,
+                Err(_) => return Err(GoldyError::new_err(format!("unknown buffer field {name:?}"))),
+            };
+            node.with_parcel(unsafe { &*parcel_ptr }, node_access.into(), resource_access.into())
+                .ok_or_else(|| GoldyError::new_err("Buffer field has no resource index for the requested access"))?;
         }
         Ok(slf)
     }
@@ -426,20 +456,46 @@ impl PySchemeRenderPass {
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.with_parcel(parcel.inner.as_ref(), access.into());
+            pass.with_parcel(parcel.inner.as_parcel(), access.into());
         })?;
         Ok(slf)
     }
 
-    fn with_parcel_view<'py>(
+    fn with_buffer_unit<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        parcel: &PyParcel,
-        slot: u32,
+        buffer: &PyBuffer,
+        unit: u32,
         access: PyNodeAccess,
     ) -> PyResult<PyRef<'py, Self>> {
+        let idx = unit as usize;
+        if idx >= buffer.inner.unit_count() {
+            return Err(GoldyError::new_err(format!(
+                "buffer unit index {unit} out of range (unit_count={})",
+                buffer.inner.unit_count()
+            )));
+        }
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.with_buffer_view(parcel.inner.as_ref().view(goldy::MosaicSlot(slot)), access.into());
+            pass.with_parcel(buffer.inner.unit(idx), access.into());
+        })?;
+        Ok(slf)
+    }
+
+    fn with_field<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        buffer: &PyBuffer,
+        name: &str,
+        access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let parcel_ptr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buffer.inner.field(name) as *const goldy::Parcel
+        })) {
+            Ok(p) => p,
+            Err(_) => return Err(GoldyError::new_err(format!("unknown buffer field {name:?}"))),
+        };
+        slf.scheme.borrow(py).with_active_render_pass(|pass| {
+            pass.with_parcel(unsafe { &*parcel_ptr }, access.into());
         })?;
         Ok(slf)
     }
@@ -469,7 +525,7 @@ impl PySchemeRenderPass {
         parcel: &PyParcel,
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.set_vertex_buffer(slot, parcel.inner.as_ref());
+            pass.set_vertex_buffer(slot, parcel.inner.as_parcel());
         })?;
         Ok(slf)
     }
@@ -549,7 +605,7 @@ impl PySchemeRenderPass {
 pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyResult<PySchemeSubmission> {
     let mut upload = Scheme::new(&ctx.inner);
     upload
-        .commit_write_parcel(parcel.inner.as_ref(), 0, data.to_vec())
+        .commit_write_parcel(parcel.inner.as_parcel(), 0, data.to_vec())
         .into_py_result()?;
     let submission = upload.submit().into_py_result()?;
     Ok(PySchemeSubmission { inner: submission })
