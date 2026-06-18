@@ -126,7 +126,7 @@ impl TextureFormat {
 
 /// Use-time access direction for a resource descriptor slot.
 ///
-/// Passed to [`crate::Buffer::resource_index`], [`crate::Texture::resource_index`],
+/// Passed to [`crate::Parcel::resource_index`], [`crate::Texture::resource_index`],
 /// and related accessors to select the correct descriptor pool entry for how the
 /// resource will be used in the current dispatch — read-only, write-only, or
 /// read-write.
@@ -199,7 +199,7 @@ pub enum BufferKind {
     Broadcast,
 }
 
-/// How costly [`crate::Buffer::resize_to`] is on this device.
+/// How costly in-place buffer resize (`resize_to`) is on this device.
 ///
 /// Phase 1 uses [`Self::Copy`] on all backends. Later phases may report
 /// [`Self::Constant`] (oversized + demand paging) or [`Self::PageBind`] (sparse).

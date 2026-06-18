@@ -1363,8 +1363,8 @@ impl TaskGraph {
     }
 
     /// Like [`Self::transient_buffer`] but with an explicit element stride for the
-    /// structured buffer descriptor. The stride is forwarded to
-    /// [`crate::Buffer::create_view`] when the transient is materialised.
+    /// structured buffer descriptor. The stride is forwarded to a sub-range
+    /// [`crate::BufferView`] when the transient is materialised.
     ///
     /// ## Stable slot identity contract
     ///
@@ -1774,7 +1774,7 @@ impl TaskGraph {
     }
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
-    /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
+    /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect_parcel`].
     pub fn node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
@@ -1864,10 +1864,9 @@ impl TaskGraph {
 
     /// Add a CPU→GPU write node for a retained buffer [`crate::Parcel`].
     ///
-    /// Like [`Self::write_buffer`], but accepts an opaque parcel instead of a
-    /// [`Buffer`] handle. Valid only for non-mosaic buffer parcels (the same
-    /// restriction as a direct buffer write). The analyzer inserts
-    /// barriers between this write and any subsequent reader in the graph.
+    /// Adds a CPU→GPU write node keyed by the parcel's resource identity (whole buffer
+    /// or buffer range). The analyzer inserts barriers between this write and any
+    /// subsequent reader in the graph.
     pub fn write_parcel(&mut self, parcel: &crate::Parcel, offset: u64, data: Vec<u8>) -> Result<()> {
         let (buffer, resource) = parcel.write_buffer_target()?;
         self.ir.nodes.push(TaskNode {
@@ -1887,8 +1886,8 @@ impl TaskGraph {
 
     /// Add a zero-fill node for a retained buffer [`crate::Parcel`].
     ///
-    /// Like [`Self::clear_buffer`], but keys the analyzer binding from the parcel's
-    /// resource identity (whole buffer or buffer range).
+    /// Keys the analyzer binding from the parcel's resource identity (whole buffer
+    /// or buffer range).
     pub fn clear_parcel(&mut self, parcel: &crate::Parcel, offset: u64, size: u64) -> Result<()> {
         let buffer = parcel
             .buffer_handle()
@@ -2538,7 +2537,7 @@ impl Default for TaskGraph {
 /// Builder for a single compute dispatch node within a [`TaskGraph`].
 ///
 /// Created by [`TaskGraph::node`]. Must be finalized with
-/// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect`](NodeBuilder::dispatch_indirect).
+/// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect_parcel`](NodeBuilder::dispatch_indirect_parcel).
 pub struct NodeBuilder<'a> {
     graph: &'a mut TaskGraph,
     label: &'static str,

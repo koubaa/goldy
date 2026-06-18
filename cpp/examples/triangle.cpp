@@ -47,7 +47,7 @@ struct GpuState {
     goldy::Context ctx;
     goldy::Device device;
     goldy::RetainedPool pool;
-    goldy::Parcel vertex_buffer;
+    goldy::Buffer vertex_buffer;
     goldy::ShaderModule shader;
     goldy::RenderPipeline pipeline;
     goldy::SwapchainPool swapchain;
@@ -92,16 +92,16 @@ goldy::SwapchainPool create_swapchain_pool(const goldy::Context& ctx, GLFWwindow
 goldy::PresentGrant record_scheme(
     goldy::Scheme& scheme,
     const goldy::RenderPipeline& pipeline,
-    const goldy::Parcel& vertex_buffer,
+    const goldy::Buffer& vertex_buffer,
     goldy::SchemeRenderTargetLease& scene_rt,
     const goldy::PresentLease& screen,
     const goldy::Color& bg_color) {
     {
         auto pass = scheme.render_pass("triangle", scene_rt);
-        pass.with_parcel(vertex_buffer, goldy::NodeAccess::Read)
+        pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read)
             .clear(bg_color)
             .set_pipeline(pipeline)
-            .set_vertex_buffer_parcel(0, vertex_buffer)
+            .set_vertex_buffer(0, vertex_buffer)
             .draw(0, 3);
     }
     scheme.copy_to_present(scene_rt, screen);
@@ -117,7 +117,7 @@ GpuState init_gpu(goldy::Device device, GLFWwindow* window) {
 
     goldy::Context ctx(device);
     goldy::RetainedPool pool(device);
-    goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
+    goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
         std::span<const Vertex>(vertices),
         goldy::BufferKind::Scattered);
 

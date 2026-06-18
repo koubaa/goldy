@@ -309,7 +309,7 @@ impl Parcel {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => b.read_to_cpu(device, output),
             ParcelBacking::BufferRange { view, .. } => view.read_to_cpu(device, output),
-            ParcelBacking::Texture(t) => t.read_to_cpu(output).map_err(Into::into),
+            ParcelBacking::Texture(t) => t.read_to_cpu(output),
         }
     }
 }
@@ -343,7 +343,8 @@ enum BufferStorage {
 
 /// An acquired GPU buffer — possibly partitioned into independently bindable parcels.
 ///
-/// Release by [`crate::retained_pool::RetainedPool::release`] or by dropping.
+/// Release by dropping or [`crate::retained_pool::RetainedPool::release_buffer`] /
+/// [`crate::retained_pool::RetainedPool::release_texture`].
 pub struct Buffer {
     storage: BufferStorage,
     units: Vec<Parcel>,
@@ -467,7 +468,7 @@ impl Buffer {
         self.units.iter().all(|u| u.is_settled(ctx))
     }
 
-    /// CPU write into a single-unit buffer (host-visible when [`BufferFlags::CPU_READABLE`]).
+    /// CPU write into a single-unit buffer (host-visible when [`crate::types::BufferFlags::CPU_READABLE`]).
     pub fn write(&self, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         match &self.storage {
             BufferStorage::Single(b) => b.write(offset, data),
@@ -482,7 +483,7 @@ impl Buffer {
         self.whole().read_to_cpu(device, output)
     }
 
-    /// GPU clear on a single-unit buffer (see [`Allocation::clear`]).
+    /// GPU clear on a single-unit buffer (see [`Self::clear`]).
     pub fn clear(&self, device: &crate::Device, offset: u64, size: u64) -> anyhow::Result<()> {
         match &self.storage {
             BufferStorage::Single(b) => b.clear(device, offset, size),

@@ -6,16 +6,16 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy, goldy_render_pipeline_create,
-    goldy_render_pipeline_destroy, goldy_render_target_buffer_size, goldy_render_target_create,
-    goldy_render_target_destroy, goldy_render_target_read_to_buffer, goldy_retained_pool_acquire_buffer,
-    goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_shader_builtin_vertex_color_2d, goldy_shader_create,
-    goldy_shader_destroy, goldy_task_graph_create, goldy_task_graph_destroy, goldy_task_graph_dispatch,
-    goldy_task_graph_render_pass_begin, goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw,
-    goldy_task_graph_render_pass_finish, goldy_task_graph_render_pass_set_pipeline,
-    goldy_task_graph_render_pass_set_vertex_buffer_parcel, goldy_task_graph_render_pass_with_parcel, GoldyBufferKind,
-    GoldyColor, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFormat, GoldyVertexAttribute,
-    GoldyVertexFormat,
+    goldy_buffer_destroy, goldy_buffer_field, goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy,
+    goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_render_target_buffer_size,
+    goldy_render_target_create, goldy_render_target_destroy, goldy_render_target_read_to_buffer,
+    goldy_retained_pool_acquire_buffer, goldy_retained_pool_create, goldy_retained_pool_destroy,
+    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, goldy_task_graph_create,
+    goldy_task_graph_destroy, goldy_task_graph_dispatch, goldy_task_graph_render_pass_begin,
+    goldy_task_graph_render_pass_clear, goldy_task_graph_render_pass_draw, goldy_task_graph_render_pass_finish,
+    goldy_task_graph_render_pass_set_pipeline, goldy_task_graph_render_pass_set_vertex_buffer_parcel,
+    goldy_task_graph_render_pass_with_parcel, GoldyBufferKind, GoldyColor, GoldyNodeAccess, GoldyRenderPipelineDesc,
+    GoldyResult, GoldyTextureFormat, GoldyVertexAttribute, GoldyVertexFormat,
 };
 use std::ffi::CString;
 use std::mem::size_of;
@@ -69,6 +69,8 @@ fn task_graph_triangle_readback_center_pixel_lit() {
             vertex_bytes.len(),
         );
         assert!(!vertex_buffer.is_null(), "{}", last_ffi_message());
+        let vertex_parcel = goldy_buffer_field(vertex_buffer, 0);
+        assert!(!vertex_parcel.is_null(), "{}", last_ffi_message());
 
         let target = goldy_render_target_create(device, W, H, GoldyTextureFormat::Rgba8Unorm);
         assert!(!target.is_null(), "{}", last_ffi_message());
@@ -112,7 +114,7 @@ fn task_graph_triangle_readback_center_pixel_lit() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_render_pass_with_parcel(graph, vertex_buffer, GoldyNodeAccess::Read),
+            goldy_task_graph_render_pass_with_parcel(graph, vertex_parcel, GoldyNodeAccess::Read),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -130,7 +132,7 @@ fn task_graph_triangle_readback_center_pixel_lit() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_task_graph_render_pass_set_vertex_buffer_parcel(graph, 0, vertex_buffer),
+            goldy_task_graph_render_pass_set_vertex_buffer_parcel(graph, 0, vertex_parcel),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -189,7 +191,8 @@ fn task_graph_triangle_readback_center_pixel_lit() {
         goldy_render_pipeline_destroy(pipeline);
         goldy_shader_destroy(shader);
         goldy_render_target_destroy(target);
-        goldy_parcel_destroy(vertex_buffer);
+        goldy_parcel_destroy(vertex_parcel);
+        goldy_buffer_destroy(vertex_buffer);
         goldy_retained_pool_destroy(pool);
         goldy_device_destroy(device);
         goldy_instance_destroy(instance);

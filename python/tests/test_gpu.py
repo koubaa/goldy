@@ -101,14 +101,14 @@ class TestRetainedPool:
         import goldy
 
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(
+        buffer = pool.acquire_buffer(
             np.zeros(64, dtype=np.uint32),
             goldy.BufferKind.SCATTERED,
         )
         ctx = device.create_context()
         frame = goldy.write_to_parcel(
             ctx,
-            parcel,
+            buffer[0],
             np.array([1, 2, 3, 4], dtype=np.uint32).tobytes(),
         )
         frame.wait(ctx)
@@ -166,16 +166,16 @@ class TestComputePipeline:
         }
         '''
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
+        buffer = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
         shader = goldy.ShaderModule.from_slang(device, source)
         pipeline = goldy.ComputePipeline(device, shader)
 
         ctx = device.create_context()
         scheme = goldy.Scheme(ctx)
         scheme.node("fill", pipeline).with_parcel(
-            parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+            buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
         ).dispatch(1, 1, 1)
-        grant = scheme.grant_read(parcel)
+        grant = scheme.grant_read(buffer[0])
         frame = scheme.submit()
         values = np.frombuffer(grant.consume(frame), dtype=np.uint32)
         assert np.all(values == 42)

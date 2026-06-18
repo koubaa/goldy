@@ -494,10 +494,10 @@ impl Drop for Allocation {
 
 /// Trait for types that can be bound as vertex or index buffers.
 ///
-/// [`Allocation`], [`BufferView`], and non-mosaic [`crate::Parcel`] buffers implement this trait,
+/// [`BufferView`], and [`crate::Parcel`] implement this trait,
 /// allowing any of them to be passed to `set_vertex_buffer` and `set_index_buffer`.
 /// For `BufferView`, the encoder binds the parent buffer at the view's offset internally.
-/// For mosaic parcels, use [`crate::Parcel::view`] instead.
+/// For partitioned buffers, bind a specific range [`crate::Parcel`] via [`crate::Buffer::field`] or indexing.
 pub trait BufferSource {
     #[doc(hidden)]
     fn source_handle(&self) -> BufferHandle;
@@ -514,7 +514,7 @@ impl BufferSource for Allocation {
     }
 }
 
-/// A view into a sub-region of an [`Allocation`].
+/// A view into a sub-region of a backing GPU buffer allocation.
 ///
 /// A `BufferView` shares the parent buffer's GPU memory but gets its own bindless
 /// descriptor pointing at `[offset, offset+size)`. The shader sees the sub-region
@@ -890,7 +890,7 @@ impl BufferPool {
         self.backing.read_to_cpu(device, output)
     }
 
-    /// Forward [`Allocation::hint_unused_above`] on the backing allocation.
+    /// Forward `hint_unused_above` on the backing allocation.
     pub fn hint_unused_above(&mut self, offset: u64) {
         self.backing.hint_unused_above(offset);
     }

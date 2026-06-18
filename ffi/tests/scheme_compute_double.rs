@@ -6,13 +6,14 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_compute_pipeline_create, goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy,
-    goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy, goldy_read_grant_byte_size,
-    goldy_read_grant_consume, goldy_read_grant_destroy, goldy_retained_pool_acquire_buffer, goldy_retained_pool_create,
-    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch,
-    goldy_scheme_compute_node_with_parcel, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read,
-    goldy_scheme_len, goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
-    GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess, GoldyResult,
+    goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
+    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_destroy, goldy_parcel_destroy,
+    goldy_read_grant_byte_size, goldy_read_grant_consume, goldy_read_grant_destroy, goldy_retained_pool_acquire_buffer,
+    goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
+    goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_parcel, goldy_scheme_create,
+    goldy_scheme_destroy, goldy_scheme_grant_read, goldy_scheme_len, goldy_scheme_submission_destroy,
+    goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess,
+    GoldyResourceAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -91,8 +92,13 @@ fn scheme_compute_double_then_add_ten() {
         );
         assert!(!src.is_null(), "{}", last_ffi_message());
 
+        let src_parcel = goldy_buffer_field(src, 0);
+        assert!(!src_parcel.is_null(), "{}", last_ffi_message());
+
         let dst = goldy_retained_pool_acquire_buffer(pool, 64 * 4, GoldyBufferKind::Scattered, 0, std::ptr::null(), 0);
         assert!(!dst.is_null(), "{}", last_ffi_message());
+        let dst_parcel = goldy_buffer_field(dst, 0);
+        assert!(!dst_parcel.is_null(), "{}", last_ffi_message());
 
         let double_src = CString::new(DOUBLE_SHADER).unwrap();
         let double_shader = goldy_shader_create(device, double_src.as_ptr());
@@ -114,8 +120,8 @@ fn scheme_compute_double_then_add_ten() {
             "double",
             double_pipeline,
             &[
-                (src, GoldyNodeAccess::Read, GoldyResourceAccess::ReadWrite),
-                (dst, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
+                (src_parcel, GoldyNodeAccess::Read, GoldyResourceAccess::ReadWrite),
+                (dst_parcel, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
             ],
             (1, 1, 1),
         );
@@ -123,13 +129,13 @@ fn scheme_compute_double_then_add_ten() {
             scheme,
             "add_ten",
             add_pipeline,
-            &[(dst, GoldyNodeAccess::ReadWrite, GoldyResourceAccess::ReadWrite)],
+            &[(dst_parcel, GoldyNodeAccess::ReadWrite, GoldyResourceAccess::ReadWrite)],
             (1, 1, 1),
         );
 
         assert_eq!(goldy_scheme_len(scheme), 2, "scheme should contain two compute nodes");
 
-        let grant = goldy_scheme_grant_read(scheme, dst);
+        let grant = goldy_scheme_grant_read(scheme, dst_parcel);
         assert!(!grant.is_null(), "{}", last_ffi_message());
 
         let mut submission = std::ptr::null_mut();
@@ -165,8 +171,10 @@ fn scheme_compute_double_then_add_ten() {
         goldy_shader_destroy(add_shader);
         goldy_compute_pipeline_destroy(double_pipeline);
         goldy_shader_destroy(double_shader);
-        goldy_parcel_destroy(dst);
-        goldy_parcel_destroy(src);
+        goldy_parcel_destroy(dst_parcel);
+        goldy_buffer_destroy(dst);
+        goldy_parcel_destroy(src_parcel);
+        goldy_buffer_destroy(src);
         goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);
         goldy_device_destroy(device);

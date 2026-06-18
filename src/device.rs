@@ -352,13 +352,13 @@ pub struct DeviceCapabilities {
     /// (requires GPU copy to a READBACK heap).
     pub has_zero_copy_storage_readback: bool,
 
-    /// How [`crate::Buffer::resize_to`] is implemented on this device.
+    /// How costly in-place buffer resize (`resize_to`) is on this device.
     pub buffer_resize_cost: BufferResizeCost,
 
     /// Sparse / tile page size when applicable; informational for aligning resize hints.
     pub buffer_page_size: u64,
 
-    /// Whether [`crate::Buffer::hint_unused_above`] can return physical memory to the system.
+    /// Whether `hint_unused_above` on backing buffer allocations can return physical memory to the system.
     pub buffer_decommit_supported: bool,
 }
 

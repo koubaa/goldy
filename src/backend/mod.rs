@@ -830,7 +830,7 @@ pub trait GpuBackend: Send + Sync {
         new_logical_size: u64,
     ) -> Result<()>;
 
-    /// Hint that bytes at and above `offset` may be discarded by the system (see [`crate::Buffer::hint_unused_above`]).
+    /// Hint that bytes at and above `offset` may be discarded by the system (see `hint_unused_above` on the backing allocation).
     fn hint_buffer_unused_above(&mut self, buffer: BufferHandle, offset: u64) {
         let _ = (buffer, offset);
     }

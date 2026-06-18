@@ -83,14 +83,14 @@ def test_parcel_write(device):
     import goldy
 
     pool = goldy.RetainedPool(device)
-    parcel = pool.acquire_buffer(
+    buffer = pool.acquire_buffer(
         np.zeros(16, dtype=np.uint32),
         goldy.BufferKind.SCATTERED,
     )
     ctx = device.create_context()
     frame = goldy.write_to_parcel(
         ctx,
-        parcel,
+        buffer[0],
         np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes(),
     )
     frame.wait(ctx)
@@ -188,16 +188,16 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     retained_pool = goldy.RetainedPool(device)
     zeros = np.zeros(64, dtype=np.uint32)
-    parcel = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
+    buffer = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
     shader = goldy.ShaderModule.from_slang(device, fill_shader)
     pipeline = goldy.ComputePipeline(device, shader)
 
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
     scheme.node("fill", pipeline).with_parcel(
-        parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
     ).dispatch(1, 1, 1)
-    grant = scheme.grant_read(parcel)
+    grant = scheme.grant_read(buffer[0])
     frame = scheme.submit()
     values = np.frombuffer(grant.consume(frame), dtype=np.uint32)
     assert values.shape == (64,)
@@ -243,7 +243,8 @@ def test_triangle_via_graph(device):
         dtype=np.float32,
     )
     retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    vertex_buffer = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    vertex_parcel = vertex_buffer[0]
     target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
 
     graph = goldy.TaskGraph()

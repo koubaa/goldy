@@ -10,13 +10,12 @@
 //! - **Textures** — [`TexturePool`] → `Device::alloc_texture`
 //!
 //! **Accounting deed.** Each resource returned from a `Device::alloc_*` call carries a deed —
-//! a `Weak` back-reference to the allocator. When the [`Allocation`] or [`Texture`] is dropped,
+//! a `Weak` back-reference to the allocator. When the backing buffer or texture is dropped,
 //! [`VramAllocator::notify_freed`] is called automatically so the allocator can update its
-//! byte counters. Sub-parcels ([`crate::buffer::AllocationView`]) carry no deed and are never
-//! accounted.
+//! byte counters. Sub-range [`crate::BufferView`]s carry no deed and are never accounted.
 //!
 //! External callers use `Device::alloc_buffer` / `Device::alloc_texture` (and the
-//! `alloc_buffer_with_*` helpers). Raw `Allocation::new_with_stride_and_flags` is
+//! `alloc_buffer_with_*` helpers). Internal `Allocation::new_with_stride_and_flags` is
 //! `pub(crate)` for allocator backends and in-crate tests only.
 //!
 //! **Deferred-reclamation ring.** The allocator also owns the timeline-gated reclamation ring.
@@ -57,11 +56,9 @@
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`BufferPool`]: crate::buffer::BufferPool
-//! [`Allocation`]: crate::buffer::Allocation
 //! [`Texture`]: crate::texture::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
-//! [`Device::with_vram_allocator`]: crate::device::Device::with_vram_allocator
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
 //! [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
 //! [`AllocationPolicy`]: crate::allocation_policy::AllocationPolicy
@@ -196,9 +193,9 @@ pub trait VramAllocator: Send + Sync {
 
     /// Notify the allocator that a deed-holding parcel has been freed.
     ///
-    /// Called automatically from [`Allocation::drop`] / [`Texture::drop`] when the parcel
-    /// was allocated through the device's [`VramAllocator`] (and carries a deed).
-    /// Borrowing sub-parcels (e.g. [`crate::buffer::AllocationView`]) never call this.
+    /// Called automatically when a deed-holding buffer or texture is dropped after allocation
+    /// through the device's [`VramAllocator`].
+    /// Borrowing sub-range views (e.g. [`crate::BufferView`]) never call this.
     ///
     /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
     /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
@@ -212,8 +209,7 @@ pub trait VramAllocator: Send + Sync {
     }
 
     /// Optional byte budget. Returns `None` if no budget is enforced.
-    /// When set, [`alloc_buffer`](Self::alloc_buffer) and
-    /// [`alloc_texture`](Self::alloc_texture) should return an error if
+    /// When set, buffer and texture allocation methods should return an error if
     /// the allocation would exceed the budget.
     fn budget(&self) -> Option<u64> {
         None

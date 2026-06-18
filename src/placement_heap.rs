@@ -1,6 +1,6 @@
 //! Persistent placement heap with paged frame allocation.
 //!
-//! A [`PlacementHeap`] owns a single large GPU [`Allocation`] divided into `depth`
+//! A [`PlacementHeap`] owns a single large GPU backing buffer divided into `depth`
 //! fixed-size pages. Frame N uses page `N % depth` at offset `(N % depth) * page_alloc_size`.
 //! Since the offset is deterministic for a given page slot, the view cache hits in
 //! steady state.
@@ -77,7 +77,7 @@ struct CachedTexture {
 
 /// Persistent GPU buffer with paged allocation for graph-colored transient heaps.
 ///
-/// The heap owns a single large [`Allocation`]. After [`Self::configure_pages`], each
+/// The heap owns a single large backing buffer allocation. After [`Self::configure_pages`], each
 /// frame obtains a deterministic page offset via [`Self::advance_page`].
 ///
 /// ## View and texture cache
