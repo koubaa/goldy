@@ -134,10 +134,6 @@ impl RenderState {
             .node("update_stars", compute_pipeline)
             .with_parcel(star_buffer, NodeAccess::ReadWrite)
             .with_parcel(params_buffer, NodeAccess::Read)
-            .with_views(&[
-                star_buffer.handle(ResourceAccess::Write).unwrap(),
-                params_buffer.handle(ResourceAccess::Read).unwrap(),
-            ])
             .dispatch(NUM_STARS.div_ceil(64), 1, 1);
 
         let mut pass = scheme.render_pass("starfield", scene_rt);

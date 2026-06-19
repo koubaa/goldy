@@ -9,8 +9,8 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::ResourceAccess, BackendType, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant,
-    Instance, NodeAccess, Parcel, ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
+    BackendType, BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, Instance, NodeAccess, Parcel,
+    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission,
 };
 use std::sync::Arc;
 use submission::submission_context;
@@ -77,7 +77,6 @@ fn saxpy_style_chain_closed_form() {
     scheme
         .node("inc", &pipe)
         .with_parcel(&buf, NodeAccess::ReadWrite)
-        .with_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buf).expect("grant");
 
@@ -108,7 +107,6 @@ fn war_write_after_read_pipelined_overwrite() {
     reader
         .node("read", &read_pipe)
         .with_parcel(&buf, NodeAccess::Read)
-        .with_views(&[buf.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     reader.submit().expect("read");
 
@@ -116,7 +114,6 @@ fn war_write_after_read_pipelined_overwrite() {
     writer
         .node("write", &write_pipe)
         .with_parcel(&buf, NodeAccess::Write)
-        .with_views(&[buf.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     let grant = writer.grant_read(&buf).expect("grant");
     let submission = writer.submit().expect("write");
@@ -135,10 +132,6 @@ fn retained_copy_reader(
         .node("copy", pipe)
         .with_parcel(src, NodeAccess::Read)
         .with_parcel(dst, NodeAccess::Write)
-        .with_views(&[
-            src.handle(ResourceAccess::Read).expect("src srv"),
-            dst.handle(ResourceAccess::Write).expect("dst uav"),
-        ])
         .dispatch(1, 1, 1);
     let grant = reader.grant_read(dst).expect("grant");
     (reader, grant)
@@ -207,7 +200,6 @@ fn retained_waw_overwrites_independent_upload() {
     worker
         .node("overwrite", &write_pipe)
         .with_parcel(&src, NodeAccess::Write)
-        .with_views(&[src.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     let grant = worker.grant_read(&src).expect("grant");
 
@@ -278,7 +270,6 @@ fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
     reader
         .node("read_p", &read_pipe)
         .with_parcel(&parcel_p, NodeAccess::Read)
-        .with_views(&[parcel_p.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     reader.submit().expect("reader record");
 
@@ -286,7 +277,6 @@ fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
     writer
         .node("write_q", &write_pipe)
         .with_parcel(&parcel_q, NodeAccess::Write)
-        .with_views(&[parcel_q.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     for _ in 0..3 {
         writer.submit().expect("writer submit");
@@ -327,7 +317,6 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
     reader
         .node("read", &read_pipe)
         .with_parcel(&parcel, NodeAccess::Read)
-        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     reader.submit().expect("reader record");
 
@@ -335,7 +324,6 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
     writer
         .node("write", &write_pipe)
         .with_parcel(&parcel, NodeAccess::Write)
-        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     writer.submit().expect("writer record");
     assert!(reader.is_topology_dirty());
@@ -374,7 +362,6 @@ fn topology_re_record_produces_correct_barriers_and_data() {
     reader
         .node("read", &read_pipe)
         .with_parcel(&parcel, NodeAccess::Read)
-        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     let grant = reader.grant_read(&parcel).expect("grant");
     reader.submit().expect("reader record");
@@ -383,7 +370,6 @@ fn topology_re_record_produces_correct_barriers_and_data() {
     writer
         .node("write", &write_pipe)
         .with_parcel(&parcel, NodeAccess::Write)
-        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     writer.submit().expect("writer record");
 
@@ -410,7 +396,6 @@ fn repeated_resubmit_of_b_never_dirties_a() {
     worker
         .node("inc", &inc_pipe)
         .with_parcel(&parcel, NodeAccess::ReadWrite)
-        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     worker.submit().expect("worker record");
 
@@ -418,7 +403,6 @@ fn repeated_resubmit_of_b_never_dirties_a() {
     observer
         .node("observe", &read_pipe)
         .with_parcel(&parcel, NodeAccess::Read)
-        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     observer.submit().expect("observer settle");
     assert!(!observer.is_topology_dirty());
@@ -467,7 +451,6 @@ fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard() {
     worker
         .node("inc_a", &inc_pipe)
         .with_parcel(&record["a"], NodeAccess::ReadWrite)
-        .with_views(&[record["a"].handle(ResourceAccess::Write).expect("a uav")])
         .dispatch(1, 1, 1);
     worker.submit().expect("worker record");
 
@@ -475,7 +458,6 @@ fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard() {
     observer
         .node("read_b", &read_pipe)
         .with_parcel(&record["b"], NodeAccess::Read)
-        .with_views(&[record["b"].handle(ResourceAccess::Read).expect("b srv")])
         .dispatch(1, 1, 1);
     observer.submit().expect("observer record");
     assert!(!observer.is_topology_dirty());

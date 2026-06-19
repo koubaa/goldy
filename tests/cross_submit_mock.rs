@@ -3,7 +3,6 @@
 use goldy::backend::GpuCommand;
 use goldy::task_graph::BarrierUsage;
 use goldy::test_support::{mock_device, with_mock};
-use goldy::types::ResourceAccess;
 use goldy::{
     BufferKind, ComputePipeline, Context, Device, NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RetainedPool,
     Scheme, ShaderModule, TextureFormat,
@@ -70,7 +69,6 @@ fn write_scheme(ctx: &Context, parcel: &Parcel, pipeline: &ComputePipeline) -> S
     let mut s = Scheme::new(ctx);
     s.node("write", pipeline)
         .with_parcel(parcel, NodeAccess::Write)
-        .with_views(&[parcel.handle(ResourceAccess::Write).expect("uav")])
         .dispatch(1, 1, 1);
     s
 }
@@ -79,7 +77,6 @@ fn read_scheme(ctx: &Context, parcel: &Parcel, pipeline: &ComputePipeline) -> Sc
     let mut s = Scheme::new(ctx);
     s.node("read", pipeline)
         .with_parcel(parcel, NodeAccess::Read)
-        .with_views(&[parcel.handle(ResourceAccess::Read).expect("srv")])
         .dispatch(1, 1, 1);
     s
 }

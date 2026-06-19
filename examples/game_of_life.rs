@@ -10,7 +10,7 @@ use anyhow::Result;
 use goldy::{
     field, Buffer, Color, ComputePipeline, Context, DeviceDescriptor, Grant, Init, Instance, Lease, LeaseRenderTarget,
     NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    ResourceAccess, RetainedPool, Scheme, ShaderModule, ShaderResourceSlot, SwapchainPool, VertexBufferLayout,
+    RetainedPool, Scheme, ShaderModule, ShaderResourceSlot, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -38,14 +38,6 @@ fn run_compute_step(
         .node("game_of_life", pipeline)
         .with_parcel(&cells[read_field], NodeAccess::Read)
         .with_parcel(&cells[write_field], NodeAccess::Write)
-        .with_views(&[
-            cells[read_field]
-                .handle(ResourceAccess::ReadWrite)
-                .expect("read field UAV"),
-            cells[write_field]
-                .handle(ResourceAccess::Write)
-                .expect("write field UAV"),
-        ])
         .dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     scheme.submit()?;
     Ok(())
@@ -61,13 +53,13 @@ fn record_display_scheme(
 ) -> PresentGrant {
     let current = &cells[current_field];
     let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
-    pass.with_parcel(current, NodeAccess::Read);
-    pass.clear(Color::BLACK);
-    pass.set_pipeline(render_pipeline);
+    // Bind before set_pipeline: Scattered<uint> needs a UAV slot, not the SRV from with_parcel(Read).
     pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
         parcel: current,
         access: NodeAccess::ReadWrite,
     }]);
+    pass.clear(Color::BLACK);
+    pass.set_pipeline(render_pipeline);
     pass.draw(0..3, 0..1);
     pass.finish();
     scheme.copy_to_present(scene_rt, screen);

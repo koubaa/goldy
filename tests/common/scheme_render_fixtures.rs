@@ -1,9 +1,9 @@
 //! Scheme render fixtures for FLIP screenshot tests and scheme render integration.
 
 use goldy::{
-    types::ResourceAccess, BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device,
-    Instance, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme,
-    ShaderModule, ShaderResourceSlot, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, Device, Instance, NodeAccess,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Scheme, ShaderModule,
+    ShaderResourceSlot, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 
@@ -249,22 +249,16 @@ pub fn scheme_render_game_of_life(device: &Device, updates: u32) -> Vec<u8> {
     for _ in 0..updates {
         let mut scheme = Scheme::new(&ctx);
         if use_buffer_a {
-            let read = buffer_a.handle(ResourceAccess::ReadWrite).expect("buffer_a read");
-            let write = buffer_b.handle(ResourceAccess::Write).expect("buffer_b write");
             scheme
                 .node("gol_update", &compute_pipeline)
                 .with_parcel(&buffer_a, NodeAccess::Read)
                 .with_parcel(&buffer_b, NodeAccess::Write)
-                .with_views(&[read, write])
                 .dispatch(workgroups_x, workgroups_y, 1);
         } else {
-            let read = buffer_b.handle(ResourceAccess::ReadWrite).expect("buffer_b read");
-            let write = buffer_a.handle(ResourceAccess::Write).expect("buffer_a write");
             scheme
                 .node("gol_update", &compute_pipeline)
                 .with_parcel(&buffer_b, NodeAccess::Read)
                 .with_parcel(&buffer_a, NodeAccess::Write)
-                .with_views(&[read, write])
                 .dispatch(workgroups_x, workgroups_y, 1);
         }
         scheme.submit().expect("compute submit");

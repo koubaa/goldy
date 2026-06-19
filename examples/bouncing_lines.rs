@@ -64,6 +64,7 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
+    ctx: goldy::Context,
     swapchain: SwapchainPool,
     screen: goldy::PresentLease,
     present: PresentGrant,
@@ -108,7 +109,6 @@ impl RenderState {
         scheme
             .node("update_lines", compute_pipeline)
             .with_parcel(line_buffer, NodeAccess::ReadWrite)
-            .with_views(&[line_buffer.handle(ResourceAccess::Write).unwrap()])
             .dispatch(NUM_LINES.div_ceil(64).max(1), 1, 1);
 
         let bg_color = Color {
@@ -199,6 +199,7 @@ impl RenderState {
         Ok(Self {
             window,
             device,
+            ctx,
             swapchain,
             screen,
             present,

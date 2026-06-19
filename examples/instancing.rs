@@ -113,10 +113,6 @@ impl RenderState {
             .node("update_instances", compute_pipeline)
             .with_parcel(instance_buffer, NodeAccess::ReadWrite)
             .with_parcel(params_buffer, NodeAccess::Read)
-            .with_views(&[
-                instance_buffer.handle(ResourceAccess::Write).unwrap(),
-                params_buffer.handle(ResourceAccess::Read).unwrap(),
-            ])
             .dispatch(NUM_QUADS.div_ceil(64), 1, 1);
 
         let bg_color = Color {

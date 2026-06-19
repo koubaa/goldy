@@ -226,6 +226,7 @@ impl EffectType {
 
 struct WindowState {
     window: Arc<Window>,
+    ctx: goldy::Context,
     swapchain: SwapchainPool,
     screen: goldy::PresentLease,
     present: PresentGrant,
@@ -325,6 +326,7 @@ impl WindowState {
 
         Ok(Self {
             window,
+            ctx: ctx.clone(),
             swapchain,
             screen,
             present,

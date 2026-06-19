@@ -11,7 +11,7 @@ mod submission;
 
 use goldy::{
     shader::builtins,
-    types::{AddressMode, FilterMode, ResourceAccess, SamplerDesc, TextureFlags, TextureKind},
+    types::{AddressMode, FilterMode, SamplerDesc, TextureFlags, TextureKind},
     BufferKind, Color, CompareFunction, ComputePipeline, DepthFormat, DepthStencilState, IndexFormat, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, Sampler, Scheme, ShaderModule, ShaderResourceSlot,
     TextureFormat, Vertex2D, Vertex2DUv, VertexAttribute, VertexBufferLayout, VertexFormat,
@@ -1053,7 +1053,6 @@ float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
     writer
         .node("write_sentinel", &write_pipeline)
         .with_parcel(&sentinel, NodeAccess::Write)
-        .with_views(&[sentinel.handle(ResourceAccess::Write).expect("sentinel uav")])
         .dispatch(1, 1, 1);
     writer.submit().expect("writer submit");
 
@@ -1068,7 +1067,6 @@ float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
     consumer
         .node("dummy_compute", &dummy_pipeline)
         .with_parcel(&dummy_buf, NodeAccess::Read)
-        .with_views(&[dummy_buf.handle(ResourceAccess::Read).expect("dummy srv")])
         .dispatch(1, 1, 1);
     let rt = consumer
         .lease_render_target(W, H, TextureFormat::Rgba8Unorm, None)

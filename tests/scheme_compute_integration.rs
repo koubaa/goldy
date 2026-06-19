@@ -1,6 +1,6 @@
 //! Scheme compute integration tests — migrated from `TaskGraph` coverage.
 //!
-//! Retained worker schemes: parcels + `with_views` + [`Scheme::submit`].
+//! Retained worker schemes: parcels + [`Scheme::node`] / [`Scheme::submit`].
 //! CPU→GPU parcel writes (including zero-fills) use [`upload::write_to_parcel`] — a
 //! separate upload submission per call (one-node upload [`Scheme`] on `ctx`),
 //! serialized against worker schemes by queue order. Callers do not use
@@ -61,13 +61,11 @@ fn dispatch_u32_write_and_read(ctx: &goldy::Context, shader_src: &str, out: &Par
     let device = ctx.device();
     let shader = ShaderModule::from_slang(device, shader_src).expect("compile shader");
     let pipeline = ComputePipeline::new(device, &shader).expect("create pipeline");
-    let out_w = out.handle(ResourceAccess::Write).expect("out handle");
 
     let mut scheme = Scheme::new(ctx);
     scheme
         .node("n0", &pipeline)
         .with_parcel(out, NodeAccess::Write)
-        .with_views(&[out_w])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(out).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -225,15 +223,10 @@ fn scheme_graph_linear_chain() {
         .node("double", &double_pipe)
         .with_parcel(&src, NodeAccess::Read)
         .with_parcel(&dst, NodeAccess::Write)
-        .with_views(&[
-            src.handle(ResourceAccess::ReadWrite).unwrap(),
-            dst.handle(ResourceAccess::Write).unwrap(),
-        ])
         .dispatch(1, 1, 1);
     scheme
         .node("add_ten", &add_pipe)
         .with_parcel(&dst, NodeAccess::ReadWrite)
-        .with_views(&[dst.handle(ResourceAccess::ReadWrite).unwrap()])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&dst).expect("grant_read");
@@ -274,12 +267,10 @@ fn scheme_graph_independent_dispatches() {
     scheme
         .node("fill_a", &pipe_42)
         .with_parcel(&buf_a, NodeAccess::Write)
-        .with_views(&[buf_a.handle(ResourceAccess::Write).unwrap()])
         .dispatch(1, 1, 1);
     scheme
         .node("fill_b", &pipe_99)
         .with_parcel(&buf_b, NodeAccess::Write)
-        .with_views(&[buf_b.handle(ResourceAccess::Write).unwrap()])
         .dispatch(1, 1, 1);
 
     let grant_a = scheme.grant_read(&buf_a).expect("grant_read");
@@ -322,35 +313,26 @@ fn scheme_graph_diamond_dependency() {
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .unwrap();
 
-    let src_rw = src.handle(ResourceAccess::ReadWrite).unwrap();
-    let y_w = y.handle(ResourceAccess::Write).unwrap();
-    let z_w = z.handle(ResourceAccess::Write).unwrap();
-    let out_w = out.handle(ResourceAccess::Write).unwrap();
-
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("fill_src", &fill_pipe)
         .with_parcel(&src, NodeAccess::Write)
-        .with_views(&[src_rw])
         .dispatch(1, 1, 1);
     scheme
         .node("double_to_y", &double_pipe)
         .with_parcel(&src, NodeAccess::Read)
         .with_parcel(&y, NodeAccess::Write)
-        .with_views(&[src_rw, y_w])
         .dispatch(1, 1, 1);
     scheme
         .node("double_to_z", &double_pipe)
         .with_parcel(&src, NodeAccess::Read)
         .with_parcel(&z, NodeAccess::Write)
-        .with_views(&[src_rw, z_w])
         .dispatch(1, 1, 1);
     scheme
         .node("sum_yz", &sum_pipe)
         .with_parcel(&y, NodeAccess::Read)
         .with_parcel(&z, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[y_w, z_w, out_w])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&out).expect("grant_read");
@@ -380,7 +362,6 @@ fn scheme_graph_fill_readback() {
     scheme
         .node("fill", &pipe)
         .with_parcel(&buf, NodeAccess::Write)
-        .with_views(&[buf.handle(ResourceAccess::Write).unwrap()])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().unwrap();
@@ -412,10 +393,6 @@ fn scheme_zeros_then_dispatch_reads_zeros() {
         .node("copy", &copy_pipe)
         .with_parcel(&buf, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[
-            buf.handle(ResourceAccess::ReadWrite).unwrap(),
-            out.handle(ResourceAccess::Write).unwrap(),
-        ])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&out).expect("grant_read");
@@ -449,10 +426,6 @@ fn scheme_write_then_dispatch_reads_uploaded_data() {
         .node("copy", &copy_pipe)
         .with_parcel(&buf, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[
-            buf.handle(ResourceAccess::ReadWrite).unwrap(),
-            out.handle(ResourceAccess::Write).unwrap(),
-        ])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&out).expect("grant_read");
@@ -486,10 +459,6 @@ fn scheme_stress_zeros_then_dispatch_large() {
         .node("copy", &copy_pipe)
         .with_parcel(&buf, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[
-            buf.handle(ResourceAccess::ReadWrite).unwrap(),
-            out.handle(ResourceAccess::Write).unwrap(),
-        ])
         .dispatch((N / 64) as u32, 1, 1);
 
     let grant = scheme.grant_read(&out).expect("grant_read");
@@ -533,10 +502,6 @@ fn scheme_stress_many_zero_writes_many_dispatches() {
             .node("copy", &copy_pipe)
             .with_parcel(src, NodeAccess::Read)
             .with_parcel(out, NodeAccess::Write)
-            .with_views(&[
-                src.handle(ResourceAccess::ReadWrite).unwrap(),
-                out.handle(ResourceAccess::Write).unwrap(),
-            ])
             .dispatch((N / 64) as u32, 1, 1);
     }
 
@@ -576,10 +541,6 @@ fn scheme_stress_write_then_dispatch_chain() {
         .node("copy", &copy_pipe)
         .with_parcel(&buf, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[
-            buf.handle(ResourceAccess::ReadWrite).unwrap(),
-            out.handle(ResourceAccess::Write).unwrap(),
-        ])
         .dispatch((N / 64) as u32, 1, 1);
 
     let grant = scheme.grant_read(&out).expect("grant_read");
@@ -608,16 +569,12 @@ fn scheme_stress_two_phase_submission() {
         .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .unwrap();
 
-    let buf_rw = buf.handle(ResourceAccess::ReadWrite).unwrap();
-    let tmp_rw = tmp.handle(ResourceAccess::ReadWrite).unwrap();
-
     {
         let mut scheme = Scheme::new(&ctx);
         scheme
             .node("double", &double_pipe)
             .with_parcel(&buf, NodeAccess::Read)
             .with_parcel(&tmp, NodeAccess::Write)
-            .with_views(&[buf_rw, tmp_rw])
             .dispatch((N / 64) as u32, 1, 1);
         scheme.submit().unwrap();
     }
@@ -627,7 +584,6 @@ fn scheme_stress_two_phase_submission() {
         scheme
             .node("add_ten", &add_pipe)
             .with_parcel(&tmp, NodeAccess::ReadWrite)
-            .with_views(&[tmp_rw])
             .dispatch((N / 64) as u32, 1, 1);
         let grant = scheme.grant_read(&tmp).expect("grant_read");
         let frame = scheme.submit().unwrap();
@@ -657,7 +613,6 @@ fn scheme_stress_rapid_submissions() {
     scheme
         .node("add_ten", &add_pipe)
         .with_parcel(&buf, NodeAccess::ReadWrite)
-        .with_views(&[buf.handle(ResourceAccess::ReadWrite).unwrap()])
         .dispatch((N / 64) as u32, 1, 1);
 
     let grant = scheme.grant_read(&buf).expect("grant_read");
@@ -722,7 +677,6 @@ fn scheme_compute_write_and_readback() {
     scheme
         .node("double", &pipe)
         .with_parcel(&buffer, NodeAccess::ReadWrite)
-        .with_views(&[buffer.handle(ResourceAccess::ReadWrite).expect("handle")])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buffer).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -752,7 +706,6 @@ fn scheme_compute_with_uav_parcel() {
     scheme
         .node("double", &pipe)
         .with_parcel(&buffer, NodeAccess::ReadWrite)
-        .with_views(&[buffer.handle(ResourceAccess::ReadWrite).expect("handle")])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buffer).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -786,10 +739,6 @@ fn scheme_compute_with_srv_and_uav_parcels() {
         .node("copy", &pipe)
         .with_parcel(&input, NodeAccess::Read)
         .with_parcel(&output, NodeAccess::Write)
-        .with_views(&[
-            input.handle(ResourceAccess::ReadWrite).expect("in"),
-            output.handle(ResourceAccess::Write).expect("out"),
-        ])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -891,10 +840,6 @@ fn scheme_zeros_before_copy_dispatch() {
         .node("copy", &pipe)
         .with_parcel(&input, NodeAccess::Read)
         .with_parcel(&output, NodeAccess::Write)
-        .with_views(&[
-            input.handle(ResourceAccess::ReadWrite).expect("in"),
-            output.handle(ResourceAccess::Write).expect("out"),
-        ])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -930,18 +875,12 @@ fn scheme_write_to_parcel_zeros_between_submissions() {
         .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
         .expect("output");
 
-    let out_rw = output.handle(ResourceAccess::ReadWrite).expect("out");
-
     {
         let mut copy_scheme = Scheme::new(&ctx);
         copy_scheme
             .node("copy", &copy_pipe)
             .with_parcel(&input, NodeAccess::Read)
             .with_parcel(&output, NodeAccess::Write)
-            .with_views(&[
-                input.handle(ResourceAccess::ReadWrite).expect("in"),
-                output.handle(ResourceAccess::Write).expect("out w"),
-            ])
             .dispatch(1, 1, 1);
         copy_scheme.submit().expect("copy submit 0");
         copy_scheme.submit().expect("copy submit 1");
@@ -962,7 +901,6 @@ fn scheme_write_to_parcel_zeros_between_submissions() {
         inc_scheme
             .node("inc", &inc_pipe)
             .with_parcel(&output, NodeAccess::ReadWrite)
-            .with_views(&[out_rw])
             .dispatch(1, 1, 1);
         let grant = inc_scheme.grant_read(&output).expect("grant_read");
         let frame = inc_scheme.submit().expect("inc submit");
@@ -1008,10 +946,6 @@ fn scheme_upload_frame_unwaited_serializes_before_worker_submit() {
         .node("copy", &copy_pipe)
         .with_parcel(&input, NodeAccess::Read)
         .with_parcel(&output, NodeAccess::Write)
-        .with_views(&[
-            input.handle(ResourceAccess::ReadWrite).expect("in"),
-            output.handle(ResourceAccess::Write).expect("out"),
-        ])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&output).expect("grant_read");
     let worker_frame = scheme.submit().expect("worker submit");
@@ -1065,14 +999,6 @@ fn scheme_compute_many_resource_slots() {
         .with_parcel(&d, NodeAccess::Read)
         .with_parcel(&e, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[
-            a.handle(ResourceAccess::ReadWrite).expect("a"),
-            b.handle(ResourceAccess::ReadWrite).expect("b"),
-            c.handle(ResourceAccess::ReadWrite).expect("c"),
-            d.handle(ResourceAccess::ReadWrite).expect("d"),
-            e.handle(ResourceAccess::ReadWrite).expect("e"),
-            out.handle(ResourceAccess::Write).expect("out"),
-        ])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&out).expect("grant_read");
@@ -1122,20 +1048,15 @@ fn scheme_regular_buffer_write_then_copy() {
         )
         .expect("output");
 
-    let scratch_rw = scratch.handle(ResourceAccess::ReadWrite).expect("scratch");
-    let out_w = output.handle(ResourceAccess::Write).expect("out");
-
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("write_iota", &write_pipe)
         .with_parcel(&scratch, NodeAccess::Write)
-        .with_views(&[scratch_rw])
         .dispatch(1, 1, 1);
     scheme
         .node("copy_out", &copy_pipe)
         .with_parcel(&scratch, NodeAccess::Read)
         .with_parcel(&output, NodeAccess::Write)
-        .with_views(&[scratch_rw, out_w])
         .dispatch(1, 1, 1);
 
     let grant = scheme.grant_read(&output).expect("grant_read");
@@ -1559,13 +1480,11 @@ fn scheme_compute_with_struct_buffer() {
     let buffer = pool
         .acquire_buffer_with_data(&particles, BufferKind::Scattered)
         .expect("buffer");
-    let handle = buffer.handle(ResourceAccess::ReadWrite).expect("handle");
 
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("n0", &pipeline)
         .with_parcel(&buffer, NodeAccess::ReadWrite)
-        .with_views(&[handle])
         .dispatch(1, 1, 1);
     scheme.submit().expect("submit with struct buffer");
 }
@@ -1601,7 +1520,6 @@ fn scheme_cpu_readable_compute_write_and_read() {
     scheme
         .node("double", &pipeline)
         .with_parcel(&buffer, NodeAccess::ReadWrite)
-        .with_views(&[buffer.handle(ResourceAccess::ReadWrite).expect("handle")])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buffer).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -1659,15 +1577,12 @@ fn scheme_scattered_typed_variable_assignment() {
         .expect("output");
 
     // BufRO<Pair> must bind the SRV slot; ReadWrite yields UAV and reads zeros on WARP.
-    let in_h = input.handle(ResourceAccess::Read).expect("in");
-    let out_h = output.handle(ResourceAccess::Write).expect("out");
 
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("typed_copy", &pipeline)
         .with_parcel(&input, NodeAccess::Read)
         .with_parcel(&output, NodeAccess::Write)
-        .with_views(&[in_h, out_h])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&output).expect("grant_read");
     let frame = scheme.submit().expect("submit");
@@ -1706,13 +1621,11 @@ fn scheme_compute_write_to_texture() {
             None,
         )
         .expect("texture");
-    let tex_w = texture.handle(ResourceAccess::Write).expect("tex write");
 
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("write_tex", &pipeline)
         .with_parcel(&texture, NodeAccess::Write)
-        .with_views(&[tex_w])
         .dispatch(wg_x, wg_y, 1);
     let grant = scheme.grant_read_texture(&texture).expect("grant_read_texture");
     let frame = scheme.submit().expect("submit");
@@ -1855,7 +1768,6 @@ fn scheme_texture_dual_view_round_trip() {
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
     let sampler = Sampler::nearest(&device).expect("sampler");
 
-    let tex_w = tex.handle(ResourceAccess::Write).expect("tex write");
     let tex_r = tex.handle(ResourceAccess::Read).expect("tex read");
     let smp_r = sampler.handle(ResourceAccess::Read).expect("sampler");
     let out_w = out.handle(ResourceAccess::Write).expect("out write");
@@ -1864,7 +1776,6 @@ fn scheme_texture_dual_view_round_trip() {
     scheme
         .node("write", &write_pipeline)
         .with_parcel(&tex, NodeAccess::Write)
-        .with_views(&[tex_w])
         .dispatch(1, 1, 1);
     scheme
         .node("read", &read_pipeline)
@@ -1911,14 +1822,10 @@ fn scheme_two_contexts_both_submit_and_complete() {
         .acquire_buffer_with_data(&(100..164).collect::<Vec<u32>>(), BufferKind::Scattered)
         .expect("buf_b");
 
-    let buf_a_rw = buf_a.handle(ResourceAccess::ReadWrite).expect("buf_a");
-    let buf_b_rw = buf_b.handle(ResourceAccess::ReadWrite).expect("buf_b");
-
     let mut scheme_a = Scheme::new(&ctx_a);
     scheme_a
         .node("n0", &pipeline)
         .with_parcel(&buf_a, NodeAccess::ReadWrite)
-        .with_views(&[buf_a_rw])
         .dispatch(1, 1, 1);
     let grant_a = scheme_a.grant_read(&buf_a).expect("grant_read");
     let frame_a = scheme_a.submit().expect("ctx_a submit");
@@ -1927,7 +1834,6 @@ fn scheme_two_contexts_both_submit_and_complete() {
     scheme_b
         .node("n0", &pipeline)
         .with_parcel(&buf_b, NodeAccess::ReadWrite)
-        .with_views(&[buf_b_rw])
         .dispatch(1, 1, 1);
     let grant_b = scheme_b.grant_read(&buf_b).expect("grant_read");
     let frame_b = scheme_b.submit().expect("ctx_b submit");
@@ -2017,10 +1923,6 @@ fn scheme_write_parcel_reuse_across_submissions() {
         )
         .expect("out_b");
 
-    let mid_h = mid.handle(ResourceAccess::ReadWrite).expect("mid handle");
-    let out_a_h = out_a.handle(ResourceAccess::Write).expect("out_a handle");
-    let out_b_h = out_b.handle(ResourceAccess::Write).expect("out_b handle");
-
     let data_a: Vec<u32> = (100..100 + N as u32).collect();
     let data_b: Vec<u32> = (900..900 + N as u32).collect();
 
@@ -2031,7 +1933,6 @@ fn scheme_write_parcel_reuse_across_submissions() {
     s1.node("copy_a", &pipeline)
         .with_parcel(&mid, NodeAccess::Read)
         .with_parcel(&out_a, NodeAccess::Write)
-        .with_views(&[mid_h, out_a_h])
         .dispatch(1, 1, 1);
     let grant_a = s1.grant_read(&out_a).expect("grant_a");
     let sub1 = s1.submit().expect("submit 1");
@@ -2044,7 +1945,6 @@ fn scheme_write_parcel_reuse_across_submissions() {
     s2.node("copy_b", &pipeline)
         .with_parcel(&mid, NodeAccess::Read)
         .with_parcel(&out_b, NodeAccess::Write)
-        .with_views(&[mid_h, out_b_h])
         .dispatch(1, 1, 1);
     let grant_b = s2.grant_read(&out_b).expect("grant_b");
     let sub2 = s2.submit().expect("submit 2");
@@ -2259,10 +2159,6 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
         .node("uniform_offset", &pipeline)
         .with_parcel(&inp, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[
-            inp.handle(ResourceAccess::ReadWrite).expect("inp"),
-            out.handle(ResourceAccess::Write).expect("out"),
-        ])
         .with_param(OFFSET)
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&out).expect("grant");
@@ -2307,10 +2203,6 @@ fn scheme_buffer_view_copy_between_sub_regions() {
         .node("n0", &pipeline)
         .with_parcel(&cells[0], NodeAccess::ReadWrite)
         .with_parcel(&cells[1], NodeAccess::Write)
-        .with_views(&[
-            cells[0].handle(ResourceAccess::ReadWrite).expect("src"),
-            cells[1].handle(ResourceAccess::Write).expect("dst"),
-        ])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&cells[1]).expect("grant_read");
     let submission = scheme.submit().expect("submit");
@@ -2358,7 +2250,6 @@ fn scheme_buffer_view_isolation() {
     scheme
         .node("n0", &pipeline)
         .with_parcel(&cells[1], NodeAccess::Write)
-        .with_views(&[cells[1].handle(ResourceAccess::Write).expect("work")])
         .dispatch(1, 1, 1);
     let grant_sentinel = scheme.grant_read(&cells[0]).expect("grant sentinel");
     let grant_work = scheme.grant_read(&cells[1]).expect("grant work");
@@ -2429,12 +2320,10 @@ fn scheme_compute_dispatch_indirect() {
     scheme
         .node("write_shape", &write_pipe)
         .with_parcel(&shape, NodeAccess::Write)
-        .with_views(&[shape.handle(ResourceAccess::Write).expect("shape handle")])
         .dispatch(1, 1, 1);
     scheme
         .node("work", &work_pipe)
         .with_parcel(&work, NodeAccess::ReadWrite)
-        .with_views(&[work.handle(ResourceAccess::ReadWrite).expect("work handle")])
         .dispatch_shape(&*shape)
         .expect("indirect dispatch");
 
@@ -2471,7 +2360,6 @@ fn scheme_dispatch_indirect_invalid_buffer() {
         scheme
             .node("work", &work_pipe)
             .with_parcel(&work, NodeAccess::Write)
-            .with_views(&[work.handle(ResourceAccess::Write).expect("work handle")])
             .dispatch_shape(&*shape)
             .expect("record indirect dispatch");
         drop(shape);
