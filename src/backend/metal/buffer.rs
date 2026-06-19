@@ -5,7 +5,7 @@ use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SI
 use crate::backend::BufferKind;
 use crate::types::BufferFlags;
 use ::metal as mtl;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
 
 fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
@@ -71,39 +71,23 @@ fn allocate_mtl_storage_buffer(
         }
     }
 
-    // Attempt 3 (blocking): wait for the oldest in-flight command buffer to
-    // complete — a runtime boundary action that reclaims one frame's worth of
-    // archive. Invisible to the caller; fires only during warmup when the CPU
-    // races ahead of the GPU before caches are warm.
-    let oldest_cb = super::context::oldest_in_flight_cb(state, device_handle);
-
-    if let Some(cb) = oldest_cb {
-        let _tz = crate::tracy_zone!("mtl.heap_allocator.wait_reclaim");
-        tracing::info!(
-            target: "goldy::diag::alloc",
-            allocation_size_mb = allocation_size / (1024 * 1024),
-            "heap.wait_reclaim: heap saturated, blocking on oldest in-flight CB"
-        );
-        cb.wait_until_completed();
-        let retired = super::context::device_retired(state, device_handle);
-        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        logical_device.process_deletion_queue_up_to(retired);
-        logical_device.heap_allocator.lock().unwrap().compact_overflow();
-        if let Some(buf) = logical_device
-            .heap_allocator
-            .lock()
-            .unwrap()
-            .allocate(allocation_size, options)
-        {
-            return Ok((buf, false));
-        }
-    }
-
+    // Attempt 3 (non-blocking pressure-relief valve): the overflow-heap cap is
+    // reached and a synchronous drain is unsafe here — this runs with the backend
+    // mutex held, so blocking on a command buffer would deadlock against the GPU
+    // completion handlers that need that same lock. Instead of failing (which the
+    // client turns into a retry storm that spikes VRAM), satisfy the request from a
+    // standalone device buffer, exactly as the jumbo/GPU-only path above does. These
+    // are transient warmup spikes (the CPU racing ahead before caches are warm, more
+    // pronounced under the 2-commit-per-frame split); the direct buffer is tracked as
+    // device-allocated and freed through the normal deletion queue, so steady state
+    // returns to the heap once the GPU catches up.
     crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
         reason: crate::signal::OversubscribedReason::BufferHeap,
         size_hint: allocation_size,
     });
-    bail!("Metal buffer heap allocation failed — all heaps exhausted");
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let buf = logical_device.device.new_buffer(allocation_size, options);
+    Ok((buf, true))
 }
 
 #[allow(clippy::too_many_arguments)]
