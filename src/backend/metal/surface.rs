@@ -1,8 +1,11 @@
 //! Surface (window presentation) management logic.
 //!
-//! The acquire/render/present cycle is decoupled:
-//! - `acquire()` calls `nextDrawable` and registers the drawable's texture for bindless access
-//! - `frame_texture()` returns the registered texture handle
+//! The acquire/render/present cycle:
+//! - `acquire()` calls `nextDrawable` and registers the drawable's texture in a
+//!   rotating bindless storage-image slot
+//! - `frame_texture()` returns the registered texture handle for the current frame
+//! - `render()` targets the already-acquired drawable
+//! - `present()` presents the drawable and unregisters its temporary texture handle
 //!
 //! ## Deprecation note
 //! This file uses `cocoa::base::id`, `NSRect`, and related types from the
@@ -204,91 +207,41 @@ pub(super) fn acquire(
             unregister_surface_texture(state, tex_handle);
         }
     }
-
-    // Clone the GPU-signal timestamp arc before taking a mutable surface borrow.
-    // This lets us read the value after nextDrawable without conflicting borrows.
-    let gpu_signal_arc = state.surfaces.get(&surface).and_then(|ss| {
-        let dev = ss.device_handle;
-        state.contexts.values().find_map(|sc_arc| {
-            let sc = sc_arc.lock().unwrap();
-            if sc.device == dev {
-                Some(sc.timeline_waiter.last_signal_ns_arc())
-            } else {
-                None
+    if let Some(ss) = state.surfaces.get_mut(&surface) {
+        if let Some(d) = ss.current_drawable.take() {
+            unsafe {
+                let (): () = msg_send![d as id, release];
             }
-        })
-    });
+        }
+    }
 
-    let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+    let (device_handle, width, height, format, frame_slot, bindless_slot) = {
+        let ss = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+        let layer = ss.layer as id;
+        let size: CGSize = unsafe { msg_send![layer, drawableSize] };
+        ss.width = (size.width as u32).max(1);
+        ss.height = (size.height as u32).max(1);
+        ss.current_frame = (ss.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        let frame_slot = ss.current_frame;
+        (
+            ss.device_handle,
+            ss.width,
+            ss.height,
+            ss.format,
+            frame_slot,
+            ss.bindless_storage_slots[frame_slot],
+        )
+    };
 
-    let layer = surface_state.layer as id;
-
-    let size: CGSize = unsafe { msg_send![layer, drawableSize] };
-    surface_state.width = (size.width as u32).max(1);
-    surface_state.height = (size.height as u32).max(1);
-
-    surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-    // Snapshot the GPU-signal timestamp and CPU clock before blocking on the compositor.
-    // gpu_signal_before: when did the GPU last fire a completion handler?
-    // t_pre: CPU time just before nextDrawable (= when we enter the potential stall).
-    let gpu_signal_before_ns = gpu_signal_arc
-        .as_ref()
-        .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
-        .unwrap_or(0);
-    let t_pre_drawable_ns = super::types::metal_instant_ns();
-
-    // Get the next drawable from the layer
+    let layer = state.surfaces.get(&surface).unwrap().layer as id;
     let drawable: id = {
         let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
         unsafe { msg_send![layer, nextDrawable] }
     };
 
-    // ── nextDrawable latency diagnostics ────────────────────────────────────
-    //
-    //  drawable_wait_us  : time spent blocked inside nextDrawable.
-    //  gpu_signal_age_us : age of the last GPU completion signal at the moment
-    //                      we entered nextDrawable.
-    //    • Large age + large wait → compositor throttle (GPU idle, compositor
-    //      hasn't released a drawable yet).
-    //    • Small age + large wait → GPU pacing (GPU was still running when we
-    //      called nextDrawable; both GPU and compositor contributed to the stall).
-    //    • gpu_fired_during_wait → GPU completion fired *inside* nextDrawable,
-    //      proving compute was on the critical path for this frame.
-    {
-        let t_post_drawable_ns = super::types::metal_instant_ns();
-        let gpu_signal_after_ns = gpu_signal_arc
-            .as_ref()
-            .map(|a| a.load(std::sync::atomic::Ordering::Acquire))
-            .unwrap_or(0);
-
-        let drawable_wait_us = t_post_drawable_ns.saturating_sub(t_pre_drawable_ns) / 1000;
-        let gpu_signal_age_us = if gpu_signal_before_ns > 0 {
-            t_pre_drawable_ns.saturating_sub(gpu_signal_before_ns) / 1000
-        } else {
-            u64::MAX
-        };
-        let gpu_fired_during_wait = gpu_signal_after_ns > gpu_signal_before_ns && gpu_signal_before_ns > 0;
-
-        if gpu_signal_age_us == u64::MAX {
-            tracing::debug!(
-                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
-                 (no prior gpu signal — first frame?)"
-            );
-        } else {
-            tracing::debug!(
-                "[mtl.nextDrawable] waited={drawable_wait_us}µs \
-                 gpu_signal_age={gpu_signal_age_us}µs \
-                 gpu_fired_during_wait={gpu_fired_during_wait}"
-            );
-        }
-
-        crate::tracy_plot!("nextDrawable_wait_us", drawable_wait_us as f64);
-        if gpu_signal_age_us != u64::MAX {
-            crate::tracy_plot!("gpu_signal_age_us", gpu_signal_age_us as f64);
-        }
+    if super::api_log::enabled() {
+        super::api_log::log_next_drawable(drawable != nil);
     }
-    // ────────────────────────────────────────────────────────────────────────
 
     if drawable == nil {
         anyhow::bail!("Failed to get next drawable from CAMetalLayer");
@@ -296,30 +249,19 @@ pub(super) fn acquire(
     unsafe {
         let () = msg_send![drawable, retain];
     }
-    surface_state.current_drawable = Some(drawable as *mut std::ffi::c_void);
+    state.surfaces.get_mut(&surface).unwrap().current_drawable = Some(drawable as *mut std::ffi::c_void);
 
-    // Get the drawable's texture and register it for bindless access
     let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
-
-    let device_handle = surface_state.device_handle;
-    let width = surface_state.width;
-    let height = surface_state.height;
-    let format = surface_state.format;
-    // Use the frame-indexed slot to avoid overwriting a slot the GPU is still reading.
-    let bindless_slot = surface_state.bindless_storage_slots[surface_state.current_frame];
 
     let tex_handle = register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
 
     let image_index = {
-        let surface_state = state
-            .surfaces
-            .get_mut(&surface)
-            .expect("surface must be registered before acquiring a frame");
-        let image_index = surface_state.current_frame as u32;
-        surface_state.current_texture_handle = Some(tex_handle);
-        surface_state.last_acquired_image_index = Some(image_index);
-        surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
+        let ss = state.surfaces.get_mut(&surface).expect("surface registered above");
+        let image_index = frame_slot as u32;
+        ss.current_texture_handle = Some(tex_handle);
+        ss.last_acquired_image_index = Some(image_index);
+        ss.pending_acquire_count = ss.pending_acquire_count.saturating_add(1);
         image_index
     };
 
@@ -477,12 +419,10 @@ pub(super) fn render(
     Ok(())
 }
 
-/// Present the acquired drawable and unregister its temporary texture.
+/// Present the acquired drawable.
 ///
-/// This is the sole place where `presentDrawable:` is called. A lightweight
-/// command buffer is created to schedule the presentation. If `render()` was
-/// called first, Metal's serial queue ordering guarantees the render commands
-/// complete before the present is scheduled by the GPU.
+/// The drawable is presented and released; the per-frame texture handle is
+/// unregistered. This is the sole place where `presentDrawable:` is called.
 pub(super) fn present(
     state: &mut MetalState,
     surface: SurfaceHandle,
@@ -556,6 +496,9 @@ pub(super) fn present(
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);
+    if super::api_log::enabled() {
+        super::api_log::log_present_drawable(signal_value);
+    }
     command_buffer.commit();
 
     // Release the retained drawable
@@ -582,6 +525,7 @@ pub(super) fn present(
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+        super::drain_completed_cbs(&mut sc);
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
@@ -609,7 +553,7 @@ pub(super) fn submit_frame(state: &mut MetalState, frame: &FrameToken) -> Result
     };
 
     if !pending.is_empty() {
-        return compute::submit(state, frame.context, &pending);
+        return compute::submit(state, frame.context, &pending, None);
     }
 
     let sc_arc = state.contexts.get(&frame.context).context("Invalid context handle")?;

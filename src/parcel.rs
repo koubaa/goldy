@@ -1,53 +1,666 @@
-//! Opaque retained parcel — the shared unit moved between retained and transient containers.
+//! Retained GPU property: [`Buffer`] (acquired aggregate) and [`Parcel`] (bindable unit).
 //!
-//! The client holds a [`Parcel`] by value and never sees backend resource handles.
-//! Resource indices for shader binding are exposed via [`Parcel::resource_index`];
-//! the runtime uses internal resource IDs when wiring [`crate::TaskGraph`] nodes.
+//! Acquire a [`Buffer`] from [`crate::retained_pool::RetainedPool`]; bind a [`Parcel`] to
+//! dispatches and render passes. Each parcel is independently dependency-tracked.
 
 use crate::backend::{BufferHandle, ContextHandle};
-use crate::buffer::{Buffer, BufferPool, BufferSource, BufferView};
+use crate::buffer::{Allocation, BufferSource, BufferView, StructuredBufferElement};
+use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::Texture;
-use crate::timeline::{mark_reference, ReferenceTable, TimelineValue};
-use crate::types::{ResourceAccess, ResourceHandle};
+use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue, WRITE_KINDS_TRANSFER};
+use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle};
 use crate::vram_allocator::ParcelType;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::borrow::Cow;
+use std::ops::{Deref, Index};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-/// Index into a [`Parcel`] mosaic's sub-ranges (returned by [`crate::retained_pool::MosaicBuilder`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MosaicSlot(pub u32);
+/// How a scheme interacts with a shared parcel for cross-scheme topology tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InteractionRole {
+    Reads,
+    Writes,
+}
+
+/// One scheme's registered interaction with a parcel.
+#[derive(Debug, Clone)]
+pub(crate) struct InteractionEdge {
+    pub scheme_id: u64,
+    pub role: InteractionRole,
+    pub kind_bits: u8,
+    pub ctx: ContextHandle,
+    pub dirty_flag: Weak<AtomicBool>,
+}
+
+pub(crate) type InteractionSet = Vec<InteractionEdge>;
 
 /// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
 pub(crate) struct ParcelStamp {
-    pub(crate) references: Arc<Mutex<ReferenceTable>>,
+    pub(crate) sync: Arc<Mutex<ResourceSync>>,
+    pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) home_device: Weak<DeviceInner>,
 }
 
 impl ParcelStamp {
     pub(crate) fn new(home_device: Weak<DeviceInner>) -> Self {
         Self {
-            references: Arc::new(Mutex::new(ReferenceTable::new())),
+            sync: Arc::new(Mutex::new(ResourceSync::default())),
+            interaction_set: Arc::new(Mutex::new(Vec::new())),
             home_device,
+        }
+    }
+
+    pub(crate) fn merged_references(&self) -> ReferenceTable {
+        self.sync.lock().unwrap().merged()
+    }
+}
+
+/// Backing storage for a bindable [`Parcel`].
+enum ParcelBacking {
+    WholeBuffer(Arc<Allocation>),
+    BufferRange {
+        view: BufferView,
+        parent: BufferHandle,
+        parent_backing: Arc<Allocation>,
+        offset: u64,
+        len: u64,
+    },
+    Texture(Texture),
+}
+
+/// A bindable unit of GPU property: whole buffer, buffer range, or texture.
+///
+/// Bind parcels to dispatches and render passes. Acquire [`Buffer`] from the retained pool
+/// and index into it to obtain range parcels, or dereference a single-unit buffer.
+pub struct Parcel {
+    backing: ParcelBacking,
+    stamp: ParcelStamp,
+    /// Present only for texture parcels acquired directly (not via [`Buffer`]).
+    bookkeeping: Option<BookkeepingGuard>,
+}
+
+impl Clone for Parcel {
+    fn clone(&self) -> Self {
+        Self {
+            backing: match &self.backing {
+                ParcelBacking::WholeBuffer(b) => ParcelBacking::WholeBuffer(Arc::clone(b)),
+                ParcelBacking::BufferRange {
+                    view,
+                    parent,
+                    parent_backing,
+                    offset,
+                    len,
+                } => ParcelBacking::BufferRange {
+                    view: view.clone(),
+                    parent: *parent,
+                    parent_backing: Arc::clone(parent_backing),
+                    offset: *offset,
+                    len: *len,
+                },
+                ParcelBacking::Texture(t) => ParcelBacking::Texture(t.clone()),
+            },
+            stamp: ParcelStamp {
+                sync: Arc::clone(&self.stamp.sync),
+                interaction_set: Arc::clone(&self.stamp.interaction_set),
+                home_device: self.stamp.home_device.clone(),
+            },
+            bookkeeping: None,
         }
     }
 }
 
-/// One backing buffer subdivided into multiple bindless sub-ranges (lifetime-homogeneous).
-struct Mosaic {
-    pool: BufferPool,
-    views: Vec<BufferView>,
+impl Parcel {
+    pub(crate) fn from_whole_buffer(allocation: Arc<Allocation>, home_device: Weak<DeviceInner>) -> Self {
+        Self {
+            backing: ParcelBacking::WholeBuffer(allocation),
+            stamp: ParcelStamp::new(home_device),
+            bookkeeping: None,
+        }
+    }
+
+    pub(crate) fn from_buffer_range(
+        view: BufferView,
+        parent: BufferHandle,
+        parent_backing: Arc<Allocation>,
+        offset: u64,
+        len: u64,
+        home_device: Weak<DeviceInner>,
+    ) -> Self {
+        Self {
+            backing: ParcelBacking::BufferRange {
+                view,
+                parent,
+                parent_backing,
+                offset,
+                len,
+            },
+            stamp: ParcelStamp::new(home_device),
+            bookkeeping: None,
+        }
+    }
+
+    pub(crate) fn from_texture(tex: Texture, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
+        Self {
+            backing: ParcelBacking::Texture(tex),
+            stamp: ParcelStamp::new(home_device),
+            bookkeeping: Some(bookkeeping),
+        }
+    }
+
+    /// Zoning / telemetry label (buffer vs texture).
+    pub fn kind(&self) -> ParcelType {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(_) | ParcelBacking::BufferRange { .. } => ParcelType::Buffer,
+            ParcelBacking::Texture(_) => ParcelType::Texture,
+        }
+    }
+
+    /// Approximate committed byte size for this bindable unit.
+    pub fn byte_size(&self) -> u64 {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.byte_size(),
+            ParcelBacking::BufferRange { len, .. } => *len,
+            ParcelBacking::Texture(t) => t.byte_size() as u64,
+        }
+    }
+
+    /// Resource descriptor index for how this parcel will be accessed in the current dispatch.
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.resource_index(access),
+            ParcelBacking::BufferRange { view, .. } => view.resource_index(access),
+            ParcelBacking::Texture(t) => t.resource_index(access),
+        }
+    }
+
+    /// Typed resource descriptor handle for validation and dispatch wiring.
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.handle(access),
+            ParcelBacking::BufferRange { view, .. } => view.handle(access),
+            ParcelBacking::Texture(t) => t.handle(access),
+        }
+    }
+
+    /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
+    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
+        self.stamp
+            .sync
+            .lock()
+            .unwrap()
+            .record_write(ctx, epoch, WRITE_KINDS_TRANSFER);
+    }
+
+    /// Context-qualified last-referencing timelines for this parcel.
+    pub fn last_referenced(&self) -> ReferenceTable {
+        self.stamp.merged_references()
+    }
+
+    /// Last referencing timeline for a single context, if any.
+    pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
+        self.stamp.merged_references().get(&ctx).copied()
+    }
+
+    /// True when no in-flight GPU work on `ctx` still references this parcel.
+    pub fn is_settled(&self, ctx: &Context) -> bool {
+        ctx.parcel_ready(&self.last_referenced())
+    }
+
+    /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
+    pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
+        Arc::new(ParcelStamp {
+            sync: Arc::clone(&self.stamp.sync),
+            interaction_set: Arc::clone(&self.stamp.interaction_set),
+            home_device: self.stamp.home_device.clone(),
+        })
+    }
+
+    pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
+        &self.stamp.home_device
+    }
+
+    /// Backend buffer handle and graph resource id for [`crate::TaskGraph::write_parcel`].
+    pub(crate) fn write_buffer_target(&self) -> anyhow::Result<(BufferHandle, ResourceId)> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => {
+                let h = b.gpu_buffer_handle();
+                Ok((h, ResourceId::Buffer(h)))
+            }
+            ParcelBacking::BufferRange { .. } | ParcelBacking::Texture(_) => {
+                anyhow::bail!("write_parcel is only valid for whole-buffer parcels")
+            }
+        }
+    }
+
+    /// Task-graph resource identity (runtime only).
+    pub(crate) fn resource_id(&self) -> ResourceId {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => ResourceId::Buffer(b.gpu_buffer_handle()),
+            ParcelBacking::BufferRange {
+                parent, offset, len, ..
+            } => ResourceId::BufferRange {
+                parent: *parent,
+                offset: *offset,
+                len: *len,
+            },
+            ParcelBacking::Texture(t) => ResourceId::Texture(t.gpu_handle()),
+        }
+    }
+
+    pub(crate) fn texture_handle(&self) -> Option<crate::backend::TextureHandle> {
+        match &self.backing {
+            ParcelBacking::Texture(t) => Some(t.gpu_handle()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn buffer_handle(&self) -> Option<BufferHandle> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => Some(b.gpu_buffer_handle()),
+            ParcelBacking::BufferRange { parent, .. } => Some(*parent),
+            _ => None,
+        }
+    }
+
+    /// Structured-buffer element stride for whole-buffer parcels, if set at allocation.
+    pub(crate) fn buffer_element_stride(&self) -> Option<u32> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.element_stride(),
+            ParcelBacking::BufferRange { .. } => None,
+            ParcelBacking::Texture(_) => None,
+        }
+    }
+
+    pub(crate) fn grant_buffer_keepalive(&self) -> Result<Arc<Allocation>, anyhow::Error> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => Ok(Arc::clone(b)),
+            ParcelBacking::BufferRange { parent_backing, .. } => Ok(Arc::clone(parent_backing)),
+            ParcelBacking::Texture(_) => anyhow::bail!("grant_read requires buffer parcel"),
+        }
+    }
+
+    pub(crate) fn grant_texture_keepalive(&self) -> Result<Texture, anyhow::Error> {
+        match &self.backing {
+            ParcelBacking::Texture(t) => Ok(t.clone()),
+            _ => anyhow::bail!("grant_read_texture requires texture parcel"),
+        }
+    }
+
+    pub(crate) fn release_bookkeeping(&mut self) {
+        self.bookkeeping = None;
+    }
+
+    pub(crate) fn attach_bookkeeping(&mut self, guard: BookkeepingGuard) {
+        self.bookkeeping = Some(guard);
+    }
+
+    /// Kind and flags for whole-buffer parcels; `None` for views and textures.
+    ///
+    /// Used by [`crate::transient_pool::TransientPool`] to key the buffer recycle bin on
+    /// the full descriptor (not just size) so that buffers with different `BufferKind` or
+    /// `BufferFlags` never alias.
+    pub(crate) fn buffer_descriptor(&self) -> Option<(BufferKind, BufferFlags)> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => Some((b.access(), b.flags())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn texture_descriptor(
+        &self,
+    ) -> Option<(
+        u32,
+        u32,
+        crate::types::TextureFormat,
+        crate::types::TextureKind,
+        crate::types::TextureFlags,
+    )> {
+        match &self.backing {
+            ParcelBacking::Texture(t) => Some((t.width(), t.height(), t.format(), t.access(), t.flags())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_homed_on(&self, ctx: &Context) -> bool {
+        self.stamp
+            .home_device
+            .upgrade()
+            .is_some_and(|home| Arc::ptr_eq(&home, &ctx.device().inner))
+    }
+
+    /// Read this parcel's GPU bytes back to CPU memory (testing / diagnostics).
+    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.read_to_cpu(device, output),
+            ParcelBacking::BufferRange { view, .. } => view.read_to_cpu(device, output),
+            ParcelBacking::Texture(t) => t.read_to_cpu(output),
+        }
+    }
 }
 
-/// Storage variant for a retained parcel (not exposed to clients).
-enum ParcelStorage {
-    Buffer(Buffer),
-    Texture(Texture),
-    Mosaic(Mosaic),
+impl BufferSource for Parcel {
+    fn source_handle(&self) -> BufferHandle {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.gpu_buffer_handle(),
+            ParcelBacking::BufferRange { parent, .. } => *parent,
+            ParcelBacking::Texture(_) => panic!("BufferSource is not implemented for texture parcels"),
+        }
+    }
+
+    fn source_offset(&self) -> u64 {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(_) => 0,
+            ParcelBacking::BufferRange { offset, .. } => *offset,
+            ParcelBacking::Texture(_) => 0,
+        }
+    }
 }
 
-/// Per-kind byte totals for parcels currently held through a [`crate::retained_pool::RetainedPool`].
+/// Storage backing for an acquired [`Buffer`].
+enum BufferStorage {
+    Single(Arc<Allocation>),
+    Partitioned {
+        parent: Arc<Allocation>,
+        field_names: Vec<Option<String>>,
+    },
+}
+
+/// An acquired GPU buffer — possibly partitioned into independently bindable parcels.
+///
+/// Release by dropping or [`crate::retained_pool::RetainedPool::release_buffer`] /
+/// [`crate::retained_pool::RetainedPool::release_texture`].
+pub struct Buffer {
+    storage: BufferStorage,
+    units: Vec<Parcel>,
+    bookkeeping: Option<BookkeepingGuard>,
+    home_device: Weak<DeviceInner>,
+}
+
+impl Buffer {
+    pub(crate) fn from_single(
+        allocation: Allocation,
+        bookkeeping: BookkeepingGuard,
+        home_device: Weak<DeviceInner>,
+    ) -> Self {
+        let arc = Arc::new(allocation);
+        let parcel = Parcel::from_whole_buffer(Arc::clone(&arc), home_device.clone());
+        Self {
+            storage: BufferStorage::Single(arc),
+            units: vec![parcel],
+            bookkeeping: Some(bookkeeping),
+            home_device,
+        }
+    }
+
+    pub(crate) fn from_partitioned(
+        parent: Arc<Allocation>,
+        views: Vec<BufferView>,
+        field_names: Vec<Option<String>>,
+        bookkeeping: BookkeepingGuard,
+        home_device: Weak<DeviceInner>,
+    ) -> Self {
+        let backing = parent.gpu_buffer_handle();
+        let units = views
+            .into_iter()
+            .map(|view| {
+                let offset = view.offset();
+                let len = view.size();
+                Parcel::from_buffer_range(view, backing, Arc::clone(&parent), offset, len, home_device.clone())
+            })
+            .collect();
+        Self {
+            storage: BufferStorage::Partitioned { parent, field_names },
+            units,
+            bookkeeping: Some(bookkeeping),
+            home_device,
+        }
+    }
+
+    /// Number of bindable parcels in this buffer.
+    pub fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
+    /// True when this buffer has more than one bindable parcel.
+    pub fn is_partitioned(&self) -> bool {
+        self.units.len() > 1
+    }
+
+    /// Obtain a bindable parcel by ordinal index.
+    pub fn unit(&self, index: usize) -> &Parcel {
+        &self.units[index]
+    }
+
+    /// Obtain a bindable parcel by field name.
+    pub fn field(&self, name: &str) -> &Parcel {
+        let idx = self
+            .field_index(name)
+            .unwrap_or_else(|| panic!("Buffer::field: unknown field {name:?}"));
+        &self.units[idx]
+    }
+
+    fn field_index(&self, name: &str) -> Option<usize> {
+        match &self.storage {
+            BufferStorage::Single(_) => None,
+            BufferStorage::Partitioned { field_names, .. } => {
+                field_names.iter().position(|n| n.as_deref() == Some(name))
+            }
+        }
+    }
+
+    /// The whole-buffer parcel. Panics on partitioned buffers (bind individual units instead).
+    pub fn whole(&self) -> &Parcel {
+        assert!(
+            !self.is_partitioned(),
+            "Buffer::whole: cannot bind a partitioned buffer as one descriptor; bind individual parcels via indexing"
+        );
+        &self.units[0]
+    }
+
+    /// Zoning / telemetry label.
+    pub fn kind(&self) -> ParcelType {
+        ParcelType::Buffer
+    }
+
+    /// Total committed byte size (backing allocation).
+    pub fn byte_size(&self) -> u64 {
+        match &self.storage {
+            BufferStorage::Single(b) => b.byte_size(),
+            BufferStorage::Partitioned { parent, .. } => parent.byte_size(),
+        }
+    }
+
+    /// Context-qualified last-referencing timelines merged across all parcels.
+    pub fn last_referenced(&self) -> ReferenceTable {
+        let mut merged = ReferenceTable::new();
+        for unit in &self.units {
+            for (ctx, tv) in unit.last_referenced() {
+                merged
+                    .entry(ctx)
+                    .and_modify(|e| {
+                        if tv > *e {
+                            *e = tv;
+                        }
+                    })
+                    .or_insert(tv);
+            }
+        }
+        merged
+    }
+
+    pub fn is_settled(&self, ctx: &Context) -> bool {
+        self.units.iter().all(|u| u.is_settled(ctx))
+    }
+
+    /// CPU write into a single-unit buffer (host-visible when [`crate::types::BufferFlags::CPU_READABLE`]).
+    pub fn write(&self, offset: u64, data: &[u8]) -> anyhow::Result<()> {
+        match &self.storage {
+            BufferStorage::Single(b) => b.write(offset, data),
+            BufferStorage::Partitioned { .. } => {
+                anyhow::bail!("Buffer::write requires a single-unit buffer; write to a specific parcel instead")
+            }
+        }
+    }
+
+    /// Read the whole-buffer parcel back to CPU memory.
+    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
+        self.whole().read_to_cpu(device, output)
+    }
+
+    /// GPU clear on a single-unit buffer (see [`Self::clear`]).
+    pub fn clear(&self, device: &crate::Device, offset: u64, size: u64) -> anyhow::Result<()> {
+        match &self.storage {
+            BufferStorage::Single(b) => b.clear(device, offset, size),
+            BufferStorage::Partitioned { .. } => {
+                anyhow::bail!("Buffer::clear requires a single-unit buffer; clear a specific parcel instead")
+            }
+        }
+    }
+
+    /// Record GPU reference on the whole-buffer parcel (single-unit buffers only).
+    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
+        self.whole().mark_referenced(ctx, epoch);
+    }
+
+    pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
+        &self.home_device
+    }
+
+    pub(crate) fn release_bookkeeping(&mut self) {
+        self.bookkeeping = None;
+    }
+
+    /// Peel a single-unit buffer into a transient-pool parcel (no bookkeeping).
+    pub(crate) fn into_transient_parcel(mut self) -> anyhow::Result<Parcel> {
+        if self.is_partitioned() {
+            anyhow::bail!("into_transient_parcel requires a single-unit buffer");
+        }
+        self.release_bookkeeping();
+        match self.storage {
+            BufferStorage::Single(arc) => Ok(Parcel::from_whole_buffer(arc, self.home_device)),
+            BufferStorage::Partitioned { .. } => unreachable!(),
+        }
+    }
+
+    /// Iterate all bindable parcels for dependency registration.
+    pub fn parcels(&self) -> impl Iterator<Item = &Parcel> {
+        self.units.iter()
+    }
+
+    /// Extract the backing allocation from a single-unit buffer.
+    #[allow(dead_code)] // retained-pool migration tests
+    pub(crate) fn detach_allocation(mut self) -> anyhow::Result<Allocation> {
+        self.release_bookkeeping();
+        match self.storage {
+            BufferStorage::Single(b) => {
+                // Drop the whole-buffer parcel before unwrapping; it holds a second Arc ref.
+                self.units.clear();
+                Arc::try_unwrap(b)
+                    .map_err(|_| anyhow::anyhow!("detach_allocation requires sole ownership of the backing allocation"))
+            }
+            BufferStorage::Partitioned { .. } => {
+                anyhow::bail!("detach_allocation requires a single-unit buffer")
+            }
+        }
+    }
+
+    /// Backing allocation handle for whole-buffer operations (clear, write_parcel).
+    pub(crate) fn backing_handle(&self) -> BufferHandle {
+        match &self.storage {
+            BufferStorage::Single(b) => b.gpu_buffer_handle(),
+            BufferStorage::Partitioned { parent, .. } => parent.gpu_buffer_handle(),
+        }
+    }
+}
+
+impl Deref for Buffer {
+    type Target = Parcel;
+
+    fn deref(&self) -> &Self::Target {
+        self.whole()
+    }
+}
+
+impl Index<usize> for Buffer {
+    type Output = Parcel;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.units[index]
+    }
+}
+
+impl Index<&str> for Buffer {
+    type Output = Parcel;
+
+    fn index(&self, name: &str) -> &Self::Output {
+        self.field(name)
+    }
+}
+
+/// Initial contents for one field of an [`Buffer`] record.
+pub enum Init {
+    Data { bytes: Vec<u8>, count: u64, stride: u32 },
+    Reserve { count: u64, stride: u32 },
+}
+
+impl Init {
+    /// Upload a typed slice at acquisition (copied; not aliased).
+    pub fn data<T: StructuredBufferElement>(data: &[T]) -> Self {
+        Self::Data {
+            bytes: bytemuck::cast_slice(data).to_vec(),
+            count: data.len() as u64,
+            stride: std::mem::size_of::<T>() as u32,
+        }
+    }
+
+    /// Reserve uninitialized space for `count` elements of type `T`.
+    pub fn reserve<T: StructuredBufferElement>(count: u64) -> Self {
+        Self::Reserve {
+            count,
+            stride: std::mem::size_of::<T>() as u32,
+        }
+    }
+
+    /// Reserve zero-initialized space for `count` elements of type `T`.
+    pub fn zeros<T: StructuredBufferElement>(count: u64) -> Self {
+        let stride = std::mem::size_of::<T>() as u32;
+        let bytes = vec![0u8; (count * stride as u64) as usize];
+        Self::Data { bytes, count, stride }
+    }
+}
+
+/// One field specification for [`crate::RetainedPool::acquire_record`].
+pub struct RecordField {
+    pub name: Option<Cow<'static, str>>,
+    pub init: Init,
+}
+
+/// Define a named field for record acquisition.
+pub fn field(name: impl Into<Cow<'static, str>>, init: Init) -> RecordField {
+    RecordField {
+        name: Some(name.into()),
+        init,
+    }
+}
+
+/// Define an anonymous ordinal field for record acquisition.
+pub fn ordinal(init: Init) -> RecordField {
+    RecordField { name: None, init }
+}
+
+impl BufferSource for Buffer {
+    fn source_handle(&self) -> BufferHandle {
+        self.whole().source_handle()
+    }
+
+    fn source_offset(&self) -> u64 {
+        self.whole().source_offset()
+    }
+}
+
+/// Per-kind byte totals for resources currently held through a [`crate::retained_pool::RetainedPool`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BytesByKind {
     pub buffer: u64,
@@ -98,7 +711,7 @@ impl PoolBookkeeping {
     }
 }
 
-/// Decrements retained-pool byte counters when the parcel is dropped without `transfer_out`.
+/// Decrements retained-pool byte counters when the resource is dropped without `transfer_out`.
 #[derive(Debug)]
 pub(crate) struct BookkeepingGuard {
     pool: Weak<PoolBookkeeping>,
@@ -117,244 +730,5 @@ impl Drop for BookkeepingGuard {
         if let Some(pool) = self.pool.upgrade() {
             pool.subtract(self.kind, self.bytes);
         }
-    }
-}
-
-/// A deed-held GPU parcel (buffer or texture). Gate-free while retained.
-///
-/// Release by [`crate::retained_pool::RetainedPool::release`] (runtime reclaims when safe) or by dropping the parcel.
-pub struct Parcel {
-    storage: ParcelStorage,
-    stamp: ParcelStamp,
-    bookkeeping: Option<BookkeepingGuard>,
-}
-
-impl Parcel {
-    pub(crate) fn from_buffer(buf: Buffer, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
-        Self {
-            storage: ParcelStorage::Buffer(buf),
-            stamp: ParcelStamp::new(home_device),
-            bookkeeping: Some(bookkeeping),
-        }
-    }
-
-    pub(crate) fn from_texture(tex: Texture, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
-        Self {
-            storage: ParcelStorage::Texture(tex),
-            stamp: ParcelStamp::new(home_device),
-            bookkeeping: Some(bookkeeping),
-        }
-    }
-
-    pub(crate) fn from_mosaic(
-        pool: BufferPool,
-        views: Vec<BufferView>,
-        bookkeeping: BookkeepingGuard,
-        home_device: Weak<DeviceInner>,
-    ) -> Self {
-        Self {
-            storage: ParcelStorage::Mosaic(Mosaic { pool, views }),
-            stamp: ParcelStamp::new(home_device),
-            bookkeeping: Some(bookkeeping),
-        }
-    }
-
-    /// Sub-range of a mosaic parcel for vertex/index binding (`BufferSource`).
-    ///
-    /// Panics if `slot` is out of range or the parcel is not a mosaic.
-    pub fn view(&self, slot: MosaicSlot) -> &BufferView {
-        match &self.storage {
-            ParcelStorage::Mosaic(m) => &m.views[slot.0 as usize],
-            _ => panic!("Parcel::view called on non-mosaic parcel"),
-        }
-    }
-
-    /// Zoning / telemetry label (buffer vs texture).
-    pub fn kind(&self) -> ParcelType {
-        match &self.storage {
-            ParcelStorage::Buffer(_) | ParcelStorage::Mosaic(_) => ParcelType::Buffer,
-            ParcelStorage::Texture(_) => ParcelType::Texture,
-        }
-    }
-
-    /// Read buffer parcel contents back to CPU memory.
-    ///
-    /// Valid only for non-mosaic buffer parcels acquired via [`crate::RetainedPool::acquire_buffer`].
-    pub fn read_to_cpu(&self, device: &crate::Device, output: &mut [u8]) -> anyhow::Result<()> {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => b.read_to_cpu(device, output),
-            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
-                anyhow::bail!("read_to_cpu is only valid for non-mosaic buffer parcels")
-            }
-        }
-    }
-
-    /// Approximate committed byte size for accounting.
-    pub fn byte_size(&self) -> u64 {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => b.byte_size(),
-            ParcelStorage::Texture(t) => t.byte_size() as u64,
-            ParcelStorage::Mosaic(m) => m.pool.capacity(),
-        }
-    }
-
-    /// Resource descriptor index for how this parcel will be accessed in the current dispatch.
-    ///
-    /// Mosaic parcels always return `None` — bind per-view via [`Parcel::view`].
-    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => b.resource_index(access),
-            ParcelStorage::Texture(t) => t.resource_index(access),
-            ParcelStorage::Mosaic(_) => None,
-        }
-    }
-
-    /// Typed resource descriptor handle for validation and dispatch wiring.
-    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => b.handle(access),
-            ParcelStorage::Texture(t) => t.handle(access),
-            ParcelStorage::Mosaic(_) => None,
-        }
-    }
-
-    /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
-    ///
-    /// Monotonic per context: only increases; a smaller epoch is ignored.
-    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        let mut table = self.stamp.references.lock().unwrap();
-        mark_reference(&mut table, ctx, epoch);
-    }
-
-    /// Context-qualified last-referencing timelines.
-    pub fn last_referenced(&self) -> ReferenceTable {
-        self.stamp.references.lock().unwrap().clone()
-    }
-
-    /// Last referencing timeline for a single context, if any.
-    pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
-        self.stamp.references.lock().unwrap().get(&ctx).copied()
-    }
-
-    /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
-    pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
-        Arc::new(ParcelStamp {
-            references: Arc::clone(&self.stamp.references),
-            home_device: self.stamp.home_device.clone(),
-        })
-    }
-
-    pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
-        &self.stamp.home_device
-    }
-
-    /// Backend buffer handle and graph resource id for [`crate::TaskGraph::write_parcel`].
-    ///
-    /// Valid only for non-mosaic buffer parcels acquired via
-    /// [`crate::RetainedPool::acquire_buffer`].
-    pub(crate) fn write_buffer_target(&self) -> anyhow::Result<(BufferHandle, ResourceId)> {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => {
-                let h = b.gpu_buffer_handle();
-                Ok((h, ResourceId::Buffer(h)))
-            }
-            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
-                anyhow::bail!("write_parcel is only valid for non-mosaic buffer parcels")
-            }
-        }
-    }
-
-    /// Task-graph resource identity (runtime only).
-    pub(crate) fn resource_id(&self) -> ResourceId {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => ResourceId::Buffer(b.gpu_buffer_handle()),
-            ParcelStorage::Texture(t) => ResourceId::Texture(t.gpu_handle()),
-            ParcelStorage::Mosaic(m) => ResourceId::Buffer(m.pool.backing_buffer().gpu_buffer_handle()),
-        }
-    }
-
-    /// Backend texture handle (runtime only; for tests comparing identity across transfer).
-    #[cfg(test)]
-    pub(crate) fn texture_handle(&self) -> Option<crate::backend::TextureHandle> {
-        match &self.storage {
-            ParcelStorage::Texture(t) => Some(t.gpu_handle()),
-            _ => None,
-        }
-    }
-
-    /// Backend buffer handle (runtime only; for tests and transfer identity checks).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn buffer_handle(&self) -> Option<crate::backend::BufferHandle> {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => Some(b.gpu_buffer_handle()),
-            ParcelStorage::Mosaic(m) => Some(m.pool.backing_buffer().gpu_buffer_handle()),
-            _ => None,
-        }
-    }
-
-    /// Release pool bookkeeping so [`Drop`] does not double-decrement after [`RetainedPool::release`].
-    pub(crate) fn release_bookkeeping(&mut self) {
-        self.bookkeeping = None;
-    }
-
-    /// Extract the backing buffer from a non-mosaic buffer parcel.
-    ///
-    /// Consumes the parcel and releases retained-pool bookkeeping. The returned
-    /// [`Buffer`] is independently owned (ekrano scratch pools and similar escape hatches).
-    pub fn detach_buffer(mut self) -> anyhow::Result<Buffer> {
-        self.release_bookkeeping();
-        match self.storage {
-            ParcelStorage::Buffer(b) => Ok(b),
-            ParcelStorage::Texture(_) | ParcelStorage::Mosaic(_) => {
-                anyhow::bail!("detach_buffer requires a non-mosaic buffer parcel")
-            }
-        }
-    }
-
-    /// Extract the backing texture from a texture parcel.
-    ///
-    /// Consumes the parcel and releases retained-pool bookkeeping.
-    pub fn detach_texture(mut self) -> anyhow::Result<Texture> {
-        self.release_bookkeeping();
-        match self.storage {
-            ParcelStorage::Texture(t) => Ok(t),
-            ParcelStorage::Buffer(_) | ParcelStorage::Mosaic(_) => {
-                anyhow::bail!("detach_texture requires a texture parcel")
-            }
-        }
-    }
-
-    /// Bindless resource index for one mosaic sub-view.
-    pub fn mosaic_view_resource_index(&self, slot: MosaicSlot, access: ResourceAccess) -> Option<u32> {
-        self.view(slot).resource_index(access)
-    }
-
-    /// Read one mosaic sub-view back to CPU memory.
-    pub fn mosaic_view_read_to_cpu(
-        &self,
-        device: &crate::Device,
-        slot: MosaicSlot,
-        output: &mut [u8],
-    ) -> anyhow::Result<()> {
-        self.view(slot).read_to_cpu(device, output)
-    }
-}
-
-impl BufferSource for Parcel {
-    fn source_handle(&self) -> BufferHandle {
-        match &self.storage {
-            ParcelStorage::Buffer(b) => b.gpu_buffer_handle(),
-            ParcelStorage::Mosaic(_) => {
-                panic!("use Parcel::view for mosaic vertex/index binding")
-            }
-            ParcelStorage::Texture(_) => {
-                panic!("BufferSource is not implemented for texture parcels")
-            }
-        }
-    }
-
-    fn source_offset(&self) -> u64 {
-        0
     }
 }

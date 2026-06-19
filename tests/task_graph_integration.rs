@@ -26,8 +26,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn test_alloc_buffer(
@@ -41,8 +39,6 @@ fn test_alloc_buffer(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer(size, kind, stride, flags, None)
         .expect("acquire_buffer")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 /// Doubles each element: out[i] = in[i] * 2
@@ -149,6 +145,7 @@ fn readback_u32(device: &goldy::Device, buffer: &Buffer, count: usize) -> Vec<u3
 
 /// Linear chain: double then add 10. Exercises RAW dependency.
 /// Expected: out[i] = i * 2 + 10
+// Scheme migration: see scheme_graph_linear_chain
 #[test]
 fn graph_linear_chain() {
     let device = make_device();
@@ -171,15 +168,15 @@ fn graph_linear_chain() {
     let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&dst, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .with_buffer(&*src, NodeAccess::Read)
+        .with_buffer(&*dst, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
 
     graph
         .node("add_ten", &add_pipe)
-        .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .bind_resources_raw_slice(&[dst_idx])
+        .with_buffer(&*dst, NodeAccess::ReadWrite)
+        .with_resource_slots_slice(&[dst_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -193,6 +190,7 @@ fn graph_linear_chain() {
 
 /// Two independent dispatches writing to separate buffers.
 /// Exercises the no-barrier path (both should land in wave 0).
+// Scheme migration: see scheme_graph_independent_dispatches
 #[test]
 fn graph_independent_dispatches() {
     let device = make_device();
@@ -214,13 +212,13 @@ fn graph_independent_dispatches() {
     let mut graph = TaskGraph::new();
     graph
         .node("fill_a", &pipe_42)
-        .bind_buffer(&buf_a, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx_a])
+        .with_buffer(&*buf_a, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx_a])
         .dispatch(1, 1, 1);
     graph
         .node("fill_b", &pipe_99)
-        .bind_buffer(&buf_b, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx_b])
+        .with_buffer(&*buf_b, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx_b])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -245,6 +243,7 @@ fn graph_independent_dispatches() {
 ///       D    (sum Y+Z into out)
 ///
 /// Expected: out[i] = i*2 + i*2 = i*4
+// Scheme migration: see scheme_graph_diamond_dependency
 #[test]
 fn graph_diamond_dependency() {
     let device = make_device();
@@ -285,33 +284,33 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     // A: fill src with thread index
     graph
         .node("fill_src", &fill_pipe)
-        .bind_buffer(&src, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx])
+        .with_buffer(&*src, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx])
         .dispatch(1, 1, 1);
 
     // B: double src -> y
     graph
         .node("double_to_y", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&y, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, y_idx])
+        .with_buffer(&*src, NodeAccess::Read)
+        .with_buffer(&*y, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, y_idx])
         .dispatch(1, 1, 1);
 
     // C: double src -> z
     graph
         .node("double_to_z", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&z, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, z_idx])
+        .with_buffer(&*src, NodeAccess::Read)
+        .with_buffer(&*z, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, z_idx])
         .dispatch(1, 1, 1);
 
     // D: sum y + z -> out
     graph
         .node("sum_yz", &sum_pipe)
-        .bind_buffer(&y, NodeAccess::Read)
-        .bind_buffer(&z, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[y_idx, z_idx, out_idx])
+        .with_buffer(&*y, NodeAccess::Read)
+        .with_buffer(&*z, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_resource_slots_slice(&[y_idx, z_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -324,6 +323,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 }
 
 /// Two-pass chained compute through TaskGraph (double then add ten).
+// Scheme migration: see scheme_graph_linear_chain
 #[test]
 fn graph_two_pass_chained_compute() {
     let device = make_device();
@@ -344,14 +344,14 @@ fn graph_two_pass_chained_compute() {
     let mut graph = TaskGraph::new();
     graph
         .node("double", &double_pipe)
-        .bind_buffer(&src, NodeAccess::Read)
-        .bind_buffer(&dst, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, dst_idx])
+        .with_buffer(&*src, NodeAccess::Read)
+        .with_buffer(&*dst, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, dst_idx])
         .dispatch(1, 1, 1);
     graph
         .node("add_ten", &add_pipe)
-        .bind_buffer(&dst, NodeAccess::ReadWrite)
-        .bind_resources_raw_slice(&[dst_idx])
+        .with_buffer(&*dst, NodeAccess::ReadWrite)
+        .with_resource_slots_slice(&[dst_idx])
         .dispatch(1, 1, 1);
     graph.dispatch(&ctx).unwrap();
 
@@ -362,6 +362,7 @@ fn graph_two_pass_chained_compute() {
 }
 
 /// Non-blocking submit via TaskGraph.
+// Scheme migration: see scheme_graph_fill_readback
 #[test]
 fn graph_nonblocking_submit() {
     let device = make_device();
@@ -376,8 +377,8 @@ fn graph_nonblocking_submit() {
     let mut graph = TaskGraph::new();
     graph
         .node("fill", &pipe)
-        .bind_buffer(&buf, NodeAccess::Write)
-        .bind_resources_raw_slice(&[idx])
+        .with_buffer(&*buf, NodeAccess::Write)
+        .with_resource_slots_slice(&[idx])
         .dispatch(1, 1, 1);
 
     let tv = graph.submit(&ctx).unwrap();
@@ -406,6 +407,7 @@ fn graph_nonblocking_submit() {
 /// `D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW`, which is distinct from
 /// `D3D12_BARRIER_SYNC_COMPUTE_SHADING`. The TaskGraph refactor promotes the
 /// clear to a first-class node so the analyzer emits the required barrier.
+// Scheme migration: see scheme_zeros_then_dispatch_reads_zeros
 #[test]
 fn clear_then_dispatch_reads_zeros() {
     let device = make_device();
@@ -425,12 +427,12 @@ fn clear_then_dispatch_reads_zeros() {
     // Build a graph: clear buf → copy buf→out
     // The analyzer must insert a barrier between the clear and the copy.
     let mut graph = TaskGraph::new();
-    graph.clear_buffer(&buf, 0, 64 * 4);
+    graph.clear_parcel(&*buf, 0, 64 * 4).unwrap();
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -450,6 +452,7 @@ fn clear_then_dispatch_reads_zeros() {
 /// The CPU data must be visible to the GPU dispatch. The TaskGraph analyzer
 /// inserts a barrier between the write node and the read dispatch, ensuring
 /// the upload completes before the shader accesses the buffer on all backends.
+// Scheme migration: see scheme_write_then_dispatch_reads_uploaded_data
 #[test]
 fn write_then_dispatch_reads_uploaded_data() {
     let device = make_device();
@@ -471,12 +474,12 @@ fn write_then_dispatch_reads_uploaded_data() {
 
     // Build a graph: write known_data into buf → copy buf→out
     let mut graph = TaskGraph::new();
-    graph.write_buffer(&buf, 0, data_bytes);
+    graph.write_parcel(&*buf, 0, data_bytes).unwrap();
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch(1, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -495,6 +498,7 @@ fn write_then_dispatch_reads_uploaded_data() {
 ///
 /// Mirrors [`write_then_dispatch_reads_uploaded_data`] but uses the opaque parcel
 /// path that goldy-doom will use for per-frame uniform uploads.
+// Scheme migration: see scheme_write_then_dispatch_reads_uploaded_data
 #[test]
 fn write_parcel_then_dispatch_reads_uploaded_data() {
     let device = make_device();
@@ -519,9 +523,9 @@ fn write_parcel_then_dispatch_reads_uploaded_data() {
     graph.write_parcel(&parcel, 0, data_bytes).unwrap();
     graph
         .node("copy", &copy_pipe)
-        .bind_parcel(&parcel, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[src_idx, out_idx])
+        .with_parcel(&parcel, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_resource_slots_slice(&[src_idx, out_idx])
         .dispatch(1, 1, 1);
 
     let tv = graph.submit(&ctx).unwrap();
@@ -559,6 +563,7 @@ fn write_parcel_then_dispatch_reads_uploaded_data() {
 /// This is the minimal repro shape for the `ClearBuffer → compute dispatch`
 /// barrier path. If the post-clear barrier is missing, some workgroups may read
 /// stale (nonzero) data.
+// Scheme migration: see scheme_stress_zeros_then_dispatch_large
 #[test]
 fn stress_clear_then_dispatch_large() {
     let device = make_device();
@@ -582,12 +587,12 @@ fn stress_clear_then_dispatch_large() {
     let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
-    graph.clear_buffer(&buf, 0, (N * 4) as u64);
+    graph.clear_parcel(&*buf, 0, (N * 4) as u64).unwrap();
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -605,6 +610,7 @@ fn stress_clear_then_dispatch_large() {
 /// Mimics Ekrano's pattern of clearing multiple pool buffers then dispatching
 /// shaders that read them all. If any clear → dispatch barrier is missing,
 /// some dispatches may read stale data.
+// Scheme migration: see scheme_stress_many_zero_writes_many_dispatches
 #[test]
 fn stress_many_clears_many_dispatches() {
     let device = make_device();
@@ -632,16 +638,16 @@ fn stress_many_clears_many_dispatches() {
 
     let mut graph = TaskGraph::new();
     for src in &srcs {
-        graph.clear_buffer(src, 0, (N * 4) as u64);
+        graph.clear_parcel(&*src, 0, (N * 4) as u64).expect("clear_parcel");
     }
     for (src, out) in srcs.iter().zip(outs.iter()) {
         let src_idx = src.resource_index(ResourceAccess::Read).unwrap();
         let out_idx = out.resource_index(ResourceAccess::Write).unwrap();
         graph
             .node("copy", &copy_pipe)
-            .bind_buffer(src, NodeAccess::Read)
-            .bind_buffer(out, NodeAccess::Write)
-            .bind_resources_raw_slice(&[src_idx, out_idx])
+            .with_buffer(&*src, NodeAccess::Read)
+            .with_buffer(&*out, NodeAccess::Write)
+            .with_resource_slots_slice(&[src_idx, out_idx])
             .dispatch((N / 64) as u32, 1, 1);
     }
 
@@ -662,6 +668,7 @@ fn stress_many_clears_many_dispatches() {
 /// Buffer is first filled with nonzero data, then cleared to zero, then
 /// overwritten with known data via write_buffer, then a dispatch copies it out.
 /// Exercises Clear→Write (WAW) and Write→Dispatch (RAW) barrier insertion.
+// Scheme migration: see scheme_stress_write_then_dispatch_chain
 #[test]
 fn stress_clear_write_dispatch_chain() {
     let device = make_device();
@@ -688,13 +695,13 @@ fn stress_clear_write_dispatch_chain() {
     let data_bytes: Vec<u8> = bytemuck::cast_slice(&known_data).to_vec();
 
     let mut graph = TaskGraph::new();
-    graph.clear_buffer(&buf, 0, (N * 4) as u64);
-    graph.write_buffer(&buf, 0, data_bytes);
+    graph.clear_parcel(&*buf, 0, (N * 4) as u64).unwrap();
+    graph.write_parcel(&*buf, 0, data_bytes).unwrap();
     graph
         .node("copy", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
     graph.dispatch(&ctx).unwrap();
@@ -712,6 +719,7 @@ fn stress_clear_write_dispatch_chain() {
 /// Tests inter-submission synchronization (tail barrier correctness).
 /// Mimics Ekrano's coarse→fine two-phase rendering where the backend may
 /// split a single graph into multiple command buffers internally.
+// Scheme migration: see scheme_stress_two_phase_submission
 #[test]
 fn stress_two_phase_submission() {
     let device = make_device();
@@ -742,9 +750,9 @@ fn stress_two_phase_submission() {
         let mut graph = TaskGraph::new();
         graph
             .node("double", &double_pipe)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .bind_buffer(&tmp, NodeAccess::Write)
-            .bind_resources_raw_slice(&[buf_idx, tmp_idx])
+            .with_buffer(&*buf, NodeAccess::Read)
+            .with_buffer(&*tmp, NodeAccess::Write)
+            .with_resource_slots_slice(&[buf_idx, tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
         ctx.wait_until(tv).unwrap();
@@ -755,8 +763,8 @@ fn stress_two_phase_submission() {
         let mut graph = TaskGraph::new();
         graph
             .node("add_ten", &add_pipe)
-            .bind_buffer(&tmp, NodeAccess::ReadWrite)
-            .bind_resources_raw_slice(&[tmp_idx])
+            .with_buffer(&*tmp, NodeAccess::ReadWrite)
+            .with_resource_slots_slice(&[tmp_idx])
             .dispatch((N / 64) as u32, 1, 1);
         graph.dispatch(&ctx).unwrap();
     }
@@ -773,6 +781,7 @@ fn stress_two_phase_submission() {
 /// Submit N graphs in quick succession, each depending on the previous one's
 /// output, using only `submit` (non-blocking). Wait only at the end.
 /// This stresses the queue fence synchronization path.
+// Scheme migration: see scheme_stress_rapid_submissions
 #[test]
 fn stress_rapid_submissions() {
     let device = make_device();
@@ -792,8 +801,8 @@ fn stress_rapid_submissions() {
         let mut graph = TaskGraph::new();
         graph
             .node("add_ten", &add_pipe)
-            .bind_buffer(&buf, NodeAccess::ReadWrite)
-            .bind_resources_raw_slice(&[idx])
+            .with_buffer(&*buf, NodeAccess::ReadWrite)
+            .with_resource_slots_slice(&[idx])
             .dispatch((N / 64) as u32, 1, 1);
         last_tv = Some(graph.submit(&ctx).unwrap());
     }
@@ -853,19 +862,20 @@ void cs_main(Scattered<uint> args, ThreadId id) {
     let args_idx = args.resource_index(ResourceAccess::Write).unwrap();
 
     let mut graph = TaskGraph::new();
-    graph.clear_buffer(&buf, 0, (N * 4) as u64);
+    graph.clear_parcel(&*buf, 0, (N * 4) as u64).unwrap();
     graph
         .node("write_args", &write_args_pipe)
-        .bind_buffer(&args, NodeAccess::Write)
-        .bind_resources_raw_slice(&[args_idx])
+        .with_buffer(&*args, NodeAccess::Write)
+        .with_resource_slots_slice(&[args_idx])
         .dispatch(1, 1, 1);
     graph
         .node("copy_indirect", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out, NodeAccess::Write)
-        .bind_buffer(&args, NodeAccess::Read)
-        .bind_resources_raw_slice(&[buf_idx, out_idx])
-        .dispatch_indirect(&args, 0);
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out, NodeAccess::Write)
+        .with_buffer(&*args, NodeAccess::Read)
+        .with_resource_slots_slice(&[buf_idx, out_idx])
+        .dispatch_indirect_parcel(&*args, 0)
+        .unwrap();
 
     graph.dispatch(&ctx).unwrap();
 
@@ -882,6 +892,7 @@ void cs_main(Scattered<uint> args, ThreadId id) {
 /// Two write_buffer nodes each followed by a dispatch that reads the buffer,
 /// all in one graph. The second write overwrites what the first dispatch read.
 /// Tests WAW and RAW barrier insertion in sequence.
+// Scheme migration: see scheme_stress_alternating_write_dispatch
 #[test]
 fn stress_alternating_write_dispatch() {
     let device = make_device();
@@ -925,20 +936,20 @@ fn stress_alternating_write_dispatch() {
 
     let mut graph = TaskGraph::new();
     // Phase 1: write data1 → copy to out1
-    graph.write_buffer(&buf, 0, bytes1);
+    graph.write_parcel(&*buf, 0, bytes1).unwrap();
     graph
         .node("copy1", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out1, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out1_idx])
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out1, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out1_idx])
         .dispatch((N / 64) as u32, 1, 1);
     // Phase 2: write data2 (overwrites buf) → copy to out2
-    graph.write_buffer(&buf, 0, bytes2);
+    graph.write_parcel(&*buf, 0, bytes2).unwrap();
     graph
         .node("copy2", &copy_pipe)
-        .bind_buffer(&buf, NodeAccess::Read)
-        .bind_buffer(&out2, NodeAccess::Write)
-        .bind_resources_raw_slice(&[buf_idx, out2_idx])
+        .with_buffer(&*buf, NodeAccess::Read)
+        .with_buffer(&*out2, NodeAccess::Write)
+        .with_resource_slots_slice(&[buf_idx, out2_idx])
         .dispatch((N / 64) as u32, 1, 1);
 
     graph.dispatch(&ctx).unwrap();

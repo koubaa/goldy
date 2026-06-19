@@ -40,8 +40,8 @@ let wg_y = height.div_ceil(8);
 
 let mut graph = TaskGraph::new();
 graph.node("compute", &compute_pipeline)
-    .bind_buffer(&uniform_buffer, NodeAccess::Read)
-    .bind_resources_raw(&[uniform_handle.index(), texture_handle.index()])
+    .with_buffer(&uniform_buffer, NodeAccess::Read)
+    .with_resource_slots(&[uniform_handle.index(), texture_handle.index()])
     .dispatch(wg_x, wg_y, 1);
 ```
 
@@ -159,8 +159,8 @@ let wg_y = height.div_ceil(8);
 
 let mut graph = TaskGraph::new();
 graph.node("compute", &compute_pipeline)
-    .bind_buffer(&uniform_buffer, NodeAccess::Read)
-    .bind_resources_raw(&[uniform_handle.index(), texture_handle.index()])
+    .with_buffer(&uniform_buffer, NodeAccess::Read)
+    .with_resource_slots(&[uniform_handle.index(), texture_handle.index()])
     .dispatch(wg_x, wg_y, 1);
 
 frame.submit_compute(&graph)?;

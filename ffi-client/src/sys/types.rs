@@ -2,24 +2,25 @@
 
 use std::ffi::c_char;
 
-pub enum GoldyMosaicBuilder {}
+pub enum GoldyRecordBuilder {}
+pub enum GoldyBuffer {}
 pub enum GoldyParcel {}
 pub enum GoldyRetainedPool {}
 pub enum GoldyComputePipeline {}
+pub enum GoldyContext {}
 pub enum GoldyDevice {}
 pub enum GoldyInstance {}
 pub enum GoldyRenderPipeline {}
 pub enum GoldyRenderTarget {}
 pub enum GoldySampler {}
+pub enum GoldyScheme {}
+pub enum GoldySchemeRenderTargetLease {}
+pub enum GoldyPresentGrant {}
+pub enum GoldyPresentLease {}
+pub enum GoldySwapchainPool {}
 pub enum GoldyShaderModule {}
 pub enum GoldySurface {}
 pub enum GoldySurfaceFrame {}
-pub enum GoldyTaskGraph {}
-
-#[repr(C)]
-pub struct GoldySwapchainOutput {
-    pub _private: [u8; 0],
-}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +47,6 @@ pub enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_VULKAN = 0,
     GOLDY_BACKEND_TYPE_METAL = 1,
     GOLDY_BACKEND_TYPE_DX12 = 2,
-    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
 }
 
 #[repr(C)]
@@ -221,4 +221,21 @@ pub struct GoldyColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GoldyTextureFlags {
     pub _0: u32,
+}
+
+#[repr(C)]
+pub struct GoldySchemeSubmission {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct GoldyReadGrant {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GoldyReplayStats {
+    pub records: u64,
+    pub resubmit_hits: u64,
 }

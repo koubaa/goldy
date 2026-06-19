@@ -5,7 +5,7 @@ using Silk.NET.GLFW;
 namespace Goldy.Examples;
 
 /// <summary>
-/// Windowed triangle via GLFW + TaskGraph (offscreen RT -> swapchain blit -> present).
+/// Windowed triangle via GLFW + retained Scheme (offscreen RT → copy_to_present → grant_present).
 /// </summary>
 static class TriangleWindow
 {
@@ -16,9 +16,35 @@ static class TriangleWindow
         public float R, G, B, A;
     }
 
+    static (SchemeRenderTargetLease rt, PresentGrant present) RecordScheme(
+        Scheme scheme,
+        SwapchainPool swapchain,
+        RenderPipeline pipeline,
+        Parcel vertexParcel,
+        PresentLease screen,
+        Color bg)
+    {
+        var rt = scheme.LeaseRenderTarget(
+            Math.Max(swapchain.Width, 1u),
+            Math.Max(swapchain.Height, 1u),
+            swapchain.Format);
+        using (var pass = scheme.RenderPass("triangle", rt))
+        {
+            pass
+                .WithParcel(vertexParcel, NodeAccess.Read)
+                .Clear(bg)
+                .SetPipeline(pipeline)
+                .SetVertexBuffer(0, vertexParcel)
+                .Draw(3);
+        }
+        scheme.CopyToPresent(rt, screen);
+        var present = scheme.GrantPresent(screen);
+        return (rt, present);
+    }
+
     public static unsafe void Run()
     {
-        Console.WriteLine("Goldy .NET Triangle Window (TaskGraph)");
+        Console.WriteLine("Goldy .NET Triangle Window (Scheme + Present)");
         Console.WriteLine(new string('=', 40));
         Console.WriteLine("Press Escape or close the window to exit\n");
 
@@ -27,7 +53,7 @@ static class TriangleWindow
             throw new InvalidOperationException("glfwInit failed");
 
         glfw.WindowHint(WindowHintClientApi.ClientApi, ClientApi.NoApi);
-        var window = glfw.CreateWindow(800, 600, "Goldy - Animated Triangle (.NET)", null, null);
+        var window = glfw.CreateWindow(800, 600, "Goldy - Triangle (.NET / Scheme)", null, null);
         if (window == null)
         {
             glfw.Terminate();
@@ -38,7 +64,9 @@ static class TriangleWindow
         {
             using var instance = new Instance();
             using var device = instance.RequestAdapter().RequestDevice();
-            using var surface = GlfwSurface.Create(device, window);
+            using var ctx = device.CreateContext();
+            using var swapchain = GlfwSwapchainPool.Create(ctx, window);
+            using var screen = swapchain.Lease();
 
             using var shader = new ShaderModule(device, ShaderModule.BuiltinVertexColor2D);
             using var pipeline = new RenderPipeline(
@@ -49,7 +77,7 @@ static class TriangleWindow
                 {
                     VertexAttributes = VertexLayouts.Vertex2D,
                     VertexStride = 24,
-                    TargetFormat = surface.Format,
+                    TargetFormat = swapchain.Format,
                 });
 
             ReadOnlySpan<Vertex2D> vertices =
@@ -59,11 +87,12 @@ static class TriangleWindow
                 new() { Px = 0.5f, Py = 0.5f, R = 0, G = 0, B = 1, A = 1 },
             ];
             using var retainedPool = new RetainedPool(device);
-            using var vertexParcel = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+            using var vertexBuffer = retainedPool.AcquireBuffer(vertices, BufferKind.Scattered);
+            using var vertexParcel = vertexBuffer.Field(0);
 
-            var sceneRt = MakeSceneRt(device, surface);
-            using var frameGraph = new TaskGraph();
-            var frameCount = 0u;
+            var bg = new Color(0.1f, 0.1f, 0.2f, 1.0f);
+            var scheme = new Scheme(ctx);
+            var (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
 
             while (!glfw.WindowShouldClose(window))
             {
@@ -72,36 +101,20 @@ static class TriangleWindow
                 {
                     var w = (uint)fbWidth;
                     var h = (uint)fbHeight;
-                    if (w != surface.Width || h != surface.Height)
+                    if (w != swapchain.Width || h != swapchain.Height)
                     {
-                        surface.Resize(w, h);
+                        swapchain.Resize(w, h);
                         sceneRt.Dispose();
-                        sceneRt = MakeSceneRt(device, surface);
+                        present.Dispose();
+                        scheme.Dispose();
+                        scheme = new Scheme(ctx);
+                        (sceneRt, present) = RecordScheme(scheme, swapchain, pipeline, vertexParcel, screen, bg);
                     }
                 }
 
-                var t = MathF.Sin(frameCount * 0.02f) * 0.5f + 0.5f;
-                var bg = new Color(0.1f + t * 0.1f, 0.1f + t * 0.05f, 0.2f + t * 0.1f, 1.0f);
+                using var submission = scheme.Submit();
+                present.Consume(submission);
 
-                frameGraph.Clear();
-                using (var pass = frameGraph.RenderPass("triangle", sceneRt))
-                {
-                    pass
-                        .BindParcel(vertexParcel, NodeAccess.Read)
-                        .Clear(bg)
-                        .SetPipeline(pipeline)
-                        .SetVertexBuffer(0, vertexParcel)
-                        .Draw(3);
-                }
-
-                var swapchain = frameGraph.DeclareSwapchainOutput();
-                frameGraph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
-
-                var frame = surface.Acquire();
-                surface.SubmitGraphToFrame(frameGraph, frame);
-                surface.Present(frame);
-
-                frameCount++;
                 glfw.PollEvents();
 
                 if (glfw.GetKey(window, Keys.Escape) == (int)InputAction.Press)
@@ -109,6 +122,8 @@ static class TriangleWindow
             }
 
             sceneRt.Dispose();
+            present.Dispose();
+            scheme.Dispose();
             Console.WriteLine("Done!");
         }
         finally
@@ -116,12 +131,5 @@ static class TriangleWindow
             glfw.DestroyWindow(window);
             glfw.Terminate();
         }
-    }
-
-    static RenderTarget MakeSceneRt(Device device, Surface surface)
-    {
-        var w = Math.Max(surface.Width, 1u);
-        var h = Math.Max(surface.Height, 1u);
-        return new RenderTarget(device, w, h, surface.Format);
     }
 }

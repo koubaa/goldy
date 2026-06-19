@@ -40,7 +40,8 @@ def main():
     print(f"Input data (first 10): {input_data[:10]}")
     
     retained_pool = goldy.RetainedPool(device)
-    parcel = retained_pool.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
+    buffer = retained_pool.acquire_buffer(input_data, goldy.BufferKind.SCATTERED)
+    parcel = buffer[0]
     print(f"Created parcel: {parcel.byte_size} bytes")
     
     # Compile compute shader
@@ -51,18 +52,20 @@ def main():
     pipeline = goldy.ComputePipeline(device, shader)
     print("Created compute pipeline")
     
-    graph = goldy.TaskGraph()
-    idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
-    with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
-        node.bind_parcel(parcel, goldy.NodeAccess.READ_WRITE)
-        node.bind_resources_raw([idx])
-
-    graph.dispatch(device)
+    ctx = device.create_context()
+    scheme = goldy.Scheme(ctx)
+    scheme.node("double", pipeline).with_parcel(
+        parcel, goldy.NodeAccess.READ_WRITE, goldy.ResourceAccess.WRITE
+    ).dispatch(4, 1, 1)
+    grant = scheme.grant_read(parcel)
+    frame = scheme.submit()
+    output = np.frombuffer(grant.consume(frame), dtype=np.float32)
     print("Dispatched compute shader")
-    
-    # Note: To read back results, you'd need a staging buffer with COPY_SRC
-    # and use a copy command. For this demo, we just show the dispatch works.
-    
+
+    expected = input_data * 2.0
+    if not np.allclose(output, expected):
+        raise RuntimeError("compute output mismatch")
+    print(f"Output data (first 10): {output[:10]}")
     print()
     print("Compute shader executed successfully!")
     print("(Values in the buffer are now doubled)")

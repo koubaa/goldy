@@ -1,12 +1,16 @@
 //! Integration tests for RenderTarget with real GPU.
 //!
+//! Legacy TaskGraph path. Scheme coverage: `scheme_render_integration.rs`.
+//! Delete this file when ekrano migrates (Phase 2).
+//!
 //! These tests require a GPU and are skipped in CI if no GPU is available.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 use goldy::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, IndexFormat, Instance,
     NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions,
-    ShaderModule, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
+    ShaderModule, ShaderResourceSlot, TaskGraph, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 
 fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
@@ -18,8 +22,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn graph_render(
@@ -61,6 +63,7 @@ fn test_vulkan_render_target_creation() {
     assert_eq!(target.buffer_size(), 800 * 600 * 4);
 }
 
+// Legacy TaskGraph — migrated: `scheme_vulkan_render_and_readback`
 #[test]
 fn test_vulkan_render_and_readback() {
     let Some(device) = create_device() else {
@@ -120,7 +123,7 @@ fn test_vulkan_render_and_readback() {
     let vertex_buffer = test_alloc_buffer_with_data(&device, &vertices, BufferKind::Scattered);
 
     graph_render(&device, &target, "triangle", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(&*vertex_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -138,6 +141,7 @@ fn test_vulkan_render_and_readback() {
     assert!(has_non_black, "Expected rendered triangle to have non-black pixels");
 }
 
+// Legacy TaskGraph — migrated: `scheme_render_target_clear_only`
 #[test]
 fn test_render_target_clear_only() {
     let Some(device) = create_device() else {
@@ -163,6 +167,7 @@ fn test_render_target_clear_only() {
     }
 }
 
+// Legacy TaskGraph — migrated: `scheme_multiple_render_targets`
 #[test]
 fn test_multiple_render_targets() {
     let Some(device) = create_device() else {
@@ -196,6 +201,7 @@ fn test_multiple_render_targets() {
     assert_eq!(pixels2[2], 255); // B
 }
 
+// Legacy TaskGraph — migrated: `scheme_indexed_drawing`
 #[test]
 fn test_indexed_drawing() {
     let Some(device) = create_device() else {
@@ -263,8 +269,8 @@ fn test_indexed_drawing() {
     let index_buffer = test_alloc_buffer_with_data(&device, &indices, BufferKind::Scattered);
 
     graph_render(&device, &target, "indexed_u16", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
-        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
+        pass.with_parcel(&*vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(&*index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -287,6 +293,7 @@ fn test_indexed_drawing() {
     );
 }
 
+// Legacy TaskGraph — migrated: `scheme_indexed_drawing_uint32`
 #[test]
 fn test_indexed_drawing_uint32() {
     let Some(device) = create_device() else {
@@ -348,8 +355,8 @@ fn test_indexed_drawing_uint32() {
     let index_buffer = test_alloc_buffer_with_data(&device, &indices, BufferKind::Scattered);
 
     graph_render(&device, &target, "indexed_u32", |pass| {
-        pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
-        pass.bind_buffer_mut(&index_buffer, NodeAccess::Read);
+        pass.with_parcel(&*vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(&*index_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, &vertex_buffer);
@@ -414,6 +421,7 @@ fn depth_vertex_layout() -> VertexBufferLayout {
 /// Expected output: every pixel is red.
 /// If depth testing is disabled the green quad overwrites the red one and
 /// every pixel is green — this test catches that regression.
+// Legacy TaskGraph — migrated: `scheme_depth_occlusion_red_beats_green`
 #[test]
 fn test_depth_occlusion_red_beats_green() {
     let Some(device) = create_device() else {
@@ -478,8 +486,8 @@ fn test_depth_occlusion_red_beats_green() {
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(&device, &target, "depth_red_wins", |pass| {
-        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
-        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
+        pass.with_parcel(&*red_vb, NodeAccess::Read);
+        pass.with_parcel(&*green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -517,6 +525,7 @@ fn test_depth_occlusion_red_beats_green() {
 /// Expected output: every pixel is green.
 /// This is the complement of the test above and verifies that a late-drawn
 /// near fragment correctly overwrites an early-drawn far fragment.
+// Legacy TaskGraph — migrated: `scheme_depth_occlusion_green_beats_red`
 #[test]
 fn test_depth_occlusion_green_beats_red() {
     let Some(device) = create_device() else {
@@ -579,8 +588,8 @@ fn test_depth_occlusion_green_beats_red() {
     let green_vb = test_alloc_buffer_with_data(&device, &green_verts, BufferKind::Scattered);
 
     graph_render(&device, &target, "depth_green_wins", |pass| {
-        pass.bind_buffer_mut(&red_vb, NodeAccess::Read);
-        pass.bind_buffer_mut(&green_vb, NodeAccess::Read);
+        pass.with_parcel(&*red_vb, NodeAccess::Read);
+        pass.with_parcel(&*green_vb, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.clear_depth(1.0);
         pass.set_pipeline(&pipeline);
@@ -615,6 +624,7 @@ fn test_depth_occlusion_green_beats_red() {
 /// Render a fullscreen triangle whose fragment shader reads a value from a bindless buffer
 /// via resource bindings. Verifies the global argument buffer is correctly bound to offscreen
 /// render targets (a bug that produces a completely blank output if missing).
+// Legacy TaskGraph — migrated: `scheme_render_target_bindless_buffer_read`
 #[test]
 fn test_render_target_bindless_buffer_read() {
     let Some(device) = create_device() else {
@@ -694,10 +704,13 @@ float4 fs_main(Scattered<uint> cells, VSOut i) : SV_Target {
     .expect("create pipeline");
 
     graph_render(&device, &target, "bindless_read", |pass| {
-        pass.bind_buffer_mut(&buffer, NodeAccess::Read);
+        pass.with_parcel(&*buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &*buffer,
+            access: NodeAccess::ReadWrite,
+        }]);
         pass.set_pipeline(&pipeline);
-        pass.bind_resources(&[&buffer]);
         pass.draw(0..3, 0..1);
     });
 

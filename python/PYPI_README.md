@@ -48,7 +48,7 @@ vertices = np.array([
      0.5,  0.5, 0.0, 0.0, 1.0, 1.0,  # blue
 ], dtype=np.float32)
 retained_pool = goldy.RetainedPool(device)
-vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
 # Create shader and pipeline
 shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
@@ -57,7 +57,7 @@ pipeline = goldy.RenderPipeline(device, shader, shader, goldy.RenderPipelineDesc
 # Graphics via TaskGraph (headless)
 graph = goldy.TaskGraph()
 with graph.render_pass("clear", target) as rp:
-    rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
+    rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
     rp.clear(goldy.Color(0.1, 0.1, 0.2, 1.0))
     rp.set_pipeline(pipeline)
     rp.set_vertex_buffer_parcel(0, vertex_parcel)
@@ -88,11 +88,11 @@ python examples/triangle.py
 
 ### NumPy Integration
 
-Retained pools accept numpy arrays directly and return parcels:
+Retained pools accept numpy arrays directly and return buffers (use `[0]` for a single-unit parcel):
 ```python
 vertices = np.array([...], dtype=np.float32)
 pool = goldy.RetainedPool(device)
-parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 ```
 
 Render targets return numpy arrays:
@@ -105,8 +105,8 @@ pixels = target.read_to_cpu()  # Shape: (height, width, 4), dtype: uint8
 Pythonic API with `with` statements for task-graph recording:
 ```python
 with graph.compute_node("update", pipeline, workgroups=(8, 8, 1)) as node:
-    node.bind_parcel(parcel, goldy.NodeAccess.READ_WRITE)
-    node.bind_resources_raw([parcel.resource_index(goldy.ResourceAccess.WRITE)])
+    node.with_parcel(parcel, goldy.NodeAccess.READ_WRITE)
+    node.with_resource_slots([parcel.resource_index(goldy.ResourceAccess.WRITE)])
 ```
 
 ### Shader Libraries

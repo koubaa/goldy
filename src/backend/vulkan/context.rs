@@ -84,7 +84,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             fence_thread,
             command_pool,
             free_cmd_buffers: Vec::new(),
-            retained_compute_cb: None,
+            retained_compute_cbs: std::collections::HashMap::new(),
             timeline_cmd_buffers: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
@@ -111,6 +111,9 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
     }
 
+    let last_seq = sc.last_submitted_seq;
+    let timeline_semaphore = sc.timeline_semaphore;
+
     let fence_thread = sc.fence_thread.take();
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, fence_thread);
 
@@ -120,8 +123,11 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         let Some(ld) = state.devices.get(&device) else {
             return;
         };
-        unsafe {
-            let _ = ld.device.device_wait_idle();
+        if last_seq > 0 {
+            let wait = vk::SemaphoreWaitInfo::default()
+                .semaphores(std::slice::from_ref(&timeline_semaphore))
+                .values(std::slice::from_ref(&last_seq));
+            let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
         }
         if !ctx_batch.is_empty() {
             let ledger_arc = std::sync::Arc::clone(&ld.ledger);
@@ -147,9 +153,13 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         for cb in sc.free_cmd_buffers.drain(..) {
             ld.device.free_command_buffers(command_pool, &[cb]);
         }
-        if let Some(retained) = sc.retained_compute_cb.take() {
-            ld.device
-                .free_command_buffers(sc.command_pool, &[retained.command_buffer]);
+        for (_, retained) in sc.retained_compute_cbs.drain() {
+            if let Some(row) = retained.frame_table_row {
+                if let Some(ft) = state.frame_tables.get(&device) {
+                    super::frame_table::unpin_row(ft, row);
+                }
+            }
+            ld.device.free_command_buffers(command_pool, &[retained.command_buffer]);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);

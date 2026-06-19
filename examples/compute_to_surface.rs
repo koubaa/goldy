@@ -1,16 +1,16 @@
 //! Compute-to-Surface example — pure compute rendering without a graphics pipeline.
 //!
-//! This example demonstrates the new Surface API where a compute shader
-//! writes directly to the swapchain texture via `frame.texture()`.
-//! No `RenderPipeline`, no raster pass, no vertex buffers.
+//! Demonstrates present-on-scheme: a retained [`Scheme`] writes directly to a
+//! [`PresentLease`] from [`SwapchainPool`], then presents via [`PresentGrant::consume`].
 //!
 //! Run with: cargo run --example compute_to_surface
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, BufferKind, ComputePipeline, DeviceDescriptor, Instance, Parcel, PresentMode,
-    RequestAdapterOptions, ResourceAccess, RetainedPool, ShaderModule, Surface, SurfaceConfig, TaskGraph,
-    SWAPCHAIN_SLOT_PLACEHOLDER,
+    task_graph::NodeAccess, write_to_parcel, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance,
+    PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
 };
 use std::sync::Arc;
 use winit::{
@@ -98,14 +98,48 @@ struct App {
 
 struct RenderState {
     window: Arc<Window>,
-    surface: Surface,
+    ctx: goldy::Context,
+    swapchain: SwapchainPool,
+    screen: goldy::PresentLease,
+    present: goldy::PresentGrant,
+    scheme: Scheme,
     compute_pipeline: ComputePipeline,
     _retained_pool: RetainedPool,
-    uniform_buffer: Parcel,
-    frame_graph: TaskGraph,
+    uniform_buffer: Buffer,
     start_time: std::time::Instant,
     vsync: bool,
     frame_count: u32,
+}
+
+fn record_scheme(
+    scheme: &mut Scheme,
+    pipeline: &ComputePipeline,
+    uniform: &Buffer,
+    screen: &goldy::PresentLease,
+    width: u32,
+    height: u32,
+) -> goldy::PresentGrant {
+    let wg_x = width.div_ceil(8);
+    let wg_y = height.div_ceil(8);
+    scheme
+        .node("compute", pipeline)
+        .with_parcel(uniform, NodeAccess::Read)
+        .with_present(screen)
+        .dispatch(wg_x, wg_y, 1);
+    scheme.grant_present(screen)
+}
+
+fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
+    let mut scheme = Scheme::new(&state.ctx);
+    state.present = record_scheme(
+        &mut scheme,
+        &state.compute_pipeline,
+        &state.uniform_buffer,
+        &state.screen,
+        width,
+        height,
+    );
+    state.scheme = scheme;
 }
 
 impl App {
@@ -118,38 +152,51 @@ impl App {
         );
         let ctx = device.create_context()?;
 
-        let surface = Surface::new_with_config(
+        let swapchain = SwapchainPool::new_with_config(
             &ctx,
             window.as_ref(),
+            3,
             SurfaceConfig {
                 present_mode: PresentMode::Fifo,
                 depth_format: None,
             },
         )?;
+        let screen = swapchain.lease();
 
         let shader = ShaderModule::from_slang(&device, COMPUTE_SHADER)?;
         let compute_pipeline = ComputePipeline::new(&device, &shader)?;
 
-        // NOTE: pass a typed `&[Uniforms]`, NOT `bytemuck::bytes_of(&u)`.
-        // Structured-buffer stride must match `size_of::<Uniforms>()` on DX12.
         let mut retained_pool = RetainedPool::new(device);
         let uniform_buffer = retained_pool.acquire_buffer_with_data(
             &[Uniforms {
-                width: surface.width(),
-                height: surface.height(),
+                width: swapchain.width(),
+                height: swapchain.height(),
                 time: 0.0,
                 _padding: 0.0,
             }],
             BufferKind::Scattered,
         )?;
 
+        let mut scheme = Scheme::new(&ctx);
+        let present = record_scheme(
+            &mut scheme,
+            &compute_pipeline,
+            &uniform_buffer,
+            &screen,
+            swapchain.width(),
+            swapchain.height(),
+        );
+
         self.state = Some(RenderState {
             window,
-            surface,
+            ctx,
+            swapchain,
+            screen,
+            present,
+            scheme,
             compute_pipeline,
             _retained_pool: retained_pool,
             uniform_buffer,
-            frame_graph: TaskGraph::new(),
             start_time: std::time::Instant::now(),
             vsync: true,
             frame_count: 0,
@@ -216,7 +263,7 @@ impl ApplicationHandler for App {
                     } else {
                         PresentMode::Immediate
                     };
-                    if let Err(e) = state.surface.set_present_mode(mode) {
+                    if let Err(e) = state.swapchain.set_present_mode(mode) {
                         eprintln!("Failed to set present mode: {e}");
                     } else {
                         println!(
@@ -229,7 +276,8 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
-                let _ = state.surface.resize(new_size.width, new_size.height);
+                let _ = state.swapchain.resize(new_size.width, new_size.height);
+                rebuild_scheme(state, new_size.width, new_size.height);
                 state.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -246,7 +294,7 @@ impl ApplicationHandler for App {
 fn render_frame(state: &mut RenderState) -> Result<()> {
     state.frame_count += 1;
 
-    let (width, height) = state.surface.size();
+    let (width, height) = state.swapchain.size();
     if width == 0 || height == 0 {
         return Ok(());
     }
@@ -259,32 +307,10 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    let frame = state.surface.begin()?;
+    write_to_parcel(&state.ctx, &state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))?;
 
-    let wg_x = width.div_ceil(8);
-    let wg_y = height.div_ceil(8);
-
-    let uniform_handle = state
-        .uniform_buffer
-        .handle(ResourceAccess::Read)
-        .expect("Uniform parcel has no bindless SRV handle");
-
-    state.frame_graph.clear();
-    state
-        .frame_graph
-        .write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
-    let swapchain = state.frame_graph.declare_swapchain_output();
-    state
-        .frame_graph
-        .node("compute", &state.compute_pipeline)
-        .bind_parcel(&state.uniform_buffer, NodeAccess::Read)
-        .bind_swapchain_output(swapchain, NodeAccess::Write)
-        .bind_resources_raw_slice(&[uniform_handle.index(), SWAPCHAIN_SLOT_PLACEHOLDER])
-        .dispatch(wg_x, wg_y, 1);
-
-    let frame = state.surface.submit_graph_to_frame(&mut state.frame_graph, frame)?;
-
-    frame.present()?;
+    let submission = state.scheme.submit()?;
+    state.present.consume(&submission)?;
 
     Ok(())
 }

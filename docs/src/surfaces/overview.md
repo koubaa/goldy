@@ -61,7 +61,7 @@ loop {
     frame_graph.clear();
 
     let mut pass = frame_graph.render_pass("main", &scene_rt);
-    pass.bind_buffer_mut(&vertices, NodeAccess::Read);
+    pass.with_buffer_mut(&vertices, NodeAccess::Read);
     pass.clear(Color::CORNFLOWER_BLUE);
     pass.set_pipeline(&pipeline);
     pass.set_vertex_buffer(0, &vertices);

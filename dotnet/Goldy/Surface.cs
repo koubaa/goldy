@@ -6,30 +6,9 @@ namespace Goldy;
 /// A GPU surface for zero-copy presentation to a window.
 /// 
 /// Unlike RenderTarget, a Surface presents directly to the display
-/// without any CPU-side copies. This is the optimal path for windowed rendering.
+/// without any CPU-side copies. Windowed rendering uses
+/// <see cref="SwapchainPool"/> + present-on-scheme.
 /// </summary>
-/// <example>
-/// <code>
-/// // Create surface from a window handle (platform-specific)
-/// var surface = Surface.CreateWin32(device, windowHandle);
-/// 
-/// var graph = new TaskGraph();
-/// var sceneRt = new RenderTarget(device, surface.Width, surface.Height, surface.Format);
-/// while (running)
-/// {
-///     graph.Clear();
-///     using (var pass = graph.RenderPass("main", sceneRt))
-///     {
-///         pass.Clear(Color.CornflowerBlue).SetPipeline(pipeline).Draw(3);
-///     }
-///     var swapchain = graph.DeclareSwapchainOutput();
-///     graph.CopyRenderTargetToSwapchain(sceneRt, swapchain);
-///     var frame = surface.Acquire();
-///     surface.SubmitGraphToFrame(graph, frame);
-///     surface.Present(frame);
-/// }
-/// </code>
-/// </example>
 public sealed class Surface : IDisposable
 {
     internal readonly nint Handle;
@@ -43,14 +22,6 @@ public sealed class Surface : IDisposable
     /// <summary>
     /// Create a surface from a Win32 window handle (HWND).
     /// </summary>
-    /// <param name="device">The GPU device to use for rendering.</param>
-    /// <param name="hwnd">The Win32 window handle (HWND).</param>
-    /// <returns>A new Surface for the window.</returns>
-    /// <exception cref="GoldyException">Thrown if surface creation fails.</exception>
-    /// <remarks>
-    /// The window must remain valid for the lifetime of the surface.
-    /// Currently only Vulkan backend is supported for C# windowed rendering.
-    /// </remarks>
     public static Surface CreateWin32(Device device, nint hwnd)
     {
         device.ThrowIfDisposed();
@@ -90,34 +61,13 @@ public sealed class Surface : IDisposable
         return new Surface(handle);
     }
 
-    /// <summary>
-    /// Get the surface width in pixels.
-    /// </summary>
     public uint Width => NativeMethods.SurfaceWidth(Handle);
-
-    /// <summary>
-    /// Get the surface height in pixels.
-    /// </summary>
     public uint Height => NativeMethods.SurfaceHeight(Handle);
-
-    /// <summary>
-    /// Get the swapchain texture format.
-    /// Use this to set RenderPipelineDesc.TargetFormat when rendering to this surface.
-    /// </summary>
     public TextureFormat Format => NativeMethods.SurfaceFormat(Handle);
 
-    /// <summary>
-    /// Resize the surface.
-    /// Call this when the window is resized. This recreates the swapchain.
-    /// </summary>
-    /// <param name="width">New width in pixels.</param>
-    /// <param name="height">New height in pixels.</param>
-    /// <exception cref="GoldyException">Thrown if resize fails.</exception>
     public void Resize(uint width, uint height)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        
-        // Ignore zero-sized resize (minimized window)
         if (width == 0 || height == 0)
             return;
         
@@ -126,12 +76,6 @@ public sealed class Surface : IDisposable
             throw GoldyException.FromLastError("Surface resize");
     }
 
-    /// <summary>
-    /// Acquire the next frame to render to.
-    /// This blocks until a frame is available from the swapchain.
-    /// </summary>
-    /// <returns>A SurfaceFrame that can be rendered to and presented.</returns>
-    /// <exception cref="GoldyException">Thrown if frame acquisition fails.</exception>
     public SurfaceFrame Acquire()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -143,26 +87,6 @@ public sealed class Surface : IDisposable
         return new SurfaceFrame(frameHandle, this);
     }
 
-    /// <summary>
-    /// Submit a task graph to an acquired swapchain frame.
-    /// The graph must declare swapchain output and include a blit node.
-    /// </summary>
-    public void SubmitGraphToFrame(TaskGraph graph, SurfaceFrame frame)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        graph.ThrowIfDisposed();
-
-        var result = NativeMethods.SurfaceSubmitGraphToFrame(Handle, graph.Handle, frame.NativeHandle);
-        if (result != GoldyResult.Ok)
-            throw GoldyException.FromLastError("Surface submit_graph_to_frame");
-    }
-
-    /// <summary>
-    /// Present a rendered frame to the screen.
-    /// This submits the frame to be displayed and returns immediately.
-    /// </summary>
-    /// <param name="frame">The frame to present. This consumes the frame.</param>
-    /// <exception cref="GoldyException">Thrown if presentation fails.</exception>
     public void Present(SurfaceFrame frame)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -185,7 +109,6 @@ public sealed class Surface : IDisposable
 
 /// <summary>
 /// A frame acquired from a surface, ready for rendering.
-/// After rendering, pass to Surface.Present() to display it.
 /// </summary>
 public sealed class SurfaceFrame
 {
@@ -198,24 +121,11 @@ public sealed class SurfaceFrame
         _surface = surface;
     }
 
-    /// <summary>
-    /// Get the frame width in pixels.
-    /// </summary>
     public uint Width => NativeMethods.SurfaceFrameWidth(_handle);
-
-    /// <summary>
-    /// Get the frame height in pixels.
-    /// </summary>
     public uint Height => NativeMethods.SurfaceFrameHeight(_handle);
 
-    /// <summary>
-    /// Native frame box pointer (for submit_graph_to_frame).
-    /// </summary>
     internal nint NativeHandle => _handle;
 
-    /// <summary>
-    /// Take ownership of the native handle (for present).
-    /// </summary>
     internal nint TakeHandle()
     {
         var handle = _handle;

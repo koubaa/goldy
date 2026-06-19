@@ -84,7 +84,7 @@ More complex examples combining multiple Goldy features or demonstrating interac
 ```rust
 frame_graph.clear();
 let mut pass = frame_graph.render_pass("main", &scene_rt);
-pass.bind_buffer_mut(&vertices, NodeAccess::Read);
+pass.with_buffer_mut(&vertices, NodeAccess::Read);
 pass.clear(background_color);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertices);
@@ -105,8 +105,8 @@ frame.present()?;
 let mut graph = TaskGraph::new();
 graph
     .node("update", &compute_pipeline)
-    .bind_buffer(&buffer, NodeAccess::ReadWrite)
-    .bind_resources_raw(&[buffer.resource_index(ResourceAccess::Read).unwrap()])
+    .with_buffer(&buffer, NodeAccess::ReadWrite)
+    .with_resource_slots(&[buffer.resource_index(ResourceAccess::Read).unwrap()])
     .dispatch(workgroups, 1, 1);
 graph.dispatch(&device)?;
 ```

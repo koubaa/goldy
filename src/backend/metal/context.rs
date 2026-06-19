@@ -81,6 +81,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             staging_belt: StagingBelt::new(DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
+            retained_graphs: std::collections::HashMap::new(),
         })),
     );
     Ok(id)
@@ -92,15 +93,30 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
     };
     let mut sc = sc_arc.lock().unwrap();
     let device = sc.device;
-    let completed = sc.timeline_event.as_ref().signaled_value();
-    if let Some(ld) = state.devices.get(&device) {
-        ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
-    }
+
+    // Drop all retained graph snapshots first so Arc<[GraphCommand]> payloads are
+    // released before in-flight CBs are drained and the staging belt is torn down.
+    sc.retained_graphs.clear();
 
     sc.staging_belt.destroy_all();
     sc.texture_staging_pool.destroy_all();
-    for (_, cb) in sc.in_flight_command_buffers.drain(..) {
+    // Wait for tracked in-flight command buffers so `MTLSharedEvent::signaled_value`
+    // catches up. `TimelineWaiter` (completion-handler condvar) can run ahead of the
+    // shared event; `device_retired` reads the event, so skipping CB waits leaves
+    // `device_wait_idle` spinning until timeout (see debug session 182c27).
+    let last_seq = sc.last_submitted_seq;
+    for (_, cb) in sc.in_flight_command_buffers.iter() {
         cb.wait_until_completed();
+    }
+    super::drain_completed_cbs(&mut sc);
+    sc.in_flight_command_buffers.clear();
+    let signaled_after = sc.timeline_event.as_ref().signaled_value();
+    // Persist retirement on the device ledger: once this context is removed,
+    // `device_retired` no longer reads its shared event. `last_submitted_seq` only
+    // counts committed command buffers, so it is a safe floor if the shared event lags.
+    let retired_horizon = signaled_after.max(last_seq);
+    if let Some(ld) = state.devices.get(&device) {
+        ld.retired_floor.fetch_max(retired_horizon, Ordering::Relaxed);
     }
     // All CBs have completed; flush any resources still parked in the per-context
     // deletion queue.  At this point every timeline value is retired so every
@@ -136,7 +152,20 @@ pub(super) fn wait_until_device_seq_at_least(
             return false;
         }
         let remaining = timeout.saturating_sub(start.elapsed());
-        // Find any context on this device that hasn't reached seq yet and wait briefly.
+        // Drive retirement through Metal: completion-handler condvar can report
+        // completion before `MTLSharedEvent::signaled_value` advances.
+        if let Some(cb) = oldest_in_flight_cb(state, device) {
+            cb.wait_until_completed();
+            for sc_arc in state.contexts.values() {
+                let mut sc = sc_arc.lock().unwrap();
+                if sc.device == device {
+                    super::drain_completed_cbs(&mut sc);
+                }
+            }
+            continue;
+        }
+        // Wait on the completion-handler condvar; by the time it fires the shared
+        // event has already been signalled for that submission.
         let found_waiter = state.contexts.values().find_map(|sc_arc| {
             let sc = sc_arc.lock().unwrap();
             if sc.device == device && sc.timeline_event.as_ref().signaled_value() < seq {
@@ -146,9 +175,18 @@ pub(super) fn wait_until_device_seq_at_least(
             }
         });
         if let Some(waiter) = found_waiter {
-            let chunk = remaining.min(std::time::Duration::from_millis(1));
-            let _ = waiter.wait_until(seq, chunk);
+            let _ = waiter.wait_until(seq, remaining);
+            continue;
         }
+        // No in-flight CBs and no live context below `seq`, yet `device_retired` lags.
+        // Context destroy should have floored `retired_floor` before removal.
+        debug_assert!(
+            device_retired(state, device) >= seq,
+            "device_retired ({}) lagged seq ({}) with nothing left to wait on",
+            device_retired(state, device),
+            seq
+        );
+        return false;
     }
     true
 }

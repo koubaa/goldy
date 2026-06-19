@@ -1,7 +1,27 @@
 //! Shared helpers for interactive examples (run limits, perf reporting).
 
+use goldy::{Device, RenderPipeline, RenderPipelineDesc, ShaderModule, SwapchainPool};
 use std::time::{Duration, Instant};
 use winit::event_loop::ActiveEventLoop;
+
+/// Build or rebuild a render pipeline using the swapchain's current format.
+#[allow(dead_code)]
+pub fn render_pipeline_for_swapchain(
+    device: &Device,
+    shader: &ShaderModule,
+    swapchain: &SwapchainPool,
+    desc: RenderPipelineDesc,
+) -> anyhow::Result<RenderPipeline> {
+    Ok(RenderPipeline::new(
+        device,
+        shader,
+        shader,
+        &RenderPipelineDesc {
+            target_format: swapchain.format(),
+            ..desc
+        },
+    )?)
+}
 
 /// Run limit in seconds from `GOLDY_EXAMPLE_TIMEOUT` or `EXAMPLE_TIMEOUT`.
 pub fn run_limit_secs() -> Option<f64> {

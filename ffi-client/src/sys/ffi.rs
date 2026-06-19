@@ -10,6 +10,107 @@ pub type FnGoldyComputePipelineCreate =
     unsafe extern "C" fn(*const GoldyDevice, *const GoldyShaderModule) -> *mut GoldyComputePipeline;
 pub type FnGoldyComputePipelineDestroy = unsafe extern "C" fn(*mut GoldyComputePipeline);
 
+pub type FnGoldyContextCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyContext;
+pub type FnGoldyContextDestroy = unsafe extern "C" fn(*mut GoldyContext);
+
+pub type FnGoldySchemeCreate = unsafe extern "C" fn(*const GoldyContext) -> *mut GoldyScheme;
+pub type FnGoldySchemeDestroy = unsafe extern "C" fn(*mut GoldyScheme);
+pub type FnGoldySchemeLen = unsafe extern "C" fn(*const GoldyScheme) -> u32;
+pub type FnGoldySchemeIsDirty = unsafe extern "C" fn(*const GoldyScheme) -> bool;
+pub type FnGoldySchemeReplayStats = unsafe extern "C" fn(*const GoldyScheme, *mut GoldyReplayStats) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeBegin =
+    unsafe extern "C" fn(*mut GoldyScheme, *const c_char, *const GoldyComputePipeline) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeWithParcel =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyNodeAccess, GoldyResourceAccess) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeWithBufferUnit = unsafe extern "C" fn(
+    *mut GoldyScheme,
+    *const GoldyBuffer,
+    u32,
+    GoldyNodeAccess,
+    GoldyResourceAccess,
+) -> GoldyResult;
+pub type FnGoldySchemeRenderPassWithBufferUnit =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer, u32, GoldyNodeAccess) -> GoldyResult;
+pub type FnGoldySchemeGrantRead = unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer) -> *mut GoldyReadGrant;
+pub type FnGoldySchemeComputeNodeWithParam = unsafe extern "C" fn(*mut GoldyScheme, u32) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeDispatch = unsafe extern "C" fn(*mut GoldyScheme, u32, u32, u32) -> GoldyResult;
+pub type FnGoldySchemeSubmit = unsafe extern "C" fn(*mut GoldyScheme, *mut *mut GoldySchemeSubmission) -> GoldyResult;
+pub type FnGoldySchemeSubmissionDestroy = unsafe extern "C" fn(*mut GoldySchemeSubmission);
+pub type FnGoldySchemeSubmissionTimelineValue = unsafe extern "C" fn(*const GoldySchemeSubmission) -> u64;
+pub type FnGoldySchemeSubmissionWait =
+    unsafe extern "C" fn(*const GoldyContext, *const GoldySchemeSubmission) -> GoldyResult;
+pub type FnGoldyReadGrantDestroy = unsafe extern "C" fn(*mut GoldyReadGrant);
+pub type FnGoldyReadGrantByteSize = unsafe extern "C" fn(*const GoldyReadGrant) -> u64;
+pub type FnGoldyReadGrantConsume =
+    unsafe extern "C" fn(*const GoldyReadGrant, *const GoldySchemeSubmission, *mut u8, usize) -> GoldyResult;
+
+pub type FnGoldySchemeLeaseRenderTarget = unsafe extern "C" fn(
+    *mut GoldyScheme,
+    u32,
+    u32,
+    GoldyTextureFormat,
+    bool,
+    GoldyDepthFormat,
+) -> *mut GoldySchemeRenderTargetLease;
+pub type FnGoldySchemeRenderTargetLeaseDestroy = unsafe extern "C" fn(*mut GoldySchemeRenderTargetLease);
+pub type FnGoldySchemeRenderPassBegin =
+    unsafe extern "C" fn(*mut GoldyScheme, *const c_char, *const GoldySchemeRenderTargetLease) -> GoldyResult;
+pub type FnGoldySchemeRenderPassWithParcel =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyNodeAccess) -> GoldyResult;
+pub type FnGoldySchemeRenderPassClear = unsafe extern "C" fn(*mut GoldyScheme, GoldyColor) -> GoldyResult;
+pub type FnGoldySchemeRenderPassClearDepth = unsafe extern "C" fn(*mut GoldyScheme, f32) -> GoldyResult;
+pub type FnGoldySchemeRenderPassSetPipeline =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyRenderPipeline) -> GoldyResult;
+pub type FnGoldySchemeRenderPassSetVertexBufferParcel =
+    unsafe extern "C" fn(*mut GoldyScheme, u32, *const GoldyParcel) -> GoldyResult;
+pub type FnGoldySchemeRenderPassSetIndexBuffer =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyIndexFormat) -> GoldyResult;
+pub type FnGoldySchemeRenderPassDraw = unsafe extern "C" fn(*mut GoldyScheme, u32, u32, u32, u32) -> GoldyResult;
+pub type FnGoldySchemeRenderPassDrawIndexed =
+    unsafe extern "C" fn(*mut GoldyScheme, u32, u32, c_int, u32, u32) -> GoldyResult;
+pub type FnGoldySchemeRenderPassDrawFullscreen = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
+pub type FnGoldySchemeRenderPassFinish = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
+pub type FnGoldySchemeCopyToTexture =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldySchemeRenderTargetLease, *const GoldyParcel) -> GoldyResult;
+pub type FnGoldySchemeCopyToPresent = unsafe extern "C" fn(
+    *mut GoldyScheme,
+    *const GoldySchemeRenderTargetLease,
+    *const GoldyPresentLease,
+) -> GoldyResult;
+pub type FnGoldySchemeGrantPresent =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyPresentLease) -> *mut GoldyPresentGrant;
+pub type FnGoldyPresentGrantDestroy = unsafe extern "C" fn(*mut GoldyPresentGrant);
+pub type FnGoldyPresentGrantConsume =
+    unsafe extern "C" fn(*const GoldyPresentGrant, *const GoldySchemeSubmission) -> GoldyResult;
+pub type FnGoldySchemeGrantReadTexture =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel) -> *mut GoldyReadGrant;
+pub type FnGoldyRetainedPoolAcquireTexture = unsafe extern "C" fn(
+    *mut GoldyRetainedPool,
+    u32,
+    u32,
+    GoldyTextureFormat,
+    GoldyTextureKind,
+    GoldyTextureFlags,
+    *const u8,
+    usize,
+) -> *mut GoldyParcel;
+pub type FnGoldySwapchainPoolDestroy = unsafe extern "C" fn(*mut GoldySwapchainPool);
+pub type FnGoldySwapchainPoolLease = unsafe extern "C" fn(*const GoldySwapchainPool) -> *mut GoldyPresentLease;
+pub type FnGoldySwapchainPoolWidth = unsafe extern "C" fn(*const GoldySwapchainPool) -> u32;
+pub type FnGoldySwapchainPoolHeight = unsafe extern "C" fn(*const GoldySwapchainPool) -> u32;
+pub type FnGoldySwapchainPoolFormat = unsafe extern "C" fn(*const GoldySwapchainPool) -> GoldyTextureFormat;
+pub type FnGoldySwapchainPoolResize = unsafe extern "C" fn(*mut GoldySwapchainPool, u32, u32) -> GoldyResult;
+pub type FnGoldyPresentLeaseDestroy = unsafe extern "C" fn(*mut GoldyPresentLease);
+#[cfg(windows)]
+pub type FnGoldySwapchainPoolCreateWin32 =
+    unsafe extern "C" fn(*const GoldyContext, *mut c_void, u32) -> *mut GoldySwapchainPool;
+#[cfg(target_os = "macos")]
+pub type FnGoldySwapchainPoolCreateAppkit =
+    unsafe extern "C" fn(*const GoldyContext, *mut c_void, u32) -> *mut GoldySwapchainPool;
+#[cfg(target_os = "linux")]
+pub type FnGoldySwapchainPoolCreateWayland =
+    unsafe extern "C" fn(*const GoldyContext, *mut c_void, *mut c_void, u32) -> *mut GoldySwapchainPool;
+
 pub type FnGoldyDeviceAdapterId = unsafe extern "C" fn(*const GoldyDevice) -> u32;
 pub type FnGoldyDeviceDestroy = unsafe extern "C" fn(*mut GoldyDevice);
 pub type FnGoldyDeviceHasLibrary = unsafe extern "C" fn(*const GoldyDevice, *const c_char) -> bool;
@@ -64,67 +165,25 @@ pub type FnGoldySurfaceFrameWidth = unsafe extern "C" fn(*const GoldySurfaceFram
 pub type FnGoldySurfaceHeight = unsafe extern "C" fn(*const GoldySurface) -> u32;
 pub type FnGoldySurfacePresent = unsafe extern "C" fn(*const GoldySurface, *mut GoldySurfaceFrame) -> GoldyResult;
 pub type FnGoldySurfaceResize = unsafe extern "C" fn(*mut GoldySurface, u32, u32) -> GoldyResult;
-pub type FnGoldySurfaceSubmitGraphToFrame =
-    unsafe extern "C" fn(*const GoldySurface, *mut GoldyTaskGraph, *mut GoldySurfaceFrame) -> GoldyResult;
 pub type FnGoldySurfaceWidth = unsafe extern "C" fn(*const GoldySurface) -> u32;
 
-pub type FnGoldyTaskGraphClear = unsafe extern "C" fn(*mut GoldyTaskGraph) -> GoldyResult;
-pub type FnGoldyTaskGraphCopyRenderTargetToSwapchain =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyRenderTarget, *const GoldySwapchainOutput) -> GoldyResult;
-pub type FnGoldyTaskGraphCreate = unsafe extern "C" fn() -> *mut GoldyTaskGraph;
-pub type FnGoldyTaskGraphDeclareSwapchainOutput =
-    unsafe extern "C" fn(*mut GoldyTaskGraph) -> *mut GoldySwapchainOutput;
-pub type FnGoldyTaskGraphDestroy = unsafe extern "C" fn(*mut GoldyTaskGraph);
-pub type FnGoldyTaskGraphComputeNodeBegin =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const c_char, *const GoldyComputePipeline) -> GoldyResult;
-pub type FnGoldyTaskGraphComputeNodeBindParcel =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, GoldyNodeAccess) -> GoldyResult;
-pub type FnGoldyTaskGraphComputeNodeBindResourcesRaw =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const u32, u32) -> GoldyResult;
-pub type FnGoldyTaskGraphComputeNodeDispatch = unsafe extern "C" fn(*mut GoldyTaskGraph, u32, u32, u32) -> GoldyResult;
-pub type FnGoldyTaskGraphDispatch = unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyDevice) -> GoldyResult;
-pub type FnGoldyTaskGraphWriteParcel =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, u64, *const u8, usize) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassBegin =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const c_char, *const GoldyRenderTarget) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassBindParcel =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, GoldyNodeAccess) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassBindResourcesTyped =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const u32, u32) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassClear = unsafe extern "C" fn(*mut GoldyTaskGraph, GoldyColor) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassClearDepth = unsafe extern "C" fn(*mut GoldyTaskGraph, f32) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassDraw = unsafe extern "C" fn(*mut GoldyTaskGraph, u32, u32, u32, u32) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassDrawFullscreen = unsafe extern "C" fn(*mut GoldyTaskGraph) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassDrawIndexed =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, u32, u32, c_int, u32, u32) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassFinish = unsafe extern "C" fn(*mut GoldyTaskGraph) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassSetIndexBuffer =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, GoldyIndexFormat) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassSetPipeline =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyRenderPipeline) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassSetVertexBufferParcel =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, u32, *const GoldyParcel) -> GoldyResult;
-
 pub type FnGoldyRetainedPoolAcquireBuffer =
-    unsafe extern "C" fn(*mut GoldyRetainedPool, u64, GoldyBufferKind, u32, *const u8, usize) -> *mut GoldyParcel;
+    unsafe extern "C" fn(*mut GoldyRetainedPool, u64, GoldyBufferKind, u32, *const u8, usize) -> *mut GoldyBuffer;
 pub type FnGoldyRetainedPoolCreate = unsafe extern "C" fn(*const GoldyDevice) -> *mut GoldyRetainedPool;
 pub type FnGoldyRetainedPoolDestroy = unsafe extern "C" fn(*mut GoldyRetainedPool);
-pub type FnGoldyMosaicBuilderCreate = unsafe extern "C" fn() -> *mut GoldyMosaicBuilder;
-pub type FnGoldyMosaicBuilderDestroy = unsafe extern "C" fn(*mut GoldyMosaicBuilder);
-pub type FnGoldyMosaicBuilderEmplace = unsafe extern "C" fn(*mut GoldyMosaicBuilder, *const u8, usize, u64, u32) -> u32;
-pub type FnGoldyMosaicBuilderBuild =
-    unsafe extern "C" fn(*mut GoldyMosaicBuilder, *mut GoldyRetainedPool) -> *mut GoldyParcel;
+pub type FnGoldyRecordBuilderCreate = unsafe extern "C" fn() -> *mut GoldyRecordBuilder;
+pub type FnGoldyRecordBuilderDestroy = unsafe extern "C" fn(*mut GoldyRecordBuilder);
+pub type FnGoldyRecordBuilderEmplace =
+    unsafe extern "C" fn(*mut GoldyRecordBuilder, *const c_char, *const u8, usize, u64, u32) -> u32;
+pub type FnGoldyRecordBuilderBuild =
+    unsafe extern "C" fn(*mut GoldyRecordBuilder, *mut GoldyRetainedPool) -> *mut GoldyBuffer;
+pub type FnGoldyBufferDestroy = unsafe extern "C" fn(*mut GoldyBuffer);
+pub type FnGoldyBufferByteSize = unsafe extern "C" fn(*const GoldyBuffer) -> u64;
+pub type FnGoldyBufferUnitCount = unsafe extern "C" fn(*const GoldyBuffer) -> u32;
+pub type FnGoldyBufferUnitByteSize = unsafe extern "C" fn(*const GoldyBuffer, u32) -> u64;
+pub type FnGoldyBufferUnitResourceIndex = unsafe extern "C" fn(*const GoldyBuffer, u32, GoldyResourceAccess) -> u32;
+pub type FnGoldyBufferUnitReadToCpu =
+    unsafe extern "C" fn(*const GoldyBuffer, u32, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
+pub type FnGoldyBufferField = unsafe extern "C" fn(*const GoldyBuffer, u32) -> *mut GoldyParcel;
 pub type FnGoldyParcelByteSize = unsafe extern "C" fn(*const GoldyParcel) -> u64;
 pub type FnGoldyParcelDestroy = unsafe extern "C" fn(*mut GoldyParcel);
-pub type FnGoldyParcelResourceIndex = unsafe extern "C" fn(*const GoldyParcel, GoldyResourceAccess) -> u32;
-pub type FnGoldyParcelMosaicViewResourceIndex =
-    unsafe extern "C" fn(*const GoldyParcel, u32, GoldyResourceAccess) -> u32;
-pub type FnGoldyParcelMosaicViewReadToCpu =
-    unsafe extern "C" fn(*const GoldyParcel, u32, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
-pub type FnGoldyParcelMosaicViewSize = unsafe extern "C" fn(*const GoldyParcel, u32) -> u64;
-pub type FnGoldyParcelReadToCpu =
-    unsafe extern "C" fn(*const GoldyParcel, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
-pub type FnGoldyTaskGraphComputeNodeBindParcelView =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, u32, GoldyNodeAccess) -> GoldyResult;
-pub type FnGoldyTaskGraphRenderPassBindParcelView =
-    unsafe extern "C" fn(*mut GoldyTaskGraph, *const GoldyParcel, u32, GoldyNodeAccess) -> GoldyResult;

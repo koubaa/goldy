@@ -291,6 +291,10 @@ impl VulkanBackend {
 // GpuBackend trait implementation - thin wrapper delegating to domain modules
 #[allow(clippy::manual_find)]
 impl GpuBackend for VulkanBackend {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Vulkan
     }
@@ -532,6 +536,59 @@ impl GpuBackend for VulkanBackend {
         )
     }
 
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        buffer::alloc_readback_buffer(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            device,
+            size,
+        )
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        buffer::read_readback_buffer(&self.state.buffers, buffer, output)
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer);
+    }
+
+    fn query_texture_readback_layout(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        Ok(buffer::query_texture_readback_layout(width, height, format))
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        buffer::alloc_texture_readback_staging(
+            &self.state.instance,
+            &self.state.devices,
+            &mut self.state.buffers,
+            &mut self.state.next_buffer_handle,
+            device,
+            layout,
+        )
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
+    }
+
     fn clear_buffer(
         &mut self,
         device_handle: DeviceHandle,
@@ -663,11 +720,13 @@ impl GpuBackend for VulkanBackend {
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()> {
+        let contexts = &self.state.contexts;
         let pipelines = &self.state.pipelines;
         let buffers = &self.state.buffers;
         let devices = &self.state.devices;
         let frame_tables = &self.state.frame_tables;
         let render_resources = render_target::RenderToResources {
+            contexts,
             devices,
             frame_tables,
             buffers,
@@ -718,14 +777,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_surface(&mut self, surface_handle: SurfaceHandle) {
-        surface::destroy(
-            &self.state.entry,
-            &self.state.instance,
-            &self.state.devices,
-            &mut self.state.surfaces,
-            &mut self.state.textures,
-            surface_handle,
-        );
+        surface::destroy(&mut self.state, surface_handle);
     }
 
     fn begin_frame(
@@ -734,6 +786,8 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
         let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
+        let frame_slot = surface::current_frame_slot(&self.state.surfaces, surface_handle)
+            .context("begin_frame: surface frame slot unavailable")?;
         let tex = surface::frame_texture(&self.state.surfaces, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
@@ -741,6 +795,7 @@ impl GpuBackend for VulkanBackend {
                 surface: surface_handle,
                 image,
                 context: ctx,
+                frame_slot,
             },
             tex,
         ))
@@ -755,24 +810,7 @@ impl GpuBackend for VulkanBackend {
             .lock()
             .unwrap()
             .timeline_semaphore;
-        let pipelines = &self.state.pipelines;
-        let buffers = &self.state.buffers;
-        let devices = &self.state.devices;
-        let frame_tables = &self.state.frame_tables;
-        surface::render(
-            devices,
-            frame_tables,
-            buffers,
-            pipelines,
-            &mut self.state.surfaces,
-            frame.surface,
-            frame.image,
-            timeline_sem,
-            commands,
-            |cmd, cmds, logical_device, current_pipeline| {
-                render_commands::record(cmd, cmds, logical_device, pipelines, buffers, current_pipeline)
-            },
-        )?;
+        surface::render(&mut self.state, frame.surface, frame.image, timeline_sem, commands)?;
         if let Some(tv) = self
             .state
             .surfaces
@@ -1189,16 +1227,18 @@ impl GpuBackend for VulkanBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&self.state, ctx, commands)
+        compute::submit(&self.state, ctx, commands, sync)
     }
 
     fn submit_graph(
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&self.state, ctx, commands)
+        compute::submit_graph(&self.state, ctx, commands, sync)
     }
 
     fn submit_graph_and_retain(
@@ -1206,16 +1246,18 @@ impl GpuBackend for VulkanBackend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph_and_retain(&self.state, ctx, commands, key)
+        compute::submit_graph_and_retain(&self.state, ctx, commands, key, sync)
     }
 
     fn try_resubmit_retained(
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        compute::try_resubmit_retained(&self.state, ctx, key)
+        compute::try_resubmit_retained(&self.state, ctx, key, sync)
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {

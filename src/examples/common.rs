@@ -1,7 +1,6 @@
 //! Common utilities shared between native and web examples.
 //!
-//! This module provides shared types and utilities that work across
-//! both native (Vulkan) and web (WebGPU) platforms.
+//! This module provides shared types and utilities.
 
 use crate::buffer::StructuredBufferElement;
 use crate::types::{VertexBufferLayout, VertexFormat};

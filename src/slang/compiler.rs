@@ -333,6 +333,7 @@ pub fn builtin_type_stride(name: &str) -> Option<u32> {
         "float2x2" => Some(16),
         "float3x3" => Some(36),
         "float4x4" => Some(64),
+        "DispatchShape" => Some(12),
         _ => None,
     }
 }
@@ -1271,6 +1272,11 @@ mod builtin_stride_tests {
     fn user_struct_returns_none() {
         assert_eq!(builtin_type_stride("MyStruct"), None);
         assert_eq!(builtin_type_stride("Particle"), None);
+    }
+
+    #[test]
+    fn dispatch_shape_stride() {
+        assert_eq!(builtin_type_stride("DispatchShape"), Some(12));
     }
 }
 

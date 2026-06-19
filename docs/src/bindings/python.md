@@ -146,8 +146,8 @@ pipeline = goldy.ComputePipeline(device, shader)
 graph = goldy.TaskGraph()
 idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
 with graph.compute_node("double", pipeline, workgroups=(4, 1, 1)) as node:
-    node.bind_parcel(parcel, goldy.NodeAccess.READ_WRITE)
-    node.bind_resources_raw([idx])   # 4 workgroups × 64 threads = 256 threads
+    node.with_parcel(parcel, goldy.NodeAccess.READ_WRITE)
+    node.with_resource_slots([idx])   # 4 workgroups × 64 threads = 256 threads
 graph.dispatch(device)
 ```
 
@@ -167,9 +167,9 @@ for _ in range(100):
     write_idx = write_buf.resource_index(goldy.ResourceAccess.WRITE)
     graph = goldy.TaskGraph()
     with graph.compute_node("step", pipeline, workgroups=(workgroups_x, workgroups_y, 1)) as node:
-        node.bind_parcel(read_buf, goldy.NodeAccess.READ)
-        node.bind_parcel(write_buf, goldy.NodeAccess.WRITE)
-        node.bind_resources_raw([read_idx, write_idx])
+        node.with_parcel(read_buf, goldy.NodeAccess.READ)
+        node.with_parcel(write_buf, goldy.NodeAccess.WRITE)
+        node.with_resource_slots([read_idx, write_idx])
     graph.dispatch(device)
     use_a = not use_a
 ```
@@ -271,7 +271,7 @@ graph = goldy.TaskGraph()
 graph.clear()
 
 with graph.render_pass("main", scene_rt) as rp:
-    rp.bind_parcel(vertex_buffer, goldy.NodeAccess.READ)
+    rp.with_parcel(vertex_buffer, goldy.NodeAccess.READ)
     rp.clear(goldy.Color.BLACK)
     rp.set_pipeline(pipeline)
     rp.set_vertex_buffer_parcel(0, vertex_buffer)
@@ -292,8 +292,8 @@ surface.present(frame)
 
 ```python
 with graph.compute_node("update", compute_pipeline, workgroups=(8, 8, 1)) as node:
-    node.bind_parcel(state_buf, goldy.NodeAccess.READ_WRITE)
-    node.bind_resources_raw([state_idx])
+    node.with_parcel(state_buf, goldy.NodeAccess.READ_WRITE)
+    node.with_resource_slots([state_idx])
 ```
 
 ### Compute Classes

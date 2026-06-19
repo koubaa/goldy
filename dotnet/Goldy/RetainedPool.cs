@@ -20,48 +20,71 @@ public sealed class RetainedPool : IDisposable
     }
 
     /// <summary>
-    /// Acquire an uninitialized retained buffer parcel.
+    /// Begin building a partitioned record buffer.
     /// </summary>
-    public Parcel AcquireBuffer(ulong size, BufferKind access, uint elementStride = 0)
+    public RecordBuilder Record() => new();
+
+    /// <summary>
+    /// Acquire an uninitialized retained buffer.
+    /// </summary>
+    public Buffer AcquireBuffer(ulong size, BufferKind access, uint elementStride = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         unsafe
         {
-            var parcel = NativeMethods.RetainedPoolAcquireBuffer(
+            var buffer = NativeMethods.RetainedPoolAcquireBuffer(
                 Handle, size, access, elementStride, nint.Zero, 0);
-            if (parcel == nint.Zero)
+            if (buffer == nint.Zero)
                 throw GoldyException.FromLastError("RetainedPool acquire_buffer");
-            return new Parcel(parcel, size);
+            return new Buffer(buffer);
         }
     }
 
     /// <summary>
-    /// Acquire a retained buffer parcel initialized with raw bytes.
+    /// Acquire a retained buffer initialized with raw bytes.
     /// </summary>
-    public Parcel AcquireBuffer(ReadOnlySpan<byte> data, BufferKind access, uint elementStride = 0)
+    public Buffer AcquireBuffer(ReadOnlySpan<byte> data, BufferKind access, uint elementStride = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         unsafe
         {
             fixed (byte* ptr = data)
             {
-                var parcel = NativeMethods.RetainedPoolAcquireBuffer(
+                var buffer = NativeMethods.RetainedPoolAcquireBuffer(
                     Handle, (ulong)data.Length, access, elementStride, (nint)ptr, (nuint)data.Length);
-                if (parcel == nint.Zero)
+                if (buffer == nint.Zero)
                     throw GoldyException.FromLastError("RetainedPool acquire_buffer");
-                return new Parcel(parcel, (ulong)data.Length);
+                return new Buffer(buffer);
             }
         }
     }
 
     /// <summary>
-    /// Acquire a retained buffer parcel initialized with typed data.
+    /// Acquire a retained buffer initialized with typed data.
     /// </summary>
-    public Parcel AcquireBuffer<T>(ReadOnlySpan<T> data, BufferKind access) where T : unmanaged
+    public Buffer AcquireBuffer<T>(ReadOnlySpan<T> data, BufferKind access) where T : unmanaged
     {
         var bytes = MemoryMarshal.AsBytes(data);
         var stride = (uint)Marshal.SizeOf<T>();
         return AcquireBuffer(bytes, access, stride);
+    }
+
+    /// <summary>
+    /// Acquire an uninitialized retained texture parcel.
+    /// </summary>
+    public Parcel AcquireTexture(
+        uint width,
+        uint height,
+        TextureFormat format,
+        TextureKind access,
+        TextureFlags flags = TextureFlags.None)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var parcel = NativeMethods.RetainedPoolAcquireTexture(
+            Handle, width, height, format, access, flags, nint.Zero, 0);
+        if (parcel == nint.Zero)
+            throw GoldyException.FromLastError("RetainedPool acquire_texture");
+        return new Parcel(parcel, 0);
     }
 
     public void Dispose()

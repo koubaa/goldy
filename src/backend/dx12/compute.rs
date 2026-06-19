@@ -7,7 +7,7 @@ use super::pso_cache;
 use super::shader;
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
-use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
+use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
 use anyhow::{Context, Result};
@@ -17,6 +17,17 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DE
 
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::types::ResourceCategory;
+
+/// WARP's buffer state tracker corrupts with precise enhanced/global barriers that
+/// name UAV/SRV access (see `buffer.rs` upload path). Use ALL/ALL/COMMON/COMMON.
+fn warp_full_global_barrier() -> D3D12_GLOBAL_BARRIER {
+    D3D12_GLOBAL_BARRIER {
+        SyncBefore: D3D12_BARRIER_SYNC_ALL,
+        SyncAfter: D3D12_BARRIER_SYNC_ALL,
+        AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+    }
+}
 
 fn buffer_stride_for_bindless_index(
     buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
@@ -132,7 +143,18 @@ fn collect_bindless_slots_from_graph_commands(
 ///
 /// Returns `D3D12_BARRIER_SYNC_ALL` if no kinds are recorded (empty set) so
 /// that the barrier is conservatively correct even without IR information.
-fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
+///
+/// When `for_buffer` is true, RENDER maps to `VERTEX_SHADING | PIXEL_SHADING`
+/// (shader stages that can read a buffer in a render pass) rather than the
+/// texture-only `RENDER_TARGET | DEPTH_STENCIL` stages.
+/// Lower Koubaa slot usage to a DX12 sync-stage mask for a **buffer** barrier.
+///
+/// `is_storage` is whether the buffer was created with
+/// `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. Non-storage (upload) buffers
+/// are never written by the GPU, so transfer/compute *writes* against them are
+/// nonsensical; we still clamp the access mask in
+/// [`slot_usage_to_dx12_access_for_buffer`] and keep the sync stages here valid.
+fn slot_usage_to_dx12_sync(usage: &SlotUsageSet, is_storage: bool) -> D3D12_BARRIER_SYNC {
     if usage.kinds.is_empty() {
         return D3D12_BARRIER_SYNC_ALL;
     }
@@ -141,10 +163,14 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
         sync.0 |= D3D12_BARRIER_SYNC_COMPUTE_SHADING.0;
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
+        // A non-storage upload buffer can only ever be a copy *source*, but the
+        // sync stage (COPY) is identical either way.
+        let _ = is_storage;
         sync.0 |= D3D12_BARRIER_SYNC_COPY.0;
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        sync.0 |= D3D12_BARRIER_SYNC_RENDER_TARGET.0 | D3D12_BARRIER_SYNC_DEPTH_STENCIL.0;
+        // Buffer reads inside a render pass happen in vertex/pixel shader stages.
+        sync.0 |= D3D12_BARRIER_SYNC_VERTEX_SHADING.0 | D3D12_BARRIER_SYNC_PIXEL_SHADING.0;
     }
     sync
 }
@@ -158,31 +184,40 @@ fn slot_usage_to_dx12_sync(usage: &SlotUsageSet) -> D3D12_BARRIER_SYNC {
 /// descriptor.  A mismatch (e.g. `AccessAfter = SRV` when the shader reads
 /// via UAV) causes the driver to use the wrong cache coherence protocol,
 /// resulting in implicit full stalls on hardware.
-/// Lower Koubaa slot usage to DX12 access flags.
+/// Lower Koubaa slot usage to DX12 access flags for a **buffer** barrier.
 ///
-/// When `for_buffer` is true, read-only shader bindings omit UAV so barriers
-/// stay valid on non-UAV buffer resources.
-fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, for_buffer: bool) -> D3D12_BARRIER_ACCESS {
+/// `is_storage` reflects whether the resource was created with
+/// `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. The D3D12 debug layer rejects
+/// (ID 1332) any buffer barrier that names `UNORDERED_ACCESS` on a resource
+/// without that flag, and similarly `COPY_DEST` is invalid for an upload-heap
+/// buffer (which is read-only from the GPU's perspective). We therefore clamp
+/// the access mask for non-storage buffers to read-only accesses (SRV / copy
+/// source), which is the only thing the GPU can legally do to them.
+fn slot_usage_to_dx12_access_for_buffer(usage: &SlotUsageSet, is_storage: bool) -> D3D12_BARRIER_ACCESS {
     if usage.kinds.is_empty() {
         return D3D12_BARRIER_ACCESS_COMMON;
     }
     let mut access = D3D12_BARRIER_ACCESS(0);
     if usage.kinds.contains(UsageKindFlags::COMPUTE) {
-        if for_buffer && usage.access != NodeAccessUnion::Write {
-            access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
-        } else {
+        if is_storage && usage.access == NodeAccessUnion::Write {
             access.0 |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
+        } else {
+            // Read-only compute binding, or a non-storage buffer that can only
+            // ever be bound as an SRV.
+            access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
         }
     }
     if usage.kinds.contains(UsageKindFlags::TRANSFER) {
-        if usage.access == NodeAccessUnion::Write {
+        if usage.access == NodeAccessUnion::Write && is_storage {
             access.0 |= D3D12_BARRIER_ACCESS_COPY_DEST.0;
         } else {
+            // Non-storage upload buffers can only ever be a copy source.
             access.0 |= D3D12_BARRIER_ACCESS_COPY_SOURCE.0;
         }
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        access.0 |= D3D12_BARRIER_ACCESS_RENDER_TARGET.0 | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE.0;
+        // Buffer read by vertex/pixel shader inside a render pass → SHADER_RESOURCE.
+        access.0 |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0;
     }
     if access.0 == 0 {
         D3D12_BARRIER_ACCESS_COMMON
@@ -587,6 +622,32 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 // Shared submit helpers
 // ---------------------------------------------------------------------------
 
+/// GPU-side queue waits on producer-context fences before executing consumer work.
+fn queue_wait_for_epochs(state: &Dx12State, consumer_device: DeviceHandle, sync: Option<&SubmitSync>) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.waits.is_empty() {
+        return Ok(());
+    }
+    let ld = state
+        .devices
+        .get(&consumer_device)
+        .context("queue_wait_for_epochs: invalid device")?;
+    for epoch in &s.waits {
+        let (_, producer_fence) = state
+            .context_fences
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
+        unsafe {
+            ld.command_queue
+                .Wait(producer_fence, epoch.value)
+                .context("cross-submit GPU queue Wait")?;
+        }
+    }
+    Ok(())
+}
+
 /// Acquire (or create) a compute allocator slot, reserving the next fence token.
 ///
 /// Returns `(command_list, fence_value, slot_idx)`.  The slot is taken from the
@@ -691,7 +752,14 @@ fn record_gpu_command(
     let cl7 = ctx.command_list7;
     match cmd {
         GpuCommand::FrameTableStaging { data } => {
-            super::frame_table::record_prologue(state, device_handle, cl7, data)?;
+            super::frame_table::record_prologue(
+                &state.contexts,
+                &state.frame_tables,
+                &state.buffers,
+                device_handle,
+                cl7,
+                data,
+            )?;
         }
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
@@ -729,19 +797,21 @@ fn record_gpu_command(
                 .current_compute_pipeline
                 .and_then(|h| state.compute_pipelines.get(&h))
             {
-                crate::backend::validate_raw_binding_strides(
-                    raw_indices,
-                    &pipeline.push_constant_categories,
-                    &pipeline.binding_element_strides,
-                    |idx, cat| buffer_stride_for_bindless_index(&state.buffers, device_handle, idx, cat),
-                    &pipeline.shader_debug_name,
-                )?;
-                crate::backend::validate_bindless_slot_kinds(
-                    raw_indices,
-                    &pipeline.push_constant_slot_kinds,
-                    |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                    &pipeline.shader_debug_name,
-                )?;
+                crate::backend::with_layout_validation(|| {
+                    crate::backend::validate_raw_binding_strides(
+                        raw_indices,
+                        &pipeline.push_constant_categories,
+                        &pipeline.binding_element_strides,
+                        |idx, cat| buffer_stride_for_bindless_index(&state.buffers, device_handle, idx, cat),
+                        &pipeline.shader_debug_name,
+                    )?;
+                    crate::backend::validate_bindless_slot_kinds(
+                        raw_indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                        &pipeline.shader_debug_name,
+                    )
+                })?;
             }
             let mut layout = types::PushLayout::default();
             shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
@@ -765,12 +835,14 @@ fn record_gpu_command(
                     &pipeline.shader_debug_name,
                 )?;
                 let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
-                crate::backend::validate_bindless_slot_kinds(
-                    &indices,
-                    &pipeline.push_constant_slot_kinds,
-                    |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                    &pipeline.shader_debug_name,
-                )?;
+                crate::backend::with_layout_validation(|| {
+                    crate::backend::validate_bindless_slot_kinds(
+                        &indices,
+                        &pipeline.push_constant_slot_kinds,
+                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                        &pipeline.shader_debug_name,
+                    )
+                })?;
             }
             anyhow::bail!(
                 "GpuCommand::BindResourcesTyped must be lowered to BindResourcesRaw before DX12 record; \
@@ -984,12 +1056,27 @@ fn record_gpu_command(
             // which is correct (just less precise).
             let mut buf_barriers: Vec<D3D12_BUFFER_BARRIER> = Vec::new();
             if ctx.use_global_buffer_barriers {
-                for (_, usage) in buf_entries {
-                    let g = D3D12_GLOBAL_BARRIER {
-                        SyncBefore: slot_usage_to_dx12_sync(&usage.src),
-                        SyncAfter: slot_usage_to_dx12_sync(&usage.dst),
-                        AccessBefore: slot_usage_to_dx12_access_for_buffer(&usage.src, true),
-                        AccessAfter: slot_usage_to_dx12_access_for_buffer(&usage.dst, true),
+                for (h, usage) in buf_entries {
+                    // Clamp access against the resource's real capabilities: a
+                    // non-storage (upload) buffer can never carry UAV/COPY_DEST.
+                    let is_storage = state.buffers.get(h).map(|bs| bs.is_storage).unwrap_or(false);
+                    let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, is_storage);
+                    let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, is_storage);
+                    // WARP validation (ID 1331): global barriers with AccessBefore=COMMON
+                    // must use AccessAfter=COMMON. Empty producer usage sets COMMON; clamp
+                    // rather than emitting UAV/SRV which fails Close() on the debug layer.
+                    if access_before == D3D12_BARRIER_ACCESS_COMMON {
+                        access_after = D3D12_BARRIER_ACCESS_COMMON;
+                    }
+                    let g = if is_storage {
+                        warp_full_global_barrier()
+                    } else {
+                        D3D12_GLOBAL_BARRIER {
+                            SyncBefore: slot_usage_to_dx12_sync(&usage.src, is_storage),
+                            SyncAfter: slot_usage_to_dx12_sync(&usage.dst, is_storage),
+                            AccessBefore: access_before,
+                            AccessAfter: access_after,
+                        }
                     };
                     unsafe { barriers::barrier_globals(cl7, &[g]) };
                 }
@@ -1000,10 +1087,10 @@ fn record_gpu_command(
                         state.buffers.get(h).map(|bs| {
                             barriers::buffer_barrier_full(
                                 &bs.resource,
-                                slot_usage_to_dx12_sync(&usage.src),
-                                slot_usage_to_dx12_sync(&usage.dst),
-                                slot_usage_to_dx12_access_for_buffer(&usage.src, true),
-                                slot_usage_to_dx12_access_for_buffer(&usage.dst, true),
+                                slot_usage_to_dx12_sync(&usage.src, bs.is_storage),
+                                slot_usage_to_dx12_sync(&usage.dst, bs.is_storage),
+                                slot_usage_to_dx12_access_for_buffer(&usage.src, bs.is_storage),
+                                slot_usage_to_dx12_access_for_buffer(&usage.dst, bs.is_storage),
                             )
                         })
                     })
@@ -1274,6 +1361,56 @@ fn record_gpu_command(
                 ts.last_layout = dst_post_state.1;
             }
         }
+        GpuCommand::CopyBuffer {
+            src,
+            src_offset,
+            dst,
+            size,
+        } => {
+            let _tz = tracy_zone!("dx12.copy_buffer");
+            let (src_resource, dst_resource) = {
+                let src_buf = state.buffers.get(src).context("CopyBuffer: invalid src")?;
+                let dst_buf = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                if src_offset.saturating_add(*size) > src_buf.size || *size > dst_buf.size {
+                    anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
+                }
+                (src_buf.resource.clone(), dst_buf.resource.clone())
+            };
+            if ctx.use_global_buffer_barriers {
+                let pre = D3D12_GLOBAL_BARRIER {
+                    SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                    SyncAfter: D3D12_BARRIER_SYNC_COPY,
+                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                };
+                unsafe { barriers::barrier_globals(cl7, &[pre]) };
+            } else {
+                let mut b_to_copy = [barriers::buffer_barrier_full(
+                    &src_resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                )];
+                unsafe {
+                    barriers::barrier_buffers(cl7, &b_to_copy);
+                    barriers::drop_buffer_barriers(&mut b_to_copy);
+                }
+            }
+            unsafe { cl.CopyBufferRegion(&dst_resource, 0, &src_resource, *src_offset, *size) };
+        }
+        GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+            let _tz = tracy_zone!("dx12.copy_texture_to_readback");
+            super::texture::record_copy_texture_to_readback(
+                cl,
+                cl7,
+                &mut state.textures,
+                &state.buffers,
+                *src,
+                *dst,
+                *layout,
+            )?;
+        }
         GpuCommand::CopyRenderTarget { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_render_target");
             let src_res = {
@@ -1379,7 +1516,7 @@ struct StagingFinish {
 /// Close the command list, execute, signal, update the pool slot, and finish staging.
 ///
 /// `retain_key`: when `Some(k)`, stores the closed command list in
-/// `Dx12SubmissionContext::retained_graph` for zero-cost re-execution via
+/// `Dx12SubmissionContext::retained_graphs` for zero-cost re-execution via
 /// [`try_resubmit_retained`].
 ///
 /// # Abandoned optimizations
@@ -1393,7 +1530,8 @@ struct StagingFinish {
 ///    command list across frames when `compute_retention_fingerprint` was stable.
 ///    Reverted: the required `wait_for_fence` after every `ExecuteCommandLists` to prevent
 ///    CPU/GPU races on the shared binding-table buffer cut throughput from ~2500 FPS to
-///    ~1200 FPS — a net regression for the common case.
+///    ~1200 FPS — a net regression for the common case. Note: this may be obsolete, as
+///    it was observed in an earlier design for binding tables.
 ///
 /// 2. **CBV binding table + bind groups**: same binding-table layout as above, with
 ///    per-pipeline bind groups (descriptor-table caching) to amortise heap binding cost.
@@ -1405,6 +1543,7 @@ fn execute_signal_and_finish(
     gpu_profile: Option<Dx12GpuProfileResources>,
     submit: SubmitFinish,
     staging_finish: StagingFinish,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let SubmitFinish {
         ctx,
@@ -1455,6 +1594,7 @@ fn execute_signal_and_finish(
         .clone();
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
+        queue_wait_for_epochs(state, device_handle, sync)?;
         unsafe { logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]) };
         unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
             .context("Failed to signal context fence")?;
@@ -1472,7 +1612,7 @@ fn execute_signal_and_finish(
             slot.fence_value = fence_value;
         }
         if let Some(key) = retain_key {
-            if let Some(old) = sc.retained_graph.take() {
+            if let Some(old) = sc.retained_graphs.remove(&key) {
                 if let Some(row) = old.frame_table_row {
                     if let Some(ft) = state.frame_tables.get(&device_handle) {
                         super::frame_table::unpin_row(ft, row);
@@ -1497,14 +1637,16 @@ fn execute_signal_and_finish(
                 .and_then(|s| s.command_list.clone())
             {
                 sc.compute_allocator_pool[slot_idx].retained = true;
-                sc.retained_graph = Some(types::RetainedGraph {
-                    fingerprint: key,
-                    command_list: cl,
-                    slot_idx,
-                    used_slots,
-                    frame_table_staging,
-                    frame_table_row,
-                });
+                sc.retained_graphs.insert(
+                    key,
+                    types::RetainedGraph {
+                        command_list: cl,
+                        slot_idx,
+                        used_slots,
+                        frame_table_staging,
+                        frame_table_row,
+                    },
+                );
             }
         }
         sc.last_submitted_seq = fence_value;
@@ -1557,7 +1699,12 @@ fn execute_signal_and_finish(
 // ---------------------------------------------------------------------------
 
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
-pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<TimelineValue> {
+pub(super) fn submit(
+    state: &mut Dx12State,
+    ctx: ContextHandle,
+    commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
     let mut commands = commands.to_vec();
     crate::frame_table::lower_gpu_commands(&mut commands);
     let frame_table_staging = super::frame_table::extract_staging_from_commands(&commands);
@@ -1777,6 +1924,7 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
             belt_slices_len: belt_slices.len(),
             belt_idx: belt_idx_final,
         },
+        sync,
     )
 }
 
@@ -1787,13 +1935,14 @@ pub(super) fn submit(state: &mut Dx12State, ctx: ContextHandle, commands: &[GpuC
 /// `ExecuteCommandLists` + `Signal(fence)` at the end.
 ///
 /// When `retain_key` is `Some(k)`, the closed command list is stored in
-/// `Dx12SubmissionContext::retained_graph` keyed by `k` for future zero-cost re-execution
-/// via [`try_resubmit_retained`].  Any previously retained graph is evicted first.
+/// `Dx12SubmissionContext::retained_graphs` keyed by `k` for future zero-cost re-execution
+/// via [`try_resubmit_retained`].  Any previously retained graph for the same key is evicted first.
 pub(super) fn submit_graph(
     state: &mut Dx12State,
     ctx: ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let frame_table_staging = super::frame_table::extract_staging_from_graph(commands);
     let device_handle = state
@@ -1997,7 +2146,12 @@ pub(super) fn submit_graph(
                                 | D3D12_BARRIER_ACCESS_SHADER_RESOURCE.0,
                         ),
                     };
-                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[compute_to_render]) };
+                    let pre_render_barrier = if use_global_buffer_barriers {
+                        warp_full_global_barrier()
+                    } else {
+                        compute_to_render
+                    };
+                    unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[pre_render_barrier]) };
 
                     let touched = super::render_target::record_render_pass_to_list(
                         state,
@@ -2081,6 +2235,7 @@ pub(super) fn submit_graph(
             belt_slices_len: belt_slices.len(),
             belt_idx: belt_idx_final,
         },
+        sync,
     )?;
 
     for t in rendered_targets {
@@ -2101,6 +2256,7 @@ pub(super) fn try_resubmit_retained(
     state: &mut Dx12State,
     ctx: ContextHandle,
     key: u64,
+    sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
     let device_handle = state
         .contexts
@@ -2112,15 +2268,14 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
         let sc = sc_arc.lock().unwrap();
-        match sc.retained_graph.as_ref() {
-            Some(r) if r.fingerprint == key => Some((
+        sc.retained_graphs.get(&key).map(|r| {
+            (
                 r.command_list.clone(),
                 r.slot_idx,
                 r.used_slots.clone(),
                 r.frame_table_staging.clone(),
-            )),
-            _ => None,
-        }
+            )
+        })
     };
 
     let Some((command_list, slot_idx, used_slots, _frame_table_staging)) = retained else {
@@ -2151,6 +2306,7 @@ pub(super) fn try_resubmit_retained(
     };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
+        queue_wait_for_epochs(state, device_handle, sync)?;
         unsafe {
             command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
         }
@@ -2197,14 +2353,18 @@ pub(super) fn try_resubmit_retained(
     Ok(Some(fence_value))
 }
 
-/// Drop the retained command list for `key`, marking its pool slot as reusable.
-pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
+fn evict_retained_on_context(
+    contexts: &std::collections::HashMap<ContextHandle, types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    ctx: ContextHandle,
+    key: u64,
+) {
+    if let Some(sc_arc) = contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_graph.take() {
+        if let Some(old) = sc.retained_graphs.remove(&key) {
             if let Some(row) = old.frame_table_row {
                 let device_handle = sc.device;
-                if let Some(ft) = state.frame_tables.get(&device_handle) {
+                if let Some(ft) = frame_tables.get(&device_handle) {
                     super::frame_table::unpin_row(ft, row);
                 }
             }
@@ -2213,6 +2373,44 @@ pub(super) fn evict_retained(state: &mut Dx12State, ctx: ContextHandle) {
             }
         }
     }
+}
+
+/// Evict every retained graph on contexts for `device_handle` that pins `row`.
+///
+/// Called when the frame-table ring wraps and a new prologue needs to overwrite staging
+/// bytes for a row still held by a retained command list from partitioned retention.
+pub(super) fn evict_retained_pinning_row(
+    contexts: &std::collections::HashMap<ContextHandle, types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    device_handle: DeviceHandle,
+    row: u32,
+) {
+    let ctxs: Vec<ContextHandle> = contexts
+        .iter()
+        .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
+        .map(|(h, _)| *h)
+        .collect();
+    for ctx in ctxs {
+        let keys: Vec<u64> = {
+            let sc_arc = contexts.get(&ctx).expect("context handle in device scan");
+            sc_arc
+                .lock()
+                .unwrap()
+                .retained_graphs
+                .iter()
+                .filter(|(_, g)| g.frame_table_row == Some(row))
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for key in keys {
+            evict_retained_on_context(contexts, frame_tables, ctx, key);
+        }
+    }
+}
+
+/// Drop the retained command list for `key`, marking its pool slot as reusable.
+pub(super) fn evict_retained(state: &Dx12State, ctx: ContextHandle, key: u64) {
+    evict_retained_on_context(&state.contexts, &state.frame_tables, ctx, key);
 }
 
 /// Check if the fence for the given token has signaled.
@@ -2253,4 +2451,148 @@ pub(super) fn wait_fence_timeout(
 ) -> Result<bool> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     super::utils::wait_for_fence_timeout(&logical_device.fence, token, timeout_ms)
+}
+
+#[cfg(test)]
+mod barrier_lowering_tests {
+    use super::*;
+    use crate::task_graph::NodeAccess;
+
+    fn slot(access: NodeAccess, kinds: UsageKindFlags) -> SlotUsageSet {
+        let mut s = SlotUsageSet::default();
+        s.merge(access, kinds);
+        s
+    }
+
+    fn has(mask: D3D12_BARRIER_ACCESS, bit: D3D12_BARRIER_ACCESS) -> bool {
+        mask.0 & bit.0 != 0
+    }
+
+    // --- The regression that crashed goldy-doom (ID 1332) -------------------
+
+    /// A non-storage (upload/uniform) buffer must NEVER carry UAV or COPY_DEST
+    /// access bits — the D3D12 debug layer rejects (ID 1332) such barriers and
+    /// `Close()` fails. This is the exact case that only Doom exercised.
+    #[test]
+    fn non_storage_buffer_never_emits_uav_or_copy_dest() {
+        // Compute write recorded against a non-storage buffer (e.g. a uniform
+        // buffer conservatively stamped as written by parcel `record_any`).
+        let compute_write = slot(NodeAccess::Write, UsageKindFlags::COMPUTE);
+        let access = slot_usage_to_dx12_access_for_buffer(&compute_write, /*is_storage=*/ false);
+        assert!(
+            !has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS),
+            "non-storage buffer must not get UNORDERED_ACCESS"
+        );
+
+        // Transfer write against a non-storage buffer must not be COPY_DEST.
+        let transfer_write = slot(NodeAccess::Write, UsageKindFlags::TRANSFER);
+        let access = slot_usage_to_dx12_access_for_buffer(&transfer_write, false);
+        assert!(
+            !has(access, D3D12_BARRIER_ACCESS_COPY_DEST),
+            "non-storage buffer must not get COPY_DEST"
+        );
+
+        // The combined producer set that doom actually generated.
+        let mut combined = SlotUsageSet::default();
+        combined.merge(NodeAccess::Write, UsageKindFlags::COMPUTE | UsageKindFlags::TRANSFER);
+        let access = slot_usage_to_dx12_access_for_buffer(&combined, false);
+        assert!(!has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_COPY_DEST));
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+        assert!(has(access, D3D12_BARRIER_ACCESS_COPY_SOURCE));
+    }
+
+    /// A storage buffer with an actual compute write still gets UAV — clamping
+    /// must not regress the legitimate case the tests already covered.
+    #[test]
+    fn storage_buffer_compute_write_keeps_uav() {
+        let compute_write = slot(NodeAccess::Write, UsageKindFlags::COMPUTE);
+        let access = slot_usage_to_dx12_access_for_buffer(&compute_write, /*is_storage=*/ true);
+        assert!(has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS));
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+    }
+
+    /// A read-only compute binding never needs UAV, even on a storage buffer.
+    #[test]
+    fn storage_buffer_compute_read_is_srv_only() {
+        let compute_read = slot(NodeAccess::Read, UsageKindFlags::COMPUTE);
+        let access = slot_usage_to_dx12_access_for_buffer(&compute_read, true);
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS));
+    }
+
+    /// Storage transfer write -> COPY_DEST; storage transfer read -> COPY_SOURCE.
+    #[test]
+    fn storage_buffer_transfer_direction() {
+        let w = slot(NodeAccess::Write, UsageKindFlags::TRANSFER);
+        assert!(has(
+            slot_usage_to_dx12_access_for_buffer(&w, true),
+            D3D12_BARRIER_ACCESS_COPY_DEST
+        ));
+        let r = slot(NodeAccess::Read, UsageKindFlags::TRANSFER);
+        assert!(has(
+            slot_usage_to_dx12_access_for_buffer(&r, true),
+            D3D12_BARRIER_ACCESS_COPY_SOURCE
+        ));
+    }
+
+    /// Render-pass buffer read maps to SHADER_RESOURCE (vertex/pixel), never an
+    /// attachment access (which is illegal on a buffer barrier — ID 1332).
+    #[test]
+    fn render_buffer_read_is_shader_resource() {
+        let render_read = slot(NodeAccess::Read, UsageKindFlags::RENDER);
+        let access = slot_usage_to_dx12_access_for_buffer(&render_read, false);
+        assert!(has(access, D3D12_BARRIER_ACCESS_SHADER_RESOURCE));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_RENDER_TARGET));
+        assert!(!has(access, D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE));
+    }
+
+    /// Empty usage -> COMMON (caller treats this specially for WARP global barriers).
+    #[test]
+    fn empty_usage_is_common() {
+        let empty = SlotUsageSet::default();
+        assert_eq!(
+            slot_usage_to_dx12_access_for_buffer(&empty, false).0,
+            D3D12_BARRIER_ACCESS_COMMON.0
+        );
+        assert_eq!(slot_usage_to_dx12_sync(&empty, false).0, D3D12_BARRIER_SYNC_ALL.0);
+    }
+
+    // --- Sync-stage / access pairing invariant (ID 1331 / barriers.rs assert) ---
+
+    /// Every non-empty render buffer usage must produce a non-zero sync stage so
+    /// it never pairs SYNC_NONE with a non-NO_ACCESS access (the panic that hit
+    /// scheme_game_of_life_update_100).
+    #[test]
+    fn render_buffer_sync_is_non_zero() {
+        let render_read = slot(NodeAccess::Read, UsageKindFlags::RENDER);
+        let sync = slot_usage_to_dx12_sync(&render_read, false);
+        assert_ne!(sync.0, 0, "render buffer usage must have a valid sync stage");
+        assert!(sync.0 & D3D12_BARRIER_SYNC_VERTEX_SHADING.0 != 0);
+        assert!(sync.0 & D3D12_BARRIER_SYNC_PIXEL_SHADING.0 != 0);
+    }
+
+    /// Any non-empty usage that lowers to a non-COMMON access must also lower to
+    /// a non-zero sync stage (mirrors the D3D12 SyncNone/AccessNoAccess pairing rule).
+    #[test]
+    fn nonempty_usage_has_paired_sync_and_access() {
+        let cases = [
+            slot(NodeAccess::Write, UsageKindFlags::COMPUTE),
+            slot(NodeAccess::Read, UsageKindFlags::COMPUTE),
+            slot(NodeAccess::Write, UsageKindFlags::TRANSFER),
+            slot(NodeAccess::Read, UsageKindFlags::TRANSFER),
+            slot(NodeAccess::Read, UsageKindFlags::RENDER),
+        ];
+        for (storage, set) in cases.iter().flat_map(|s| [(true, s), (false, s)]) {
+            let access = slot_usage_to_dx12_access_for_buffer(set, storage);
+            let sync = slot_usage_to_dx12_sync(set, storage);
+            if access.0 != D3D12_BARRIER_ACCESS_COMMON.0 {
+                assert_ne!(
+                    sync.0, 0,
+                    "non-COMMON access {:#x} (storage={storage}) must have a sync stage",
+                    access.0
+                );
+            }
+        }
+    }
 }

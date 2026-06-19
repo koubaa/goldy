@@ -204,6 +204,8 @@ fn create_scattered_u32_buffer_at_slot(
             is_sparse: false,
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
     Ok(handle)
@@ -309,8 +311,8 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
     let pinned = ft.pinned_rows.load(Ordering::Acquire);
     if pinned & (1 << row) != 0 {
         anyhow::bail!(
-            "frame table row {row} is pinned by a retained command list; \
-             evict the retained graph before submitting new bindings"
+            "frame table row {row} is still pinned after evicting retained graphs \
+             (sub={sub}); retained command list lifecycle bug"
         );
     }
     if sub >= FRAME_TABLE_MAX_ROWS {
@@ -327,12 +329,22 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
 }
 
 /// CPU staging write before a retained resubmit (row bump + table bytes; GPU copy is in the CB).
-fn write_staging_for_submission_on(ft: &FrameTableDevice, data: &[u32]) -> Result<u32> {
+fn write_staging_for_submission_on(
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
+    device_handle: super::DeviceHandle,
+    ft: &FrameTableDevice,
+    data: &[u32],
+) -> Result<u32> {
+    let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
+    let row = sub % FRAME_TABLE_MAX_ROWS;
+    let row_pinned = ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0;
+    if row_pinned {
+        super::compute::evict_retained_pinning_row(contexts, frame_tables, device_handle, row);
+    }
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
-    let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
-    let row = sub % FRAME_TABLE_MAX_ROWS;
     assert_row_available(ft, sub, row)?;
     ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     unsafe {
@@ -346,6 +358,7 @@ fn write_staging_for_submission_on(ft: &FrameTableDevice, data: &[u32]) -> Resul
 
 /// CPU staging write + GPU copy prologue (split borrows for standalone render).
 pub(crate) fn record_prologue_for_tables(
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
     frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     device_handle: super::DeviceHandle,
@@ -356,7 +369,7 @@ pub(crate) fn record_prologue_for_tables(
     let ft = frame_tables
         .get(&device_handle)
         .context("frame table not initialized")?;
-    let row = write_staging_for_submission_on(ft, data)?;
+    let row = write_staging_for_submission_on(contexts, frame_tables, device_handle, ft, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     record_table_copies(ft, buffers, ld, cmd, row, copy_u32s, true)
@@ -364,13 +377,15 @@ pub(crate) fn record_prologue_for_tables(
 
 /// CPU staging write + GPU copy prologue.
 pub(crate) fn record_prologue(
-    state: &VulkanState,
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
+    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     device_handle: super::DeviceHandle,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     data: &[u32],
 ) -> Result<()> {
-    record_prologue_for_tables(&state.frame_tables, &state.buffers, device_handle, ld, cmd, data)
+    record_prologue_for_tables(contexts, frame_tables, buffers, device_handle, ld, cmd, data)
 }
 
 /// Refresh the active row in the device-local table without advancing the selector.
@@ -407,15 +422,17 @@ pub(crate) fn prepare_render_commands(
     use crate::backend::RenderCommand;
     use crate::frame_table::FrameTableStaging;
 
-    crate::backend::validate_render_pass_bind_resources(
-        commands,
-        |h| {
-            pipelines
-                .get(&h)
-                .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
-        },
-        |h| buffers.get(&h).and_then(|b| b.element_stride),
-    )?;
+    crate::backend::with_layout_validation(|| {
+        crate::backend::validate_render_pass_bind_resources(
+            commands,
+            |h| {
+                pipelines
+                    .get(&h)
+                    .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
+            },
+            |h| buffers.get(&h).and_then(|b| b.element_stride),
+        )
+    })?;
 
     let mut staging = FrameTableStaging::new();
     let lowered = commands

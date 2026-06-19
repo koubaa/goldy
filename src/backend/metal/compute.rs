@@ -1,7 +1,7 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle};
+use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, ShaderHandle, SubmitSync};
 use super::staging::TextureStagingEntry;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
@@ -14,6 +14,46 @@ use crate::tracy_zone;
 const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 use crate::timeline::TimelineValue;
 use crate::types::{BufferKind, ResourceCategory};
+
+/// True when this submission records GPU encoder work beyond CPU-only `WriteBuffer` nodes.
+///
+/// CPU-mapped `WriteBuffer` fast paths are only sound when a dispatch (or other GPU
+/// command) in the *same* command buffer follows the write. Upload-only submissions
+/// must use the blit slow path so a later submission on the queue observes the data.
+fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
+    commands.iter().any(|c| {
+        !matches!(
+            c,
+            GpuCommand::WriteBuffer { .. }
+                | GpuCommand::FrameTableStaging { .. }
+                | GpuCommand::Barrier
+                | GpuCommand::ResourceBarrier { .. }
+        )
+    })
+}
+
+/// Encode GPU-side waits on producer-context shared events before consumer work.
+fn encode_wait_for_epochs(
+    state: &MetalState,
+    command_buffer: &mtl::CommandBufferRef,
+    sync: Option<&SubmitSync>,
+) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    for epoch in &s.waits {
+        let producer_event = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_event
+            .clone();
+        command_buffer.encode_wait_for_event(producer_event.as_ref(), epoch.value);
+    }
+    Ok(())
+}
 
 fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCategory) -> Option<u32> {
     let expected_kind = match cat {
@@ -29,7 +69,7 @@ fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCate
 }
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLCommandBufferStatus, MTLOrigin, MTLSize};
+use mtl::{MTLBlitOption, MTLCommandBufferStatus, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -323,6 +363,9 @@ pub(super) fn record_commands_to_buffer(
     macro_rules! end_compute {
         () => {
             if let Some(enc) = guard.compute.take() {
+                if super::api_log::enabled() {
+                    super::api_log::log_encoder_end("compute");
+                }
                 enc.end_encoding();
             }
         };
@@ -331,6 +374,9 @@ pub(super) fn record_commands_to_buffer(
     macro_rules! end_blit {
         () => {
             if let Some(enc) = guard.blit.take() {
+                if super::api_log::enabled() {
+                    super::api_log::log_encoder_end("blit");
+                }
                 enc.end_encoding();
             }
         };
@@ -342,6 +388,9 @@ pub(super) fn record_commands_to_buffer(
             blit_touched_bufs.clear();
             blit_touched_texs.clear();
             if guard.compute.is_none() {
+                if super::api_log::enabled() {
+                    super::api_log::log_encoder_open("compute");
+                }
                 let enc = begin_compute_encoder(command_buffer, state, logical_device, device_handle);
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
@@ -357,6 +406,9 @@ pub(super) fn record_commands_to_buffer(
         () => {
             end_compute!();
             end_blit!();
+            if super::api_log::enabled() {
+                super::api_log::log_encoder_open("blit");
+            }
             guard.blit = Some(command_buffer.new_blit_command_encoder());
             blit_touched_bufs.clear();
             blit_touched_texs.clear();
@@ -402,6 +454,9 @@ pub(super) fn record_commands_to_buffer(
                 if clear_size > 0 {
                     ensure_blit_buf!(*buffer);
                     let range = mtl::NSRange::new(*offset, clear_size);
+                    if super::api_log::enabled() {
+                        super::api_log::log_fill_buffer(*buffer, clear_size);
+                    }
                     guard.blit.unwrap().fill_buffer(&buf_state.buffer, range, 0);
                 }
             }
@@ -429,6 +484,7 @@ pub(super) fn record_commands_to_buffer(
                 const SMALL_WRITE_THRESHOLD: usize = 4096;
                 if gpu_idle
                     && !has_recorded_gpu_work
+                    && submission_has_gpu_encoder_work(commands)
                     && !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
@@ -490,6 +546,9 @@ pub(super) fn record_commands_to_buffer(
                     .context("WriteTexture: texture_scratches index out of range")?;
                 *tex_idx += 1;
                 let bytes_per_row = (*width as u64) * (bpp as u64);
+                if super::api_log::enabled() {
+                    super::api_log::log_write_texture(*tex_handle, *width, *height, data.len());
+                }
                 guard.blit.unwrap().copy_from_buffer_to_texture(
                     &scratch.buffer,
                     0,
@@ -579,13 +638,15 @@ pub(super) fn record_commands_to_buffer(
             } => {
                 ensure_compute!();
                 if let Some(pipeline) = current_pipeline {
-                    crate::backend::validate_raw_binding_strides(
-                        raw_indices,
-                        &pipeline.push_constant_categories,
-                        &pipeline.binding_element_strides,
-                        |idx, cat| buffer_stride_for_arg_index(state, idx, cat),
-                        &pipeline.shader_debug_name,
-                    )?;
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_raw_binding_strides(
+                            raw_indices,
+                            &pipeline.push_constant_categories,
+                            &pipeline.binding_element_strides,
+                            |idx, cat| buffer_stride_for_arg_index(state, idx, cat),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
                 }
                 let absolute_base =
                     prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
@@ -605,7 +666,7 @@ pub(super) fn record_commands_to_buffer(
                 anyhow::bail!("BindResourcesTyped in frame-table path: call frame_table::lower_gpu_commands first");
             }
             GpuCommand::Dispatch {
-                label: _,
+                label,
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -622,18 +683,20 @@ pub(super) fn record_commands_to_buffer(
                         height: *workgroups_y as u64,
                         depth: *workgroups_z as u64,
                     };
+                    if super::api_log::enabled() {
+                        super::api_log::log_dispatch(*label, *workgroups_x, *workgroups_y, *workgroups_z);
+                    }
                     guard
                         .compute
                         .expect("encoder must be set after ensure_compute!()")
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
-            GpuCommand::DispatchBatch {
-                label: _,
-                arg_data,
-                count,
-            } => {
+            GpuCommand::DispatchBatch { label, arg_data, count } => {
                 ensure_compute!();
+                if super::api_log::enabled() {
+                    super::api_log::log_dispatch_batch(*label, *count);
+                }
                 if let Some(pipeline) = current_pipeline {
                     let push_size = std::mem::size_of::<PushLayout>();
                     let stride = shared::DISPATCH_BATCH_STRIDE;
@@ -688,11 +751,7 @@ pub(super) fn record_commands_to_buffer(
                     }
                 }
             }
-            GpuCommand::DispatchIndirect {
-                label: _,
-                buffer,
-                offset,
-            } => {
+            GpuCommand::DispatchIndirect { label, buffer, offset } => {
                 ensure_compute!();
                 let buf_state = state
                     .buffers
@@ -704,6 +763,9 @@ pub(super) fn record_commands_to_buffer(
                     height: pipeline.workgroup_size[1] as u64,
                     depth: pipeline.workgroup_size[2] as u64,
                 };
+                if super::api_log::enabled() {
+                    super::api_log::log_dispatch_indirect(*label, *buffer, *offset);
+                }
                 guard
                     .compute
                     .expect("encoder must be set after ensure_compute!()")
@@ -716,6 +778,9 @@ pub(super) fn record_commands_to_buffer(
                 let dst_state = state.textures.get(dst).context("CopyTexture: dst texture not found")?;
                 let w = src_state.width as u64;
                 let h = src_state.height as u64;
+                if super::api_log::enabled() {
+                    super::api_log::log_copy_texture(*src, *dst, w, h);
+                }
                 guard.blit.unwrap().copy_from_texture(
                     &src_state.texture,
                     0,
@@ -730,6 +795,58 @@ pub(super) fn record_commands_to_buffer(
                     0,
                     0,
                     MTLOrigin { x: 0, y: 0, z: 0 },
+                );
+            }
+            GpuCommand::CopyBuffer {
+                src,
+                src_offset,
+                dst,
+                size,
+            } => {
+                ensure_blit_buf!(*src);
+                ensure_blit_buf!(*dst);
+                let (src_mtl, dst_mtl) = {
+                    let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
+                    let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                    if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
+                        anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
+                    }
+                    (src_state.buffer.clone(), dst_state.buffer.clone())
+                };
+                if super::api_log::enabled() {
+                    super::api_log::log_copy_buffer(*src, *dst, *size);
+                }
+                guard
+                    .blit
+                    .unwrap()
+                    .copy_from_buffer(&src_mtl, *src_offset, &dst_mtl, 0, *size);
+            }
+            GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                ensure_blit_buf!(*dst);
+                let (src_tex, dst_mtl, bytes_per_row) = {
+                    let src_state = state.textures.get(src).context("CopyTextureToReadback: invalid src")?;
+                    let dst_state = state.buffers.get(dst).context("CopyTextureToReadback: invalid dst")?;
+                    (
+                        src_state.texture.clone(),
+                        dst_state.buffer.clone(),
+                        layout.tight_row_bytes() as u64,
+                    )
+                };
+                guard.blit.unwrap().copy_from_texture_to_buffer(
+                    &src_tex,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    MTLSize {
+                        width: layout.width as u64,
+                        height: layout.height as u64,
+                        depth: 1,
+                    },
+                    &dst_mtl,
+                    layout.footprint_offset,
+                    bytes_per_row,
+                    layout.staging_bytes,
+                    MTLBlitOption::empty(),
                 );
             }
             GpuCommand::CopyRenderTarget { src, dst } => {
@@ -762,6 +879,9 @@ pub(super) fn record_commands_to_buffer(
             }
             GpuCommand::Barrier => {
                 if let Some(enc) = guard.compute {
+                    if super::api_log::enabled() {
+                        super::api_log::log_barrier();
+                    }
                     const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
                     let () = unsafe { msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES] };
                 }
@@ -788,6 +908,9 @@ pub(super) fn record_commands_to_buffer(
                         }
                     }
                     if !resources.is_empty() {
+                        if super::api_log::enabled() {
+                            super::api_log::log_resource_barrier(buf_entries.len(), tex_entries.len());
+                        }
                         let count: mtl::NSUInteger = resources.len() as mtl::NSUInteger;
                         let ptr = resources.as_ptr();
                         let () = unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
@@ -897,6 +1020,7 @@ fn stage_uploads(
 
                 let fast_path = gpu_idle
                     && !would_have_gpu_work
+                    && submission_has_gpu_encoder_work(commands)
                     && !buf_flags.contains(crate::types::BufferFlags::GPU_ONLY)
                     && data.len() <= SMALL_WRITE_THRESHOLD
                     && !contents_null;
@@ -936,7 +1060,9 @@ fn stage_uploads(
             }
             // Commands that open an encoder set would_have_gpu_work.
             GpuCommand::ClearBuffer { .. }
+            | GpuCommand::CopyBuffer { .. }
             | GpuCommand::CopyTexture { .. }
+            | GpuCommand::CopyTextureToReadback { .. }
             | GpuCommand::CopyRenderTarget { .. }
             | GpuCommand::SetPipeline(_)
             | GpuCommand::BindResourcesRaw { .. }
@@ -955,7 +1081,12 @@ fn stage_uploads(
 }
 
 /// Submit compute commands without blocking. Returns the timeline value signaled when the work completes.
-pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[GpuCommand]) -> Result<TimelineValue> {
+pub(super) fn submit(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit");
     if state.device_lost.load(Ordering::Relaxed) {
         anyhow::bail!("GPU device is lost (earlier wait timed out); refusing to submit new work");
@@ -1001,6 +1132,7 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
         ld.command_queue.new_command_buffer().to_owned()
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
+    encode_wait_for_epochs(state, command_buffer_ref, sync)?;
 
     // Reclaim and pre-stage all uploads before recording.
     let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, commands)?;
@@ -1041,6 +1173,9 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
         .clone();
 
     let compute_commit_instant = std::time::Instant::now();
+    if super::api_log::enabled() {
+        super::api_log::log_commit(signal_value);
+    }
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {
@@ -1108,6 +1243,7 @@ pub(super) fn submit(state: &mut MetalState, ctx: ContextHandle, commands: &[Gpu
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+        super::drain_completed_cbs(&mut sc);
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1143,6 +1279,8 @@ pub(super) fn submit_graph(
     state: &mut MetalState,
     ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
+    retain_key: Option<u64>,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit_graph");
     use super::super::GraphCommand;
@@ -1199,6 +1337,7 @@ pub(super) fn submit_graph(
         ld.command_queue.new_command_buffer().to_owned()
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
+    encode_wait_for_epochs(state, command_buffer_ref, sync)?;
 
     // Pre-pass: collect all compute commands across the entire graph into a flat
     // list, run the staging pre-pass once, then replay the graph using shared
@@ -1381,6 +1520,7 @@ pub(super) fn submit_graph(
         sc.in_flight_command_buffers
             .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
+        super::drain_completed_cbs(&mut sc);
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1411,7 +1551,61 @@ pub(super) fn submit_graph(
         }
     }
 
+    if let Some(key) = retain_key {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let arc: std::sync::Arc<[super::super::GraphCommand]> = commands.into();
+            sc_arc.lock().unwrap().retained_graphs.insert(key, arc);
+        }
+    }
+
     Ok(signal_value)
+}
+
+/// Record, submit, and retain graph commands keyed by `key` for future resubmission.
+pub(super) fn submit_graph_and_retain(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[super::super::GraphCommand],
+    key: u64,
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    // Evict only the slot for this key; other schemes' retained graphs are unaffected.
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().retained_graphs.remove(&key);
+    }
+    submit_graph(state, ctx, commands, Some(key), sync).inspect_err(|e| {
+        tracing::error!(
+            target: "goldy::diag::submit",
+            ctx = ?ctx,
+            key,
+            "submit_graph_and_retain: submit failed after evicting retained snapshot: {e:#}"
+        );
+    })
+}
+
+/// Re-record and submit a previously retained graph without rebuilding the IR.
+pub(super) fn try_resubmit_retained(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    key: u64,
+    sync: Option<&SubmitSync>,
+) -> Result<Option<TimelineValue>> {
+    let commands = {
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+        sc_arc.lock().unwrap().retained_graphs.get(&key).cloned()
+    };
+    let Some(commands) = commands else {
+        return Ok(None);
+    };
+    let tv = submit_graph(state, ctx, &commands, None, sync)?;
+    Ok(Some(tv))
+}
+
+/// Drop the retained graph entry for `key` on this context.
+pub(super) fn evict_retained(state: &mut MetalState, ctx: ContextHandle, key: u64) {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().retained_graphs.remove(&key);
+    }
 }
 
 /// Record an offscreen render pass into an existing command buffer (no commit/wait).

@@ -197,6 +197,16 @@ name = "compute_to_surface"
 path = "examples/compute_to_surface.rs"
 required-features = ["examples"]
 
+[[example]]
+name = "textured_quad"
+path = "examples/textured_quad.rs"
+required-features = ["examples"]
+
+[[example]]
+name = "solid_cube"
+path = "examples/solid_cube.rs"
+required-features = ["examples"]
+
 [[bin]]
 name = "update-screenshots"
 path = "tools/update_screenshots.rs"

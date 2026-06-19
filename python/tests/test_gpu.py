@@ -78,35 +78,43 @@ class TestRetainedPool:
 
         data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
-        assert parcel.byte_size == 16
+        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert buffer.byte_size == 16
+        assert buffer[0].byte_size == 16
 
     def test_acquire_from_int32(self, device):
         import goldy
 
         data = np.array([1, 2, 3], dtype=np.int32)
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
-        assert parcel.byte_size == 12
+        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert buffer.byte_size == 12
+        assert buffer[0].byte_size == 12
 
     def test_acquire_from_uint16(self, device):
         import goldy
 
         data = np.array([0, 1, 2, 3, 4, 5], dtype=np.uint16)
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
-        assert parcel.byte_size == 12
+        buffer = pool.acquire_buffer(data, goldy.BufferKind.SCATTERED)
+        assert buffer.byte_size == 12
+        assert buffer[0].byte_size == 12
 
-    def test_write_parcel_via_graph(self, device):
+    def test_write_parcel(self, device):
         import goldy
 
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(
+        buffer = pool.acquire_buffer(
             np.zeros(64, dtype=np.uint32),
             goldy.BufferKind.SCATTERED,
         )
-        graph = goldy.TaskGraph()
-        graph.write_parcel(parcel, 0, np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
+        ctx = device.create_context()
+        frame = goldy.write_to_parcel(
+            ctx,
+            buffer[0],
+            np.array([1, 2, 3, 4], dtype=np.uint32).tobytes(),
+        )
+        frame.wait(ctx)
 
 
 class TestShaderModule:
@@ -149,7 +157,7 @@ class TestComputePipeline:
         pipeline = goldy.ComputePipeline(device, shader)
         assert pipeline is not None
 
-    def test_dispatch_via_graph(self, device):
+    def test_dispatch(self, device):
         import goldy
 
         source = '''
@@ -161,15 +169,57 @@ class TestComputePipeline:
         }
         '''
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
+        buffer = pool.acquire_buffer(np.zeros(64, dtype=np.uint32), goldy.BufferKind.SCATTERED)
         shader = goldy.ShaderModule.from_slang(device, source)
         pipeline = goldy.ComputePipeline(device, shader)
-        idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
 
-        graph = goldy.TaskGraph()
-        with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
-            node.bind_parcel(parcel, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
-        graph.dispatch(device)
-
-        values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
+        ctx = device.create_context()
+        scheme = goldy.Scheme(ctx)
+        scheme.node("fill", pipeline).with_parcel(
+            buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        ).dispatch(1, 1, 1)
+        grant = scheme.grant_read(buffer[0])
+        frame = scheme.submit()
+        values = np.frombuffer(grant.consume(frame), dtype=np.uint32)
         assert np.all(values == 42)
+
+    def test_grant_read_texture(self, device):
+        import goldy
+
+        source = '''
+        import goldy_exp;
+        [goldy_compute]
+        [numthreads(8, 8, 1)]
+        void cs_main(DirectSpatial<float4> output, ThreadId id) {
+            uint2 dims;
+            output.GetDimensions(dims.x, dims.y);
+            if (id.x < dims.x && id.y < dims.y) {
+                output[int2(id.x, id.y)] = float4(1.0, 0.0, 0.0, 1.0);
+            }
+        }
+        '''
+        width = height = 16
+        pool = goldy.RetainedPool(device)
+        parcel = pool.acquire_texture(
+            width,
+            height,
+            goldy.TextureFormat.RGBA8_UNORM,
+            goldy.TextureKind.DIRECT,
+            copy_src=True,
+        )
+        shader = goldy.ShaderModule.from_slang(device, source)
+        pipeline = goldy.ComputePipeline(device, shader)
+
+        ctx = device.create_context()
+        scheme = goldy.Scheme(ctx)
+        scheme.node("write_tex", pipeline).with_parcel(
+            parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        ).dispatch(2, 2, 1)
+        grant = scheme.grant_read_texture(parcel)
+        frame = scheme.submit()
+        pixels = grant.consume(frame)
+        assert len(pixels) > 0
+        assert pixels[0] == 255
+        assert pixels[1] == 0
+        assert pixels[2] == 0
+        assert pixels[3] == 255

@@ -121,12 +121,42 @@ impl TextureFormat {
 }
 
 // ============================================================================
+// Dispatch Types
+// ============================================================================
+
+/// Workgroup-count triple for compute dispatch (direct or indirect).
+///
+/// Matches `goldy_exp.types.DispatchShape` in shaders. When held in a device
+/// parcel, the first 12 bytes at the parcel's byte offset are consumed by
+/// indirect dispatch commands (`vkCmdDispatchIndirect` / DX12 `ExecuteIndirect`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
+pub struct DispatchShape {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+impl DispatchShape {
+    /// Create a workgroup-count triple.
+    pub const fn new(x: u32, y: u32, z: u32) -> Self {
+        Self { x, y, z }
+    }
+}
+
+impl From<(u32, u32, u32)> for DispatchShape {
+    fn from((x, y, z): (u32, u32, u32)) -> Self {
+        Self::new(x, y, z)
+    }
+}
+
+// ============================================================================
 // Access Pattern Types
 // ============================================================================
 
 /// Use-time access direction for a resource descriptor slot.
 ///
-/// Passed to [`crate::Buffer::resource_index`], [`crate::Texture::resource_index`],
+/// Passed to [`crate::Parcel::resource_index`], [`crate::Texture::resource_index`],
 /// and related accessors to select the correct descriptor pool entry for how the
 /// resource will be used in the current dispatch — read-only, write-only, or
 /// read-write.
@@ -199,7 +229,7 @@ pub enum BufferKind {
     Broadcast,
 }
 
-/// How costly [`crate::Buffer::resize_to`] is on this device.
+/// How costly in-place buffer resize (`resize_to`) is on this device.
 ///
 /// Phase 1 uses [`Self::Copy`] on all backends. Later phases may report
 /// [`Self::Constant`] (oversized + demand paging) or [`Self::PageBind`] (sparse).
@@ -383,7 +413,7 @@ bitflags! {
         /// Optimize this buffer for CPU readback.
         ///
         /// On backends with shared storage memory (Vulkan `HOST_VISIBLE`, Metal Shared),
-        /// [`crate::buffer::Buffer::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
+        /// [`crate::buffer::Allocation::read_to_cpu`] is a direct `memcpy` with no GPU involvement.
         /// On Direct3D 12, storage buffers live on GPU-local memory; `read_to_cpu` performs a
         /// GPU copy to a pre-allocated READBACK heap and waits for completion.
         ///
@@ -588,7 +618,6 @@ pub enum BackendType {
     Vulkan,
     Metal,
     Dx12,
-    WebGPU,
 }
 
 /// A simple 2D vertex with position and color.
@@ -922,6 +951,11 @@ mod tests {
     }
 
     // Texture types tests
+    #[test]
+    fn test_dispatch_shape_size() {
+        assert_eq!(std::mem::size_of::<DispatchShape>(), 12);
+    }
+
     #[test]
     fn test_texture_flags() {
         let flags = TextureFlags::COPY_SRC | TextureFlags::COPY_DST;

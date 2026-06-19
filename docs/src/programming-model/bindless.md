@@ -71,18 +71,17 @@ Any user-defined struct type (e.g. `MyUniforms`) declared as a parameter is auto
 
 ## Dispatch-Time Type Checking
 
-When you call `bind_resources_typed`, Goldy compares each `ResourceHandle.category` against the shader's declared parameter types (extracted via `extract_push_constant_categories`):
+When you call `with_parcel` on a compute or render pass builder, Goldy queues each parcel as a push-constant slot. At `dispatch` / `set_pipeline` time it consults the pipeline's reflected slot kinds to pick the correct SRV vs UAV (or CBV) handle and validates categories against the shader signature:
 
 ```rust
-let uniforms = uniform_buf.handle(ResourceAccess::Read).unwrap();  // Broadcast
-let data     = storage_buf.handle(ResourceAccess::Write).unwrap(); // Scattered
-
-// Category validation happens here:
-pass.bind_resources_typed(&[uniforms, data]);
-pass.dispatch(workgroups, 1, 1);
+graph
+    .node("update", &pipeline)
+    .with_parcel(&params_buf, NodeAccess::Read)
+    .with_parcel(&particle_buf, NodeAccess::ReadWrite)
+    .dispatch((particle_count + 63) / 64, 1, 1);
 ```
 
-If slot 0 expects `Broadcast` (from the shader's `MyUniforms cfg` parameter) but receives a `Scattered` handle, the dispatch fails with a clear error instead of producing undefined behavior.
+If slot 0 expects `Broadcast` (from the shader's `MyUniforms cfg` parameter) but the parcel only exposes a scattered view, binding fails with a clear error instead of producing undefined behavior.
 
 ## Contrast with Traditional Binding
 
@@ -134,14 +133,10 @@ let pipeline = ComputePipeline::new(&device, &shader)?;
 let mut graph = TaskGraph::new();
 graph
     .node("update", &pipeline)
-    .bind_parcel(&params_buf, NodeAccess::Read)
-    .bind_parcel(&particle_buf, NodeAccess::ReadWrite)
-    .bind_resources_typed(&[
-        ResourceHandle::new(ResourceCategory::Broadcast, params_buf.resource_index(ResourceAccess::Read).unwrap()),
-        ResourceHandle::new(ResourceCategory::Scattered, particle_buf.resource_index(ResourceAccess::Write).unwrap()),
-    ])
+    .with_parcel(&params_buf, NodeAccess::Read)
+    .with_parcel(&particle_buf, NodeAccess::ReadWrite)
     .dispatch((particle_count + 63) / 64, 1, 1);
 graph.dispatch(&device)?;
 ```
 
-The shader author writes natural function parameters. The Rust side binds handles in declaration order. Goldy handles the rest — slot packing, category validation, and cross-backend descriptor plumbing.
+The shader author writes natural function parameters. The Rust side binds parcels in declaration order via `with_parcel`. Goldy handles the rest — slot packing, category validation, and cross-backend descriptor plumbing.

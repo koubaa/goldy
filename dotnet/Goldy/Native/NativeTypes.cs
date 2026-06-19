@@ -89,4 +89,3 @@ internal struct SamplerDescNative
         LodMaxClamp = 32.0f,
     };
 }
-

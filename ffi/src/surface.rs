@@ -6,7 +6,6 @@
 #[cfg(windows)]
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
-use crate::task_graph::GoldyTaskGraph;
 use crate::types::GoldyTextureFormat;
 use std::ptr;
 
@@ -111,49 +110,6 @@ pub unsafe extern "C" fn goldy_surface_acquire(surface: *const GoldySurface) -> 
         Err(e) => {
             set_last_error_from_anyhow(&e);
             ptr::null_mut()
-        }
-    }
-}
-
-/// Submit a task graph that writes to an already-acquired swapchain frame.
-///
-/// The graph must include [`goldy_task_graph_declare_swapchain_output`] and
-/// [`goldy_task_graph_copy_render_target_to_swapchain`] (or another swapchain
-/// binding). Updates `frame` in place with any parcel stamp targets from the graph.
-///
-/// # Safety
-/// All pointers must be valid. No render pass may be open on `graph`.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_surface_submit_graph_to_frame(
-    surface: *const GoldySurface,
-    graph: *mut GoldyTaskGraph,
-    frame: *mut GoldySurfaceFrame,
-) -> GoldyResult {
-    if surface.is_null() || graph.is_null() || frame.is_null() {
-        return GoldyResult::NullPointer;
-    }
-    if (*graph).has_active_render_pass() {
-        set_last_error("Cannot submit graph while a render pass is being recorded; call render_pass_finish first");
-        return GoldyResult::InvalidArgument;
-    }
-
-    let mut frame_box = Box::from_raw(frame);
-    let Some(goldy_frame) = frame_box.inner.take() else {
-        set_last_error("Surface frame already consumed");
-        let _ = Box::into_raw(frame_box);
-        return GoldyResult::InvalidArgument;
-    };
-    match (*surface).inner.submit_graph_to_frame(&mut (*graph).inner, goldy_frame) {
-        Ok(updated) => {
-            frame_box.inner = Some(updated);
-            let _ = Box::into_raw(frame_box);
-            GoldyResult::Ok
-        }
-        Err(e) => {
-            set_last_error_from_anyhow(&e);
-            frame_box.inner = None;
-            let _ = Box::into_raw(frame_box);
-            GoldyResult::GpuError
         }
     }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Triangle example — animated colored triangle in a window via TaskGraph.
+"""Triangle example — animated colored triangle in a window via retained Scheme.
 
-Offscreen RenderTarget -> render_pass -> copy_render_target_to_swapchain -> present.
+Offscreen render pass → copy_to_present → grant_present.
 
 Requires: pip install glfw
 
@@ -11,7 +11,6 @@ Usage:
 
 from __future__ import annotations
 
-import math
 import sys
 
 import glfw
@@ -19,14 +18,28 @@ import goldy
 import numpy as np
 
 
-def make_scene_rt(device: goldy.Device, surface: goldy.Surface) -> goldy.RenderTarget:
-    width = max(surface.width, 1)
-    height = max(surface.height, 1)
-    return goldy.RenderTarget(device, width, height, surface.format)
+def record_scheme(
+    scheme: goldy.Scheme,
+    pipeline: goldy.RenderPipeline,
+    vertex_parcel: goldy.Parcel,
+    scene_rt: goldy.SchemeRenderTargetLease,
+    screen: goldy.PresentLease,
+    bg: goldy.Color,
+) -> goldy.PresentGrant:
+    with scheme.render_pass("triangle", scene_rt) as rp:
+        (
+            rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
+            .clear(bg)
+            .set_pipeline(pipeline)
+            .set_vertex_buffer_parcel(0, vertex_parcel)
+            .draw(range(3))
+        )
+    scheme.copy_to_present(scene_rt, screen)
+    return scheme.grant_present(screen)
 
 
 def main() -> int:
-    print("Goldy Python Triangle Window (TaskGraph)")
+    print("Goldy Python Triangle Window (Scheme + Present)")
     print("=" * 40)
     print("Press Escape or close the window to exit\n")
 
@@ -35,7 +48,7 @@ def main() -> int:
         return 1
 
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API)
-    window = glfw.create_window(800, 600, "Goldy - Animated Triangle (Python)", None, None)
+    window = glfw.create_window(800, 600, "Goldy - Triangle (Python / Scheme)", None, None)
     if not window:
         glfw.terminate()
         print("Failed to create GLFW window", file=sys.stderr)
@@ -43,7 +56,9 @@ def main() -> int:
 
     instance = goldy.Instance()
     device = instance.request_adapter().request_device()
-    surface = goldy.Surface.from_glfw(device, window)
+    ctx = device.create_context()
+    swapchain = goldy.SwapchainPool.from_glfw(ctx, window)
+    screen = swapchain.lease()
 
     shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
     pipeline = goldy.RenderPipeline(
@@ -52,7 +67,7 @@ def main() -> int:
         shader,
         goldy.RenderPipelineDesc(
             vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
-            target_format=surface.format,
+            target_format=swapchain.format,
         ),
     )
 
@@ -80,39 +95,46 @@ def main() -> int:
         dtype=np.float32,
     )
     retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
 
-    scene_rt = make_scene_rt(device, surface)
-    frame_graph = goldy.TaskGraph()
+    scheme = goldy.Scheme(ctx)
+    scene_rt = scheme.lease_render_target(
+        max(swapchain.width, 1),
+        max(swapchain.height, 1),
+        swapchain.format,
+    )
+    bg = goldy.Color(0.1, 0.1, 0.2, 1.0)
+    present = record_scheme(scheme, pipeline, vertex_parcel, scene_rt, screen, bg)
+
     frame_count = 0
 
     try:
         while not glfw.window_should_close(window):
             fb_width, fb_height = glfw.get_framebuffer_size(window)
             if fb_width > 0 and fb_height > 0:
-                if fb_width != surface.width or fb_height != surface.height:
-                    surface.resize(fb_width, fb_height)
-                    scene_rt = make_scene_rt(device, surface)
+                if fb_width != swapchain.width or fb_height != swapchain.height:
+                    swapchain.resize(fb_width, fb_height)
+                    pipeline = goldy.RenderPipeline(
+                        device,
+                        shader,
+                        shader,
+                        goldy.RenderPipelineDesc(
+                            vertex_layout=goldy.VertexBufferLayout.vertex_2d(),
+                            target_format=swapchain.format,
+                        ),
+                    )
+                    scheme = goldy.Scheme(ctx)
+                    scene_rt = scheme.lease_render_target(
+                        max(swapchain.width, 1),
+                        max(swapchain.height, 1),
+                        swapchain.format,
+                    )
+                    present = record_scheme(
+                        scheme, pipeline, vertex_parcel, scene_rt, screen, bg
+                    )
 
-            t = math.sin(frame_count * 0.02) * 0.5 + 0.5
-            bg = goldy.Color(0.1 + t * 0.1, 0.1 + t * 0.05, 0.2 + t * 0.1, 1.0)
-
-            frame_graph.clear()
-            with frame_graph.render_pass("triangle", scene_rt) as rp:
-                (
-                    rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
-                    .clear(bg)
-                    .set_pipeline(pipeline)
-                    .set_vertex_buffer_parcel(0, vertex_parcel)
-                    .draw(range(3))
-                )
-
-            swapchain = frame_graph.declare_swapchain_output()
-            frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain)
-
-            frame = surface.acquire()
-            surface.submit_graph_to_frame(frame_graph, frame)
-            surface.present(frame)
+            submission = scheme.submit()
+            present.consume(submission)
 
             frame_count += 1
             glfw.poll_events()

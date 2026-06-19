@@ -37,7 +37,7 @@ Goldy uses **bindless access**. Resources get a slot index at creation time, and
 // Goldy: retained parcel already has a bindless slot; bind it in the task graph
 let mut pool = RetainedPool::new(device.clone());
 let parcel = pool.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
-pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+pass.with_parcel(&parcel, NodeAccess::Read);
 ```
 
 The bindless approach eliminates an entire layer of API surface and the pipeline layout permutations that come with it.

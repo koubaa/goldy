@@ -5,7 +5,7 @@ use super::super::shared::DISPATCH_BATCH_STRIDE;
 use super::staging;
 use super::types::{ComputePipelineState, LogicalDevice, PipelineState, PushLayout, SlotKey};
 use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle};
-use crate::backend::{GpuCommand, GraphCommand, RenderCommand};
+use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
 use crate::timeline::TimelineValue;
@@ -14,6 +14,33 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+
+/// Build GPU-side timeline-semaphore waits for cross-context [`SubmitSync::waits`].
+fn build_cross_submit_wait_infos(
+    state: &super::types::VulkanState,
+    sync: Option<&SubmitSync>,
+) -> Result<Vec<vk::SemaphoreSubmitInfo<'static>>> {
+    let Some(s) = sync else {
+        return Ok(Vec::new());
+    };
+    let mut wait_infos = Vec::with_capacity(s.waits.len());
+    for epoch in &s.waits {
+        let sem = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_semaphore;
+        wait_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(sem)
+                .value(epoch.value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        );
+    }
+    Ok(wait_infos)
+}
 
 fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Option<SlotKey> {
     use crate::types::ResourceCategory;
@@ -206,7 +233,11 @@ fn slot_usage_to_vk_stage(usage: &SlotUsageSet) -> vk::PipelineStageFlags2 {
 }
 
 /// Map a Koubaa producer/consumer usage set to Vulkan access flags.
-fn slot_usage_to_vk_access(usage: &SlotUsageSet) -> vk::AccessFlags2 {
+///
+/// When `for_buffer` is true, color-attachment and depth-stencil access flags
+/// are omitted: those access types are only valid on image memory barriers, not
+/// `VkBufferMemoryBarrier2`.
+fn slot_usage_to_vk_access(usage: &SlotUsageSet, for_buffer: bool) -> vk::AccessFlags2 {
     if usage.kinds.is_empty() {
         return vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE;
     }
@@ -229,7 +260,12 @@ fn slot_usage_to_vk_access(usage: &SlotUsageSet) -> vk::AccessFlags2 {
         }
     }
     if usage.kinds.contains(UsageKindFlags::RENDER) {
-        flags |= vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        if for_buffer {
+            // Buffer read by vertex/pixel shader inside a render pass → SHADER_READ.
+            flags |= vk::AccessFlags2::SHADER_READ;
+        } else {
+            flags |= vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        }
     }
     flags
 }
@@ -546,6 +582,7 @@ pub(super) fn submit(
     state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let mut commands = commands.to_vec();
     crate::frame_table::lower_gpu_commands(&mut commands);
@@ -666,7 +703,14 @@ pub(super) fn submit(
             .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let submit_info2 = vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info));
+        let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+        let submit_info2 = if wait_infos.is_empty() {
+            vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info))
+        } else {
+            vk::SubmitInfo2::default()
+                .wait_semaphore_infos(&wait_infos)
+                .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+        };
         let r = {
             let _queue_guard = queue_lock.lock().unwrap();
             unsafe {
@@ -778,28 +822,32 @@ pub(super) fn submit(
 
         // Cross-submission acquire: make prior submit's writes visible to this
         // CB's reads. Same-queue execution ordering is guaranteed by Vulkan but
-        // memory visibility is not.
-        unsafe {
-            let acquire = vk::MemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER
-                        | vk::PipelineStageFlags2::TRANSFER
-                        | vk::PipelineStageFlags2::ALL_GRAPHICS,
-                )
-                .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER
-                        | vk::PipelineStageFlags2::TRANSFER
-                        | vk::PipelineStageFlags2::DRAW_INDIRECT,
-                )
-                .dst_access_mask(
-                    vk::AccessFlags2::SHADER_READ
-                        | vk::AccessFlags2::TRANSFER_READ
-                        | vk::AccessFlags2::INDIRECT_COMMAND_READ,
-                );
-            let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
-            logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+        // memory visibility is not. Skipped when epoch-driven scoped sync is active.
+        if SubmitSync::use_legacy_acquire_from(sync) {
+            unsafe {
+                let acquire = vk::MemoryBarrier2::default()
+                    .src_stage_mask(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER
+                            | vk::PipelineStageFlags2::TRANSFER
+                            | vk::PipelineStageFlags2::ALL_GRAPHICS,
+                    )
+                    .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::COMPUTE_SHADER
+                            | vk::PipelineStageFlags2::TRANSFER
+                            | vk::PipelineStageFlags2::DRAW_INDIRECT,
+                    )
+                    .dst_access_mask(
+                        vk::AccessFlags2::SHADER_READ
+                            | vk::AccessFlags2::TRANSFER_READ
+                            | vk::AccessFlags2::INDIRECT_COMMAND_READ,
+                    );
+                let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
+                logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+            }
+        }
 
+        unsafe {
             if let (Some(bindless_set), Some(bindless_layout)) = (
                 logical_device.bindless_descriptor_set,
                 logical_device.bindless_pipeline_layout,
@@ -836,7 +884,15 @@ pub(super) fn submit(
         for command in &commands {
             match command {
                 GpuCommand::FrameTableStaging { data } => {
-                    super::frame_table::record_prologue(state, device_handle, logical_device, cmd, data)?;
+                    super::frame_table::record_prologue(
+                        &state.contexts,
+                        &state.frame_tables,
+                        &state.buffers,
+                        device_handle,
+                        logical_device,
+                        cmd,
+                        data,
+                    )?;
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -857,13 +913,15 @@ pub(super) fn submit(
                     frame_table_base,
                 } => {
                     if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
-                            &pipeline.shader_debug_name,
-                        )?;
+                        crate::backend::with_layout_validation(|| {
+                            crate::backend::validate_raw_binding_strides(
+                                raw_indices,
+                                &pipeline.push_constant_categories,
+                                &pipeline.binding_element_strides,
+                                |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                                &pipeline.shader_debug_name,
+                            )
+                        })?;
                         let mut layout = PushLayout::default();
                         shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                         unsafe {
@@ -1013,9 +1071,9 @@ pub(super) fn submit(
                                 buffers.get(h).map(|bs| {
                                     vk::BufferMemoryBarrier2::default()
                                         .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                        .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src, true))
                                         .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst, true))
                                         .buffer(bs.buffer)
                                         .offset(0)
                                         .size(vk::WHOLE_SIZE)
@@ -1030,9 +1088,9 @@ pub(super) fn submit(
                             .map(|(_, usage)| {
                                 vk::MemoryBarrier2::default()
                                     .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                    .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                    .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
                                     .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
                             })
                             .collect();
                         let dep_info = if tex_mem.is_empty() {
@@ -1184,6 +1242,56 @@ pub(super) fn submit(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2);
                     }
                 }
+                GpuCommand::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    size,
+                } => {
+                    let _tz = tracy_zone!("vk.copy_buffer");
+                    let (src_buf, dst_buf) = {
+                        let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
+                        let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                        if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
+                            anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
+                        }
+                        (src_state.buffer, dst_state.buffer)
+                    };
+                    unsafe {
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep_info =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+                        let region = vk::BufferCopy {
+                            src_offset: *src_offset,
+                            dst_offset: 0,
+                            size: *size,
+                        };
+                        logical_device
+                            .device
+                            .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
+                    }
+                }
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                    let _tz = tracy_zone!("vk.copy_texture_to_readback");
+                    let staging_buffer = state
+                        .buffers
+                        .get(dst)
+                        .context("CopyTextureToReadback: invalid dst")?
+                        .buffer;
+                    super::texture::record_copy_texture_to_readback(
+                        cmd,
+                        logical_device,
+                        &state.textures,
+                        staging_buffer,
+                        *src,
+                        *layout,
+                    )?;
+                }
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_render_target");
                     let (src_image, width, height) = {
@@ -1325,14 +1433,22 @@ pub(super) fn submit(
         .timeline_semaphore;
     let submit_device_core = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device_core.queue_lock);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let submit_info2 = vk::SubmitInfo2::default()
-        .command_buffer_infos(std::slice::from_ref(&cmd_info))
-        .signal_semaphore_infos(std::slice::from_ref(&signal_info));
+    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+    let submit_info2 = if wait_infos.is_empty() {
+        vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+    } else {
+        vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
+            .wait_semaphore_infos(&wait_infos)
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+    };
 
     let queue_submit_result = {
         let _tz = tracy_zone!("vk.queue_submit2");
@@ -1439,15 +1555,16 @@ pub(super) fn submit_graph(
     state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    submit_graph_impl(state, ctx, commands, None)
+    submit_graph_impl(state, ctx, commands, None, sync)
 }
 
 /// Inner implementation shared by `submit_graph` and `submit_graph_and_retain`.
 ///
 /// When `retain_key` is `Some(key)`:
 /// - the CB is recorded without `ONE_TIME_SUBMIT` (driver keeps it executable)
-/// - after a successful submit the CB is stored in `LogicalDevice::retained_compute_cb`
+/// - after a successful submit the CB is stored in `SubmissionContext::retained_compute_cbs`
 ///   rather than `timeline_cmd_buffers` (so it is not freed by the normal reap cycle)
 /// - any WriteBuffer / WriteTexture commands cause a fallback to normal (non-retained) submit
 ///
@@ -1459,6 +1576,7 @@ fn submit_graph_impl(
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let device_handle = state
         .contexts
@@ -1634,28 +1752,38 @@ fn submit_graph_impl(
     let mut vk_gpu_profile =
         unsafe { create_vulkan_gpu_profile_pool(logical_device, false, dispatch_count_graph, dispatch_labels_graph)? };
 
-    // Cross-submission acquire: make prior submit's writes visible.
-    unsafe {
-        let acquire = vk::MemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER
-                    | vk::PipelineStageFlags2::TRANSFER
-                    | vk::PipelineStageFlags2::ALL_GRAPHICS,
-            )
-            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::COMPUTE_SHADER
-                    | vk::PipelineStageFlags2::TRANSFER
-                    | vk::PipelineStageFlags2::DRAW_INDIRECT,
-            )
-            .dst_access_mask(
-                vk::AccessFlags2::SHADER_READ
-                    | vk::AccessFlags2::TRANSFER_READ
-                    | vk::AccessFlags2::INDIRECT_COMMAND_READ,
-            );
-        let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
-        logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+    // Cross-submission acquire: make prior submit's writes visible to this graph's
+    // first reads. Render-only schemes (e.g. reading a buffer written by a prior
+    // compute submit) need fragment/vertex stages here — not just compute.
+    if SubmitSync::use_legacy_acquire_from(sync) {
+        unsafe {
+            let acquire = vk::MemoryBarrier2::default()
+                .src_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER
+                        | vk::PipelineStageFlags2::TRANSFER
+                        | vk::PipelineStageFlags2::ALL_GRAPHICS,
+                )
+                .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER
+                        | vk::PipelineStageFlags2::TRANSFER
+                        | vk::PipelineStageFlags2::DRAW_INDIRECT
+                        | vk::PipelineStageFlags2::VERTEX_SHADER
+                        | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags2::VERTEX_INPUT,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::SHADER_READ
+                        | vk::AccessFlags2::TRANSFER_READ
+                        | vk::AccessFlags2::INDIRECT_COMMAND_READ
+                        | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+                );
+            let dep = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&acquire));
+            logical_device.device.cmd_pipeline_barrier2(cmd, &dep);
+        }
+    }
 
+    unsafe {
         if let (Some(bindless_set), Some(bindless_layout)) = (
             logical_device.bindless_descriptor_set,
             logical_device.bindless_pipeline_layout,
@@ -1697,7 +1825,15 @@ fn submit_graph_impl(
             GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table_prologue_in_cb = true;
-                    super::frame_table::record_prologue(state, device_handle, logical_device, cmd, data)?;
+                    super::frame_table::record_prologue(
+                        &state.contexts,
+                        &state.frame_tables,
+                        &state.buffers,
+                        device_handle,
+                        logical_device,
+                        cmd,
+                        data,
+                    )?;
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -1718,13 +1854,15 @@ fn submit_graph_impl(
                     frame_table_base,
                 } => {
                     if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
-                        crate::backend::validate_raw_binding_strides(
-                            raw_indices,
-                            &pipeline.push_constant_categories,
-                            &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
-                            &pipeline.shader_debug_name,
-                        )?;
+                        crate::backend::with_layout_validation(|| {
+                            crate::backend::validate_raw_binding_strides(
+                                raw_indices,
+                                &pipeline.push_constant_categories,
+                                &pipeline.binding_element_strides,
+                                |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                                &pipeline.shader_debug_name,
+                            )
+                        })?;
                         let mut layout = PushLayout::default();
                         shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
                         unsafe {
@@ -1874,9 +2012,9 @@ fn submit_graph_impl(
                                 buffers.get(h).map(|bs| {
                                     vk::BufferMemoryBarrier2::default()
                                         .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                        .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src, true))
                                         .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst, true))
                                         .buffer(bs.buffer)
                                         .offset(0)
                                         .size(vk::WHOLE_SIZE)
@@ -1891,9 +2029,9 @@ fn submit_graph_impl(
                             .map(|(_, usage)| {
                                 vk::MemoryBarrier2::default()
                                     .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                    .src_access_mask(slot_usage_to_vk_access(&usage.src))
+                                    .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
                                     .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst))
+                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
                             })
                             .collect();
                         let dep_info = if tex_mem.is_empty() {
@@ -2034,6 +2172,56 @@ fn submit_graph_impl(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep2);
                     }
                 }
+                GpuCommand::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    size,
+                } => {
+                    let _tz = tracy_zone!("vk.copy_buffer");
+                    let (src_buf, dst_buf) = {
+                        let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
+                        let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                        if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
+                            anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
+                        }
+                        (src_state.buffer, dst_state.buffer)
+                    };
+                    unsafe {
+                        let mem_barrier = vk::MemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE);
+                        let dep_info =
+                            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
+                        logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
+                        let region = vk::BufferCopy {
+                            src_offset: *src_offset,
+                            dst_offset: 0,
+                            size: *size,
+                        };
+                        logical_device
+                            .device
+                            .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
+                    }
+                }
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                    let _tz = tracy_zone!("vk.copy_texture_to_readback");
+                    let staging_buffer = state
+                        .buffers
+                        .get(dst)
+                        .context("CopyTextureToReadback: invalid dst")?
+                        .buffer;
+                    super::texture::record_copy_texture_to_readback(
+                        cmd,
+                        logical_device,
+                        &state.textures,
+                        staging_buffer,
+                        *src,
+                        *layout,
+                    )?;
+                }
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_render_target");
                     let (src_image, width, height) = {
@@ -2144,7 +2332,15 @@ fn submit_graph_impl(
                             &sync_data,
                         )?;
                     } else {
-                        super::frame_table::record_prologue(state, device_handle, logical_device, cmd, &staging_data)?;
+                        super::frame_table::record_prologue(
+                            &state.contexts,
+                            &state.frame_tables,
+                            &state.buffers,
+                            device_handle,
+                            logical_device,
+                            cmd,
+                            &staging_data,
+                        )?;
                     }
                 }
 
@@ -2248,14 +2444,22 @@ fn submit_graph_impl(
         .timeline_semaphore;
     let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let submit_info2 = vk::SubmitInfo2::default()
-        .command_buffer_infos(std::slice::from_ref(&cmd_info))
-        .signal_semaphore_infos(std::slice::from_ref(&signal_info));
+    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+    let submit_info2 = if wait_infos.is_empty() {
+        vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+    } else {
+        vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
+            .wait_semaphore_infos(&wait_infos)
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+    };
 
     let retain_plan = if let Some(key) = retain_key {
         let frame_table_row = super::frame_table::extract_staging_from_graph(commands).and_then(|_| {
@@ -2310,12 +2514,15 @@ fn submit_graph_impl(
         let mut sc = sc_arc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         if let Some((key, frame_table_row)) = retain_plan {
-            sc.retained_compute_cb = Some(super::types::RetainedVkCb {
-                fingerprint: key,
-                command_buffer: cmd,
-                used_slots,
-                frame_table_row,
-            });
+            sc.retained_compute_cbs.insert(
+                key,
+                super::types::RetainedVkCb {
+                    command_buffer: cmd,
+                    used_slots,
+                    frame_table_row,
+                    last_signal_value: signal_value,
+                },
+            );
         } else {
             sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
         }
@@ -2387,7 +2594,7 @@ fn submit_graph_impl(
 /// Record, submit, and retain a dispatch command buffer keyed by `key`.
 ///
 /// The CB is recorded without `ONE_TIME_SUBMIT` (driver keeps it executable after GPU
-/// completion) and stored in `LogicalDevice::retained_compute_cb` rather than
+/// completion) and stored in `SubmissionContext::retained_compute_cbs` rather than
 /// `timeline_cmd_buffers`, so it survives the normal reap cycle.
 /// On subsequent frames call [`try_resubmit_retained`] to re-execute without re-recording.
 /// If commands contain any WriteBuffer/WriteTexture nodes the call falls back to a normal
@@ -2397,23 +2604,20 @@ pub(super) fn submit_graph_and_retain(
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     key: u64,
+    sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     // Evict any previously retained CB so we start fresh.
     evict_retained(state, ctx, key);
     // Delegate to the shared inner path with retention enabled.
-    submit_graph_impl(state, ctx, commands, Some(key))
+    submit_graph_impl(state, ctx, commands, Some(key), sync)
 }
 
 /// Re-execute the retained dispatch CB without re-recording.
-///
-/// Returns `Ok(Some(tv))` if the retained CB for `key` was found and resubmitted.
-/// Returns `Ok(None)` if no matching retained CB exists.
-/// Safety: The caller must have confirmed that the GPU has completed the previous
-/// submission of this CB (e.g. by `wait_until`) so it is in executable state.
 pub(super) fn try_resubmit_retained(
     state: &super::types::VulkanState,
     ctx: super::ContextHandle,
     key: u64,
+    sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
     let (device_handle, timeline_sem) = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
@@ -2423,10 +2627,9 @@ pub(super) fn try_resubmit_retained(
     let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
         let sc = sc_arc.lock().unwrap();
-        match sc.retained_compute_cb.as_ref() {
-            Some(r) if r.fingerprint == key => Some((r.command_buffer, r.used_slots.clone())),
-            _ => None,
-        }
+        sc.retained_compute_cbs
+            .get(&key)
+            .map(|r| (r.command_buffer, r.used_slots.clone()))
     };
 
     let Some((cmd, used_slots)) = retained else {
@@ -2439,14 +2642,22 @@ pub(super) fn try_resubmit_retained(
     };
     let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
-    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let submit_info2 = vk::SubmitInfo2::default()
-        .command_buffer_infos(std::slice::from_ref(&cmd_info))
-        .signal_semaphore_infos(std::slice::from_ref(&signal_info));
+    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
+    let submit_info2 = if wait_infos.is_empty() {
+        vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+    } else {
+        vk::SubmitInfo2::default()
+            .command_buffer_infos(std::slice::from_ref(&cmd_info))
+            .wait_semaphore_infos(&wait_infos)
+            .signal_semaphore_infos(std::slice::from_ref(&signal_info))
+    };
 
     {
         let _tz = tracy_zone!("vk.resubmit_retained");
@@ -2466,6 +2677,14 @@ pub(super) fn try_resubmit_retained(
             .lock()
             .unwrap()
             .record_slot_usage(ctx, signal_value, used_slots);
+    }
+
+    // Update the last signal value so eviction can defer-free the CB safely.
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        let mut sc = sc_arc.lock().unwrap();
+        if let Some(retained) = sc.retained_compute_cbs.values_mut().find(|r| r.command_buffer == cmd) {
+            retained.last_signal_value = signal_value;
+        }
     }
 
     {
@@ -2495,21 +2714,66 @@ pub(super) fn try_resubmit_retained(
     Ok(Some(signal_value))
 }
 
-/// Evict the retained dispatch CB for `key` (or any retained CB if `key` doesn't match),
-/// returning the `VkCommandBuffer` to `free_cmd_buffers` for pool reuse.
-pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, _key: u64) {
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
+fn evict_retained_on_context(
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::frame_table::FrameTableDevice>,
+    ctx: super::ContextHandle,
+    key: u64,
+) {
+    if let Some(sc_arc) = contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_compute_cb.take() {
+        if let Some(old) = sc.retained_compute_cbs.remove(&key) {
             if let Some(row) = old.frame_table_row {
                 let device = sc.device;
-                if let Some(ft) = state.frame_tables.get(&device) {
+                if let Some(ft) = frame_tables.get(&device) {
                     super::frame_table::unpin_row(ft, row);
                 }
             }
-            sc.free_cmd_buffers.push(old.command_buffer);
+            // Defer the CB free until the GPU has retired its last submission.
+            // Pushing directly to free_cmd_buffers is unsafe because the CB may
+            // still be in-flight; using timeline_cmd_buffers ensures vkFreeCommandBuffers
+            // is only called once the GPU timeline passes last_signal_value.
+            sc.timeline_cmd_buffers
+                .entry(old.last_signal_value)
+                .or_default()
+                .push(old.command_buffer);
         }
     }
+}
+
+/// Evict every retained dispatch CB on contexts for `device_handle` that pins `row`.
+pub(super) fn evict_retained_pinning_row(
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::frame_table::FrameTableDevice>,
+    device_handle: super::DeviceHandle,
+    row: u32,
+) {
+    let ctxs: Vec<super::ContextHandle> = contexts
+        .iter()
+        .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
+        .map(|(h, _)| *h)
+        .collect();
+    for ctx in ctxs {
+        let keys: Vec<u64> = {
+            let sc_arc = contexts.get(&ctx).expect("context handle in device scan");
+            sc_arc
+                .lock()
+                .unwrap()
+                .retained_compute_cbs
+                .iter()
+                .filter(|(_, g)| g.frame_table_row == Some(row))
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for key in keys {
+            evict_retained_on_context(contexts, frame_tables, ctx, key);
+        }
+    }
+}
+
+/// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
+pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {
+    evict_retained_on_context(&state.contexts, &state.frame_tables, ctx, key);
 }
 
 pub(super) fn reap_timeline_cmd_buffers_up_to(

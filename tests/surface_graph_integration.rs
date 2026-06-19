@@ -1,5 +1,8 @@
 //! Integration tests for the windowed surface graph path (render pass + swapchain copy).
 //!
+//! Legacy TaskGraph path. Scheme coverage: `scheme_render_integration.rs`.
+//! Delete this file when ekrano migrates (Phase 2).
+//!
 //! Full `Surface::submit_graph_to_frame` requires a live WSI window (see `examples/triangle.rs`).
 //! These tests exercise the same render-pass graph submission against an offscreen
 //! `RenderTarget` and verify pixels via CPU readback.
@@ -19,8 +22,6 @@ fn test_alloc_buffer_with_data<T: goldy::StructuredBufferElement>(
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_buffer_with_data(data, kind)
         .expect("acquire_buffer_with_data")
-        .detach_buffer()
-        .expect("detach_buffer")
 }
 
 fn make_device() -> Option<goldy::Device> {
@@ -33,6 +34,7 @@ fn make_device() -> Option<goldy::Device> {
 }
 
 /// Same graph shape as `examples/triangle.rs` (render_pass → submit), without swapchain acquire.
+// Legacy TaskGraph — migrated: `scheme_render_pass_triangle_readback`
 #[test]
 fn render_pass_task_graph_triangle_readback() {
     let Some(device) = make_device() else {
@@ -72,7 +74,7 @@ fn render_pass_task_graph_triangle_readback() {
 
     let mut graph = TaskGraph::new();
     let mut pass = graph.render_pass("triangle", &target);
-    pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+    pass.with_buffer(&vertex_buffer, NodeAccess::Read);
     pass.clear(clear);
     pass.set_pipeline(&pipeline);
     pass.set_vertex_buffer(0, &vertex_buffer);

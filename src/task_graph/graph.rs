@@ -1,15 +1,19 @@
 //! `TaskGraph` — analyzed GPU task graph with automatic barrier insertion.
 
 use super::analysis;
-use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use super::cross_submit::{
+    apply_resource_sync_updates, apply_stamp_targets_legacy, build_ledger_snapshot, compute_cross_submit_sync,
+    net_access_for_waves, prepend_prologue, resource_stamps_from_ir, CrossSubmitSync, ResourceKey,
+};
+use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
     ResourceId, SwapchainOutputHandle, TransientBufferSpec, TransientId, TransientTextureId, TransientTextureKey,
     TransientTextureSpec,
 };
 use crate::backend::{
-    BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, TextureHandle,
+    BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, SubmitSync, TextureHandle,
 };
-use crate::buffer::{Buffer, BufferSource, BufferView};
+use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::device::Device;
 use crate::error::GoldyError;
@@ -128,13 +132,13 @@ fn lcm(a: u64, b: u64) -> u64 {
 /// // Dispatch nodes declare what they read/write so the analyzer can insert
 /// // barriers automatically.
 /// graph.node("write_data", &pipeline_a)
-///     .bind_buffer(&buf, NodeAccess::Write)
-///     .bind_resources_raw_slice(&[buf_idx])
+///     .with_allocation(&buf, NodeAccess::Write)
+///     .with_resource_slots_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// graph.node("read_data", &pipeline_b)
-///     .bind_buffer(&buf, NodeAccess::Read)
-///     .bind_resources_raw_slice(&[buf_idx])
+///     .with_allocation(&buf, NodeAccess::Read)
+///     .with_resource_slots_slice(&[buf_idx])
 ///     .dispatch(64, 1, 1);
 ///
 /// let tv = graph.submit(&ctx)?;
@@ -170,12 +174,12 @@ pub struct TaskGraph {
     /// When the node count hasn't changed and the cache already holds a
     /// schedule, we skip the expensive `binding_fingerprint` hash.
     schedule_validated_node_count: usize,
-    /// Stamp cells for [`crate::Parcel`]s bound via [`NodeBuilder::bind_parcel`].
+    /// Stamp cells for [`crate::Parcel`]s bound via [`NodeBuilder::with_parcel`].
     /// Cleared in [`Self::clear`]; stamped in [`Self::apply_reference_stamps`] at submit.
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
 }
 
-/// Stamp every parcel bound via [`NodeBuilder::bind_parcel`] with a context-qualified timeline.
+/// Stamp every parcel bound via [`NodeBuilder::with_parcel`] with a context-qualified timeline.
 pub(crate) fn apply_stamp_targets(
     targets: &[Arc<crate::parcel::ParcelStamp>],
     ctx: crate::backend::ContextHandle,
@@ -189,8 +193,1089 @@ pub(crate) fn apply_stamp_targets(
                 "parcel home_device must match submitting context's device"
             );
         }
-        let mut table = stamp.references.lock().unwrap();
-        crate::timeline::mark_reference(&mut table, ctx, tv);
+    }
+    apply_stamp_targets_legacy(targets, ctx, tv);
+}
+
+fn plan_cross_submit(
+    ir: &GraphIR,
+    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    submitting_ctx: crate::backend::ContextHandle,
+    waves: &[Wave],
+) -> CrossSubmitSync {
+    let net = net_access_for_waves(ir, waves);
+    let registry = resource_stamps_from_ir(ir, resource_stamps);
+    let ledger = build_ledger_snapshot(&registry);
+    compute_cross_submit_sync(&net, &ledger, submitting_ctx)
+}
+
+fn submit_sync_from_cross(cross: &CrossSubmitSync) -> SubmitSync {
+    SubmitSync::from_cross_submit(cross)
+}
+
+fn backend_submit_standalone(
+    backend: &mut dyn GpuBackend,
+    ctx: crate::backend::ContextHandle,
+    commands: &[crate::backend::GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    let cmds = if let Some(s) = sync {
+        if s.prologue.is_empty() {
+            commands.to_vec()
+        } else {
+            prepend_prologue(commands, &s.prologue)
+        }
+    } else {
+        commands.to_vec()
+    };
+    let waits_only = sync.map(|s| SubmitSync {
+        prologue: Default::default(),
+        waits: s.waits.clone(),
+    });
+    backend.submit_standalone(ctx, &cmds, waits_only.as_ref())
+}
+
+/// Fold a same-context cross-submit prologue into the graph command list.
+///
+/// Barrier-only standalone submits trigger D3D12 warning 1356; the prologue belongs
+/// in the graph body. On the retained path the topology dirty bit forces re-record
+/// before any topology-driven prologue change, so the baked barrier stays current.
+fn graph_commands_with_sync_prologue<'a>(
+    commands: &'a [crate::backend::GraphCommand],
+    sync: Option<&SubmitSync>,
+) -> std::borrow::Cow<'a, [crate::backend::GraphCommand]> {
+    if let Some(s) = sync {
+        if !s.prologue.is_empty() {
+            let barrier = crate::backend::GpuCommand::ResourceBarrier {
+                buffers: s.prologue.buffers.clone(),
+                textures: s.prologue.textures.clone(),
+            };
+            let mut v = Vec::with_capacity(1 + commands.len());
+            v.push(crate::backend::GraphCommand::Compute(barrier));
+            v.extend_from_slice(commands);
+            return std::borrow::Cow::Owned(v);
+        }
+    }
+    std::borrow::Cow::Borrowed(commands)
+}
+
+fn submit_sync_waits_only(sync: Option<&SubmitSync>) -> Option<SubmitSync> {
+    sync.map(|s| SubmitSync {
+        prologue: Default::default(),
+        waits: s.waits.clone(),
+    })
+}
+
+fn backend_submit_graph(
+    backend: &mut dyn GpuBackend,
+    ctx: crate::backend::ContextHandle,
+    commands: &[crate::backend::GraphCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    let effective = graph_commands_with_sync_prologue(commands, sync);
+    // Mirror the standalone path: pass Some whenever sync is Some so the backend
+    // knows to suppress its legacy blanket-acquire barrier even when there are no
+    // cross-context waits.
+    backend.submit_graph(ctx, &effective, submit_sync_waits_only(sync).as_ref())
+}
+
+fn backend_submit_graph_and_retain(
+    backend: &mut dyn GpuBackend,
+    ctx: crate::backend::ContextHandle,
+    commands: &[crate::backend::GraphCommand],
+    key: u64,
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    let effective = graph_commands_with_sync_prologue(commands, sync);
+    backend.submit_graph_and_retain(ctx, &effective, key, submit_sync_waits_only(sync).as_ref())
+}
+
+fn backend_try_resubmit_retained(
+    backend: &mut dyn GpuBackend,
+    ctx: crate::backend::ContextHandle,
+    key: u64,
+    sync: Option<&SubmitSync>,
+) -> Result<Option<TimelineValue>> {
+    // Prologue is baked into the retained body; only cross-context waits are live.
+    backend.try_resubmit_retained(ctx, key, submit_sync_waits_only(sync).as_ref())
+}
+
+/// True when `waves` include a binding with no [`ResourceKey`] (mosaic/transient/present, etc.).
+fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().flat_map(|w| &w.node_indices).any(|&ni| {
+        let node = &ir.nodes[ni];
+        if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
+            return false;
+        }
+        node.bindings
+            .iter()
+            .any(|b| ResourceKey::from_resource_id(b.resource).is_none())
+    })
+}
+
+/// Stamp parcel epochs for resources touched in one partition at that partition's timeline value.
+fn apply_partition_epoch_stamps(
+    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
+    ctx: crate::backend::ContextHandle,
+    ir: &GraphIR,
+    waves: &[Wave],
+    tv: TimelineValue,
+) {
+    let net = net_access_for_waves(ir, waves);
+    if !net.is_empty() {
+        apply_resource_sync_updates(&net, resource_stamps, ctx, tv);
+    }
+    if !stamp_targets.is_empty() && partition_has_unkeyed_bindings(ir, waves) {
+        apply_stamp_targets_legacy(stamp_targets, ctx, tv);
+    }
+}
+
+// ---- Free functions over GraphIR -------------------------------------------
+//
+// These are pure algorithms: they take GraphIR + backend data and produce a
+// result. They carry no TaskGraph dependency and are the actual logic shared
+// with Scheme via IrSubmitState.
+
+/// Compile a `GraphIR` to backend `GraphCommand`s.
+pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
+    let edges = analysis::build_edges(ir);
+    let schedule = analysis::schedule_waves(ir, &edges);
+    analysis::emit_graph_commands(ir, &schedule, None)
+}
+
+/// Fingerprint of the graph's *binding structure* (node count + per-node resource-access pairs).
+/// Suitable for schedule caching only — not for CB retention (does not cover pipeline/slots/dims).
+pub(crate) fn binding_fingerprint(ir: &GraphIR) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    ir.nodes.len().hash(&mut h);
+    for node in &ir.nodes {
+        node.bindings.len().hash(&mut h);
+        for b in &node.bindings {
+            b.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Hash dispatch `resource_slots` for retention fingerprints.
+///
+/// Late-bound present/swapchain placeholders are normalized to a single sentinel
+/// tag so slot indices do not affect the fingerprint.
+fn hash_resource_slots_for_fingerprint(slots: &[u32], h: &mut impl std::hash::Hasher) {
+    use super::{PRESENT_LEASE_SLOT_PLACEHOLDER, SWAPCHAIN_SLOT_PLACEHOLDER};
+    slots.len().hash(h);
+    for &slot in slots {
+        let tag = match slot {
+            PRESENT_LEASE_SLOT_PLACEHOLDER => 0u8,
+            SWAPCHAIN_SLOT_PLACEHOLDER => 1u8,
+            _ => {
+                2u8.hash(h);
+                slot.hash(h);
+                continue;
+            }
+        };
+        tag.hash(h);
+    }
+}
+
+/// Fingerprint of all state that affects the *recorded* command buffer.
+///
+/// Hashes everything `binding_fingerprint` covers plus per-`Dispatch` node:
+/// pipeline handle, `resource_slots`, `user_slots`, and dispatch dimensions.
+/// Upload/copy nodes are excluded — graphs containing them fall back to a
+/// plain submit (their data is staged on every submission, not retained).
+pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    ir.nodes.len().hash(&mut h);
+    for node in &ir.nodes {
+        node.bindings.len().hash(&mut h);
+        for b in &node.bindings {
+            b.hash(&mut h);
+        }
+        match &node.kind {
+            NodeKind::Dispatch {
+                pipeline,
+                resource_slots,
+                user_slots,
+                dispatch,
+            } => {
+                0u8.hash(&mut h);
+                pipeline.hash(&mut h);
+                hash_resource_slots_for_fingerprint(resource_slots, &mut h);
+                user_slots.hash(&mut h);
+                match dispatch {
+                    DispatchDim::Direct { x, y, z } => {
+                        0u8.hash(&mut h);
+                        x.hash(&mut h);
+                        y.hash(&mut h);
+                        z.hash(&mut h);
+                    }
+                    DispatchDim::Indirect { buffer, offset } => {
+                        1u8.hash(&mut h);
+                        buffer.hash(&mut h);
+                        offset.hash(&mut h);
+                    }
+                }
+            }
+            NodeKind::ClearBuffer { buffer, offset, size } => {
+                1u8.hash(&mut h);
+                buffer.hash(&mut h);
+                offset.hash(&mut h);
+                size.hash(&mut h);
+            }
+            NodeKind::GrantRead { grant_id } => {
+                3u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
+            NodeKind::GrantPresent { grant_id } => {
+                4u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
+            _ => {
+                2u8.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Per-partition retention fingerprint.
+///
+/// Hashes the same fields as [`retention_fingerprint`] but restricted to
+/// the nodes assigned to `partition_idx` in the compiled schedule.  Two
+/// partitions from different IRs will have the same key if and only if their
+/// node sets are structurally identical — pipeline handles, resource-access
+/// bindings, slot arrays, and dispatch dimensions.
+///
+/// The hash also folds in the partition index itself so that two consecutive
+/// identical partitions receive distinct keys.
+pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, partition_waves: &[Wave]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    // Collect node indices in this partition's waves in stable order.
+    let mut node_indices: Vec<usize> = partition_waves
+        .iter()
+        .flat_map(|w| w.node_indices.iter().copied())
+        .collect();
+    node_indices.sort_unstable();
+    node_indices.len().hash(&mut h);
+    // Include partition's wave count to distinguish same-sized different positions.
+    partition_waves.len().hash(&mut h);
+    for &ni in &node_indices {
+        let node = &ir.nodes[ni];
+        // Wave depth of this node (its position in the schedule).
+        let wave_depth = schedule
+            .waves
+            .iter()
+            .position(|w| w.node_indices.contains(&ni))
+            .unwrap_or(0);
+        wave_depth.hash(&mut h);
+        node.bindings.len().hash(&mut h);
+        for b in &node.bindings {
+            b.hash(&mut h);
+        }
+        match &node.kind {
+            NodeKind::Dispatch {
+                pipeline,
+                resource_slots,
+                user_slots,
+                dispatch,
+            } => {
+                0u8.hash(&mut h);
+                pipeline.hash(&mut h);
+                hash_resource_slots_for_fingerprint(resource_slots, &mut h);
+                user_slots.hash(&mut h);
+                match dispatch {
+                    DispatchDim::Direct { x, y, z } => {
+                        0u8.hash(&mut h);
+                        x.hash(&mut h);
+                        y.hash(&mut h);
+                        z.hash(&mut h);
+                    }
+                    DispatchDim::Indirect { buffer, offset } => {
+                        1u8.hash(&mut h);
+                        buffer.hash(&mut h);
+                        offset.hash(&mut h);
+                    }
+                }
+            }
+            NodeKind::ClearBuffer { buffer, offset, size } => {
+                1u8.hash(&mut h);
+                buffer.hash(&mut h);
+                offset.hash(&mut h);
+                size.hash(&mut h);
+            }
+            NodeKind::GrantRead { grant_id } => {
+                3u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
+            NodeKind::GrantPresent { grant_id } => {
+                4u8.hash(&mut h);
+                grant_id.hash(&mut h);
+            }
+            _ => {
+                2u8.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// True when all nodes in the given waves are retainable (no uploads).
+///
+/// Upload nodes (WriteBuffer, WriteTexture, etc.) must be staged on every
+/// submit, so a partition containing them is submitted standalone rather than
+/// retained.
+fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
+    use super::ResourceId;
+    for wave in waves {
+        for &ni in &wave.node_indices {
+            match &ir.nodes[ni].kind {
+                NodeKind::WriteBuffer { .. }
+                | NodeKind::WriteTexture { .. }
+                | NodeKind::WriteTextureRegion { .. }
+                | NodeKind::CopyTexture { .. } => return false,
+                // CopyRenderTarget → PresentLease is retainable via the slot-key
+                // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.
+                // CopyRenderTarget → Texture is also retainable: the texture handle
+                // is stable across submissions, so the blit CB can be reused as-is.
+                // All other destinations (SwapchainOutput, etc.) are not stable and
+                // must be submitted standalone.
+                NodeKind::CopyRenderTarget { dst, .. }
+                    if !matches!(dst, ResourceId::PresentLease(_) | ResourceId::Texture(_)) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+/// True when the partition's waves contain at least one [`NodeKind::RenderPass`] node.
+fn partition_waves_have_render(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| {
+        w.node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
+    })
+}
+
+/// Merge key for a compute partition and its immediately following render partition.
+fn merged_compute_render_fp(fp0: u64, fp1: u64) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    fp0.hash(&mut h);
+    fp1.hash(&mut h);
+    h.finish()
+}
+
+/// When the next partition is an offscreen render pass, emit and retain compute and render
+/// in one command buffer so the shared frame table and UAV→graphics barriers stay coherent.
+fn try_merge_compute_render_range(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    wave_ranges: &[std::ops::Range<usize>],
+    part_idx: usize,
+) -> Option<std::ops::Range<usize>> {
+    if part_idx + 1 >= wave_ranges.len() {
+        return None;
+    }
+    let r0 = wave_ranges[part_idx].clone();
+    let r1 = wave_ranges[part_idx + 1].clone();
+    let w0 = &schedule.waves[r0.clone()];
+    let w1 = &schedule.waves[r1.clone()];
+    if analysis::partition_waves_have_present(ir, w0)
+        || analysis::partition_waves_have_present(ir, w1)
+        || !partition_waves_can_retain(ir, w0)
+        || !partition_waves_can_retain(ir, w1)
+    {
+        return None;
+    }
+    let render0 = partition_waves_have_render(ir, w0);
+    let render1 = partition_waves_have_render(ir, w1);
+    if !render0 && render1 {
+        Some(r0.start..r1.end)
+    } else {
+        None
+    }
+}
+
+/// Emit graph commands for a retainable partition from the cache or by re-emitting.
+///
+/// For render-pass partitions the cached `GraphCommand` list is used; re-emit only
+/// happens on the very first submission (before the cache is warm) or after a
+/// present-slot resolver is provided.  Compute-only partitions use the cached
+/// `GpuCommand` slice wrapped in `GraphCommand::Compute`.
+fn partition_graph_commands_for_retain(
+    ir: &GraphIR,
+    cache: &CompiledCacheEntry,
+    waves: &[Wave],
+    part_idx: usize,
+    has_render: bool,
+    resolver: Option<&super::SlotResolver>,
+) -> Vec<GraphCommand> {
+    // When a resolver is given (present partition), we must re-emit to patch in the
+    // concrete drawable handle — the cached form was emitted without a resolver.
+    if resolver.is_some() {
+        if has_render {
+            return analysis::emit_graph_commands_for_waves(ir, waves, resolver);
+        }
+        return analysis::emit_waves_to_commands(ir, waves, resolver)
+            .into_iter()
+            .map(GraphCommand::Compute)
+            .collect();
+    }
+
+    // No resolver: use the cache.
+    if has_render {
+        if let Some(cmds) = cache.partitioned_graph_commands.get(part_idx).and_then(|o| o.as_ref()) {
+            return cmds.clone();
+        }
+        // Cache not yet warm — emit fresh (will be cached next call).
+        return analysis::emit_graph_commands_for_waves(ir, waves, None);
+    }
+
+    if let Some(parts) = cache.partitioned_commands.as_ref() {
+        return parts[part_idx].iter().cloned().map(GraphCommand::Compute).collect();
+    }
+    // Cache not yet warm.
+    analysis::emit_waves_to_commands(ir, waves, None)
+        .into_iter()
+        .map(GraphCommand::Compute)
+        .collect()
+}
+
+/// Emit standalone (non-retained) commands for a non-retainable partition.
+fn partition_standalone_commands(
+    ir: &GraphIR,
+    cache: &CompiledCacheEntry,
+    waves: &[Wave],
+    part_idx: usize,
+    has_render: bool,
+    has_present: bool,
+    resolver: Option<&super::SlotResolver>,
+) -> Result<Vec<GpuCommand>> {
+    if has_render {
+        anyhow::bail!(
+            "retained submit: standalone partition contains render_pass nodes; \
+             render-pass partitions must always be retainable (no upload nodes)"
+        );
+    }
+    if has_present {
+        return Ok(analysis::emit_waves_to_commands(ir, waves, resolver));
+    }
+    if let Some(parts) = cache.partitioned_commands.as_ref() {
+        return Ok(parts[part_idx].clone());
+    }
+    Ok(analysis::emit_waves_to_commands(ir, waves, None))
+}
+
+/// Submit `ir`, partitioned into wave groups.
+pub(crate) fn submit_resolved_ir(
+    cache: &mut Option<CompiledCacheEntry>,
+    context: &crate::Context,
+    backend: &mut dyn GpuBackend,
+    ir: &GraphIR,
+    submit_state: Option<&IrSubmitState>,
+) -> Result<TimelineValue> {
+    let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
+    let ctx = context.backend_handle();
+
+    if has_render {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        let g = compile_graph_commands_for_ir(ir);
+        let sync = cross_sync_for_ir(submit_state, ir, ctx, &schedule.waves);
+        let tv = backend_submit_graph(backend, ctx, &g, sync.as_ref())?;
+        if let Some(state) = submit_state {
+            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &schedule.waves, tv);
+        }
+        return Ok(tv);
+    }
+
+    let fp = binding_fingerprint(ir);
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+    let mut last_tv = backend.gpu_progress(ctx);
+    for (part_idx, range) in wave_ranges.iter().enumerate() {
+        let _tz = crate::tracy_zone!("goldy.submit_partition");
+        let waves = cache.as_ref().unwrap().schedule.waves[range.clone()].to_vec();
+        let sync = cross_sync_for_ir(submit_state, ir, ctx, &waves);
+        let cache_ref = cache.as_ref().unwrap();
+        if let Some(graph_cmds) = cache_ref
+            .partitioned_graph_commands
+            .get(part_idx)
+            .and_then(|o| o.as_ref())
+        {
+            last_tv = backend_submit_graph(backend, ctx, graph_cmds, sync.as_ref())?;
+        } else {
+            let cmds = &cache_ref.partitioned_commands.as_ref().unwrap()[part_idx];
+            last_tv = backend_submit_standalone(backend, ctx, cmds, sync.as_ref())?;
+        }
+        if let Some(state) = submit_state {
+            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+        }
+    }
+    Ok(last_tv)
+}
+
+fn cross_sync_for_stamps(
+    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    ir: &GraphIR,
+    submitting_ctx: crate::backend::ContextHandle,
+    waves: &[Wave],
+) -> Option<SubmitSync> {
+    if resource_stamps.is_empty() {
+        return None;
+    }
+    let cross = plan_cross_submit(ir, resource_stamps, submitting_ctx, waves);
+    Some(submit_sync_from_cross(&cross))
+}
+
+fn cross_sync_for_ir(
+    submit_state: Option<&IrSubmitState>,
+    ir: &GraphIR,
+    submitting_ctx: crate::backend::ContextHandle,
+    waves: &[Wave],
+) -> Option<SubmitSync> {
+    let state = submit_state?;
+    cross_sync_for_stamps(&state.resource_stamps, ir, submitting_ctx, waves)
+}
+
+/// Outcome of [`submit_resolved_ir_and_retain`]: how many partitions were re-recorded
+/// versus resubmitted from the retained cache.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PartitionSubmitResult {
+    /// Partitions that were re-recorded (and retained) this call.
+    pub records: usize,
+    /// Partitions that were resubmitted from the cached command list without re-recording.
+    pub resubmit_hits: usize,
+}
+
+impl PartitionSubmitResult {
+    /// True when every retainable partition was served from cache (zero re-records).
+    pub fn all_from_cache(&self) -> bool {
+        self.records == 0
+    }
+}
+
+/// Submit `ir` to the backend with per-partition (slice-aware) retention.
+///
+/// The IR is split into the same partitions as [`submit_resolved_ir`] — one or
+/// two wave groups depending on barrier cost or swapchain presence.  Each
+/// partition is treated independently:
+///
+/// - **Upload partition** (contains `WriteBuffer`/`WriteTexture`/`CopyTexture`
+///   nodes, or `CopyRenderTarget` to a present-lease): submitted via
+///   `submit_standalone` on every call — data is staged fresh each frame and
+///   cannot be retained. `CopyRenderTarget` to a stable texture parcel
+///   (`ResourceId::Texture`) is retainable and does **not** force standalone.
+/// - **Render partition** (contains `RenderPass` nodes):
+///   submitted via `submit_graph_and_retain`; the backend retains the closed
+///   list and can resubmit it on cache hit.
+/// - **Pure-compute partition**: submitted via `submit_graph_and_retain`; the
+///   retained command list is reused whenever the partition fingerprint matches.
+///
+/// Upload partitions do not prevent retention of adjacent pure-compute
+/// partitions — this is the key improvement over the previous whole-IR bail-out.
+///
+/// Returns both the final timeline value and a [`PartitionSubmitResult`] so callers
+/// can decide whether to count this call as a record or a resubmit.
+pub(crate) fn submit_resolved_ir_and_retain(
+    cache: &mut Option<CompiledCacheEntry>,
+    context: &crate::Context,
+    backend: &mut dyn GpuBackend,
+    ir: &GraphIR,
+    submit_state: Option<&IrSubmitState>,
+) -> Result<(TimelineValue, PartitionSubmitResult)> {
+    let fp = binding_fingerprint(ir);
+
+    // Ensure schedule exists in the cache.
+    TaskGraph::get_or_build_schedule(cache, ir, fp);
+
+    // Compute partition wave ranges from the cached schedule (same split logic as
+    // `emit_partitioned_commands`).
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+
+    // Compute per-partition fingerprints up front so we can check them against the
+    // cached keys without borrowing `cache` mutably yet.
+    let partition_fps: Vec<u64> = {
+        let schedule = &cache.as_ref().unwrap().schedule;
+        wave_ranges
+            .iter()
+            .enumerate()
+            .map(|(part_idx, range)| {
+                let waves = &schedule.waves[range.clone()];
+                let raw_fp = partition_fingerprint(ir, schedule, waves);
+                // Fold in partition index so identical adjacent partitions have distinct keys.
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                raw_fp.hash(&mut h);
+                part_idx.hash(&mut h);
+                h.finish()
+            })
+            .collect()
+    };
+
+    // Ensure the partition retention key vecs are sized correctly.
+    // On a topology change (fp miss) the schedule was just rebuilt; reset keys.
+    {
+        let entry = cache.as_mut().unwrap();
+        if entry.partition_retention_keys.len() != wave_ranges.len() {
+            entry.partition_retention_keys = vec![None; wave_ranges.len()];
+            entry.partition_slot_keys = vec![None; wave_ranges.len()];
+        }
+    }
+
+    // Build partitioned commands (cached; only emits on topology change).
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+
+    let ctx = context.backend_handle();
+    let mut last_tv = backend.gpu_progress(ctx);
+    let mut result = PartitionSubmitResult::default();
+
+    let mut part_idx = 0usize;
+    while part_idx < wave_ranges.len() {
+        let merged_range = {
+            let schedule = &cache.as_ref().unwrap().schedule;
+            try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx)
+        };
+        if let Some(merged_range) = merged_range {
+            let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
+            let merged_waves = {
+                let schedule = &cache.as_ref().unwrap().schedule;
+                schedule.waves[merged_range.clone()].to_vec()
+            };
+            let sync = cross_sync_for_ir(submit_state, ir, ctx, &merged_waves);
+            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+
+            if cached_key == Some(merged_fp) {
+                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync.as_ref())? {
+                    last_tv = tv;
+                    result.resubmit_hits += 1;
+                    if let Some(state) = submit_state {
+                        state.apply_partition_reference_stamps(
+                            ctx,
+                            &context.device().inner,
+                            ir,
+                            &merged_waves,
+                            last_tv,
+                        );
+                    }
+                    part_idx += 2;
+                    continue;
+                }
+            }
+
+            let graph_cmds = analysis::emit_graph_commands_for_waves(ir, &merged_waves, None);
+            let _tz = crate::tracy_zone!("goldy.submit_partition_merged_compute_render");
+            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, merged_fp, sync.as_ref())?;
+            {
+                let entry = cache.as_mut().unwrap();
+                entry.partition_retention_keys[part_idx] = Some(merged_fp);
+                entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
+            }
+            result.records += 1;
+            if let Some(state) = submit_state {
+                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &merged_waves, last_tv);
+            }
+            part_idx += 2;
+            continue;
+        }
+
+        let part_fp = partition_fps[part_idx];
+        let range = wave_ranges[part_idx].clone();
+        let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+        let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
+        let can_retain = partition_waves_can_retain(ir, &waves);
+        let has_render = partition_waves_have_render(ir, &waves);
+        let sync = cross_sync_for_ir(submit_state, ir, ctx, &waves);
+
+        if !can_retain {
+            // Upload/copy partition: always submit standalone, never retain.
+            let cache_entry = cache.as_ref().unwrap();
+            let cmds = partition_standalone_commands(ir, cache_entry, &waves, part_idx, has_render, false, None)?;
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
+            if let Some(state) = submit_state {
+                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+            }
+            part_idx += 1;
+            continue;
+        }
+
+        // Try to resubmit from the retained cache if the fingerprint matches.
+        if cached_key == Some(part_fp) {
+            if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync.as_ref())? {
+                last_tv = tv;
+                result.resubmit_hits += 1;
+                if let Some(state) = submit_state {
+                    state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+                }
+                part_idx += 1;
+                continue;
+            }
+        }
+
+        // Re-record this partition.
+        let cache_entry = cache.as_ref().unwrap();
+        let graph_cmds = partition_graph_commands_for_retain(ir, cache_entry, &waves, part_idx, has_render, None);
+        let _tz = crate::tracy_zone!("goldy.submit_partition");
+        last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync.as_ref())?;
+        cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
+        result.records += 1;
+        if let Some(state) = submit_state {
+            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+        }
+        part_idx += 1;
+    }
+
+    Ok((last_tv, result))
+}
+
+/// Resolved swapchain drawable for one present lease at submit time.
+pub(crate) struct ResolvedPresentSlot {
+    pub lease_id: u32,
+    pub slot_id: u32,
+    pub handle: crate::backend::TextureHandle,
+    pub uav_index: u32,
+}
+
+/// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
+/// bindings through `present_slots` and retains present-touching partitions per
+/// backing slot (immutable CB per swapchain image index).
+pub(crate) fn submit_resolved_ir_and_retain_with_presents(
+    cache: &mut Option<CompiledCacheEntry>,
+    context: &crate::Context,
+    backend: &mut dyn GpuBackend,
+    ir: &GraphIR,
+    present_slots: &[ResolvedPresentSlot],
+    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
+) -> Result<(TimelineValue, PartitionSubmitResult)> {
+    use super::{ResolvedSwapchain, SlotResolver};
+
+    let fp = binding_fingerprint(ir);
+    TaskGraph::get_or_build_schedule(cache, ir, fp);
+
+    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule);
+    let partition_fps: Vec<u64> = {
+        let schedule = &cache.as_ref().unwrap().schedule;
+        wave_ranges
+            .iter()
+            .enumerate()
+            .map(|(part_idx, range)| {
+                let waves = &schedule.waves[range.clone()];
+                let raw_fp = partition_fingerprint(ir, schedule, waves);
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                raw_fp.hash(&mut h);
+                part_idx.hash(&mut h);
+                h.finish()
+            })
+            .collect()
+    };
+
+    {
+        let entry = cache.as_mut().unwrap();
+        if entry.partition_retention_keys.len() != wave_ranges.len() {
+            entry.partition_retention_keys = vec![None; wave_ranges.len()];
+            entry.partition_slot_keys = vec![None; wave_ranges.len()];
+        }
+    }
+
+    TaskGraph::get_or_build_partitioned_commands(cache, ir, fp);
+
+    let mut resolver = SlotResolver::new();
+    for slot in present_slots {
+        resolver.present_leases.insert(
+            slot.lease_id,
+            ResolvedSwapchain {
+                handle: slot.handle,
+                uav_index: slot.uav_index,
+            },
+        );
+    }
+
+    let ctx = context.backend_handle();
+    let mut last_tv = backend.gpu_progress(ctx);
+    let mut result = PartitionSubmitResult::default();
+
+    let mut part_idx = 0usize;
+    while part_idx < wave_ranges.len() {
+        let merged_range = {
+            let schedule = &cache.as_ref().unwrap().schedule;
+            try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx)
+        };
+        if let Some(merged_range) = merged_range {
+            let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
+            let merged_waves = {
+                let schedule = &cache.as_ref().unwrap().schedule;
+                schedule.waves[merged_range.clone()].to_vec()
+            };
+            let sync = cross_sync_for_stamps(resource_stamps, ir, ctx, &merged_waves);
+            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+
+            if cached_key == Some(merged_fp) {
+                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync.as_ref())? {
+                    last_tv = tv;
+                    result.resubmit_hits += 1;
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                    part_idx += 2;
+                    continue;
+                }
+            }
+
+            let graph_cmds = analysis::emit_graph_commands_for_waves(ir, &merged_waves, None);
+            let _tz = crate::tracy_zone!("goldy.submit_partition_merged_compute_render");
+            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, merged_fp, sync.as_ref())?;
+            {
+                let entry = cache.as_mut().unwrap();
+                entry.partition_retention_keys[part_idx] = Some(merged_fp);
+                entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
+            }
+            result.records += 1;
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+            part_idx += 2;
+            continue;
+        }
+
+        let part_fp = partition_fps[part_idx];
+        let range = wave_ranges[part_idx].clone();
+        let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
+        let can_retain = partition_waves_can_retain(ir, &waves);
+        let has_render = partition_waves_have_render(ir, &waves);
+        let has_present = analysis::partition_waves_have_present(ir, &waves);
+        let sync = cross_sync_for_stamps(resource_stamps, ir, ctx, &waves);
+
+        if !can_retain {
+            let cache_entry = cache.as_ref().unwrap();
+            let cmds = partition_standalone_commands(
+                ir,
+                cache_entry,
+                &waves,
+                part_idx,
+                has_render,
+                has_present,
+                if has_present { Some(&resolver) } else { None },
+            )?;
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+            part_idx += 1;
+            continue;
+        }
+
+        if has_present {
+            if present_slots.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "present partition requires at least one resolved present slot"
+                ));
+            }
+
+            if !backend.retains_present_partitions() {
+                let cache_entry = cache.as_ref().unwrap();
+                let cmds = partition_standalone_commands(
+                    ir,
+                    cache_entry,
+                    &waves,
+                    part_idx,
+                    has_render,
+                    true,
+                    Some(&resolver),
+                )?;
+                let _tz = crate::tracy_zone!("goldy.submit_partition");
+                last_tv = backend_submit_standalone(backend, ctx, &cmds, sync.as_ref())?;
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                part_idx += 1;
+                continue;
+            }
+
+            let slot_key = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                part_fp.hash(&mut h);
+                for slot in present_slots {
+                    slot.lease_id.hash(&mut h);
+                    slot.slot_id.hash(&mut h);
+                }
+                h.finish()
+            };
+
+            let already_retained = cache.as_ref().unwrap().partition_slot_keys[part_idx]
+                .as_ref()
+                .map(|s| s.contains(&slot_key))
+                .unwrap_or(false);
+
+            if already_retained {
+                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, slot_key, sync.as_ref())? {
+                    last_tv = tv;
+                    result.resubmit_hits += 1;
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                    part_idx += 1;
+                    continue;
+                }
+            }
+
+            let graph_cmds = partition_graph_commands_for_retain(
+                ir,
+                cache.as_ref().unwrap(),
+                &waves,
+                part_idx,
+                has_render,
+                Some(&resolver),
+            );
+            let _tz = crate::tracy_zone!("goldy.submit_partition");
+            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, slot_key, sync.as_ref())?;
+            {
+                let entry = cache.as_mut().unwrap();
+                entry.partition_slot_keys[part_idx]
+                    .get_or_insert_with(std::collections::HashSet::new)
+                    .insert(slot_key);
+            }
+            result.records += 1;
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+            part_idx += 1;
+            continue;
+        }
+
+        let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+        if cached_key == Some(part_fp) {
+            if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync.as_ref())? {
+                last_tv = tv;
+                result.resubmit_hits += 1;
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                part_idx += 1;
+                continue;
+            }
+        }
+
+        let graph_cmds =
+            partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None);
+        let _tz = crate::tracy_zone!("goldy.submit_partition");
+        last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync.as_ref())?;
+        cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
+        result.records += 1;
+        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+        part_idx += 1;
+    }
+
+    Ok((last_tv, result))
+}
+
+/// Schedule cache + parcel stamp targets for a retained [`GraphIR`] submission.
+///
+/// Shared by [`crate::Scheme`]; [`TaskGraph`] carries an equivalent bundle inline.
+pub(crate) struct IrSubmitState {
+    schedule_cache: Option<CompiledCacheEntry>,
+    stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+}
+
+impl IrSubmitState {
+    pub fn new() -> Self {
+        Self {
+            schedule_cache: None,
+            stamp_targets: Vec::new(),
+            resource_stamps: HashMap::new(),
+        }
+    }
+
+    pub fn register_parcel_stamp(&mut self, parcel: &crate::Parcel) {
+        self.register_stamp_parts(parcel.resource_id(), parcel.stamp_handle());
+    }
+
+    pub fn register_stamp_parts(&mut self, resource_id: ResourceId, stamp: Arc<crate::parcel::ParcelStamp>) {
+        if let Some(key) = ResourceKey::from_resource_id(resource_id) {
+            self.resource_stamps.insert(key, stamp);
+        } else {
+            self.stamp_targets.push(stamp);
+        }
+    }
+
+    /// Register stamps for every parcel unit in a buffer (dependency tracking only).
+    pub fn register_buffer_stamps(&mut self, buffer: &crate::Buffer) {
+        for parcel in buffer.parcels() {
+            self.register_parcel_stamp(parcel);
+        }
+    }
+
+    pub fn register_stamp(&mut self, stamp: Arc<crate::parcel::ParcelStamp>) {
+        self.stamp_targets.push(stamp);
+    }
+
+    pub fn apply_partition_reference_stamps(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        submit_device: &std::sync::Arc<crate::device::DeviceInner>,
+        ir: &GraphIR,
+        waves: &[Wave],
+        tv: TimelineValue,
+    ) {
+        for stamp in self.resource_stamps.values() {
+            if let Some(home) = stamp.home_device.upgrade() {
+                debug_assert!(
+                    std::sync::Arc::ptr_eq(&home, submit_device),
+                    "parcel home_device must match submitting context's device"
+                );
+            }
+        }
+        for stamp in &self.stamp_targets {
+            if let Some(home) = stamp.home_device.upgrade() {
+                debug_assert!(
+                    std::sync::Arc::ptr_eq(&home, submit_device),
+                    "parcel home_device must match submitting context's device"
+                );
+            }
+        }
+        apply_partition_epoch_stamps(&self.resource_stamps, &self.stamp_targets, ctx, ir, waves, tv);
+    }
+
+    /// Drop cached retention keys so the next submit re-records retained partitions.
+    pub fn invalidate_retention(&mut self) {
+        if let Some(entry) = &mut self.schedule_cache {
+            for key in &mut entry.partition_retention_keys {
+                *key = None;
+            }
+            for keys in &mut entry.partition_slot_keys {
+                *keys = None;
+            }
+        }
+    }
+
+    pub fn resource_stamps(&self) -> &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>> {
+        &self.resource_stamps
+    }
+
+    /// Record and retain the command list for `ir` on `ctx`.
+    ///
+    /// When `present_slots` is empty, every partition uses the standard single-key
+    /// retention path. Present leases are resolved through `present_slots` at emit time.
+    pub fn submit_pipelined_and_retain_with_presents(
+        &mut self,
+        ctx: &crate::Context,
+        ir: &GraphIR,
+        present_slots: &[ResolvedPresentSlot],
+    ) -> Result<(TimelineValue, PartitionSubmitResult)> {
+        let mut backend = ctx.device().inner.backend.lock().unwrap();
+        submit_resolved_ir_and_retain_with_presents(
+            &mut self.schedule_cache,
+            ctx,
+            backend.as_mut(),
+            ir,
+            present_slots,
+            &self.resource_stamps,
+            &self.stamp_targets,
+        )
     }
 }
 
@@ -206,9 +1291,31 @@ pub(crate) struct CompiledCacheEntry {
     upload_remap: Vec<(usize, usize)>,
     /// Cached partitioned emission output.  Populated on first call to
     /// `get_or_build_partitioned_commands`.
+    ///
+    /// For pure-compute partitions, the entry holds the compute `GpuCommand` list.
+    /// For render-pass partitions, the entry is an empty `Vec` — the `GraphCommand`
+    /// form is stored in `partitioned_graph_commands` instead.
     partitioned_commands: Option<Vec<Vec<GpuCommand>>>,
     /// `(partition_idx, cmd_idx, ir_node_idx)` for upload commands across partitions.
     partitioned_upload_remap: Vec<(usize, usize, usize)>,
+    /// Cached `GraphCommand` lists for render-pass partitions.
+    ///
+    /// Indexed in parallel with `partitioned_commands`.  `Some(cmds)` when partition
+    /// `i` has render-pass nodes; `None` when partition `i` is pure-compute.
+    partitioned_graph_commands: Vec<Option<Vec<GraphCommand>>>,
+    /// Per-partition retention keys for slice-aware retention.
+    ///
+    /// `Some(key)` when partition `i` was last successfully retained with that key;
+    /// `None` when the partition has not yet been retained (e.g. it contains upload
+    /// nodes and is submitted standalone rather than retained).
+    partition_retention_keys: Vec<Option<u64>>,
+    /// Per-partition set of slot-combination keys for present-aware retention.
+    ///
+    /// Each entry is the set of `slot_key` values (derived from all present lease
+    /// slot assignments for that frame) that have been successfully retained.
+    /// A cache hit occurs when the current frame's `slot_key` is already in the set
+    /// and the backend can resubmit the retained command buffer.
+    partition_slot_keys: Vec<Option<std::collections::HashSet<u64>>>,
 }
 
 /// Per-page cache of a fully-lowered [`GraphIR`].
@@ -250,8 +1357,8 @@ impl TaskGraph {
     }
 
     /// Like [`Self::transient_buffer`] but with an explicit element stride for the
-    /// structured buffer descriptor. The stride is forwarded to
-    /// [`crate::Buffer::create_view`] when the transient is materialised.
+    /// structured buffer descriptor. The stride is forwarded to a sub-range
+    /// [`crate::BufferView`] when the transient is materialised.
     ///
     /// ## Stable slot identity contract
     ///
@@ -357,82 +1464,11 @@ impl TaskGraph {
             "submit_with_backend: transient resources must go through submit_ir_with_resolver"
         );
 
-        let tv = Self::submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir)?;
+        let tv = submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir, None)?;
         if wait_for_transient_completion && self.needs_transient_gpu_wait() {
             backend.wait_until(context.backend_handle(), tv)?;
         }
         Ok(tv)
-    }
-
-    fn submit_resolved_ir(
-        cache: &mut Option<CompiledCacheEntry>,
-        context: &crate::Context,
-        backend: &mut dyn GpuBackend,
-        ir: &GraphIR,
-    ) -> Result<TimelineValue> {
-        let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
-
-        if has_render {
-            // Render-pass graphs: single submission (mixed compute+render CBs).
-            let g = Self::compile_graph_commands_for_ir(ir);
-            return backend.submit_graph(context.backend_handle(), &g);
-        }
-
-        // Compute-only: partition the wave schedule and submit each group.
-        // Early partitions are submitted immediately so the GPU can start
-        // executing coarse work while the CPU records the next partition.
-        // The last partition's timeline value is returned to the caller.
-        let fp = Self::binding_fingerprint(ir);
-        let partitions = Self::get_or_build_partitioned_commands(cache, ir, fp);
-        let mut last_tv = backend.gpu_progress(context.backend_handle());
-        for partition in partitions {
-            let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
-        }
-        Ok(last_tv)
-    }
-
-    /// Submit `ir` to the backend and retain the closed command list for future resubmission.
-    ///
-    /// The retention key is always derived from [`Self::retention_fingerprint`] so it
-    /// reflects every field that affects the recorded command buffer.  Render-pass graphs
-    /// and graphs containing upload nodes fall back to a plain submit (no retention).
-    fn submit_resolved_ir_and_retain(
-        cache: &mut Option<CompiledCacheEntry>,
-        context: &crate::Context,
-        backend: &mut dyn GpuBackend,
-        ir: &GraphIR,
-    ) -> Result<TimelineValue> {
-        let has_render = ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }));
-
-        if has_render {
-            // Render-pass graphs cannot be retained (mixed command lists); fall back.
-            let g = Self::compile_graph_commands_for_ir(ir);
-            return backend.submit_graph(context.backend_handle(), &g);
-        }
-
-        let has_upload = ir.nodes.iter().any(|n| {
-            matches!(
-                n.kind,
-                NodeKind::WriteBuffer { .. }
-                    | NodeKind::WriteTexture { .. }
-                    | NodeKind::WriteTextureRegion { .. }
-                    | NodeKind::CopyTexture { .. }
-                    | NodeKind::CopyRenderTarget { .. }
-            )
-        });
-        let fp = Self::binding_fingerprint(ir);
-        if has_upload {
-            // Upload commands use staging memory that is not re-encodable; fall back.
-            let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
-            return backend.submit_standalone(context.backend_handle(), cmds);
-        }
-
-        // Derive the retention key from full CB content so it is always correct.
-        let key = Self::retention_fingerprint(ir);
-        let cmds = Self::get_or_build_compute_commands(cache, ir, fp);
-        let graph_cmds: Vec<GraphCommand> = cmds.iter().cloned().map(GraphCommand::Compute).collect();
-        backend.submit_graph_and_retain(context.backend_handle(), &graph_cmds, key)
     }
 
     /// Like [`Self::submit_with_backend`] but retains the closed command list keyed by
@@ -448,9 +1484,9 @@ impl TaskGraph {
     ) -> Result<TimelineValue> {
         // Only retain pure compute graphs (no transients, no render passes, no uploads).
         if self.has_transient_resources() {
-            return Self::submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir);
+            return submit_resolved_ir(&mut self.schedule_cache, context, backend, &self.ir, None);
         }
-        Self::submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir)
+        submit_resolved_ir_and_retain(&mut self.schedule_cache, context, backend, &self.ir, None).map(|(tv, _)| tv)
     }
 
     /// Pack transient buffers into a heap using wave live ranges: transients whose
@@ -573,7 +1609,7 @@ impl TaskGraph {
 
         if has_render {
             let g = analysis::emit_graph_commands(&self.ir, schedule, Some(resolver));
-            let tv = backend.submit_graph(context.backend_handle(), &g)?;
+            let tv = backend.submit_graph(context.backend_handle(), &g, None)?;
             if wait_for_transient_completion && self.needs_transient_gpu_wait() {
                 backend.wait_until(context.backend_handle(), tv)?;
             }
@@ -584,7 +1620,7 @@ impl TaskGraph {
         let mut last_tv = backend.gpu_progress(context.backend_handle());
         for partition in &partitions {
             let _tz = crate::tracy_zone!("goldy.submit_partition");
-            last_tv = backend.submit_standalone(context.backend_handle(), partition)?;
+            last_tv = backend.submit_standalone(context.backend_handle(), partition, None)?;
         }
         if wait_for_transient_completion && self.needs_transient_gpu_wait() {
             backend.wait_until(context.backend_handle(), last_tv)?;
@@ -706,7 +1742,7 @@ impl TaskGraph {
     /// Declare that this graph will write to a swapchain output.
     ///
     /// Returns a [`SwapchainOutputHandle`] that must be passed to
-    /// [`NodeBuilder::bind_swapchain_output`] when recording the final
+    /// [`NodeBuilder::with_swapchain_output`] when recording the final
     /// (fine-pass) dispatch node.  The concrete `TextureHandle` is resolved
     /// at submit time inside [`Surface::submit_graph`](crate::Surface::submit_graph).
     ///
@@ -723,12 +1759,6 @@ impl TaskGraph {
             .any(|n| n.bindings.iter().any(|b| b.resource == ResourceId::SwapchainOutput))
     }
 
-    pub(crate) fn compile_graph_commands_for_ir(ir: &GraphIR) -> Vec<GraphCommand> {
-        let edges = analysis::build_edges(ir);
-        let schedule = analysis::schedule_waves(ir, &edges);
-        analysis::emit_graph_commands(ir, &schedule, None)
-    }
-
     fn has_render_passes_in_ir(ir: &GraphIR) -> bool {
         ir.nodes.iter().any(|n| matches!(n.kind, NodeKind::RenderPass { .. }))
     }
@@ -738,7 +1768,7 @@ impl TaskGraph {
     }
 
     /// Add a compute dispatch node to the graph. The returned [`NodeBuilder`] must
-    /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect`].
+    /// be finalized with [`NodeBuilder::dispatch`] or [`NodeBuilder::dispatch_indirect_parcel`].
     pub fn node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> NodeBuilder<'a> {
         NodeBuilder {
             graph: self,
@@ -754,7 +1784,8 @@ impl TaskGraph {
     ///
     /// The node is declared as `NodeAccess::Write` on the buffer so the analyzer
     /// can insert barriers between this clear and any subsequent reader.
-    pub fn clear_buffer(&mut self, buffer: &Buffer, offset: u64, size: u64) {
+    #[allow(dead_code)] // heap_tests and task_graph unit tests
+    pub(crate) fn clear_buffer(&mut self, buffer: &Allocation, offset: u64, size: u64) {
         self.ir.nodes.push(TaskNode {
             label: "clear_buffer",
             bindings: vec![ResourceBinding {
@@ -809,7 +1840,8 @@ impl TaskGraph {
     /// surrounding dispatches. The node is declared as `NodeAccess::Write` so
     /// the analyzer inserts the necessary barrier between this write and any
     /// subsequent reader, and serializes it after any prior reader (WAR).
-    pub fn write_buffer(&mut self, buffer: &Buffer, offset: u64, data: Vec<u8>) {
+    #[allow(dead_code)] // heap_tests and task_graph unit tests
+    pub(crate) fn write_buffer(&mut self, buffer: &Allocation, offset: u64, data: Vec<u8>) {
         self.ir.nodes.push(TaskNode {
             label: "write_buffer",
             bindings: vec![ResourceBinding {
@@ -826,10 +1858,9 @@ impl TaskGraph {
 
     /// Add a CPU→GPU write node for a retained buffer [`crate::Parcel`].
     ///
-    /// Like [`Self::write_buffer`], but accepts an opaque parcel instead of a
-    /// [`Buffer`] handle. Valid only for non-mosaic buffer parcels (the same
-    /// restriction as a direct buffer write). The analyzer inserts
-    /// barriers between this write and any subsequent reader in the graph.
+    /// Adds a CPU→GPU write node keyed by the parcel's resource identity (whole buffer
+    /// or buffer range). The analyzer inserts barriers between this write and any
+    /// subsequent reader in the graph.
     pub fn write_parcel(&mut self, parcel: &crate::Parcel, offset: u64, data: Vec<u8>) -> Result<()> {
         let (buffer, resource) = parcel.write_buffer_target()?;
         self.ir.nodes.push(TaskNode {
@@ -842,6 +1873,38 @@ impl TaskGraph {
                 buffer,
                 offset,
                 data: Arc::from(data),
+            },
+        });
+        Ok(())
+    }
+
+    /// Add a zero-fill node for a retained buffer [`crate::Parcel`].
+    ///
+    /// Keys the analyzer binding from the parcel's resource identity (whole buffer
+    /// or buffer range).
+    pub fn clear_parcel(&mut self, parcel: &crate::Parcel, offset: u64, size: u64) -> Result<()> {
+        let buffer = parcel
+            .buffer_handle()
+            .ok_or_else(|| anyhow::anyhow!("clear_parcel requires a buffer parcel"))?;
+        let abs_offset = match parcel.resource_id() {
+            ResourceId::BufferRange { offset: base, .. } => base + offset,
+            _ => offset,
+        };
+        let clear_size = if size == 0 {
+            parcel.byte_size().saturating_sub(offset)
+        } else {
+            size
+        };
+        self.ir.nodes.push(TaskNode {
+            label: "clear_parcel",
+            bindings: vec![ResourceBinding {
+                resource: parcel.resource_id(),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer,
+                offset: abs_offset,
+                size: clear_size,
             },
         });
         Ok(())
@@ -1075,12 +2138,7 @@ impl TaskGraph {
     /// (every frame pays full record cost; nothing can resubmit).
     ///
     /// The `#[deprecated]` attribute lands once `Scheme` exists as the migration
-    /// target (deprecating with no alternative would strand clients). `Scheme` has no
-    /// equivalent: structural change is a re-record tier, per-submission data enters
-    /// via `goldy::write_to_parcel` / upload windows, and a fresh graph is a fresh
-    /// object. Call sites to migrate: ekrano's frame loop, examples,
-    /// `FrameOrchestrator::flush`. See
-    /// `docu/development/projects/diwan/in-progress/retained-scheme/design.md`.
+    /// target (deprecating with no alternative would strand clients).
     ///
     /// ## Slot identity reset
     ///
@@ -1112,7 +2170,7 @@ impl TaskGraph {
         self.stamp_targets.clear();
     }
 
-    /// Stamp every [`crate::Parcel`] bound via [`NodeBuilder::bind_parcel`] with the
+    /// Stamp every [`crate::Parcel`] bound via [`NodeBuilder::with_parcel`] with the
     /// context-qualified timeline value of the submission that just completed.
     pub(crate) fn apply_reference_stamps(
         &self,
@@ -1152,16 +2210,7 @@ impl TaskGraph {
     /// bytes, dispatch dimensions) are intentionally excluded — the schedule depends
     /// only on which resources are read/written, not what values they carry.
     fn binding_fingerprint(ir: &GraphIR) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut h = DefaultHasher::new();
-        ir.nodes.len().hash(&mut h);
-        for node in &ir.nodes {
-            node.bindings.len().hash(&mut h);
-            for b in &node.bindings {
-                b.hash(&mut h);
-            }
-        }
-        h.finish()
+        binding_fingerprint(ir)
     }
 
     /// Compute a fingerprint of the transient spec set (buffers + textures).
@@ -1198,54 +2247,8 @@ impl TaskGraph {
         Self::retention_fingerprint(&self.ir)
     }
 
-    fn retention_fingerprint(ir: &GraphIR) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut h = DefaultHasher::new();
-        ir.nodes.len().hash(&mut h);
-        for node in &ir.nodes {
-            node.bindings.len().hash(&mut h);
-            for b in &node.bindings {
-                b.hash(&mut h);
-            }
-            match &node.kind {
-                NodeKind::Dispatch {
-                    pipeline,
-                    resource_slots,
-                    user_slots,
-                    dispatch,
-                } => {
-                    0u8.hash(&mut h);
-                    pipeline.hash(&mut h);
-                    resource_slots.hash(&mut h);
-                    user_slots.hash(&mut h);
-                    match dispatch {
-                        DispatchDim::Direct { x, y, z } => {
-                            0u8.hash(&mut h);
-                            x.hash(&mut h);
-                            y.hash(&mut h);
-                            z.hash(&mut h);
-                        }
-                        DispatchDim::Indirect { buffer, offset } => {
-                            1u8.hash(&mut h);
-                            buffer.hash(&mut h);
-                            offset.hash(&mut h);
-                        }
-                    }
-                }
-                NodeKind::ClearBuffer { buffer, offset, size } => {
-                    1u8.hash(&mut h);
-                    buffer.hash(&mut h);
-                    offset.hash(&mut h);
-                    size.hash(&mut h);
-                }
-                // Upload / copy nodes: excluded intentionally (data varies per frame;
-                // graphs containing these nodes are not eligible for retention).
-                _ => {
-                    2u8.hash(&mut h);
-                }
-            }
-        }
-        h.finish()
+    pub(crate) fn retention_fingerprint(ir: &GraphIR) -> u64 {
+        retention_fingerprint(ir)
     }
 
     /// Return a reference to the compiled schedule for `ir`, using the cache when possible.
@@ -1270,6 +2273,9 @@ impl TaskGraph {
             upload_remap: Vec::new(),
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
+            partition_retention_keys: Vec::new(),
+            partition_slot_keys: Vec::new(),
+            partitioned_graph_commands: Vec::new(),
         });
         &cache.as_ref().unwrap().schedule
     }
@@ -1327,20 +2333,23 @@ impl TaskGraph {
             upload_remap,
             partitioned_commands: None,
             partitioned_upload_remap: Vec::new(),
+            partition_retention_keys: Vec::new(),
+            partition_slot_keys: Vec::new(),
+            partitioned_graph_commands: Vec::new(),
         });
         cache.as_ref().unwrap().commands.as_deref().unwrap()
     }
 
     /// Return cached partitioned commands for `ir`, building them if necessary.
     ///
-    /// Like [`Self::get_or_build_compute_commands`] but returns a partitioned
-    /// `Vec<Vec<GpuCommand>>` suitable for multi-submission.  On cache hit only
-    /// the upload `Arc<[u8]>` payloads are refreshed.
-    fn get_or_build_partitioned_commands<'c>(
-        cache: &'c mut Option<CompiledCacheEntry>,
-        ir: &GraphIR,
-        fp: u64,
-    ) -> &'c [Vec<GpuCommand>] {
+    /// Partitions that contain only compute nodes are stored as `Vec<GpuCommand>`.
+    /// Partitions that contain render-pass nodes are stored as `Vec<GraphCommand>` in
+    /// `CompiledCacheEntry::partitioned_graph_commands` and represented by an empty
+    /// `Vec` in the parallel `partitioned_commands` slot.
+    ///
+    /// On cache hit only upload `Arc<[u8]>` payloads in the compute slots are refreshed;
+    /// render-pass commands are immutable (data arrives via bound parcels, not uploads).
+    fn get_or_build_partitioned_commands(cache: &mut Option<CompiledCacheEntry>, ir: &GraphIR, fp: u64) {
         let _tz = crate::tracy_zone!("goldy.compile_partitioned");
 
         // Ensure schedule exists.
@@ -1358,6 +2367,9 @@ impl TaskGraph {
                 upload_remap: Vec::new(),
                 partitioned_commands: None,
                 partitioned_upload_remap: Vec::new(),
+                partition_retention_keys: Vec::new(),
+                partition_slot_keys: Vec::new(),
+                partitioned_graph_commands: Vec::new(),
             });
         }
 
@@ -1366,7 +2378,7 @@ impl TaskGraph {
         tracing::trace!(target: "goldy::schedule_cache", hit = !needs_build, fp, "partitioned_commands");
 
         if !needs_build {
-            // Hit: refresh upload payloads.
+            // Hit: refresh upload payloads in compute-only partitions.
             let entry = cache.as_mut().unwrap();
             if let Some(parts) = entry.partitioned_commands.as_mut() {
                 for &(part_idx, cmd_idx, node_idx) in &entry.partitioned_upload_remap {
@@ -1386,16 +2398,47 @@ impl TaskGraph {
                     }
                 }
             }
-            return cache.as_ref().unwrap().partitioned_commands.as_deref().unwrap();
+            return;
         }
 
-        // Miss: emit partitioned commands from the cached schedule.
+        // Miss: emit each partition with the correct emitter.
+        //
+        // Present partitions are skipped — their commands are always re-emitted at
+        // submit time with a concrete SlotResolver (the drawable handle isn't known
+        // until the OS grants the swapchain image).  An empty Vec placeholder is
+        // stored so the slot indices remain aligned with wave_ranges.
         let entry = cache.as_mut().unwrap();
-        let partitions = analysis::emit_partitioned_commands(ir, &entry.schedule, None);
-        let remap = build_partitioned_upload_remap(ir, &partitions);
-        entry.partitioned_commands = Some(partitions);
+        let wave_ranges = analysis::partition_wave_ranges(ir, &entry.schedule);
+
+        let mut compute_partitions: Vec<Vec<GpuCommand>> = Vec::with_capacity(wave_ranges.len());
+        let mut graph_partitions: Vec<Option<Vec<GraphCommand>>> = Vec::with_capacity(wave_ranges.len());
+
+        for range in &wave_ranges {
+            let waves = &entry.schedule.waves[range.clone()];
+            let has_present = analysis::partition_waves_have_present(ir, waves);
+            let has_render = waves.iter().any(|w| {
+                w.node_indices
+                    .iter()
+                    .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::RenderPass { .. }))
+            });
+
+            if has_present {
+                // Deferred: commands emitted fresh at submit time with a resolver.
+                compute_partitions.push(Vec::new());
+                graph_partitions.push(None);
+            } else if has_render {
+                compute_partitions.push(Vec::new());
+                graph_partitions.push(Some(analysis::emit_graph_commands_for_waves(ir, waves, None)));
+            } else {
+                compute_partitions.push(analysis::emit_waves_to_commands(ir, waves, None));
+                graph_partitions.push(None);
+            }
+        }
+
+        let remap = build_partitioned_upload_remap(ir, &compute_partitions);
+        entry.partitioned_commands = Some(compute_partitions);
         entry.partitioned_upload_remap = remap;
-        cache.as_ref().unwrap().partitioned_commands.as_deref().unwrap()
+        entry.partitioned_graph_commands = graph_partitions;
     }
 
     /// Compile the graph into a flat command stream.
@@ -1488,7 +2531,7 @@ impl Default for TaskGraph {
 /// Builder for a single compute dispatch node within a [`TaskGraph`].
 ///
 /// Created by [`TaskGraph::node`]. Must be finalized with
-/// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect`](NodeBuilder::dispatch_indirect).
+/// [`dispatch`](NodeBuilder::dispatch) or [`dispatch_indirect_parcel`](NodeBuilder::dispatch_indirect_parcel).
 pub struct NodeBuilder<'a> {
     graph: &'a mut TaskGraph,
     label: &'static str,
@@ -1499,8 +2542,18 @@ pub struct NodeBuilder<'a> {
 }
 
 impl<'a> NodeBuilder<'a> {
-    /// Declare that this node accesses a buffer with the given logical access.
-    pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
+    /// Declare that this node accesses a bindable buffer parcel with the given logical access.
+    pub fn with_buffer(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    /// Low-level binding for internal tests and transient paths using raw [`Allocation`].
+    #[allow(dead_code)]
+    pub(crate) fn with_allocation(mut self, buf: &Allocation, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -1517,7 +2570,7 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// Barriers are still emitted against the parent buffer handle so backends
     /// require no changes.
-    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
+    pub fn with_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -1530,7 +2583,7 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Declare that this node accesses a texture with the given logical access.
-    pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
+    pub fn with_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Texture(tex.handle),
             access,
@@ -1542,7 +2595,7 @@ impl<'a> NodeBuilder<'a> {
     ///
     /// The backend resource handle is resolved inside the runtime; the client does not
     /// pass a raw handle.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+    pub fn with_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
         self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -1551,7 +2604,7 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
+    pub fn with_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientBuffer(id),
             access,
@@ -1559,7 +2612,7 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
+    pub fn with_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::TransientTexture(id),
             access,
@@ -1574,7 +2627,7 @@ impl<'a> NodeBuilder<'a> {
     /// [`super::SWAPCHAIN_SLOT_PLACEHOLDER`] in `resource_slots` at the corresponding
     /// binding position so `TaskGraph::lower_swapchain_output` can patch it with the
     /// real UAV bindless index after `surface.begin()`.
-    pub fn bind_swapchain_output(mut self, _handle: SwapchainOutputHandle, access: NodeAccess) -> Self {
+    pub fn with_swapchain_output(mut self, _handle: SwapchainOutputHandle, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::SwapchainOutput,
             access,
@@ -1584,48 +2637,45 @@ impl<'a> NodeBuilder<'a> {
 
     /// Set the bindless resource slot indices for this node's dispatch (region A).
     /// Accepts an owned `Vec` to avoid re-allocation when the caller already has one.
-    pub fn bind_resources_raw(mut self, indices: Vec<u32>) -> Self {
+    pub fn with_resource_slots(mut self, indices: Vec<u32>) -> Self {
         self.resource_slots = indices;
         self
     }
 
     /// Convenience wrapper that copies a slice into owned storage.
-    pub fn bind_resources_raw_slice(self, indices: &[u32]) -> Self {
-        self.bind_resources_raw(indices.to_vec())
+    pub fn with_resource_slots_slice(self, indices: &[u32]) -> Self {
+        self.with_resource_slots(indices.to_vec())
     }
 
     /// Bind buffer resource slots and declare read/write dependencies.
     ///
     /// Slot indices are each buffer's UAV bindless index in shader parameter order.
-    pub fn bind_resources(mut self, buffers: &[&Buffer]) -> Self {
+    pub fn with_resources(mut self, parcels: &[&crate::Parcel]) -> Self {
         use crate::types::ResourceAccess;
-        let mut indices = Vec::with_capacity(buffers.len());
-        for buf in buffers {
+        let mut indices = Vec::with_capacity(parcels.len());
+        for parcel in parcels {
             self.bindings.push(ResourceBinding {
-                resource: ResourceId::Buffer(buf.handle),
+                resource: parcel.resource_id(),
                 access: NodeAccess::ReadWrite,
             });
-            let idx = buf
+            let idx = parcel
                 .resource_index(ResourceAccess::ReadWrite)
-                .or_else(|| buf.resource_index(ResourceAccess::Read))
-                .expect("bind_resources: buffer has no bindless index");
+                .or_else(|| parcel.resource_index(ResourceAccess::Read))
+                .expect("with_resources: parcel has no bindless index");
             indices.push(idx);
         }
         self.resource_slots = indices;
         self
     }
 
-    /// Bind resource slots from typed [`ResourceHandle`]s (region A indices only).
-    pub fn bind_resources_typed(mut self, handles: &[ResourceHandle]) -> Self {
-        self.resource_slots = handles.iter().map(|h| h.index()).collect();
-        self
-    }
-
-    /// Set user scalar parameters for this node's dispatch (region B).
-    /// Accepts an owned `Vec` for indices to avoid re-allocation.
-    pub fn bind_resources_raw_with_user(mut self, indices: Vec<u32>, user: &[u32]) -> Self {
-        self.resource_slots = indices;
-        self.user_slots = user.to_vec();
+    /// Append one scalar virtual-main parameter (region B).
+    pub fn with_param(mut self, value: u32) -> Self {
+        use crate::backend::shared::MAX_USER_SLOTS;
+        assert!(
+            self.user_slots.len() < MAX_USER_SLOTS,
+            "with_param: at most {MAX_USER_SLOTS} scalar params per dispatch"
+        );
+        self.user_slots.push(value);
         self
     }
 
@@ -1645,7 +2695,8 @@ impl<'a> NodeBuilder<'a> {
     }
 
     /// Finalize the node with indirect dispatch (dimensions read from `buf` at `offset`).
-    pub fn dispatch_indirect(self, buf: &Buffer, offset: u64) {
+    #[allow(dead_code)] // compute_integration tests
+    pub(crate) fn dispatch_indirect(self, buf: &Allocation, offset: u64) {
         let node = TaskNode {
             label: self.label,
             bindings: self.bindings,
@@ -1661,12 +2712,31 @@ impl<'a> NodeBuilder<'a> {
         };
         self.graph.ir.nodes.push(node);
     }
+
+    /// Finalize the node with indirect dispatch using a retained buffer parcel.
+    pub fn dispatch_indirect_parcel(self, parcel: &crate::Parcel, offset: u64) -> Result<()> {
+        let handle = parcel
+            .buffer_handle()
+            .ok_or_else(|| anyhow::anyhow!("dispatch_indirect_parcel requires a buffer parcel"))?;
+        let node = TaskNode {
+            label: self.label,
+            bindings: self.bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: self.pipeline,
+                resource_slots: self.resource_slots,
+                user_slots: self.user_slots,
+                dispatch: DispatchDim::Indirect { buffer: handle, offset },
+            },
+        };
+        self.graph.ir.nodes.push(node);
+        Ok(())
+    }
 }
 
 /// One bindless push-constant slot in shader virtual-main parameter order.
 ///
-/// Use with [`RenderPassBuilder::bind_shader_resources`]. Mosaic parcels belong in
-/// [`RenderPassBuilder::bind_parcel_mut`] (graph dependency + vertex views), not here.
+/// Use with [`RenderPassBuilder::with_shader_resources`]. Mosaic parcels belong in
+/// [`RenderPassBuilder::with_parcel`] (graph dependency + vertex views), not here.
 pub enum ShaderResourceSlot<'a> {
     Parcel {
         parcel: &'a crate::Parcel,
@@ -1698,7 +2768,7 @@ impl<'a> RenderPassBuilder<'a> {
     ///
     /// [`Self::set_pipeline`] emits [`RenderCommand::BindResourcesTyped`] from these
     /// handles before each pipeline bind.
-    pub fn bind_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
+    pub fn with_shader_resources(&mut self, slots: &[ShaderResourceSlot<'_>]) -> &mut Self {
         for slot in slots {
             match slot {
                 ShaderResourceSlot::Parcel { parcel, access } => {
@@ -1711,7 +2781,7 @@ impl<'a> RenderPassBuilder<'a> {
                     let handle = parcel.handle(resource_access).unwrap_or_else(|| {
                         panic!(
                             "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
-                             use bind_parcel_mut for geometry and bind views at draw time"
+                             use with_parcel for geometry and bind views at draw time"
                         )
                     });
                     self.push_constant_handles.push(handle);
@@ -1727,8 +2797,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_parcel`] but for use while recording on `&mut self`.
-    pub fn bind_parcel_mut(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_parcel`] but for use while recording on `&mut self`.
+    pub fn with_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
@@ -1737,8 +2807,17 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_buffer`] but for use while recording on `&mut self`.
-    pub fn bind_buffer_mut(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_buffer`] but for use while recording on `&mut self`.
+    pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_allocation(&mut self, buf: &Allocation, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Buffer(buf.handle),
             access,
@@ -1746,8 +2825,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_texture`] but for use while recording on `&mut self`.
-    pub fn bind_texture_mut(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_texture`] but for use while recording on `&mut self`.
+    pub fn with_texture(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::Texture(tex.handle),
             access,
@@ -1755,8 +2834,8 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Like [`Self::bind_buffer_view`] but for use while recording on `&mut self`.
-    pub fn bind_buffer_view_mut(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+    /// Like [`Self::with_buffer_view`] but for use while recording on `&mut self`.
+    pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -1778,7 +2857,7 @@ impl<'a> RenderPassBuilder<'a> {
         self
     }
 
-    /// Set the active pipeline and bind [`Self::bind_shader_resources`] slots when declared.
+    /// Set the active pipeline and apply [`Self::with_shader_resources`] slots when declared.
     ///
     /// Pipeline is bound before root constants (required on D3D12: root signature first).
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
@@ -1843,82 +2922,19 @@ impl<'a> RenderPassBuilder<'a> {
         self.draw(0..6, 0..count)
     }
 
-    pub fn bind_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+    #[allow(dead_code)] // legacy bind-resources render path
+    pub(crate) fn with_resources(&mut self, buffers: &[&Allocation]) -> &mut Self {
         self.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesRaw {
             indices: indices.to_vec(),
             user: Vec::new(),
             frame_table_base: 0,
-        });
-        self
-    }
-
-    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.commands.push(RenderCommand::BindResourcesTyped {
-            handles: handles.to_vec(),
-        });
-        self
-    }
-
-    pub fn bind_buffer(mut self, buf: &Buffer, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::Buffer(buf.handle),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_buffer_view(mut self, view: &BufferView, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::BufferRange {
-                parent: view.parent_handle(),
-                offset: view.offset(),
-                len: view.size(),
-            },
-            access,
-        });
-        self
-    }
-
-    pub fn bind_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::Texture(tex.handle),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_transient_buffer(mut self, id: TransientId, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::TransientBuffer(id),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_transient_texture(mut self, id: TransientTextureId, access: NodeAccess) -> Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::TransientTexture(id),
-            access,
-        });
-        self
-    }
-
-    /// Declare that this render pass accesses a retained [`crate::Parcel`].
-    ///
-    /// Like [`NodeBuilder::bind_parcel`], the parcel is stamped at graph submit
-    /// time so [`crate::Parcel::last_referenced`] is updated automatically.
-    pub fn bind_parcel(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
-        self.graph.stamp_targets.push(parcel.stamp_handle());
-        self.bindings.push(ResourceBinding {
-            resource: parcel.resource_id(),
-            access,
         });
         self
     }
@@ -2016,18 +3032,18 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("compute_write", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(1, 1, 1);
 
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_buffer_mut(&buf, NodeAccess::Read);
+        pass.with_allocation(&buf, NodeAccess::Read);
         pass.clear(Color::RED);
         pass.finish_recorded();
 
@@ -2047,14 +3063,14 @@ mod tests {
 
         let device = mock_device();
         let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_render_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_shader_resources(&[ShaderResourceSlot::Parcel {
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
             parcel: &parcel,
             access: NodeAccess::Read,
         }]);
@@ -2074,7 +3090,7 @@ mod tests {
             render_cmds
                 .iter()
                 .any(|c| matches!(c, RenderCommand::BindResourcesRaw { .. })),
-            "set_pipeline should emit lowered BindResourcesRaw from bind_shader_resources"
+            "set_pipeline should emit lowered BindResourcesRaw from with_shader_resources"
         );
         let set_pipe = render_cmds
             .iter()
@@ -2091,14 +3107,14 @@ mod tests {
     fn write_parcel_then_render_pass_inserts_barrier() {
         let device = mock_device();
         let mut pool = crate::RetainedPool::new(Arc::new(device.clone()));
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_parcel(&parcel, 0, vec![1, 2, 3, 4]).unwrap();
 
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.with_parcel(&parcel, NodeAccess::Read);
         pass.clear(Color::RED);
         pass.finish_recorded();
 
@@ -2111,19 +3127,20 @@ mod tests {
     }
 
     #[test]
-    fn write_parcel_rejects_mosaic_parcel() {
+    fn write_parcel_rejects_partitioned_buffer_unit() {
+        use crate::{field, Init};
         let device = Arc::new(mock_device());
         let mut pool = crate::RetainedPool::new(device.clone());
-        let mut mosaic = pool.mosaic();
-        let _slot = mosaic.emplace(&[0u32, 1, 2, 3]);
-        let parcel = mosaic.build().unwrap();
+        let cells = pool
+            .acquire_record([
+                field("a", Init::data(&[0u32, 1, 2, 3])),
+                field("b", Init::reserve::<u32>(4)),
+            ])
+            .unwrap();
 
         let mut graph = TaskGraph::new();
-        let err = graph.write_parcel(&parcel, 0, vec![0; 4]).unwrap_err();
-        assert!(
-            err.to_string().contains("non-mosaic buffer parcels"),
-            "unexpected error: {err}"
-        );
+        let err = graph.write_parcel(&cells["a"], 0, vec![0; 4]).unwrap_err();
+        assert!(err.to_string().contains("whole-buffer"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2146,16 +3163,16 @@ mod tests {
     }
 
     #[test]
-    fn render_pass_bind_parcel_submit_stamps_last_referenced() {
+    fn render_pass_with_parcel_submit_stamps_last_referenced() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
 
         let mut graph = TaskGraph::new();
         let mut pass = graph.render_pass("draw", &target);
-        pass.bind_parcel_mut(&parcel, NodeAccess::Read);
+        pass.with_parcel(&parcel, NodeAccess::Read);
         pass.clear(Color::BLUE);
         pass.finish_recorded();
 
@@ -2173,8 +3190,8 @@ mod tests {
         let t = graph.transient_buffer(256);
         graph
             .node("touch", &pipeline)
-            .bind_transient_buffer(t, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&ctx).unwrap();
     }
@@ -2189,8 +3206,8 @@ mod tests {
         let tt = graph.transient_texture(4, 4, TextureFormat::Rgba8Unorm);
         graph
             .node("touch_tex", &pipeline)
-            .bind_transient_texture(tt, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_texture(tt, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&ctx).unwrap();
     }
@@ -2201,21 +3218,21 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 4, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 4, crate::BufferKind::Scattered).unwrap();
         let mut graph = TaskGraph::new();
         let t0 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
         let t1 = graph.transient_texture(2, 2, TextureFormat::Rgba8Unorm);
         graph
             .node("w0", &pipeline)
-            .bind_transient_texture(t0, NodeAccess::Write)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_texture(t0, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("w1", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .bind_transient_texture(t1, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_allocation(&buf, NodeAccess::Read)
+            .with_transient_texture(t1, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph.submit(&ctx).unwrap();
     }
@@ -2226,22 +3243,22 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 4, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 4, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         let t0 = graph.transient_buffer(256);
         let t1 = graph.transient_buffer(256);
         graph
             .node("wave0", &pipeline)
-            .bind_transient_buffer(t0, NodeAccess::Write)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t0, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("wave1", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
-            .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_allocation(&buf, NodeAccess::Read)
+            .with_transient_buffer(t1, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
 
         let (schedule, _) = graph.schedule_and_split_wave();
@@ -2264,13 +3281,13 @@ mod tests {
         let t1 = graph.transient_buffer(256);
         graph
             .node("a", &pipeline)
-            .bind_transient_buffer(t0, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t0, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
         graph
             .node("b", &pipeline)
-            .bind_transient_buffer(t1, NodeAccess::Write)
-            .bind_resources_raw_slice(&[0])
+            .with_transient_buffer(t1, NodeAccess::Write)
+            .with_resource_slots_slice(&[0])
             .dispatch(1, 1, 1);
 
         let (schedule, _) = graph.schedule_and_split_wave();
@@ -2291,20 +3308,20 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
-            .bind_buffer(&buf_a, NodeAccess::Write)
-            .bind_resources_raw_slice(&[42])
+            .with_allocation(&buf_a, NodeAccess::Write)
+            .with_resource_slots_slice(&[42])
             .dispatch(8, 1, 1);
         graph
             .node("read_write", &pipeline)
-            .bind_buffer(&buf_a, NodeAccess::Read)
-            .bind_buffer(&buf_b, NodeAccess::Write)
-            .bind_resources_raw_slice(&[43])
+            .with_allocation(&buf_a, NodeAccess::Read)
+            .with_allocation(&buf_b, NodeAccess::Write)
+            .with_resource_slots_slice(&[43])
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2329,17 +3346,17 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
-            .bind_buffer(&buf_a, NodeAccess::Write)
+            .with_allocation(&buf_a, NodeAccess::Write)
             .dispatch(8, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .dispatch(4, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2361,12 +3378,12 @@ mod tests {
         let ctx = device.create_context().unwrap();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_buffer(&buf, NodeAccess::ReadWrite)
+            .with_allocation(&buf, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -2383,33 +3400,33 @@ mod tests {
         let p3 = mock_pipeline(&device, &shader);
         let p4 = mock_pipeline(&device, &shader);
 
-        let buf_x = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_y = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_z = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_x = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_y = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_z = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         // A writes X
         graph
             .node("A", &p1)
-            .bind_buffer(&buf_x, NodeAccess::Write)
+            .with_allocation(&buf_x, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // B reads X, writes Y
         graph
             .node("B", &p2)
-            .bind_buffer(&buf_x, NodeAccess::Read)
-            .bind_buffer(&buf_y, NodeAccess::Write)
+            .with_allocation(&buf_x, NodeAccess::Read)
+            .with_allocation(&buf_y, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // C reads X, writes Z
         graph
             .node("C", &p3)
-            .bind_buffer(&buf_x, NodeAccess::Read)
-            .bind_buffer(&buf_z, NodeAccess::Write)
+            .with_allocation(&buf_x, NodeAccess::Read)
+            .with_allocation(&buf_z, NodeAccess::Write)
             .dispatch(1, 1, 1);
         // D reads Y and Z
         graph
             .node("D", &p4)
-            .bind_buffer(&buf_y, NodeAccess::Read)
-            .bind_buffer(&buf_z, NodeAccess::Read)
+            .with_allocation(&buf_y, NodeAccess::Read)
+            .with_allocation(&buf_z, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2436,7 +3453,7 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -2444,7 +3461,7 @@ mod tests {
 
         graph
             .node("A", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
         assert!(!graph.is_empty());
         assert_eq!(graph.len(), 1);
@@ -2461,13 +3478,13 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf, 0, 256);
         graph
             .node("read", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2488,14 +3505,14 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf_a, 0, 256);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2511,18 +3528,18 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_buffer(&buf, 0, vec![0u8; 256]);
         graph
             .node("read", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Read)
+            .with_allocation(&buf, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
 
-        // No staging (dispatch uses bind_buffer for barrier-tracking only, no bindless slots).
+        // No staging (dispatch uses with_buffer for barrier-tracking only, no bindless slots).
         assert!(matches!(cmds[0], GpuCommand::WriteBuffer { .. }));
         assert!(
             cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
@@ -2536,14 +3553,14 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_buffer(&buf_a, 0, vec![0u8; 4]);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer(&buf_b, NodeAccess::Write)
+            .with_allocation(&buf_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2571,11 +3588,11 @@ mod tests {
         graph.write_texture(&tex, vec![0u8; 4 * 4 * 4]).unwrap();
         graph
             .node("read_tex", &pipeline)
-            .bind_texture(&tex, NodeAccess::Read)
+            .with_texture(&tex, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
-        // No staging (dispatch uses bind_texture for barrier-tracking only, no bindless slots).
+        // No staging (dispatch uses with_texture for barrier-tracking only, no bindless slots).
         assert!(matches!(cmds[0], GpuCommand::WriteTexture { .. }));
         assert!(
             cmds.iter().any(|c| matches!(c, GpuCommand::ResourceBarrier { .. })),
@@ -2598,13 +3615,13 @@ mod tests {
             crate::types::TextureFlags::COPY_DST,
         )
         .unwrap();
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_texture(&tex, vec![0u8; 16]).unwrap();
         graph
             .node("writes_buf", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
+            .with_allocation(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2614,8 +3631,8 @@ mod tests {
     #[test]
     fn multiple_clears_independent_same_wave() {
         let device = mock_device();
-        let buf_a = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
-        let buf_b = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_a = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf_b = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         graph.clear_buffer(&buf_a, 0, 256);
@@ -2635,7 +3652,7 @@ mod tests {
     #[test]
     fn is_empty_with_clear_node() {
         let device = mock_device();
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -2647,7 +3664,7 @@ mod tests {
     #[test]
     fn is_empty_with_write_node() {
         let device = mock_device();
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();
         assert!(graph.is_empty());
@@ -2682,11 +3699,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write_a", &pipeline)
-            .bind_buffer_view(&view_a, NodeAccess::Write)
+            .with_buffer_view(&view_a, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .with_buffer_view(&view_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2707,11 +3724,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write", &pipeline)
-            .bind_buffer_view(&view, NodeAccess::Write)
+            .with_buffer_view(&view, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("read", &pipeline)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2734,22 +3751,22 @@ mod tests {
         let p2 = mock_pipeline(&device, &shader);
         let p3 = mock_pipeline(&device, &shader);
 
-        let owned = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let owned = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
         let view = pool.alloc::<u32>(64).unwrap();
 
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .bind_buffer(&owned, NodeAccess::Write)
+            .with_allocation(&owned, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
-            .bind_buffer_view(&view, NodeAccess::Write)
+            .with_buffer_view(&view, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("C", &p3)
-            .bind_buffer(&owned, NodeAccess::Read)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_allocation(&owned, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2782,22 +3799,22 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .bind_buffer_view(&v0, NodeAccess::Write)
+            .with_buffer_view(&v0, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
-            .bind_buffer_view(&v0, NodeAccess::Read)
-            .bind_buffer_view(&v1, NodeAccess::Write)
+            .with_buffer_view(&v0, NodeAccess::Read)
+            .with_buffer_view(&v1, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("C", &p3)
-            .bind_buffer_view(&v0, NodeAccess::Read)
-            .bind_buffer_view(&v2, NodeAccess::Write)
+            .with_buffer_view(&v0, NodeAccess::Read)
+            .with_buffer_view(&v2, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("D", &p4)
-            .bind_buffer_view(&v1, NodeAccess::Read)
-            .bind_buffer_view(&v2, NodeAccess::Read)
+            .with_buffer_view(&v1, NodeAccess::Read)
+            .with_buffer_view(&v2, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2814,7 +3831,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_buffer_on_pool_backing_aliases_all_views() {
+    fn with_buffer_on_pool_backing_aliases_all_views() {
         // A writes the whole backing buffer; B reads a view — must have an edge
         let (device, shader, _, mut pool) = make_pool_setup(512);
         let p1 = mock_pipeline(&device, &shader);
@@ -2826,11 +3843,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("A", &p1)
-            .bind_buffer(backing, NodeAccess::Write)
+            .with_allocation(backing, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("B", &p2)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2855,7 +3872,7 @@ mod tests {
         for view in &views {
             graph
                 .node("write", &pipeline)
-                .bind_buffer_view(view, NodeAccess::Write)
+                .with_buffer_view(view, NodeAccess::Write)
                 .dispatch(1, 1, 1);
         }
 
@@ -2881,11 +3898,11 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("write", &p1)
-            .bind_buffer_view(&view, NodeAccess::Write)
+            .with_buffer_view(&view, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("read", &p2)
-            .bind_buffer_view(&view, NodeAccess::Read)
+            .with_buffer_view(&view, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2926,11 +3943,11 @@ mod tests {
         //   Wave 1: write_a, write_b (independent of each other)
         graph
             .node("write_a", &pipeline)
-            .bind_buffer_view(&view_a, NodeAccess::Write)
+            .with_buffer_view(&view_a, NodeAccess::Write)
             .dispatch(1, 1, 1);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .with_buffer_view(&view_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2943,7 +3960,7 @@ mod tests {
         assert_eq!(barrier_count, 1, "expected exactly one barrier (clear → views)");
 
         // ClearBuffer first, then dispatches with one barrier.
-        // No staging (dispatches use bind_buffer_view for barrier-tracking only).
+        // No staging (dispatches use with_buffer_view for barrier-tracking only).
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
 
         // Two dispatches present
@@ -2962,7 +3979,7 @@ mod tests {
         graph.clear_buffer_view(&view_a, 0, 0); // size=0 → clear to end of view
         graph
             .node("read_a", &pipeline)
-            .bind_buffer_view(&view_a, NodeAccess::Read)
+            .with_buffer_view(&view_a, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -2973,7 +3990,7 @@ mod tests {
                 .count(),
             1
         );
-        // No staging (dispatch uses bind_buffer_view for barrier-tracking only).
+        // No staging (dispatch uses with_buffer_view for barrier-tracking only).
         assert!(matches!(cmds[0], GpuCommand::ClearBuffer { .. }));
     }
 
@@ -2990,7 +4007,7 @@ mod tests {
         graph.clear_buffer_view(&view_a, 0, 0);
         graph
             .node("write_b", &pipeline)
-            .bind_buffer_view(&view_b, NodeAccess::Write)
+            .with_buffer_view(&view_b, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let cmds = graph.compile_commands();
@@ -3010,18 +4027,18 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         assert_eq!(
@@ -3038,18 +4055,18 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(8, 8, 1); // different dims
 
         assert_ne!(
@@ -3073,18 +4090,18 @@ mod tests {
         let shader = mock_shader(&device);
         let p1 = mock_pipeline(&device, &shader);
         let p2 = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &p1)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &p2) // different pipeline
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let fp1 = g1.compute_retention_fingerprint();
@@ -3115,18 +4132,18 @@ mod tests {
         let device = mock_device();
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
-        let buf = Buffer::new(&device, 256, crate::BufferKind::Scattered).unwrap();
+        let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut g1 = TaskGraph::new();
         g1.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[1])
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[1])
             .dispatch(4, 4, 1);
 
         let mut g2 = TaskGraph::new();
         g2.node("dispatch", &pipeline)
-            .bind_buffer(&buf, NodeAccess::Write)
-            .bind_resources_raw_slice(&[2]) // different bindless slot
+            .with_allocation(&buf, NodeAccess::Write)
+            .with_resource_slots_slice(&[2]) // different bindless slot
             .dispatch(4, 4, 1);
 
         assert_ne!(
@@ -3145,7 +4162,7 @@ mod tests {
     // Parcel reference stamping at submit
     // -----------------------------------------------------------------------
 
-    fn retained_buffer_parcel(pool: &mut crate::RetainedPool) -> crate::Parcel {
+    fn retained_buffer(pool: &mut crate::RetainedPool) -> crate::Buffer {
         pool.acquire_buffer(
             256,
             crate::BufferKind::Scattered,
@@ -3157,11 +4174,11 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_submit_stamps_last_referenced() {
+    fn with_parcel_submit_stamps_last_referenced() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         assert!(parcel.last_referenced().is_empty());
 
         let shader = mock_shader(&device);
@@ -3170,7 +4187,7 @@ mod tests {
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -3178,18 +4195,18 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_monotonic_max_across_submits() {
+    fn with_parcel_monotonic_max_across_submits() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv1 = graph.submit(&ctx).unwrap();
 
@@ -3197,7 +4214,7 @@ mod tests {
         graph.clear();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv2 = graph.submit(&ctx).unwrap();
         assert!(tv2 > tv1);
@@ -3209,20 +4226,20 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_multiple_all_stamped() {
+    fn with_parcel_multiple_all_stamped() {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let p1 = retained_buffer_parcel(&mut pool);
-        let p2 = retained_buffer_parcel(&mut pool);
+        let p1 = retained_buffer(&mut pool);
+        let p2 = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&p1, NodeAccess::Write)
-            .bind_parcel(&p2, NodeAccess::Read)
+            .with_parcel(&p1, NodeAccess::Write)
+            .with_parcel(&p2, NodeAccess::Read)
             .dispatch(1, 1, 1);
 
         let tv = graph.submit(&ctx).unwrap();
@@ -3235,15 +4252,15 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let bound = retained_buffer_parcel(&mut pool);
-        let unbound = retained_buffer_parcel(&mut pool);
+        let bound = retained_buffer(&mut pool);
+        let unbound = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&bound, NodeAccess::ReadWrite)
+            .with_parcel(&bound, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
         assert_eq!(bound.last_referenced_on(ctx.backend_handle()), Some(tv));
@@ -3255,18 +4272,18 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).unwrap();
 
-        let stamped = pool.transfer_out(&ctx, parcel);
+        let stamped = pool.transfer_out_buffer(&ctx, parcel);
         assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&tv));
     }
 
@@ -3275,8 +4292,8 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device);
-        let parcel = retained_buffer_parcel(&mut pool);
-        let stamped = pool.transfer_out(&ctx, parcel);
+        let parcel = retained_buffer(&mut pool);
+        let stamped = pool.transfer_out_buffer(&ctx, parcel);
         assert!(stamped.ready_after.is_empty());
     }
 
@@ -3285,14 +4302,14 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         graph.clear();
 
@@ -3306,14 +4323,14 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined(&mut graph).unwrap();
@@ -3325,14 +4342,14 @@ mod tests {
         let device = Arc::new(mock_device());
         let ctx = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
 
         let tv = ctx.submit_pipelined_and_retain(&mut graph).unwrap();
@@ -3340,19 +4357,19 @@ mod tests {
     }
 
     #[test]
-    fn bind_parcel_stamp_is_context_specific() {
+    fn with_parcel_stamp_is_context_specific() {
         let device = Arc::new(mock_device());
         let ctx_a = device.create_context().unwrap();
         let ctx_b = device.create_context().unwrap();
         let mut pool = crate::RetainedPool::new(device.clone());
-        let parcel = retained_buffer_parcel(&mut pool);
+        let parcel = retained_buffer(&mut pool);
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
         let mut graph = TaskGraph::new();
         graph
             .node("work", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
         let tv_a = graph.submit(&ctx_a).unwrap();
 
@@ -3363,5 +4380,1065 @@ mod tests {
             ctx_b.parcel_ready(&parcel.last_referenced()),
             "readiness checks the stamping context's progress, not the caller's"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slice-aware retention tests
+//
+// These test the per-partition retain/resubmit logic in `submit_resolved_ir_and_retain`.
+// All tests run against the mock backend.  Submission calls use `IrSubmitState` (which
+// acquires the backend lock internally) and stats are read via `Device::with_mock` after
+// each call (a separate lock acquisition) to avoid holding the lock across a submit.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod slice_retention_tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::buffer::Allocation;
+    use crate::compute::ComputePipeline;
+    use crate::device::Device;
+    use crate::shader::ShaderModule;
+    use crate::task_graph::{IrSubmitState, NodeAccess};
+    use std::sync::Arc;
+
+    fn mock_device() -> Arc<Device> {
+        Arc::new(Device::from_backend(Box::new(MockBackend::new())).unwrap())
+    }
+
+    fn mock_shader(device: &Device) -> ShaderModule {
+        ShaderModule::from_slang(device, "void main() {}").unwrap()
+    }
+
+    fn mock_pipeline(device: &Device, shader: &ShaderModule) -> ComputePipeline {
+        ComputePipeline::new(device, shader).unwrap()
+    }
+
+    fn mock_buf(device: &Device) -> Allocation {
+        Allocation::new(device, 256, crate::BufferKind::Scattered).unwrap()
+    }
+
+    /// Read `retained_resubmit_count` from the mock backend.
+    fn resubmit_count(device: &Device) -> usize {
+        device.with_mock(|m| m.retained_resubmit_count)
+    }
+
+    /// Read the number of live retained graph entries.
+    fn retained_count(device: &Device) -> usize {
+        device.with_mock(|m| m.retained_graph_count())
+    }
+
+    fn do_submit(state: &mut IrSubmitState, ctx: &crate::Context, ir: &GraphIR) {
+        state.submit_pipelined_and_retain_with_presents(ctx, ir, &[]).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Baseline: a single-partition (1 or 2 wave) scheme retains as one slice
+    // and resubmits from it on subsequent clean submits.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn single_partition_retains_and_resubmits() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p = mock_pipeline(&device, &shader);
+        let buf = mock_buf(&device);
+
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "a",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+
+        let mut state = IrSubmitState::new();
+
+        // First submit: records and retains.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0, "first submit records, does not resubmit");
+        assert_eq!(retained_count(&device), 1, "one slice retained");
+
+        // Second submit (unchanged IR): should resubmit from cache.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 1, "second submit resubmits retained slice");
+        assert_eq!(retained_count(&device), 1, "still one slice retained");
+    }
+
+    // ------------------------------------------------------------------
+    // Two-partition IR: a 3-wave linear chain produces two partitions.
+    // Both are retained on first submit; both resubmit on second submit.
+    // ------------------------------------------------------------------
+
+    /// Build a 3-wave linear-chain IR: A writes buf0 → B reads buf0 writes buf1 → C reads buf1.
+    /// With 3 waves the `emit_partitioned_commands` split produces two partitions:
+    ///   partition 0 = waves 0..split, partition 1 = waves split..3.
+    fn three_wave_ir(
+        p_a: &ComputePipeline,
+        p_b: &ComputePipeline,
+        p_c: &ComputePipeline,
+        buf0: &Allocation,
+        buf1: &Allocation,
+    ) -> GraphIR {
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "a",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf0.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p_a.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "b",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf0.handle),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf1.handle),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::Dispatch {
+                pipeline: p_b.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "c",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf1.handle),
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: p_c.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir
+    }
+
+    #[test]
+    fn two_partition_ir_retains_both_slices() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+
+        let ir = three_wave_ir(&p_a, &p_b, &p_c, &buf0, &buf1);
+        let mut state = IrSubmitState::new();
+
+        // First submit: both partitions record and retain.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0, "first submit records all partitions");
+        assert_eq!(retained_count(&device), 2, "two slices retained for two partitions");
+
+        // Second submit: both partitions resubmit.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(
+            resubmit_count(&device),
+            2,
+            "second submit resubmits both retained slices"
+        );
+        assert_eq!(retained_count(&device), 2, "still two slices retained");
+    }
+
+    // ------------------------------------------------------------------
+    // Selective re-record: change only partition 1 (node C's pipeline),
+    // assert partition 0 is resubmitted while partition 1 re-records.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn changing_second_partition_only_rerecords_second_partition() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let p_c2 = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+
+        // The mock assigns distinct handles per pipeline.
+        assert_ne!(p_c.handle, p_c2.handle, "test requires distinct pipeline handles");
+
+        let ir = three_wave_ir(&p_a, &p_b, &p_c, &buf0, &buf1);
+        let mut state = IrSubmitState::new();
+
+        // Frame 1: record all partitions.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0);
+
+        // Frame 2: only node C's pipeline changed → only partition 1 re-records;
+        //          partition 0 resubmits from retained cache (one resubmit hit).
+        let ir2 = three_wave_ir(&p_a, &p_b, &p_c2, &buf0, &buf1);
+        do_submit(&mut state, &ctx, &ir2);
+        assert_eq!(
+            resubmit_count(&device),
+            1,
+            "partition 0 resubmits; partition 1 re-records — one resubmit total"
+        );
+
+        // Frame 3: both partitions are now cached (partition 1 was retained in frame 2).
+        do_submit(&mut state, &ctx, &ir2);
+        assert_eq!(resubmit_count(&device), 3, "third submit resubmits both partitions");
+    }
+
+    // ------------------------------------------------------------------
+    // Changing partition 0 invalidates only partition 0; partition 1 resubmits.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn changing_first_partition_only_rerecords_first_partition() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_a = mock_pipeline(&device, &shader);
+        let p_a2 = mock_pipeline(&device, &shader);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+
+        assert_ne!(p_a.handle, p_a2.handle);
+
+        let ir = three_wave_ir(&p_a, &p_b, &p_c, &buf0, &buf1);
+        let mut state = IrSubmitState::new();
+
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0);
+
+        // Change only node A → partition 0 re-records; partition 1 resubmits.
+        let ir2 = three_wave_ir(&p_a2, &p_b, &p_c, &buf0, &buf1);
+        do_submit(&mut state, &ctx, &ir2);
+        assert_eq!(
+            resubmit_count(&device),
+            1,
+            "partition 1 resubmits; partition 0 re-records"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Upload node in one partition does not prevent retention of the other
+    // partition. The upload partition is submitted standalone each frame;
+    // the pure-compute partition is retained.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn upload_in_one_partition_does_not_prevent_other_partition_retention() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let shader = mock_shader(&device);
+        let p_b = mock_pipeline(&device, &shader);
+        let p_c = mock_pipeline(&device, &shader);
+        let buf0 = mock_buf(&device);
+        let buf1 = mock_buf(&device);
+        let buf2 = mock_buf(&device);
+
+        // Three-wave IR so `emit_partitioned_commands` splits into two partitions.
+        //
+        // Wave 0: upload writes buf0          → partition 0 (upload present, not retainable)
+        // Wave 1: compute_b reads buf0        → partition 0 (same partition as wave 0)
+        //         writes buf1
+        // Wave 2: compute_c reads buf1        → partition 1 (pure compute, retained)
+        //         writes buf2
+        //
+        // The split point is the wave boundary with highest barrier cost; for this chain
+        // both wave-1 and wave-2 each have one buffer barrier so `max_by_key` (last-max
+        // semantics) picks split = 2 → partition 0 = waves 0..2, partition 1 = wave 2.
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "upload",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Buffer(buf0.handle),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer: buf0.handle,
+                offset: 0,
+                data: Arc::from(vec![0u8; 4]),
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "compute_b",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf0.handle),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf1.handle),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::Dispatch {
+                pipeline: p_b.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        ir.nodes.push(TaskNode {
+            label: "compute_c",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf1.handle),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(buf2.handle),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::Dispatch {
+                pipeline: p_c.handle,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+
+        let mut state = IrSubmitState::new();
+
+        // Frame 1: partition 0 (upload) submitted standalone; partition 1 (compute) retained.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(resubmit_count(&device), 0, "first submit: no resubmits");
+        assert_eq!(retained_count(&device), 1, "one retained slice (partition 1 only)");
+
+        // Frame 2: partition 0 re-runs standalone; partition 1 resubmits from cache.
+        do_submit(&mut state, &ctx, &ir);
+        assert_eq!(
+            resubmit_count(&device),
+            1,
+            "compute partition resubmits on second submit"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partitioning tests (no GPU submit)
+//
+// These tests operate at the *logical partition* level using
+// `analysis::describe_logical_partitions`.  They assert invariants that must
+// hold regardless of the actualized split count or heuristic tuning:
+//
+//  • Present-boundary invariant: all pre-present logical partitions have
+//    has_present == false; the present partition (if any) comes last.
+//  • Render-kind invariant: every render-pass logical partition has
+//    has_render == true; pure-compute ones have has_render == false.
+//  • Cache-kind invariant: render partitions use the graph-command cache slot;
+//    compute partitions use the GpuCommand cache slot; present partitions use
+//    neither (deferred to submit time).
+//  • Upload-remap invariant: every WriteBuffer/WriteTexture node in the IR
+//    appears exactly once in the upload remap across all compute partitions.
+//  • Cache-stability invariant: repeated calls with the same fingerprint
+//    reuse the same allocated Vecs; a fingerprint change causes a rebuild.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod partitioning_tests {
+    use super::*;
+    use crate::backend::GpuCommand;
+    use crate::task_graph::analysis::{self, LogicalPartition};
+    use std::sync::Arc;
+
+    // ------------------------------------------------------------------
+    // IR construction helpers
+    // ------------------------------------------------------------------
+
+    fn buf(id: u64) -> ResourceId {
+        ResourceId::Buffer(id)
+    }
+
+    fn dispatch_node(label: &'static str, pipeline: u64, bindings: Vec<(ResourceId, NodeAccess)>, wg: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: bindings
+                .into_iter()
+                .map(|(resource, access)| ResourceBinding { resource, access })
+                .collect(),
+            kind: NodeKind::Dispatch {
+                pipeline,
+                resource_slots: Vec::new(),
+                user_slots: Vec::new(),
+                dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
+            },
+        }
+    }
+
+    fn write_node(label: &'static str, buffer: ResourceId, buf_handle: u64) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![ResourceBinding {
+                resource: buffer,
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteBuffer {
+                buffer: buf_handle,
+                offset: 0,
+                data: Arc::from(vec![0u8; 4]),
+            },
+        }
+    }
+
+    fn render_pass_node(label: &'static str, target: RenderTargetHandle) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![],
+            kind: NodeKind::RenderPass {
+                target,
+                commands: Vec::new(),
+            },
+        }
+    }
+
+    fn copy_to_dst_node(label: &'static str, src: RenderTargetHandle, dst: ResourceId) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::RenderTarget(src),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyRenderTarget { src, dst },
+        }
+    }
+
+    fn grant_present_node(label: &'static str, grant_id: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![],
+            kind: NodeKind::GrantPresent { grant_id },
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Analysis helpers — logical partitions and actualized cache
+    // ------------------------------------------------------------------
+
+    fn logical_partitions(ir: &GraphIR) -> Vec<LogicalPartition> {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        analysis::describe_logical_partitions(ir, &schedule)
+    }
+
+    fn build_cache(ir: &GraphIR) -> CompiledCacheEntry {
+        let mut cache: Option<CompiledCacheEntry> = None;
+        let fp = binding_fingerprint(ir);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, ir, fp);
+        cache.unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // Logical-partition invariant helpers
+    // ------------------------------------------------------------------
+
+    /// Assert the present-boundary invariant:
+    ///   - At most one logical partition has has_present == true.
+    ///   - The present partition (if any) must be the last one.
+    fn assert_present_boundary_invariant(parts: &[LogicalPartition]) {
+        let present_indices: Vec<usize> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.has_present)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            present_indices.len() <= 1,
+            "at most one present partition expected, got indices {:?}",
+            present_indices
+        );
+        if let Some(&pi) = present_indices.first() {
+            assert_eq!(
+                pi,
+                parts.len() - 1,
+                "present partition must be the last logical partition"
+            );
+        }
+    }
+
+    /// Assert the render-kind invariant:
+    ///   - No partition mixes render and present.
+    ///   - Each partition's has_render flag matches whether it actually
+    ///     contains render-pass waves.
+    fn assert_render_kind_invariant(parts: &[LogicalPartition]) {
+        for (i, p) in parts.iter().enumerate() {
+            assert!(
+                !(p.has_render && p.has_present),
+                "partition {i} must not mix render and present"
+            );
+        }
+    }
+
+    /// Assert the cache-kind invariant against an actualized CompiledCacheEntry:
+    ///   - Render partitions: compute slot empty, graph slot Some.
+    ///   - Present partitions: both slots empty/None (deferred to submit time).
+    ///   - Pure-compute partitions: compute slot non-empty, graph slot None.
+    fn assert_cache_kind_invariant(ir: &GraphIR, entry: &CompiledCacheEntry) {
+        let edges = analysis::build_edges(ir);
+        let schedule = analysis::schedule_waves(ir, &edges);
+        let ranges = analysis::partition_wave_ranges(ir, &schedule);
+        let parts = entry.partitioned_commands.as_ref().unwrap();
+
+        for (i, range) in ranges.iter().enumerate() {
+            let waves = &entry.schedule.waves[range.clone()];
+            let has_render = partition_waves_have_render(ir, waves);
+            let has_present = analysis::partition_waves_have_present(ir, waves);
+
+            if has_present {
+                assert!(
+                    parts[i].is_empty(),
+                    "present partition {i}: compute slot must be empty (deferred)"
+                );
+                assert!(
+                    entry.partitioned_graph_commands[i].is_none(),
+                    "present partition {i}: graph slot must be None (deferred)"
+                );
+            } else if has_render {
+                assert!(parts[i].is_empty(), "render partition {i}: compute slot must be empty");
+                assert!(
+                    entry.partitioned_graph_commands[i].is_some(),
+                    "render partition {i}: graph slot must be Some"
+                );
+                assert!(
+                    entry.partitioned_graph_commands[i]
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|c| matches!(c, GraphCommand::Render { .. })),
+                    "render partition {i}: graph slot must contain a Render command"
+                );
+            } else {
+                assert!(
+                    !parts[i].is_empty(),
+                    "compute partition {i}: compute slot must be non-empty"
+                );
+                assert!(
+                    entry.partitioned_graph_commands[i].is_none(),
+                    "compute partition {i}: graph slot must be None"
+                );
+            }
+        }
+    }
+
+    /// Assert upload-remap invariant: every WriteBuffer/WriteTexture/WriteTextureRegion
+    /// node in the IR appears exactly once in the remap table.
+    fn assert_upload_remap_invariant(ir: &GraphIR, entry: &CompiledCacheEntry) {
+        let upload_node_indices: Vec<usize> = ir
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                matches!(
+                    n.kind,
+                    NodeKind::WriteBuffer { .. } | NodeKind::WriteTexture { .. } | NodeKind::WriteTextureRegion { .. }
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut remap_node_indices: Vec<usize> = entry.partitioned_upload_remap.iter().map(|&(_, _, ni)| ni).collect();
+        remap_node_indices.sort_unstable();
+
+        let mut expected = upload_node_indices.clone();
+        expected.sort_unstable();
+
+        assert_eq!(
+            remap_node_indices, expected,
+            "upload remap must cover every upload node exactly once"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Group 1: logical partitions — pure-compute schemes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn single_dispatch_one_pure_compute_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 4)],
+        };
+        let parts = logical_partitions(&ir);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_pure_compute());
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn independent_dispatches_share_wave_one_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 4),
+                dispatch_node("b", 2, vec![(buf(1), NodeAccess::Write)], 4),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        // Two independent dispatches land in the same wave → one logical partition.
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_pure_compute());
+        assert_present_boundary_invariant(&parts);
+    }
+
+    #[test]
+    fn linear_chain_stays_one_pure_compute_logical_partition() {
+        // A→B→C linear chain: 3 waves, no render, no present.
+        // The barrier-cost split is an *actualized* concern; logically it is one unit.
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                dispatch_node("c", 3, vec![(buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        assert_eq!(parts.len(), 1, "pure-compute linear chain is one logical partition");
+        assert!(parts[0].is_pure_compute());
+        assert_present_boundary_invariant(&parts);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 2: logical partitions — render-pass schemes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_pass_alone_one_render_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![render_pass_node("draw", 10)],
+        };
+        let parts = logical_partitions(&ir);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].has_render);
+        assert!(!parts[0].has_present);
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn render_then_copy_present_two_logical_partitions() {
+        // RenderPass → CopyRenderTarget(PresentLease) → GrantPresent
+        // Logical split: render partition | present partition.
+        let ir = GraphIR {
+            nodes: vec![
+                render_pass_node("draw", 10),
+                copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        // Must have at least: one render partition + one present partition.
+        assert!(parts.len() >= 2, "render→present must produce ≥ 2 logical partitions");
+        let render_count = parts.iter().filter(|p| p.has_render).count();
+        let present_count = parts.iter().filter(|p| p.has_present).count();
+        assert_eq!(render_count, 1);
+        assert_eq!(present_count, 1);
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn compute_then_render_two_logical_partitions() {
+        // The render pass reads from a buffer that the dispatch writes, so it lands
+        // in a later wave — a render-kind boundary then forces a logical split.
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                TaskNode {
+                    label: "draw",
+                    bindings: vec![ResourceBinding {
+                        resource: buf(0),
+                        access: NodeAccess::Read,
+                    }],
+                    kind: NodeKind::RenderPass {
+                        target: 10,
+                        commands: Vec::new(),
+                    },
+                },
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        assert!(parts.len() >= 2, "compute→render must produce ≥ 2 logical partitions");
+        let has_pure_compute = parts.iter().any(|p| p.is_pure_compute());
+        let has_render = parts.iter().any(|p| p.has_render);
+        assert!(has_pure_compute, "must have at least one pure-compute partition");
+        assert!(has_render, "must have at least one render partition");
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 3: logical partitions — present-lease schemes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn present_lease_copy_only_has_present_partition() {
+        let ir = GraphIR {
+            nodes: vec![copy_to_dst_node("copy", 5, ResourceId::PresentLease(0))],
+        };
+        let parts = logical_partitions(&ir);
+        let present_count = parts.iter().filter(|p| p.has_present).count();
+        assert_eq!(present_count, 1, "must have exactly one present logical partition");
+        assert!(!parts.iter().any(|p| p.has_render), "no render partitions expected");
+        assert_present_boundary_invariant(&parts);
+    }
+
+    #[test]
+    fn compute_then_present_present_is_last_logical_partition() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("post", 2, vec![(buf(0), NodeAccess::Read)], 1),
+                copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        assert!(parts.last().unwrap().has_present, "present partition must be last");
+        assert!(parts.iter().take(parts.len() - 1).all(|p| !p.has_present));
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+    }
+
+    #[test]
+    fn render_then_compute_then_present_ordering() {
+        // A richer scheme: render pass → compute post-process → present.
+        let ir = GraphIR {
+            nodes: vec![
+                render_pass_node("draw", 10),
+                dispatch_node("post", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let parts = logical_partitions(&ir);
+        // Whatever the exact count, the present partition must be last.
+        assert_present_boundary_invariant(&parts);
+        assert_render_kind_invariant(&parts);
+        assert!(parts.iter().any(|p| p.has_render));
+        assert!(parts.last().unwrap().has_present);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 4: actualized cache — kind correctness
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cache_kind_invariant_pure_compute() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn cache_kind_invariant_render_only() {
+        let ir = GraphIR {
+            nodes: vec![render_pass_node("draw", 10)],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn cache_kind_invariant_present_deferred() {
+        // Present partitions must have both cache slots empty after build_cache.
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("pre", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                copy_to_dst_node("copy", 5, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn cache_kind_invariant_mixed_render_and_present() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                render_pass_node("draw", 10),
+                copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+                grant_present_node("grant", 0),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_cache_kind_invariant(&ir, &entry);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 5: upload remap coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn write_then_dispatch_upload_remap_covers_all_uploads() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("upload", buf(0), 0),
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_upload_remap_invariant(&ir, &entry);
+    }
+
+    #[test]
+    fn two_uploads_remap_covers_both() {
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("upload_a", buf(0), 0),
+                write_node("upload_b", buf(1), 1),
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_upload_remap_invariant(&ir, &entry);
+        assert_eq!(entry.partitioned_upload_remap.len(), 2);
+    }
+
+    #[test]
+    fn two_uploads_same_buffer_same_offset_remap_covers_both() {
+        // Interleaved WAW pattern: write buf → dispatch → write buf → dispatch, all in one IR.
+        // Both WriteBuffer nodes share (buffer=0, offset=0). The remap must cover both via
+        // the consumed-flag walk in find_upload_node, not by key uniqueness.
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("write1", buf(0), 0),
+                dispatch_node(
+                    "copy1",
+                    1,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
+                write_node("write2", buf(0), 0),
+                dispatch_node(
+                    "copy2",
+                    1,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_upload_remap_invariant(&ir, &entry);
+        assert_eq!(
+            entry.partitioned_upload_remap.len(),
+            2,
+            "both WriteBuffer nodes must appear in the remap"
+        );
+        // Node indices in the remap must be distinct (0 and 2, not 0 twice).
+        let remapped_nodes: Vec<usize> = entry.partitioned_upload_remap.iter().map(|&(_, _, ni)| ni).collect();
+        assert_eq!(
+            remapped_nodes.iter().collect::<std::collections::HashSet<_>>().len(),
+            2,
+            "remap must reference two distinct IR nodes, not the same node twice"
+        );
+    }
+
+    #[test]
+    fn no_uploads_remap_is_empty() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_eq!(entry.partitioned_upload_remap.len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Group 6: cache stability
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cache_hit_reuses_allocated_vecs() {
+        let ir = GraphIR {
+            nodes: vec![
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1),
+                dispatch_node("b", 2, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                dispatch_node("c", 3, vec![(buf(1), NodeAccess::Read)], 1),
+            ],
+        };
+        let mut cache: Option<CompiledCacheEntry> = None;
+        let fp = binding_fingerprint(&ir);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        let ptr_before = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
+
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+        let ptr_after = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
+        assert_eq!(
+            ptr_before, ptr_after,
+            "cache hit must not reallocate the partitioned_commands Vec"
+        );
+    }
+
+    #[test]
+    fn fingerprint_change_rebuilds_cache() {
+        // Changing the binding structure (different buffer id) changes the fingerprint.
+        let ir_v1 = GraphIR {
+            nodes: vec![dispatch_node("a", 1, vec![(buf(0), NodeAccess::Write)], 1)],
+        };
+        let ir_v2 = GraphIR {
+            nodes: vec![dispatch_node("a", 1, vec![(buf(1), NodeAccess::Write)], 1)],
+        };
+        let fp1 = binding_fingerprint(&ir_v1);
+        let fp2 = binding_fingerprint(&ir_v2);
+        assert_ne!(fp1, fp2, "test requires distinct binding fingerprints");
+
+        let mut cache: Option<CompiledCacheEntry> = None;
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1);
+        assert_eq!(cache.as_ref().unwrap().fp, fp1);
+
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2);
+        assert_eq!(
+            cache.as_ref().unwrap().fp,
+            fp2,
+            "cache must rebuild on fingerprint change"
+        );
+        assert!(cache.as_ref().unwrap().partitioned_commands.is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // Group 7: copy_to_texture retainability
+    //
+    // CopyRenderTarget → Texture must be retainable (the texture handle is
+    // stable across submissions; the staging readback blit runs standalone
+    // separately via finish_submit_frame).
+    // CopyRenderTarget → PresentLease must also be retainable (slot-key path).
+    // Other destinations (e.g. SwapchainOutput) must NOT be retainable.
+    // ------------------------------------------------------------------
+
+    fn grant_read_node(label: &'static str, resource: ResourceId, grant_id: u32) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![ResourceBinding {
+                resource,
+                access: NodeAccess::Read,
+            }],
+            kind: NodeKind::GrantRead { grant_id },
+        }
+    }
+
+    /// Call `partition_waves_can_retain` for a single-wave IR built from `nodes`.
+    fn can_retain_single_wave(nodes: Vec<TaskNode>) -> bool {
+        let ir = GraphIR { nodes };
+        let edges = analysis::build_edges(&ir);
+        let schedule = analysis::schedule_waves(&ir, &edges);
+        partition_waves_can_retain(&ir, &schedule.waves)
+    }
+
+    #[test]
+    fn copy_render_target_to_texture_is_retainable() {
+        // RenderPass → CopyRenderTarget(Texture) → GrantRead
+        // All in one chain; CopyRenderTarget → Texture must not force standalone.
+        let nodes = vec![
+            render_pass_node("rp", 10),
+            copy_to_dst_node("copy", 10, ResourceId::Texture(42)),
+            grant_read_node("grant", ResourceId::Texture(42), 0),
+        ];
+        assert!(
+            can_retain_single_wave(nodes),
+            "CopyRenderTarget → Texture must be retainable"
+        );
+    }
+
+    #[test]
+    fn copy_render_target_to_present_lease_is_retainable() {
+        let nodes = vec![
+            render_pass_node("rp", 10),
+            copy_to_dst_node("copy", 10, ResourceId::PresentLease(0)),
+            grant_present_node("grant", 0),
+        ];
+        assert!(
+            can_retain_single_wave(nodes),
+            "CopyRenderTarget → PresentLease must be retainable (slot-key path)"
+        );
+    }
+
+    #[test]
+    fn copy_render_target_to_swapchain_output_is_not_retainable() {
+        let nodes = vec![
+            render_pass_node("rp", 10),
+            copy_to_dst_node("copy", 10, ResourceId::SwapchainOutput),
+        ];
+        assert!(
+            !can_retain_single_wave(nodes),
+            "CopyRenderTarget → SwapchainOutput must NOT be retainable"
+        );
+    }
+
+    #[test]
+    fn upload_payload_refreshes_on_cache_hit() {
+        let mut ir = GraphIR {
+            nodes: vec![
+                write_node("upload", buf(0), 0),
+                dispatch_node("a", 1, vec![(buf(0), NodeAccess::Read)], 1),
+            ],
+        };
+        let mut cache: Option<CompiledCacheEntry> = None;
+        let fp = binding_fingerprint(&ir);
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+
+        let ptr_before = {
+            let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
+            match &parts[0][0] {
+                GpuCommand::WriteBuffer { data, .. } => Arc::as_ptr(data),
+                other => panic!("expected WriteBuffer, got {other:?}"),
+            }
+        };
+
+        // Mutate the upload payload — same fingerprint, different Arc.
+        if let NodeKind::WriteBuffer { data, .. } = &mut ir.nodes[0].kind {
+            *data = Arc::from(vec![9u8; 4]);
+        }
+        TaskGraph::get_or_build_partitioned_commands(&mut cache, &ir, fp);
+
+        let ptr_after = {
+            let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
+            match &parts[0][0] {
+                GpuCommand::WriteBuffer { data, .. } => Arc::as_ptr(data),
+                other => panic!("expected WriteBuffer, got {other:?}"),
+            }
+        };
+        assert_ne!(
+            ptr_before, ptr_after,
+            "upload payload Arc must be refreshed on cache hit"
+        );
+        // Partition count must not change.
+        assert_eq!(cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().len(), 1);
     }
 }

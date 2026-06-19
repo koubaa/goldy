@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
+    use crate::buffer::BufferPool;
     use crate::device::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::types::{BufferFlags, ResourceAccess};
-    use crate::{BufferKind, BufferPool, DeviceType};
+    use crate::{BufferKind, DeviceType, NodeAccess};
 
     fn make_device() -> Device {
         let inst = Instance::new().expect("instance");
@@ -242,13 +243,13 @@ mod buffer_alloc_tests {
         let mut buf = device
             .alloc_buffer_with_capacity(256, 4 * 64 * 1024, BufferKind::Scattered, BufferFlags::empty())
             .expect("buf");
-        let bindless = buf.resource_index(ResourceAccess::Write).expect("bindless");
+        let bindless = buf.resource_index(ResourceAccess::ReadWrite).expect("bindless");
 
         let initial: Vec<u32> = (1..=16).collect();
         buf.write(0, bytemuck::cast_slice(&initial)).expect("w");
 
         buf.resize_to(200 * 1024).expect("grow across tiles");
-        assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
+        assert_eq!(buf.resource_index(ResourceAccess::ReadWrite), Some(bindless));
 
         let mut read = vec![0u32; 16];
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
@@ -258,7 +259,11 @@ mod buffer_alloc_tests {
         let shader = ShaderModule::from_slang(&device, SMOKY_SHADER).expect("shader");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
         let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+        graph
+            .node("n0", &pipeline)
+            .with_allocation(&buf, NodeAccess::ReadWrite)
+            .with_resource_slots_slice(&[bindless])
+            .dispatch(1, 1, 1);
         graph.dispatch(&ctx).expect("dispatch");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))
@@ -269,15 +274,19 @@ mod buffer_alloc_tests {
 
         // Shrink to one tile, decommit reserved tail with `hint_unused_above`, then grow again.
         buf.resize_to(64 * 1024).expect("shrink to one tile");
-        assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
+        assert_eq!(buf.resource_index(ResourceAccess::ReadWrite), Some(bindless));
         buf.hint_unused_above(64 * 1024);
         buf.resize_to(200 * 1024).expect("grow after decommit hint");
-        assert_eq!(buf.resource_index(ResourceAccess::Write), Some(bindless));
+        assert_eq!(buf.resource_index(ResourceAccess::ReadWrite), Some(bindless));
 
         let initial2: Vec<u32> = (0..16).collect();
         buf.write(0, bytemuck::cast_slice(&initial2)).expect("w2");
         let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).bind_resources(&[&buf]).dispatch(1, 1, 1);
+        graph
+            .node("n0", &pipeline)
+            .with_allocation(&buf, NodeAccess::ReadWrite)
+            .with_resource_slots_slice(&[bindless])
+            .dispatch(1, 1, 1);
         graph.dispatch(&ctx).expect("dispatch2");
 
         buf.read_to_cpu(&device, bytemuck::cast_slice_mut(&mut read))

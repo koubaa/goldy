@@ -9,6 +9,7 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::wrong_self_convention)]
 
+mod buffer;
 mod bytes_util;
 mod compute;
 mod device;
@@ -16,11 +17,13 @@ mod error;
 mod instance;
 mod parcel;
 mod pipeline;
+mod pyutil;
 mod render_target;
 mod retained_pool;
+mod scheme;
 mod shader;
 mod surface;
-mod task_graph;
+mod swapchain_pool;
 mod types;
 
 use pyo3::prelude::*;
@@ -55,23 +58,31 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<instance::PyInstance>()?;
     m.add_class::<instance::PyAdapter>()?;
     m.add_class::<device::PyDevice>()?;
+    m.add_class::<scheme::PyContext>()?;
+    m.add_class::<scheme::PyScheme>()?;
+    m.add_class::<scheme::PySchemeSubmission>()?;
+    m.add_class::<scheme::PyReadGrant>()?;
+    m.add_class::<scheme::PySchemeComputeNode>()?;
+    m.add_class::<scheme::PySchemeRenderPass>()?;
+    m.add_class::<scheme::PySchemeRenderTargetLease>()?;
+    m.add_class::<scheme::PyPresentLease>()?;
+    m.add_class::<scheme::PyPresentGrant>()?;
+    m.add_class::<swapchain_pool::PySwapchainPool>()?;
+    m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;
-    m.add_class::<retained_pool::PyMosaicBuilder>()?;
+    m.add_class::<retained_pool::PyRecordBuilder>()?;
     m.add_class::<shader::PyShaderModule>()?;
     m.add_class::<pipeline::PyRenderPipeline>()?;
     m.add_class::<pipeline::PyRenderPipelineDesc>()?;
     m.add_class::<render_target::PyRenderTarget>()?;
-    m.add_class::<task_graph::PyTaskGraph>()?;
-    m.add_class::<task_graph::PyRenderPass>()?;
-    m.add_class::<task_graph::PySwapchainOutput>()?;
-    m.add_class::<task_graph::PyComputeNode>()?;
 
     // Shader builtins
     m.add_class::<shader::PyBuiltins>()?;
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
+    m.add_function(wrap_pyfunction!(scheme::write_to_parcel, m)?)?;
 
     // Surface (windowed rendering)
     m.add_class::<surface::PySurface>()?;

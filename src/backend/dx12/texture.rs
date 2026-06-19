@@ -3,7 +3,7 @@
 use super::barriers;
 use super::types::{Dx12State, PendingDeletion, TextureState};
 use super::utils::{format_to_dxgi, wait_for_fence};
-use super::{DeviceHandle, TextureHandle};
+use super::{BufferHandle, DeviceHandle, TextureHandle};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use windows::core::Interface;
@@ -734,6 +734,148 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
     }
 
     tracing::debug!("Flushed {} pending texture copies in one submission", count);
+    Ok(())
+}
+
+/// Query grant-readback staging layout for a 2D texture allocation.
+pub(super) fn query_readback_layout(
+    state: &Dx12State,
+    device_handle: DeviceHandle,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+) -> Result<crate::backend::TextureReadbackLayout> {
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let dxgi_format = format_to_dxgi(format);
+    let res_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        Alignment: 0,
+        Width: width as u64,
+        Height: height,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: dxgi_format,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    };
+    let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+    let mut total_bytes: u64 = 0;
+    unsafe {
+        logical_device.device.GetCopyableFootprints(
+            &res_desc,
+            0,
+            1,
+            0,
+            Some(&mut footprint),
+            None,
+            None,
+            Some(&mut total_bytes),
+        );
+    }
+    let logical_bytes = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
+    Ok(crate::backend::TextureReadbackLayout {
+        width,
+        height,
+        format,
+        logical_bytes,
+        staging_bytes: total_bytes,
+        row_pitch: footprint.Footprint.RowPitch,
+        footprint_offset: footprint.Offset,
+    })
+}
+
+/// Record copy from a texture into a grant-readback staging buffer.
+pub(super) fn record_copy_texture_to_readback(
+    command_list: &ID3D12GraphicsCommandList,
+    command_list7: &ID3D12GraphicsCommandList7,
+    textures: &mut std::collections::HashMap<TextureHandle, TextureState>,
+    buffers: &std::collections::HashMap<BufferHandle, super::types::BufferState>,
+    src: TextureHandle,
+    dst: BufferHandle,
+    layout: crate::backend::TextureReadbackLayout,
+) -> Result<()> {
+    // Extract everything we need from the immutable borrow before any mutable access.
+    let (src_resource, dst_resource, layout_before, is_storage, dxgi_format) = {
+        let texture = textures
+            .get(&src)
+            .context("CopyTextureToReadback: src texture not found")?;
+        let dst_buf = buffers
+            .get(&dst)
+            .context("CopyTextureToReadback: dst buffer not found")?;
+        (
+            texture.resource.clone(),
+            dst_buf.resource.clone(),
+            texture.last_layout,
+            texture.is_storage,
+            format_to_dxgi(layout.format),
+        )
+    };
+
+    let b_to_src = barriers::texture_barrier_full(
+        &src_resource,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_SYNC_COPY,
+        access_for_layout(layout_before),
+        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        layout_before,
+        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+    );
+    unsafe { barriers::barrier_textures(command_list7, &[b_to_src]) };
+
+    let src_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&src_resource) },
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+    };
+    let dst_location = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: unsafe { std::mem::transmute_copy(&dst_resource) },
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: layout.footprint_offset,
+                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                    Format: dxgi_format,
+                    Width: layout.width,
+                    Height: layout.height,
+                    Depth: 1,
+                    RowPitch: layout.row_pitch,
+                },
+            },
+        },
+    };
+    unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
+
+    let post_access = if is_storage {
+        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
+    } else {
+        D3D12_BARRIER_ACCESS_SHADER_RESOURCE
+    };
+    let post_layout = if is_storage {
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+    } else {
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
+    };
+    let b_back = barriers::texture_barrier_full(
+        &src_resource,
+        D3D12_BARRIER_SYNC_COPY,
+        D3D12_BARRIER_SYNC_ALL,
+        D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        post_access,
+        D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+        post_layout,
+    );
+    unsafe { barriers::barrier_textures(command_list7, &[b_back]) };
+
+    // Update tracked layout so subsequent copies (retained resubmits) use the correct
+    // layout_before. Without this, the pre-copy barrier would repeat the same transition
+    // correctly only by accident (round-trip textures happen to match), but any code path
+    // that transitions the texture to a layout other than post_layout between copies
+    // would compute a wrong layout_before on the next call.
+    if let Some(tex) = textures.get_mut(&src) {
+        tex.last_layout = post_layout;
+    }
+
     Ok(())
 }
 

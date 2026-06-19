@@ -1,15 +1,16 @@
 //! Instancing example - render many objects efficiently.
 //!
-//! Demonstrates GPU compute + graphics in a single task graph:
-//! instance update dispatch → offscreen render → swapchain blit.
+//! Demonstrates retained scheme with compute dispatch → offscreen render → copy-to-present.
 //!
 //! Run with: cargo run --example instancing
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, Instance2D, NodeAccess, Parcel,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess,
-    RetainedPool, ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance,
+    Instance2D, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,7 +27,6 @@ const GRID_SIZE: u32 = 20;
 const QUAD_SIZE: f32 = 0.03;
 const NUM_QUADS: u32 = GRID_SIZE * GRID_SIZE;
 
-/// Animation parameters for compute shader
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AnimParams {
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-    println!("Goldy Instancing Example - {} quads (GPU-driven)", NUM_QUADS);
+    println!("Goldy Instancing Example - {} quads (Scheme + Present)", NUM_QUADS);
     println!("Press Escape to exit");
 
     let event_loop = EventLoop::new()?;
@@ -64,23 +64,91 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
-    surface: Surface,
-    scene_rt: RenderTarget,
-    frame_graph: TaskGraph,
+    ctx: goldy::Context,
+    swapchain: SwapchainPool,
+    screen: goldy::PresentLease,
+    present: PresentGrant,
+    scheme: Scheme,
+    scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
+    render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
     _retained_pool: RetainedPool,
-    instance_buffer: Parcel,
-    params_buffer: Parcel,
+    instance_buffer: Buffer,
+    params_buffer: Buffer,
     start_time: Instant,
     last_time: f32,
     frame_count: u32,
 }
 
 impl RenderState {
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_render_pipeline(
+        device: &goldy::Device,
+        render_shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            render_shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: VertexBufferLayout::empty(),
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        compute_pipeline: &ComputePipeline,
+        render_pipeline: &RenderPipeline,
+        instance_buffer: &Buffer,
+        params_buffer: &Buffer,
+        scene_rt: &Lease<LeaseRenderTarget>,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        scheme
+            .node("update_instances", compute_pipeline)
+            .with_parcel(instance_buffer, NodeAccess::ReadWrite)
+            .with_parcel(params_buffer, NodeAccess::Read)
+            .dispatch(NUM_QUADS.div_ceil(64), 1, 1);
+
+        let bg_color = Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.04,
+            a: 1.0,
+        };
+
+        let mut pass = scheme.render_pass("instancing", scene_rt);
+        pass.with_parcel(&instance_buffer, NodeAccess::Read);
+        pass.clear(bg_color);
+        pass.set_pipeline(render_pipeline);
+        pass.draw(0..6, 0..NUM_QUADS);
+        pass.finish();
+
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
+    }
+
+    fn rerecord_scheme(&mut self) {
+        let mut scheme = Scheme::new(&self.ctx);
+        let (width, height) = self.swapchain.size();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
+            self.scene_rt = rt;
+            self.present = Self::record_scheme(
+                &mut scheme,
+                &self.compute_pipeline,
+                &self.render_pipeline,
+                &self.instance_buffer,
+                &self.params_buffer,
+                &self.scene_rt,
+                &self.screen,
+            );
+            self.scheme = scheme;
+        }
     }
 
     fn new(window: Arc<Window>) -> Result<Self> {
@@ -91,8 +159,8 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/instancing_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/instancing_render.slang"))?;
@@ -102,10 +170,13 @@ impl RenderState {
             for j in 0..GRID_SIZE {
                 let nx = (i as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
                 let ny = (j as f32 / (GRID_SIZE - 1) as f32) * 2.0 - 1.0;
-                let cx = nx * 0.85;
-                let cy = ny * 0.85;
-
-                instances.push(Instance2D::new(cx, cy, 0.0, QUAD_SIZE, [1.0, 1.0, 1.0, 1.0]));
+                instances.push(Instance2D::new(
+                    nx * 0.85,
+                    ny * 0.85,
+                    0.0,
+                    QUAD_SIZE,
+                    [1.0, 1.0, 1.0, 1.0],
+                ));
             }
         }
 
@@ -115,18 +186,20 @@ impl RenderState {
             retained_pool.acquire_buffer_sized::<AnimParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
+        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &swapchain)?;
 
-        let render_pipeline = RenderPipeline::new(
-            &device,
-            &render_shader,
-            &render_shader,
-            &RenderPipelineDesc {
-                vertex_layout: VertexBufferLayout::empty(),
-                topology: PrimitiveTopology::TriangleList,
-                target_format: surface.format(),
-                ..Default::default()
-            },
-        )?;
+        let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let present = Self::record_scheme(
+            &mut scheme,
+            &compute_pipeline,
+            &render_pipeline,
+            &instance_buffer,
+            &params_buffer,
+            &scene_rt,
+            &screen,
+        );
 
         println!(
             "Created instancing example with {} quads (GPU compute + graphics)",
@@ -136,10 +209,14 @@ impl RenderState {
         Ok(Self {
             window,
             device,
-            surface,
+            ctx,
+            swapchain,
+            screen,
+            present,
+            scheme,
             scene_rt,
-            frame_graph: TaskGraph::new(),
             compute_pipeline,
+            render_shader,
             render_pipeline,
             _retained_pool: retained_pool,
             instance_buffer,
@@ -164,41 +241,10 @@ impl RenderState {
             _pad: 0,
         };
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
-        self.frame_graph
-            .node("update_instances", &self.compute_pipeline)
-            .bind_parcel(&self.instance_buffer, NodeAccess::ReadWrite)
-            .bind_parcel(&self.params_buffer, NodeAccess::Read)
-            .bind_resources_raw_slice(&[
-                self.instance_buffer.resource_index(ResourceAccess::Write).unwrap(),
-                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
-            ])
-            .dispatch(NUM_QUADS.div_ceil(64), 1, 1);
+        write_to_parcel(&self.ctx, &self.params_buffer, 0, bytemuck::bytes_of(&params))?;
 
-        let bg_color = Color {
-            r: 0.02,
-            g: 0.02,
-            b: 0.04,
-            a: 1.0,
-        };
-
-        let mut pass = self.frame_graph.render_pass("instancing", &self.scene_rt);
-        pass.bind_parcel_mut(&self.instance_buffer, NodeAccess::Read);
-        pass.clear(bg_color);
-        pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[self.instance_buffer.resource_index(ResourceAccess::Read).unwrap()]);
-        pass.draw_quads(NUM_QUADS);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
-
-        let frame = self.surface.begin()?;
-        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let submission = self.scheme.submit()?;
+        self.present.consume(&submission)?;
 
         self.window.request_redraw();
         Ok(())
@@ -227,7 +273,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title(format!("Goldy - Instancing ({} quads, GPU-driven)", NUM_QUADS))
+                            .with_title(format!("Goldy - Instancing ({} quads, Scheme + Present)", NUM_QUADS))
                             .with_inner_size(winit::dpi::LogicalSize::new(800, 800)),
                     )
                     .expect("Failed to create window"),
@@ -254,9 +300,7 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     event_loop.exit();
@@ -265,10 +309,13 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        state.surface.resize(size.width, size.height).ok();
-                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
-                            state.scene_rt = rt;
+                        state.swapchain.resize(size.width, size.height).ok();
+                        if let Ok(pipeline) =
+                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.swapchain)
+                        {
+                            state.render_pipeline = pipeline;
                         }
+                        state.rerecord_scheme();
                     }
                 }
             }

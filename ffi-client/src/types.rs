@@ -104,6 +104,45 @@ impl From<GoldyTextureFormat> for TextureFormat {
     }
 }
 
+/// Spatial access pattern for textures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureKind {
+    Interpolated,
+    Direct,
+    DirectInterpolated,
+}
+
+impl From<TextureKind> for sys::GoldyTextureKind {
+    fn from(k: TextureKind) -> Self {
+        match k {
+            TextureKind::Interpolated => sys::GoldyTextureKind::GOLDY_TEXTURE_KIND_INTERPOLATED,
+            TextureKind::Direct => sys::GoldyTextureKind::GOLDY_TEXTURE_KIND_DIRECT,
+            TextureKind::DirectInterpolated => sys::GoldyTextureKind::GOLDY_TEXTURE_KIND_DIRECT_INTERPOLATED,
+        }
+    }
+}
+
+/// Texture flags for copy and render operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureFlags(pub u32);
+
+impl TextureFlags {
+    pub const NONE: Self = Self(0);
+    pub const COPY_SRC: Self = Self(1 << 0);
+    pub const COPY_DST: Self = Self(1 << 1);
+    pub const RENDER_TARGET: Self = Self(1 << 2);
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl From<TextureFlags> for sys::GoldyTextureFlags {
+    fn from(f: TextureFlags) -> Self {
+        sys::GoldyTextureFlags { _0: f.0 }
+    }
+}
+
 /// Buffer data access pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BufferKind {

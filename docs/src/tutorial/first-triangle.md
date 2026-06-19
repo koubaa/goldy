@@ -95,7 +95,7 @@ impl App {
 
         self.frame_graph.clear();
         let mut pass = self.frame_graph.render_pass("triangle", scene_rt);
-        pass.bind_parcel_mut(vertex_buffer, NodeAccess::Read);
+        pass.with_parcel(vertex_buffer, NodeAccess::Read);
         pass.clear(Color { r: 0.1, g: 0.1, b: 0.2, a: 1.0 });
         pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer);

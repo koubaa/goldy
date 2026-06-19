@@ -1,5 +1,8 @@
 //! Screenshot tests for Goldy examples using FLIP perceptual image comparison.
 //!
+//! Legacy TaskGraph path. Scheme coverage: `scheme_screenshot_tests.rs`.
+//! Delete this file when ekrano migrates (Phase 2).
+//!
 //! These tests render examples to offscreen targets and compare them against
 //! reference PNG images using NVIDIA's FLIP algorithm.
 //!
@@ -59,6 +62,7 @@ fn run_screenshot_test(
 }
 
 /// Test rendering a solid red color.
+// Legacy TaskGraph — migrated: `scheme_solid_red`
 #[test]
 fn test_solid_red() {
     let Some(device) = create_device() else {
@@ -78,6 +82,7 @@ fn test_solid_red() {
 }
 
 /// Test rendering a solid blue color.
+// Legacy TaskGraph — migrated: `scheme_solid_blue`
 #[test]
 fn test_solid_blue() {
     let Some(device) = create_device() else {
@@ -97,6 +102,7 @@ fn test_solid_blue() {
 }
 
 /// Test rendering the classic RGB triangle.
+// Legacy TaskGraph — migrated: `scheme_rgb_triangle`
 #[test]
 fn test_rgb_triangle() {
     let Some(device) = create_device() else {
@@ -122,6 +128,7 @@ fn test_rgb_triangle() {
 }
 
 /// Test rendering a white triangle on black background.
+// Legacy TaskGraph — migrated: `scheme_white_triangle`
 #[test]
 fn test_white_triangle() {
     let Some(device) = create_device() else {
@@ -147,6 +154,7 @@ fn test_white_triangle() {
 }
 
 /// Test Game of Life at update 50.
+// Legacy TaskGraph — migrated: `scheme_game_of_life_update_50`
 #[test]
 fn test_game_of_life_update_50() {
     let Some(device) = create_device() else {
@@ -166,6 +174,7 @@ fn test_game_of_life_update_50() {
 }
 
 /// Test Game of Life at update 100.
+// Legacy TaskGraph — migrated: `scheme_game_of_life_update_100`
 #[test]
 fn test_game_of_life_update_100() {
     let Some(device) = create_device() else {
@@ -185,6 +194,7 @@ fn test_game_of_life_update_100() {
 }
 
 /// Depth occlusion test: a near (red) geometry blocks a far (green) geometry.
+// Legacy TaskGraph — migrated: `scheme_depth_occlusion`
 #[test]
 fn test_depth_occlusion() {
     let Some(device) = create_device() else {

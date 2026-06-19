@@ -391,6 +391,118 @@ pub fn align_up(x: u64, a: u64) -> u64 {
     x.div_ceil(a) * a
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal [`BeltChunk`] backed by a heap-allocated byte array.
+    ///
+    /// The heap allocation is stable across moves of the `MockChunk` struct
+    /// itself, so `mapped_ptr()` remains valid after the chunk is pushed into a
+    /// `Vec` inside [`StagingBeltCore`].
+    struct MockChunk {
+        backing: Vec<u8>,
+        offset: u64,
+    }
+
+    impl MockChunk {
+        fn new(capacity: u64) -> Self {
+            Self {
+                backing: vec![0u8; capacity as usize],
+                offset: 0,
+            }
+        }
+    }
+
+    impl BeltChunk for MockChunk {
+        fn capacity(&self) -> u64 {
+            self.backing.len() as u64
+        }
+        fn offset(&self) -> u64 {
+            self.offset
+        }
+        fn offset_mut(&mut self) -> &mut u64 {
+            &mut self.offset
+        }
+        fn mapped_ptr(&self) -> *mut u8 {
+            self.backing.as_ptr() as *mut u8
+        }
+    }
+
+    fn new_core(chunk_size: u64) -> StagingBeltCore<MockChunk> {
+        StagingBeltCore::new(chunk_size)
+    }
+
+    /// `finish()` moves all active chunks to `in_flight` tagged with the given
+    /// token, leaving `active` empty.  A subsequent `write()` cannot touch the
+    /// in-flight chunk — it must open a new active chunk.
+    #[test]
+    fn staging_belt_finish_isolates_in_flight_chunk() {
+        let mut core = new_core(256);
+
+        let payload_a = b"hello";
+        let (idx_a, start_a) = core.write(payload_a, |sz| Ok(MockChunk::new(sz))).unwrap();
+        assert_eq!(core.active.len(), 1, "one active chunk after first write");
+        assert_eq!(core.in_flight.len(), 0);
+        assert_eq!(
+            &core.active[idx_a].backing[start_a as usize..start_a as usize + payload_a.len()],
+            payload_a
+        );
+
+        core.finish(42);
+        assert_eq!(core.active.len(), 0, "active drained by finish");
+        assert_eq!(core.in_flight.len(), 1, "one in-flight batch");
+        assert_eq!(core.in_flight[0].0, 42, "token preserved");
+        assert_eq!(core.in_flight[0].1.len(), 1, "one chunk in batch");
+
+        // A second write must NOT touch the in-flight chunk.
+        let payload_b = b"world";
+        let (idx_b, _start_b) = core.write(payload_b, |sz| Ok(MockChunk::new(sz))).unwrap();
+        assert_eq!(core.active.len(), 1, "new active chunk opened");
+        assert_eq!(core.in_flight.len(), 1, "in-flight batch is untouched");
+        assert_eq!(idx_b, 0, "second write is in a fresh active chunk at index 0");
+
+        // The in-flight chunk still holds payload_a unmodified.
+        let inflight_chunk = &core.in_flight[0].1[0];
+        assert_eq!(
+            &inflight_chunk.backing[start_a as usize..start_a as usize + payload_a.len()],
+            payload_a
+        );
+    }
+
+    /// Once a chunk is moved from `in_flight` to `free` (simulating a reclaim),
+    /// the next `write()` reuses it without calling the allocation closure.
+    #[test]
+    fn staging_belt_reclaimed_chunk_is_reused() {
+        let mut core = new_core(256);
+
+        core.write(b"first", |sz| Ok(MockChunk::new(sz))).unwrap();
+        core.finish(1);
+        assert_eq!(core.in_flight.len(), 1);
+
+        // Simulate reclaim: token 1 has completed.
+        let (token, mut chunks) = core.in_flight.remove(0);
+        assert_eq!(token, 1);
+        for ch in &mut chunks {
+            ch.reset();
+        }
+        core.free.extend(chunks);
+        assert_eq!(core.free.len(), 1, "chunk available for reuse");
+
+        // The allocation closure must NOT be called — the free chunk is reused.
+        let alloc_called = std::cell::Cell::new(false);
+        core.write(b"second", |sz| {
+            alloc_called.set(true);
+            Ok(MockChunk::new(sz))
+        })
+        .unwrap();
+
+        assert!(!alloc_called.get(), "free chunk must be reused, not a fresh allocation");
+        assert_eq!(core.free.len(), 0, "free list drained");
+        assert_eq!(core.active.len(), 1);
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Clear-size resolution
 // ──────────────────────────────────────────────────────────────────────────────

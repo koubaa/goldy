@@ -12,7 +12,7 @@ use goldy::{Color, NodeAccess, RenderTarget, Surface, TaskGraph};
 frame_graph.clear();
 
 let mut pass = frame_graph.render_pass("main", &scene_rt);
-pass.bind_buffer_mut(&vertex_buffer, NodeAccess::Read);
+pass.with_buffer_mut(&vertex_buffer, NodeAccess::Read);
 pass.clear(Color::CORNFLOWER_BLUE);
 pass.set_pipeline(&pipeline);
 pass.set_vertex_buffer(0, &vertex_buffer);
@@ -61,9 +61,9 @@ pass.draw_quads(4);                 // instanced quads
 Declare which resources the pass reads or writes so the runtime can track parcel lifetimes:
 
 ```rust
-pass.bind_buffer_mut(&buf, NodeAccess::Read);
-pass.bind_texture_mut(&tex, NodeAccess::Read);
-pass.bind_parcel_mut(&parcel, NodeAccess::Write);
+pass.with_buffer_mut(&buf, NodeAccess::Read);
+pass.with_texture(&tex, NodeAccess::Read);
+pass.with_parcel(&parcel, NodeAccess::Write);
 ```
 
 Call `finish_recorded()` when done recording commands for this pass node.

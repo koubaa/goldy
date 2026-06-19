@@ -23,6 +23,8 @@ pub(crate) struct GoldyFfi {
     pub goldy_clear_error: FnGoldyClearError,
     pub goldy_compute_pipeline_create: FnGoldyComputePipelineCreate,
     pub goldy_compute_pipeline_destroy: FnGoldyComputePipelineDestroy,
+    pub goldy_context_create: FnGoldyContextCreate,
+    pub goldy_context_destroy: FnGoldyContextDestroy,
     pub goldy_device_adapter_id: FnGoldyDeviceAdapterId,
     pub goldy_device_destroy: FnGoldyDeviceDestroy,
     pub goldy_device_has_library: FnGoldyDeviceHasLibrary,
@@ -63,47 +65,75 @@ pub(crate) struct GoldyFfi {
     pub goldy_surface_height: FnGoldySurfaceHeight,
     pub goldy_surface_present: FnGoldySurfacePresent,
     pub goldy_surface_resize: FnGoldySurfaceResize,
-    pub goldy_surface_submit_graph_to_frame: FnGoldySurfaceSubmitGraphToFrame,
     pub goldy_surface_width: FnGoldySurfaceWidth,
-    pub goldy_task_graph_clear: FnGoldyTaskGraphClear,
-    pub goldy_task_graph_copy_render_target_to_swapchain: FnGoldyTaskGraphCopyRenderTargetToSwapchain,
-    pub goldy_task_graph_create: FnGoldyTaskGraphCreate,
-    pub goldy_task_graph_declare_swapchain_output: FnGoldyTaskGraphDeclareSwapchainOutput,
-    pub goldy_task_graph_compute_node_begin: FnGoldyTaskGraphComputeNodeBegin,
-    pub goldy_task_graph_compute_node_bind_parcel: FnGoldyTaskGraphComputeNodeBindParcel,
-    pub goldy_task_graph_compute_node_bind_resources_raw: FnGoldyTaskGraphComputeNodeBindResourcesRaw,
-    pub goldy_task_graph_compute_node_dispatch: FnGoldyTaskGraphComputeNodeDispatch,
-    pub goldy_task_graph_destroy: FnGoldyTaskGraphDestroy,
-    pub goldy_task_graph_dispatch: FnGoldyTaskGraphDispatch,
-    pub goldy_task_graph_write_parcel: FnGoldyTaskGraphWriteParcel,
-    pub goldy_task_graph_render_pass_begin: FnGoldyTaskGraphRenderPassBegin,
-    pub goldy_task_graph_render_pass_bind_parcel: FnGoldyTaskGraphRenderPassBindParcel,
-    pub goldy_task_graph_render_pass_bind_resources_typed: FnGoldyTaskGraphRenderPassBindResourcesTyped,
-    pub goldy_task_graph_render_pass_clear: FnGoldyTaskGraphRenderPassClear,
-    pub goldy_task_graph_render_pass_clear_depth: FnGoldyTaskGraphRenderPassClearDepth,
-    pub goldy_task_graph_render_pass_draw: FnGoldyTaskGraphRenderPassDraw,
-    pub goldy_task_graph_render_pass_draw_fullscreen: FnGoldyTaskGraphRenderPassDrawFullscreen,
-    pub goldy_task_graph_render_pass_draw_indexed: FnGoldyTaskGraphRenderPassDrawIndexed,
-    pub goldy_task_graph_render_pass_finish: FnGoldyTaskGraphRenderPassFinish,
-    pub goldy_task_graph_render_pass_set_index_buffer: FnGoldyTaskGraphRenderPassSetIndexBuffer,
-    pub goldy_task_graph_render_pass_set_pipeline: FnGoldyTaskGraphRenderPassSetPipeline,
-    pub goldy_task_graph_render_pass_set_vertex_buffer_parcel: FnGoldyTaskGraphRenderPassSetVertexBufferParcel,
     pub goldy_retained_pool_acquire_buffer: FnGoldyRetainedPoolAcquireBuffer,
     pub goldy_retained_pool_create: FnGoldyRetainedPoolCreate,
     pub goldy_retained_pool_destroy: FnGoldyRetainedPoolDestroy,
-    pub goldy_mosaic_builder_create: FnGoldyMosaicBuilderCreate,
-    pub goldy_mosaic_builder_destroy: FnGoldyMosaicBuilderDestroy,
-    pub goldy_mosaic_builder_emplace: FnGoldyMosaicBuilderEmplace,
-    pub goldy_mosaic_builder_build: FnGoldyMosaicBuilderBuild,
+    pub goldy_record_builder_create: FnGoldyRecordBuilderCreate,
+    pub goldy_record_builder_destroy: FnGoldyRecordBuilderDestroy,
+    pub goldy_record_builder_emplace: FnGoldyRecordBuilderEmplace,
+    pub goldy_record_builder_build: FnGoldyRecordBuilderBuild,
+    pub goldy_buffer_destroy: FnGoldyBufferDestroy,
+    pub goldy_buffer_byte_size: FnGoldyBufferByteSize,
+    pub goldy_buffer_unit_count: FnGoldyBufferUnitCount,
+    pub goldy_buffer_unit_byte_size: FnGoldyBufferUnitByteSize,
+    pub goldy_buffer_unit_resource_index: FnGoldyBufferUnitResourceIndex,
+    pub goldy_buffer_unit_read_to_cpu: FnGoldyBufferUnitReadToCpu,
+    pub goldy_buffer_field: FnGoldyBufferField,
     pub goldy_parcel_byte_size: FnGoldyParcelByteSize,
     pub goldy_parcel_destroy: FnGoldyParcelDestroy,
-    pub goldy_parcel_resource_index: FnGoldyParcelResourceIndex,
-    pub goldy_parcel_mosaic_view_resource_index: FnGoldyParcelMosaicViewResourceIndex,
-    pub goldy_parcel_mosaic_view_read_to_cpu: FnGoldyParcelMosaicViewReadToCpu,
-    pub goldy_parcel_mosaic_view_size: FnGoldyParcelMosaicViewSize,
-    pub goldy_parcel_read_to_cpu: FnGoldyParcelReadToCpu,
-    pub goldy_task_graph_compute_node_bind_parcel_view: FnGoldyTaskGraphComputeNodeBindParcelView,
-    pub goldy_task_graph_render_pass_bind_parcel_view: FnGoldyTaskGraphRenderPassBindParcelView,
+    pub goldy_scheme_create: FnGoldySchemeCreate,
+    pub goldy_scheme_destroy: FnGoldySchemeDestroy,
+    pub goldy_scheme_len: FnGoldySchemeLen,
+    pub goldy_scheme_is_dirty: FnGoldySchemeIsDirty,
+    pub goldy_scheme_replay_stats: FnGoldySchemeReplayStats,
+    pub goldy_scheme_compute_node_begin: FnGoldySchemeComputeNodeBegin,
+    pub goldy_scheme_compute_node_with_parcel: FnGoldySchemeComputeNodeWithParcel,
+    pub goldy_scheme_compute_node_with_buffer_unit: FnGoldySchemeComputeNodeWithBufferUnit,
+    pub goldy_scheme_compute_node_with_param: FnGoldySchemeComputeNodeWithParam,
+    pub goldy_scheme_compute_node_dispatch: FnGoldySchemeComputeNodeDispatch,
+    pub goldy_scheme_submit: FnGoldySchemeSubmit,
+    pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
+    pub goldy_scheme_submission_timeline_value: FnGoldySchemeSubmissionTimelineValue,
+    pub goldy_scheme_submission_wait: FnGoldySchemeSubmissionWait,
+    pub goldy_scheme_grant_read: FnGoldySchemeGrantRead,
+    pub goldy_read_grant_destroy: FnGoldyReadGrantDestroy,
+    pub goldy_read_grant_byte_size: FnGoldyReadGrantByteSize,
+    pub goldy_read_grant_consume: FnGoldyReadGrantConsume,
+    pub goldy_scheme_lease_render_target: FnGoldySchemeLeaseRenderTarget,
+    pub goldy_scheme_render_target_lease_destroy: FnGoldySchemeRenderTargetLeaseDestroy,
+    pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
+    pub goldy_scheme_render_pass_with_buffer_unit: FnGoldySchemeRenderPassWithBufferUnit,
+    pub goldy_scheme_render_pass_with_parcel: FnGoldySchemeRenderPassWithParcel,
+    pub goldy_scheme_render_pass_clear: FnGoldySchemeRenderPassClear,
+    pub goldy_scheme_render_pass_clear_depth: FnGoldySchemeRenderPassClearDepth,
+    pub goldy_scheme_render_pass_set_pipeline: FnGoldySchemeRenderPassSetPipeline,
+    pub goldy_scheme_render_pass_set_vertex_buffer_parcel: FnGoldySchemeRenderPassSetVertexBufferParcel,
+    pub goldy_scheme_render_pass_set_index_buffer: FnGoldySchemeRenderPassSetIndexBuffer,
+    pub goldy_scheme_render_pass_draw: FnGoldySchemeRenderPassDraw,
+    pub goldy_scheme_render_pass_draw_indexed: FnGoldySchemeRenderPassDrawIndexed,
+    pub goldy_scheme_render_pass_draw_fullscreen: FnGoldySchemeRenderPassDrawFullscreen,
+    pub goldy_scheme_render_pass_finish: FnGoldySchemeRenderPassFinish,
+    pub goldy_scheme_copy_to_texture: FnGoldySchemeCopyToTexture,
+    pub goldy_scheme_copy_to_present: FnGoldySchemeCopyToPresent,
+    pub goldy_scheme_grant_present: FnGoldySchemeGrantPresent,
+    pub goldy_present_grant_destroy: FnGoldyPresentGrantDestroy,
+    pub goldy_present_grant_consume: FnGoldyPresentGrantConsume,
+    pub goldy_scheme_grant_read_texture: FnGoldySchemeGrantReadTexture,
+    pub goldy_retained_pool_acquire_texture: FnGoldyRetainedPoolAcquireTexture,
+    pub goldy_swapchain_pool_destroy: FnGoldySwapchainPoolDestroy,
+    pub goldy_swapchain_pool_lease: FnGoldySwapchainPoolLease,
+    pub goldy_swapchain_pool_width: FnGoldySwapchainPoolWidth,
+    pub goldy_swapchain_pool_height: FnGoldySwapchainPoolHeight,
+    pub goldy_swapchain_pool_format: FnGoldySwapchainPoolFormat,
+    pub goldy_swapchain_pool_resize: FnGoldySwapchainPoolResize,
+    pub goldy_present_lease_destroy: FnGoldyPresentLeaseDestroy,
+    #[cfg(windows)]
+    pub goldy_swapchain_pool_create_win32: FnGoldySwapchainPoolCreateWin32,
+    #[cfg(target_os = "macos")]
+    pub goldy_swapchain_pool_create_appkit: FnGoldySwapchainPoolCreateAppkit,
+    #[cfg(target_os = "linux")]
+    pub goldy_swapchain_pool_create_wayland: FnGoldySwapchainPoolCreateWayland,
 }
 
 impl GoldyFfi {
@@ -130,6 +160,8 @@ impl GoldyFfi {
             goldy_clear_error: sym!("goldy_clear_error", FnGoldyClearError),
             goldy_compute_pipeline_create: sym!("goldy_compute_pipeline_create", FnGoldyComputePipelineCreate),
             goldy_compute_pipeline_destroy: sym!("goldy_compute_pipeline_destroy", FnGoldyComputePipelineDestroy),
+            goldy_context_create: sym!("goldy_context_create", FnGoldyContextCreate),
+            goldy_context_destroy: sym!("goldy_context_destroy", FnGoldyContextDestroy),
             goldy_device_adapter_id: sym!("goldy_device_adapter_id", FnGoldyDeviceAdapterId),
             goldy_device_destroy: sym!("goldy_device_destroy", FnGoldyDeviceDestroy),
             goldy_device_has_library: sym!("goldy_device_has_library", FnGoldyDeviceHasLibrary),
@@ -182,118 +214,131 @@ impl GoldyFfi {
             goldy_surface_height: sym!("goldy_surface_height", FnGoldySurfaceHeight),
             goldy_surface_present: sym!("goldy_surface_present", FnGoldySurfacePresent),
             goldy_surface_resize: sym!("goldy_surface_resize", FnGoldySurfaceResize),
-            goldy_surface_submit_graph_to_frame: sym!(
-                "goldy_surface_submit_graph_to_frame",
-                FnGoldySurfaceSubmitGraphToFrame
-            ),
             goldy_surface_width: sym!("goldy_surface_width", FnGoldySurfaceWidth),
-            goldy_task_graph_clear: sym!("goldy_task_graph_clear", FnGoldyTaskGraphClear),
-            goldy_task_graph_copy_render_target_to_swapchain: sym!(
-                "goldy_task_graph_copy_render_target_to_swapchain",
-                FnGoldyTaskGraphCopyRenderTargetToSwapchain
-            ),
-            goldy_task_graph_create: sym!("goldy_task_graph_create", FnGoldyTaskGraphCreate),
-            goldy_task_graph_declare_swapchain_output: sym!(
-                "goldy_task_graph_declare_swapchain_output",
-                FnGoldyTaskGraphDeclareSwapchainOutput
-            ),
-            goldy_task_graph_compute_node_begin: sym!(
-                "goldy_task_graph_compute_node_begin",
-                FnGoldyTaskGraphComputeNodeBegin
-            ),
-            goldy_task_graph_compute_node_bind_parcel: sym!(
-                "goldy_task_graph_compute_node_bind_parcel",
-                FnGoldyTaskGraphComputeNodeBindParcel
-            ),
-            goldy_task_graph_compute_node_bind_resources_raw: sym!(
-                "goldy_task_graph_compute_node_bind_resources_raw",
-                FnGoldyTaskGraphComputeNodeBindResourcesRaw
-            ),
-            goldy_task_graph_compute_node_dispatch: sym!(
-                "goldy_task_graph_compute_node_dispatch",
-                FnGoldyTaskGraphComputeNodeDispatch
-            ),
-            goldy_task_graph_destroy: sym!("goldy_task_graph_destroy", FnGoldyTaskGraphDestroy),
-            goldy_task_graph_dispatch: sym!("goldy_task_graph_dispatch", FnGoldyTaskGraphDispatch),
-            goldy_task_graph_write_parcel: sym!("goldy_task_graph_write_parcel", FnGoldyTaskGraphWriteParcel),
-            goldy_task_graph_render_pass_begin: sym!(
-                "goldy_task_graph_render_pass_begin",
-                FnGoldyTaskGraphRenderPassBegin
-            ),
-            goldy_task_graph_render_pass_bind_parcel: sym!(
-                "goldy_task_graph_render_pass_bind_parcel",
-                FnGoldyTaskGraphRenderPassBindParcel
-            ),
-            goldy_task_graph_render_pass_bind_resources_typed: sym!(
-                "goldy_task_graph_render_pass_bind_resources_typed",
-                FnGoldyTaskGraphRenderPassBindResourcesTyped
-            ),
-            goldy_task_graph_render_pass_clear: sym!(
-                "goldy_task_graph_render_pass_clear",
-                FnGoldyTaskGraphRenderPassClear
-            ),
-            goldy_task_graph_render_pass_clear_depth: sym!(
-                "goldy_task_graph_render_pass_clear_depth",
-                FnGoldyTaskGraphRenderPassClearDepth
-            ),
-            goldy_task_graph_render_pass_draw: sym!(
-                "goldy_task_graph_render_pass_draw",
-                FnGoldyTaskGraphRenderPassDraw
-            ),
-            goldy_task_graph_render_pass_draw_fullscreen: sym!(
-                "goldy_task_graph_render_pass_draw_fullscreen",
-                FnGoldyTaskGraphRenderPassDrawFullscreen
-            ),
-            goldy_task_graph_render_pass_draw_indexed: sym!(
-                "goldy_task_graph_render_pass_draw_indexed",
-                FnGoldyTaskGraphRenderPassDrawIndexed
-            ),
-            goldy_task_graph_render_pass_finish: sym!(
-                "goldy_task_graph_render_pass_finish",
-                FnGoldyTaskGraphRenderPassFinish
-            ),
-            goldy_task_graph_render_pass_set_index_buffer: sym!(
-                "goldy_task_graph_render_pass_set_index_buffer",
-                FnGoldyTaskGraphRenderPassSetIndexBuffer
-            ),
-            goldy_task_graph_render_pass_set_pipeline: sym!(
-                "goldy_task_graph_render_pass_set_pipeline",
-                FnGoldyTaskGraphRenderPassSetPipeline
-            ),
-            goldy_task_graph_render_pass_set_vertex_buffer_parcel: sym!(
-                "goldy_task_graph_render_pass_set_vertex_buffer_parcel",
-                FnGoldyTaskGraphRenderPassSetVertexBufferParcel
-            ),
             goldy_retained_pool_acquire_buffer: sym!(
                 "goldy_retained_pool_acquire_buffer",
                 FnGoldyRetainedPoolAcquireBuffer
             ),
             goldy_retained_pool_create: sym!("goldy_retained_pool_create", FnGoldyRetainedPoolCreate),
             goldy_retained_pool_destroy: sym!("goldy_retained_pool_destroy", FnGoldyRetainedPoolDestroy),
-            goldy_mosaic_builder_create: sym!("goldy_mosaic_builder_create", FnGoldyMosaicBuilderCreate),
-            goldy_mosaic_builder_destroy: sym!("goldy_mosaic_builder_destroy", FnGoldyMosaicBuilderDestroy),
-            goldy_mosaic_builder_emplace: sym!("goldy_mosaic_builder_emplace", FnGoldyMosaicBuilderEmplace),
-            goldy_mosaic_builder_build: sym!("goldy_mosaic_builder_build", FnGoldyMosaicBuilderBuild),
+            goldy_record_builder_create: sym!("goldy_record_builder_create", FnGoldyRecordBuilderCreate),
+            goldy_record_builder_destroy: sym!("goldy_record_builder_destroy", FnGoldyRecordBuilderDestroy),
+            goldy_record_builder_emplace: sym!("goldy_record_builder_emplace", FnGoldyRecordBuilderEmplace),
+            goldy_record_builder_build: sym!("goldy_record_builder_build", FnGoldyRecordBuilderBuild),
+            goldy_buffer_destroy: sym!("goldy_buffer_destroy", FnGoldyBufferDestroy),
+            goldy_buffer_byte_size: sym!("goldy_buffer_byte_size", FnGoldyBufferByteSize),
+            goldy_buffer_unit_count: sym!("goldy_buffer_unit_count", FnGoldyBufferUnitCount),
+            goldy_buffer_unit_byte_size: sym!("goldy_buffer_unit_byte_size", FnGoldyBufferUnitByteSize),
+            goldy_buffer_unit_resource_index: sym!("goldy_buffer_unit_resource_index", FnGoldyBufferUnitResourceIndex),
+            goldy_buffer_unit_read_to_cpu: sym!("goldy_buffer_unit_read_to_cpu", FnGoldyBufferUnitReadToCpu),
+            goldy_buffer_field: sym!("goldy_buffer_field", FnGoldyBufferField),
             goldy_parcel_byte_size: sym!("goldy_parcel_byte_size", FnGoldyParcelByteSize),
             goldy_parcel_destroy: sym!("goldy_parcel_destroy", FnGoldyParcelDestroy),
-            goldy_parcel_resource_index: sym!("goldy_parcel_resource_index", FnGoldyParcelResourceIndex),
-            goldy_parcel_mosaic_view_resource_index: sym!(
-                "goldy_parcel_mosaic_view_resource_index",
-                FnGoldyParcelMosaicViewResourceIndex
+            goldy_scheme_create: sym!("goldy_scheme_create", FnGoldySchemeCreate),
+            goldy_scheme_destroy: sym!("goldy_scheme_destroy", FnGoldySchemeDestroy),
+            goldy_scheme_len: sym!("goldy_scheme_len", FnGoldySchemeLen),
+            goldy_scheme_is_dirty: sym!("goldy_scheme_is_dirty", FnGoldySchemeIsDirty),
+            goldy_scheme_replay_stats: sym!("goldy_scheme_replay_stats", FnGoldySchemeReplayStats),
+            goldy_scheme_compute_node_begin: sym!("goldy_scheme_compute_node_begin", FnGoldySchemeComputeNodeBegin),
+            goldy_scheme_compute_node_with_parcel: sym!(
+                "goldy_scheme_compute_node_with_parcel",
+                FnGoldySchemeComputeNodeWithParcel
             ),
-            goldy_parcel_mosaic_view_read_to_cpu: sym!(
-                "goldy_parcel_mosaic_view_read_to_cpu",
-                FnGoldyParcelMosaicViewReadToCpu
+            goldy_scheme_compute_node_with_buffer_unit: sym!(
+                "goldy_scheme_compute_node_with_buffer_unit",
+                FnGoldySchemeComputeNodeWithBufferUnit
             ),
-            goldy_parcel_mosaic_view_size: sym!("goldy_parcel_mosaic_view_size", FnGoldyParcelMosaicViewSize),
-            goldy_parcel_read_to_cpu: sym!("goldy_parcel_read_to_cpu", FnGoldyParcelReadToCpu),
-            goldy_task_graph_compute_node_bind_parcel_view: sym!(
-                "goldy_task_graph_compute_node_bind_parcel_view",
-                FnGoldyTaskGraphComputeNodeBindParcelView
+            goldy_scheme_compute_node_with_param: sym!(
+                "goldy_scheme_compute_node_with_param",
+                FnGoldySchemeComputeNodeWithParam
             ),
-            goldy_task_graph_render_pass_bind_parcel_view: sym!(
-                "goldy_task_graph_render_pass_bind_parcel_view",
-                FnGoldyTaskGraphRenderPassBindParcelView
+            goldy_scheme_compute_node_dispatch: sym!(
+                "goldy_scheme_compute_node_dispatch",
+                FnGoldySchemeComputeNodeDispatch
+            ),
+            goldy_scheme_submit: sym!("goldy_scheme_submit", FnGoldySchemeSubmit),
+            goldy_scheme_submission_destroy: sym!("goldy_scheme_submission_destroy", FnGoldySchemeSubmissionDestroy),
+            goldy_scheme_submission_timeline_value: sym!(
+                "goldy_scheme_submission_timeline_value",
+                FnGoldySchemeSubmissionTimelineValue
+            ),
+            goldy_scheme_submission_wait: sym!("goldy_scheme_submission_wait", FnGoldySchemeSubmissionWait),
+            goldy_scheme_grant_read: sym!("goldy_scheme_grant_read", FnGoldySchemeGrantRead),
+            goldy_read_grant_destroy: sym!("goldy_read_grant_destroy", FnGoldyReadGrantDestroy),
+            goldy_read_grant_byte_size: sym!("goldy_read_grant_byte_size", FnGoldyReadGrantByteSize),
+            goldy_read_grant_consume: sym!("goldy_read_grant_consume", FnGoldyReadGrantConsume),
+            goldy_scheme_lease_render_target: sym!("goldy_scheme_lease_render_target", FnGoldySchemeLeaseRenderTarget),
+            goldy_scheme_render_target_lease_destroy: sym!(
+                "goldy_scheme_render_target_lease_destroy",
+                FnGoldySchemeRenderTargetLeaseDestroy
+            ),
+            goldy_scheme_render_pass_begin: sym!("goldy_scheme_render_pass_begin", FnGoldySchemeRenderPassBegin),
+            goldy_scheme_render_pass_with_buffer_unit: sym!(
+                "goldy_scheme_render_pass_with_buffer_unit",
+                FnGoldySchemeRenderPassWithBufferUnit
+            ),
+            goldy_scheme_render_pass_with_parcel: sym!(
+                "goldy_scheme_render_pass_with_parcel",
+                FnGoldySchemeRenderPassWithParcel
+            ),
+            goldy_scheme_render_pass_clear: sym!("goldy_scheme_render_pass_clear", FnGoldySchemeRenderPassClear),
+            goldy_scheme_render_pass_clear_depth: sym!(
+                "goldy_scheme_render_pass_clear_depth",
+                FnGoldySchemeRenderPassClearDepth
+            ),
+            goldy_scheme_render_pass_set_pipeline: sym!(
+                "goldy_scheme_render_pass_set_pipeline",
+                FnGoldySchemeRenderPassSetPipeline
+            ),
+            goldy_scheme_render_pass_set_vertex_buffer_parcel: sym!(
+                "goldy_scheme_render_pass_set_vertex_buffer_parcel",
+                FnGoldySchemeRenderPassSetVertexBufferParcel
+            ),
+            goldy_scheme_render_pass_set_index_buffer: sym!(
+                "goldy_scheme_render_pass_set_index_buffer",
+                FnGoldySchemeRenderPassSetIndexBuffer
+            ),
+            goldy_scheme_render_pass_draw: sym!("goldy_scheme_render_pass_draw", FnGoldySchemeRenderPassDraw),
+            goldy_scheme_render_pass_draw_indexed: sym!(
+                "goldy_scheme_render_pass_draw_indexed",
+                FnGoldySchemeRenderPassDrawIndexed
+            ),
+            goldy_scheme_render_pass_draw_fullscreen: sym!(
+                "goldy_scheme_render_pass_draw_fullscreen",
+                FnGoldySchemeRenderPassDrawFullscreen
+            ),
+            goldy_scheme_render_pass_finish: sym!("goldy_scheme_render_pass_finish", FnGoldySchemeRenderPassFinish),
+            goldy_scheme_copy_to_texture: sym!("goldy_scheme_copy_to_texture", FnGoldySchemeCopyToTexture),
+            goldy_scheme_copy_to_present: sym!("goldy_scheme_copy_to_present", FnGoldySchemeCopyToPresent),
+            goldy_scheme_grant_present: sym!("goldy_scheme_grant_present", FnGoldySchemeGrantPresent),
+            goldy_present_grant_destroy: sym!("goldy_present_grant_destroy", FnGoldyPresentGrantDestroy),
+            goldy_present_grant_consume: sym!("goldy_present_grant_consume", FnGoldyPresentGrantConsume),
+            goldy_scheme_grant_read_texture: sym!("goldy_scheme_grant_read_texture", FnGoldySchemeGrantReadTexture),
+            goldy_retained_pool_acquire_texture: sym!(
+                "goldy_retained_pool_acquire_texture",
+                FnGoldyRetainedPoolAcquireTexture
+            ),
+            goldy_swapchain_pool_destroy: sym!("goldy_swapchain_pool_destroy", FnGoldySwapchainPoolDestroy),
+            goldy_swapchain_pool_lease: sym!("goldy_swapchain_pool_lease", FnGoldySwapchainPoolLease),
+            goldy_swapchain_pool_width: sym!("goldy_swapchain_pool_width", FnGoldySwapchainPoolWidth),
+            goldy_swapchain_pool_height: sym!("goldy_swapchain_pool_height", FnGoldySwapchainPoolHeight),
+            goldy_swapchain_pool_format: sym!("goldy_swapchain_pool_format", FnGoldySwapchainPoolFormat),
+            goldy_swapchain_pool_resize: sym!("goldy_swapchain_pool_resize", FnGoldySwapchainPoolResize),
+            goldy_present_lease_destroy: sym!("goldy_present_lease_destroy", FnGoldyPresentLeaseDestroy),
+            #[cfg(windows)]
+            goldy_swapchain_pool_create_win32: sym!(
+                "goldy_swapchain_pool_create_win32",
+                FnGoldySwapchainPoolCreateWin32
+            ),
+            #[cfg(target_os = "macos")]
+            goldy_swapchain_pool_create_appkit: sym!(
+                "goldy_swapchain_pool_create_appkit",
+                FnGoldySwapchainPoolCreateAppkit
+            ),
+            #[cfg(target_os = "linux")]
+            goldy_swapchain_pool_create_wayland: sym!(
+                "goldy_swapchain_pool_create_wayland",
+                FnGoldySwapchainPoolCreateWayland
             ),
             _library: library,
         })

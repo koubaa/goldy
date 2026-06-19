@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::buffer::Buffer;
+use crate::buffer::Allocation;
 use crate::texture::Texture;
 use crate::vram_allocator::{bytesize, ParcelType};
 
@@ -35,7 +35,7 @@ pub struct AllocCommit {
 }
 
 impl AllocCommit {
-    pub fn from_buffer(buf: &Buffer) -> Self {
+    pub(crate) fn from_buffer(buf: &Allocation) -> Self {
         Self {
             reserved: buf.allocated_size(),
             committed: buf.size(),

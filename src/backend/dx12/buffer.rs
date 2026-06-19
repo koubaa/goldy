@@ -399,36 +399,31 @@ pub(super) fn resize(
         .context("resize_buffer: command list")?;
         let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
-        if need_copy {
-            let mut b_src = [barriers::buffer_barrier_full(
-                &old_resource,
-                D3D12_BARRIER_SYNC_ALL,
-                D3D12_BARRIER_SYNC_COPY,
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                D3D12_BARRIER_ACCESS_COPY_SOURCE,
-            )];
-            let mut b_dst = [barriers::buffer_barrier_full(
-                &new_resource,
-                D3D12_BARRIER_SYNC_ALL,
-                D3D12_BARRIER_SYNC_COPY,
-                D3D12_BARRIER_ACCESS_COMMON,
-                D3D12_BARRIER_ACCESS_COPY_DEST,
-            )];
-            unsafe {
-                barriers::barrier_buffers(&cmd7, &b_src);
-                barriers::drop_buffer_barriers(&mut b_src);
-                barriers::barrier_buffers(&cmd7, &b_dst);
-                barriers::drop_buffer_barriers(&mut b_dst);
-                cmd.CopyBufferRegion(&new_resource, 0, &old_resource, 0, copy_len);
-            }
-        }
+        // WARP silently corrupts its internal resource-state tracker when
+        // D3D12_BARRIER_TYPE_BUFFER enhanced barriers are used in standalone command
+        // lists.  On WARP we use a conservative ALL/ALL/COMMON/COMMON global barrier
+        // instead; on real hardware we keep per-buffer barriers for minimal flush scope.
+        let is_warp = device.adapter_id == super::WARP_ADAPTER_ID;
+        let warp_full = D3D12_GLOBAL_BARRIER {
+            SyncBefore: D3D12_BARRIER_SYNC_ALL,
+            SyncAfter: D3D12_BARRIER_SYNC_ALL,
+            AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+            AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+        };
 
-        if need_tail_clear {
-            let tail_len = new_size - old.size;
-            // If we just copied old content, new_resource is already in COPY_DEST.
-            // Otherwise transition it from COMMON.
-            if !need_copy {
-                let mut b_to_copy = [barriers::buffer_barrier_full(
+        if need_copy {
+            if is_warp {
+                unsafe { barriers::barrier_globals(&cmd7, &[warp_full]) };
+            } else {
+                // Transition old_resource → COPY_SOURCE and new_resource → COPY_DEST.
+                let mut b_old = [barriers::buffer_barrier_full(
+                    &old_resource,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                )];
+                let mut b_new = [barriers::buffer_barrier_full(
                     &new_resource,
                     D3D12_BARRIER_SYNC_ALL,
                     D3D12_BARRIER_SYNC_COPY,
@@ -436,21 +431,70 @@ pub(super) fn resize(
                     D3D12_BARRIER_ACCESS_COPY_DEST,
                 )];
                 unsafe {
-                    barriers::barrier_buffers(&cmd7, &b_to_copy);
-                    barriers::drop_buffer_barriers(&mut b_to_copy);
+                    barriers::barrier_buffers(&cmd7, &b_old);
+                    barriers::drop_buffer_barriers(&mut b_old);
+                    barriers::barrier_buffers(&cmd7, &b_new);
+                    barriers::drop_buffer_barriers(&mut b_new);
                 }
             }
-            // Zero-fill the tail via chunked CopyBufferRegion from the device's zero buffer.
-            let zero = &device.zero_buffer;
-            let mut tail_written = 0u64;
-            while tail_written < tail_len {
-                let this_chunk = (tail_len - tail_written).min(ZERO_BUFFER_SIZE);
+            unsafe { cmd.CopyBufferRegion(&new_resource, 0, &old_resource, 0, copy_len) };
+        }
+
+        if need_tail_clear {
+            let tail_len = new_size - old.size;
+            if is_warp {
+                if !need_copy {
+                    unsafe { barriers::barrier_globals(&cmd7, &[warp_full]) };
+                }
+                // Zero-fill the tail via chunked CopyBufferRegion from the device's zero buffer.
+                let zero = &device.zero_buffer;
+                let mut tail_written = 0u64;
+                while tail_written < tail_len {
+                    let this_chunk = (tail_len - tail_written).min(ZERO_BUFFER_SIZE);
+                    unsafe {
+                        cmd.CopyBufferRegion(&new_resource, old.size + tail_written, zero, 0, this_chunk);
+                    }
+                    tail_written += this_chunk;
+                }
+                unsafe { barriers::barrier_globals(&cmd7, &[warp_full]) };
+            } else {
+                if !need_copy {
+                    // new_resource not yet in COPY_DEST; transition it now.
+                    let mut b_to_copy = [barriers::buffer_barrier_full(
+                        &new_resource,
+                        D3D12_BARRIER_SYNC_ALL,
+                        D3D12_BARRIER_SYNC_COPY,
+                        D3D12_BARRIER_ACCESS_COMMON,
+                        D3D12_BARRIER_ACCESS_COPY_DEST,
+                    )];
+                    unsafe {
+                        barriers::barrier_buffers(&cmd7, &b_to_copy);
+                        barriers::drop_buffer_barriers(&mut b_to_copy);
+                    }
+                }
+                let zero = &device.zero_buffer;
+                let mut tail_written = 0u64;
+                while tail_written < tail_len {
+                    let this_chunk = (tail_len - tail_written).min(ZERO_BUFFER_SIZE);
+                    unsafe {
+                        cmd.CopyBufferRegion(&new_resource, old.size + tail_written, zero, 0, this_chunk);
+                    }
+                    tail_written += this_chunk;
+                }
+                let mut b_to_common = [barriers::buffer_barrier_full(
+                    &new_resource,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    D3D12_BARRIER_ACCESS_COMMON,
+                )];
                 unsafe {
-                    cmd.CopyBufferRegion(&new_resource, old.size + tail_written, zero, 0, this_chunk);
+                    barriers::barrier_buffers(&cmd7, &b_to_common);
+                    barriers::drop_buffer_barriers(&mut b_to_common);
                 }
-                tail_written += this_chunk;
             }
-            // Transition back to COMMON so the resource can be used as UAV by subsequent work.
+        } else if need_copy && !is_warp {
+            // Copy only (no tail clear): restore new_resource to COMMON.
             let mut b_to_common = [barriers::buffer_barrier_full(
                 &new_resource,
                 D3D12_BARRIER_SYNC_COPY,
@@ -534,6 +578,8 @@ pub(super) fn resize(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -872,6 +918,8 @@ pub(super) fn create(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -1013,6 +1061,8 @@ pub(super) fn create_reserved_with_capacity(
             is_reserved: true,
             tile_byte_size: tiles::BUFFER_TILE_BYTES,
             reserved_tiles,
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -1155,8 +1205,11 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
                 return;
             }
             if buffer.coherent_readback_mapped.is_some() {
-                if let Some(ref rb) = buffer.coherent_readback {
-                    let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+                if buffer.is_grant_readback {
+                    // Grant readback maps the primary READBACK resource directly.
+                    unsafe { buffer.resource.Unmap(0, Some(&no_write)) };
+                } else if let Some(ref rb) = buffer.coherent_readback {
                     unsafe { rb.Unmap(0, Some(&no_write)) };
                 }
             }
@@ -1389,6 +1442,8 @@ pub(super) fn create_view(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -1575,26 +1630,48 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
         let cmd7: ID3D12GraphicsCommandList7 = cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
         let dst_offset = offset + written;
-        let mut b_to_copy = [barriers::buffer_barrier_full(
-            &main_resource,
-            D3D12_BARRIER_SYNC_ALL,
-            D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_ACCESS_COMMON,
-            D3D12_BARRIER_ACCESS_COPY_DEST,
-        )];
-        let mut b_to_uav = [barriers::buffer_barrier_full(
-            &main_resource,
-            D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_SYNC_ALL,
-            D3D12_BARRIER_ACCESS_COPY_DEST,
-            D3D12_BARRIER_ACCESS_COMMON,
-        )];
-        unsafe {
-            barriers::barrier_buffers(&cmd7, &b_to_copy);
-            barriers::drop_buffer_barriers(&mut b_to_copy);
-            cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk);
-            barriers::barrier_buffers(&cmd7, &b_to_uav);
-            barriers::drop_buffer_barriers(&mut b_to_uav);
+        // WARP silently corrupts its buffer state tracker when D3D12_BARRIER_TYPE_BUFFER
+        // enhanced barriers are used (the GPU writes the data, but WARP's internal tracker
+        // leaves the resource stuck in COPY_DEST, causing subsequent SRV reads to return 0).
+        // On WARP we use a conservative ALL/ALL/COMMON/COMMON global barrier; on real hardware
+        // we use precise per-buffer barriers so only the destination cache line is flushed.
+        let is_warp = device.adapter_id == super::WARP_ADAPTER_ID;
+        if is_warp {
+            let g = D3D12_GLOBAL_BARRIER {
+                SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                SyncAfter: D3D12_BARRIER_SYNC_ALL,
+                AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+                AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+            };
+            unsafe {
+                barriers::barrier_globals(&cmd7, &[g]);
+                cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk);
+                barriers::barrier_globals(&cmd7, &[g]);
+            }
+        } else {
+            let mut b_pre = [barriers::buffer_barrier_full(
+                &main_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_COMMON,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+            )];
+            unsafe {
+                barriers::barrier_buffers(&cmd7, &b_pre);
+                barriers::drop_buffer_barriers(&mut b_pre);
+                cmd.CopyBufferRegion(&main_resource, dst_offset, &upload_buf, 0, this_chunk);
+            }
+            let mut b_post = [barriers::buffer_barrier_full(
+                &main_resource,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_ACCESS_COMMON,
+            )];
+            unsafe {
+                barriers::barrier_buffers(&cmd7, &b_post);
+                barriers::drop_buffer_barriers(&mut b_post);
+            }
         }
         unsafe { cmd.Close() }.context("Failed to close command list")?;
 
@@ -1959,37 +2036,62 @@ pub(super) fn clear(
         let buf_resource = buffer.resource.clone();
         let zero = device.zero_buffer.clone();
 
-        let mut b_to_copy = [barriers::buffer_barrier_full(
-            &buf_resource,
-            D3D12_BARRIER_SYNC_ALL,
-            D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_ACCESS_COMMON,
-            D3D12_BARRIER_ACCESS_COPY_DEST,
-        )];
-        unsafe {
-            barriers::barrier_buffers(&cmd_list7, &b_to_copy);
-            barriers::drop_buffer_barriers(&mut b_to_copy);
-        }
+        // WARP silently corrupts its buffer state tracker with D3D12_BARRIER_TYPE_BUFFER
+        // enhanced barriers.  Use a conservative global barrier on WARP; on real hardware
+        // use a precise per-buffer barrier so only this buffer's cache lines are flushed.
+        let is_warp = device.adapter_id == super::WARP_ADAPTER_ID;
+        if is_warp {
+            let g = D3D12_GLOBAL_BARRIER {
+                SyncBefore: D3D12_BARRIER_SYNC_ALL,
+                SyncAfter: D3D12_BARRIER_SYNC_ALL,
+                AccessBefore: D3D12_BARRIER_ACCESS_COMMON,
+                AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+            };
+            unsafe { barriers::barrier_globals(&cmd_list7, &[g]) };
 
-        let mut written = 0u64;
-        while written < clear_size {
-            let this_chunk = (clear_size - written).min(ZERO_BUFFER_SIZE);
-            unsafe {
-                cmd_list.CopyBufferRegion(&buf_resource, offset + written, &zero, 0, this_chunk);
+            let mut written = 0u64;
+            while written < clear_size {
+                let this_chunk = (clear_size - written).min(ZERO_BUFFER_SIZE);
+                unsafe {
+                    cmd_list.CopyBufferRegion(&buf_resource, offset + written, &zero, 0, this_chunk);
+                }
+                written += this_chunk;
             }
-            written += this_chunk;
-        }
 
-        let mut b_to_common = [barriers::buffer_barrier_full(
-            &buf_resource,
-            D3D12_BARRIER_SYNC_COPY,
-            D3D12_BARRIER_SYNC_ALL,
-            D3D12_BARRIER_ACCESS_COPY_DEST,
-            D3D12_BARRIER_ACCESS_COMMON,
-        )];
-        unsafe {
-            barriers::barrier_buffers(&cmd_list7, &b_to_common);
-            barriers::drop_buffer_barriers(&mut b_to_common);
+            unsafe { barriers::barrier_globals(&cmd_list7, &[g]) };
+        } else {
+            let mut b_pre = [barriers::buffer_barrier_full(
+                &buf_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_COMMON,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+            )];
+            unsafe {
+                barriers::barrier_buffers(&cmd_list7, &b_pre);
+                barriers::drop_buffer_barriers(&mut b_pre);
+            }
+
+            let mut written = 0u64;
+            while written < clear_size {
+                let this_chunk = (clear_size - written).min(ZERO_BUFFER_SIZE);
+                unsafe {
+                    cmd_list.CopyBufferRegion(&buf_resource, offset + written, &zero, 0, this_chunk);
+                }
+                written += this_chunk;
+            }
+
+            let mut b_post = [barriers::buffer_barrier_full(
+                &buf_resource,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_ACCESS_COMMON,
+            )];
+            unsafe {
+                barriers::barrier_buffers(&cmd_list7, &b_post);
+                barriers::drop_buffer_barriers(&mut b_post);
+            }
         }
 
         unsafe { cmd_list.Close() }.context("Failed to close command list")?;
@@ -2025,5 +2127,213 @@ pub(super) fn clear(
         unsafe { buffer.resource.Unmap(0, Some(&written)) };
     }
 
+    Ok(())
+}
+
+/// Allocate a persistently mapped READBACK staging buffer for grant readback.
+pub(super) fn alloc_readback_buffer(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    size: u64,
+) -> Result<BufferHandle> {
+    use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+
+    let device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let readback_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let readback_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut resource: Option<ID3D12Resource> = None;
+    unsafe {
+        device.device.CreateCommittedResource(
+            &readback_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &readback_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut resource,
+        )
+    }
+    .context("Failed to create grant readback buffer")?;
+    let resource = resource.context("CreateCommittedResource readback returned null")?;
+    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map grant readback buffer")?;
+    let mapped_addr = mapped as usize;
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            resource,
+            size,
+            allocation_size: size,
+            bindless_offset: None,
+            bindless_srv_offset: None,
+            is_storage: false,
+            upload_buffer: None,
+            element_stride: None,
+            is_view: false,
+            coherent_readback: None,
+            coherent_readback_mapped: Some(mapped_addr),
+            flags: BufferFlags::empty(),
+            transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
+            is_grant_readback: true,
+            grant_texture_readback: None,
+        },
+    );
+    Ok(handle)
+}
+
+/// Allocate a persistently mapped READBACK staging buffer for texture grant readback.
+pub(super) fn alloc_texture_readback_staging(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    layout: crate::backend::TextureReadbackLayout,
+) -> Result<BufferHandle> {
+    use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
+
+    let device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let readback_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let readback_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: layout.staging_bytes,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut resource: Option<ID3D12Resource> = None;
+    unsafe {
+        device.device.CreateCommittedResource(
+            &readback_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &readback_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut resource,
+        )
+    }
+    .context("Failed to create texture grant readback buffer")?;
+    let resource = resource.context("CreateCommittedResource texture readback returned null")?;
+    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+    unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }
+        .context("Failed to map texture grant readback buffer")?;
+    let mapped_addr = mapped as usize;
+
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            resource,
+            size: layout.staging_bytes,
+            allocation_size: layout.staging_bytes,
+            bindless_offset: None,
+            bindless_srv_offset: None,
+            is_storage: false,
+            upload_buffer: None,
+            element_stride: None,
+            is_view: false,
+            coherent_readback: None,
+            coherent_readback_mapped: Some(mapped_addr),
+            flags: BufferFlags::empty(),
+            transient_placed: false,
+            parent_for_view: None,
+            view_byte_offset: None,
+            is_reserved: false,
+            tile_byte_size: 0,
+            reserved_tiles: Vec::new(),
+            is_grant_readback: true,
+            grant_texture_readback: Some(layout),
+        },
+    );
+    Ok(handle)
+}
+
+/// Read tight linear bytes from a texture grant readback staging buffer.
+pub(super) fn read_texture_readback_staging(
+    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    layout: crate::backend::TextureReadbackLayout,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    }
+    if output.len() as u64 != layout.logical_bytes {
+        anyhow::bail!("read_texture_readback_staging size mismatch");
+    }
+    let base = buffer
+        .coherent_readback_mapped
+        .context("texture grant readback buffer not mapped")?;
+    let row_bytes = layout.tight_row_bytes() as usize;
+    let pitch = layout.row_pitch as usize;
+    let p = base as *const u8;
+    for row in 0..layout.height as usize {
+        let src_offset = layout.footprint_offset as usize + row * pitch;
+        let dst_offset = row * row_bytes;
+        unsafe {
+            std::ptr::copy_nonoverlapping(p.add(src_offset), output.as_mut_ptr().add(dst_offset), row_bytes);
+        }
+    }
+    Ok(())
+}
+
+/// Read bytes from a grant readback staging buffer.
+pub(super) fn read_readback_buffer(
+    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    output: &mut [u8],
+) -> Result<()> {
+    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    }
+    let base = buffer
+        .coherent_readback_mapped
+        .context("grant readback buffer not mapped")?;
+    if output.len() as u64 > buffer.size {
+        anyhow::bail!("read_readback_buffer would exceed buffer bounds");
+    }
+    let p = base as *const u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(p, output.as_mut_ptr(), output.len());
+    }
     Ok(())
 }

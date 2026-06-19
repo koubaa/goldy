@@ -212,6 +212,8 @@ fn create_scattered_u32_buffer_at_slot(
             is_reserved: false,
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
     Ok(handle)
@@ -273,8 +275,8 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
     let pinned = ft.pinned_rows.load(Ordering::Acquire);
     if pinned & (1 << row) != 0 {
         anyhow::bail!(
-            "frame table row {row} is pinned by a retained command list; \
-             evict the retained graph before submitting new bindings"
+            "frame table row {row} is still pinned after evicting retained graphs \
+             (sub={sub}); retained command list lifecycle bug"
         );
     }
     if sub >= FRAME_TABLE_MAX_ROWS {
@@ -292,19 +294,33 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
 
 /// CPU staging write before a retained resubmit (row bump + table bytes; GPU copy is in the CB).
 pub(crate) fn write_staging_for_submission(
-    state: &Dx12State,
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
     device_handle: super::DeviceHandle,
     data: &[u32],
 ) -> Result<u32> {
-    let ft = state
-        .frame_tables
+    let sub = frame_tables
+        .get(&device_handle)
+        .context("frame table not initialized")?
+        .submission_counter
+        .fetch_add(1, Ordering::Relaxed);
+    let row = sub % FRAME_TABLE_MAX_ROWS;
+    let row_pinned = frame_tables
+        .get(&device_handle)
+        .context("frame table not initialized")?
+        .pinned_rows
+        .load(Ordering::Acquire)
+        & (1 << row)
+        != 0;
+    if row_pinned {
+        super::compute::evict_retained_pinning_row(contexts, frame_tables, device_handle, row);
+    }
+    let ft = frame_tables
         .get(&device_handle)
         .context("frame table not initialized")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
-    let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
-    let row = sub % FRAME_TABLE_MAX_ROWS;
     assert_row_available(ft, sub, row)?;
     ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     // Staging selector word `row` always holds the value `row` (matches baked copy offset).
@@ -381,19 +397,20 @@ pub(crate) fn sync_table_row_to_device(
 
 /// CPU staging write + GPU copy prologue.
 pub(crate) fn record_prologue(
-    state: &Dx12State,
+    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
+    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     device_handle: super::DeviceHandle,
     cl: &ID3D12GraphicsCommandList7,
     data: &[u32],
 ) -> Result<()> {
-    let row = write_staging_for_submission(state, device_handle, data)?;
+    let row = write_staging_for_submission(contexts, frame_tables, device_handle, data)?;
 
-    let ft = state
-        .frame_tables
+    let ft = frame_tables
         .get(&device_handle)
         .context("frame table not initialized")?;
-    let device_table = state.buffers.get(&ft.device_table).context("device table")?;
-    let selector_state = state.buffers.get(&ft.selector).context("selector")?;
+    let device_table = buffers.get(&ft.device_table).context("device table")?;
+    let selector_state = buffers.get(&ft.selector).context("selector")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let row_bytes = (FRAME_TABLE_ROW_STRIDE as u64) * 4;
@@ -477,16 +494,18 @@ pub(crate) fn prepare_render_commands(
     use crate::backend::RenderCommand;
     use crate::frame_table::FrameTableStaging;
 
-    crate::backend::validate_render_pass_bind_resources(
-        commands,
-        |h| {
-            state
-                .pipelines
-                .get(&h)
-                .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
-        },
-        |h| state.buffers.get(&h).and_then(|b| b.element_stride),
-    )?;
+    crate::backend::with_layout_validation(|| {
+        crate::backend::validate_render_pass_bind_resources(
+            commands,
+            |h| {
+                state
+                    .pipelines
+                    .get(&h)
+                    .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
+            },
+            |h| state.buffers.get(&h).and_then(|b| b.element_stride),
+        )
+    })?;
 
     let mut staging = FrameTableStaging::new();
     let lowered = commands

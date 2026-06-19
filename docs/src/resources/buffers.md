@@ -4,7 +4,7 @@
 
 ## Creating buffers (recommended)
 
-For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in the task graph (`bind_parcel`, `set_vertex_buffer`, `write_parcel`). All Rust, Python, FFI, and .NET examples use this path.
+For application-owned GPU memory, use [`RetainedPool`](retained-pool.md) and bind the returned [`Parcel`](retained-pool.md) in the task graph (`with_parcel`, `set_vertex_buffer`, `write_parcel`). All Rust, Python, FFI, and .NET examples use this path.
 
 ```rust
 use goldy::{BufferFlags, BufferKind, RetainedPool};

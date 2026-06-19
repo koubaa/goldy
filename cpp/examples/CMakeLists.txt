@@ -17,6 +17,9 @@ target_link_libraries(triangle PRIVATE goldy::goldy glfw)
 add_executable(triangle_headless triangle_headless.cpp)
 target_link_libraries(triangle_headless PRIVATE goldy::goldy)
 
+add_executable(compute_simple compute_simple.cpp)
+target_link_libraries(compute_simple PRIVATE goldy::goldy)
+
 add_executable(game_of_life game_of_life.cpp)
 target_link_libraries(game_of_life PRIVATE goldy::goldy glfw)
 
@@ -27,7 +30,7 @@ if(APPLE)
     target_link_libraries(game_of_life PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
 
-set(GOLDY_EXAMPLES triangle triangle_headless game_of_life)
+set(GOLDY_EXAMPLES triangle triangle_headless compute_simple game_of_life)
 
 # Platform-specific shared library handling for all examples
 if(GOLDY_FFI_LIB)

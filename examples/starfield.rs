@@ -1,15 +1,16 @@
 //! Starfield example - classic 3D starfield flying through space.
 //!
-//! Demonstrates GPU compute + graphics in a single task graph:
-//! star update dispatch → offscreen render → swapchain blit.
+//! Demonstrates retained scheme with compute dispatch → offscreen render → copy-to-present.
 //!
-//! Run with: cargo run --example starfield
+//! Run with: `cargo run --example starfield`
+
+#![allow(deprecated)] // write_to_parcel migration deferred
 
 use anyhow::Result;
 use goldy::{
-    BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, ResourceAccess, RetainedPool,
-    ShaderModule, Surface, TaskGraph, VertexBufferLayout,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -23,13 +24,11 @@ mod common;
 
 const NUM_STARS: u32 = 500;
 
-/// Star types for different celestial objects
 const STAR_TYPE_NORMAL: f32 = 0.0;
 const STAR_TYPE_GALAXY: f32 = 1.0;
 const STAR_TYPE_QUASAR: f32 = 2.0;
 const STAR_TYPE_WHITE_DWARF: f32 = 3.0;
 
-/// Star structure matching the shader layout
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Star {
@@ -39,7 +38,6 @@ struct Star {
     star_type: f32,
 }
 
-/// Uniform parameters for the compute shader
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct StarfieldParams {
@@ -87,23 +85,84 @@ struct App {
 struct RenderState {
     window: Arc<Window>,
     device: Arc<goldy::Device>,
-    surface: Surface,
-    scene_rt: RenderTarget,
-    frame_graph: TaskGraph,
+    ctx: goldy::Context,
+    swapchain: SwapchainPool,
+    screen: goldy::PresentLease,
+    present: PresentGrant,
+    scheme: Scheme,
+    scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
-    _retained_pool: RetainedPool,
-    star_buffer: Parcel,
-    params_buffer: Parcel,
+    render_shader: ShaderModule,
     render_pipeline: RenderPipeline,
+    _retained_pool: RetainedPool,
+    star_buffer: Buffer,
+    params_buffer: Buffer,
     speed: f32,
     frame_count: f32,
     start_time: std::time::Instant,
 }
 
 impl RenderState {
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_render_pipeline(
+        device: &goldy::Device,
+        render_shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            render_shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: VertexBufferLayout::empty(),
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        compute_pipeline: &ComputePipeline,
+        render_pipeline: &RenderPipeline,
+        star_buffer: &Buffer,
+        params_buffer: &Buffer,
+        scene_rt: &Lease<LeaseRenderTarget>,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        scheme
+            .node("update_stars", compute_pipeline)
+            .with_parcel(star_buffer, NodeAccess::ReadWrite)
+            .with_parcel(params_buffer, NodeAccess::Read)
+            .dispatch(NUM_STARS.div_ceil(64), 1, 1);
+
+        let mut pass = scheme.render_pass("starfield", scene_rt);
+        pass.with_parcel(star_buffer, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(render_pipeline);
+        pass.draw(0..6, 0..NUM_STARS);
+        pass.finish();
+
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
+    }
+
+    fn rerecord_scheme(&mut self) {
+        let mut scheme = Scheme::new(&self.ctx);
+        let (width, height) = self.swapchain.size();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
+            self.scene_rt = rt;
+            self.present = Self::record_scheme(
+                &mut scheme,
+                &self.compute_pipeline,
+                &self.render_pipeline,
+                &self.star_buffer,
+                &self.params_buffer,
+                &self.scene_rt,
+                &self.screen,
+            );
+            self.scheme = scheme;
+        }
     }
 
     fn new(window: Arc<Window>) -> Result<Self> {
@@ -114,8 +173,8 @@ impl RenderState {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
         let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
         let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
@@ -147,32 +206,38 @@ impl RenderState {
             retained_pool.acquire_buffer_sized::<StarfieldParams>(1, BufferKind::Broadcast, BufferFlags::empty())?;
 
         let compute_pipeline = ComputePipeline::new(&device, &compute_shader)?;
+        let render_pipeline = Self::create_render_pipeline(&device, &render_shader, &swapchain)?;
 
-        let render_pipeline = RenderPipeline::new(
-            &device,
-            &render_shader,
-            &render_shader,
-            &RenderPipelineDesc {
-                vertex_layout: VertexBufferLayout::empty(),
-                topology: PrimitiveTopology::TriangleList,
-                target_format: surface.format(),
-                ..Default::default()
-            },
-        )?;
+        let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let present = Self::record_scheme(
+            &mut scheme,
+            &compute_pipeline,
+            &render_pipeline,
+            &star_buffer,
+            &params_buffer,
+            &scene_rt,
+            &screen,
+        );
 
-        println!("Created starfield with {} stars", NUM_STARS);
+        println!("Created starfield with {NUM_STARS} stars (Scheme + Present)");
 
         Ok(Self {
             window,
             device,
-            surface,
+            ctx,
+            swapchain,
+            screen,
+            present,
+            scheme,
             scene_rt,
-            frame_graph: TaskGraph::new(),
             compute_pipeline,
+            render_shader,
+            render_pipeline,
             _retained_pool: retained_pool,
             star_buffer,
             params_buffer,
-            render_pipeline,
             speed: 0.01,
             frame_count: 0.0,
             start_time: std::time::Instant::now(),
@@ -189,34 +254,10 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
-        self.frame_graph
-            .node("update_stars", &self.compute_pipeline)
-            .bind_parcel(&self.star_buffer, NodeAccess::ReadWrite)
-            .bind_parcel(&self.params_buffer, NodeAccess::Read)
-            .bind_resources_raw_slice(&[
-                self.star_buffer.resource_index(ResourceAccess::Write).unwrap(),
-                self.params_buffer.resource_index(ResourceAccess::Read).unwrap(),
-            ])
-            .dispatch(NUM_STARS.div_ceil(64), 1, 1);
+        write_to_parcel(&self.ctx, &self.params_buffer, 0, bytemuck::bytes_of(&params))?;
 
-        let mut pass = self.frame_graph.render_pass("starfield", &self.scene_rt);
-        pass.bind_parcel_mut(&self.star_buffer, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&self.render_pipeline);
-        pass.bind_resources_raw(&[self.star_buffer.resource_index(ResourceAccess::Read).unwrap()]);
-        pass.draw(0..6, 0..NUM_STARS);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
-
-        let frame = self.surface.begin()?;
-        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let submission = self.scheme.submit()?;
+        self.present.consume(&submission)?;
 
         self.window.request_redraw();
         Ok(())
@@ -224,9 +265,8 @@ impl RenderState {
 
     fn change_speed(&mut self, delta: f32) {
         self.speed = (self.speed + delta).clamp(0.001, 0.1);
-        if let Some(w) = Some(&self.window) {
-            w.set_title(&format!("Goldy - Starfield (speed: {:.1})", self.speed));
-        }
+        self.window
+            .set_title(&format!("Goldy - Starfield (speed: {:.1})", self.speed));
     }
 }
 
@@ -264,7 +304,7 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
                 Err(e) => {
-                    tracing::error!("Failed to create render state: {}", e);
+                    tracing::error!("Failed to create render state: {e}");
                     event_loop.exit();
                 }
             }
@@ -279,9 +319,7 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if let Some(state) = &mut self.state {
                     match event.logical_key {
@@ -295,17 +333,20 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     if size.width > 0 && size.height > 0 {
-                        state.surface.resize(size.width, size.height).ok();
-                        if let Ok(rt) = RenderState::create_scene_rt(&state.device, &state.surface) {
-                            state.scene_rt = rt;
+                        state.swapchain.resize(size.width, size.height).ok();
+                        if let Ok(pipeline) =
+                            RenderState::create_render_pipeline(&state.device, &state.render_shader, &state.swapchain)
+                        {
+                            state.render_pipeline = pipeline;
                         }
+                        state.rerecord_scheme();
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(state) = &mut self.state {
                     if let Err(e) = state.render() {
-                        tracing::error!("Render error: {}", e);
+                        tracing::error!("Render error: {e}");
                     }
                 }
             }

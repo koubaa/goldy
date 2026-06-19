@@ -1,12 +1,15 @@
 //! Waveform example - animated audio waveform visualizer.
 //!
-//! Demonstrates procedural waveform generation and line rendering using Surface API.
+//! Demonstrates retained scheme with offscreen render pass → copy-to-present.
 //!
-//! Run with: cargo run --example waveform
+//! Run with: `cargo run --example waveform`
+
+#![allow(deprecated)] // write_to_parcel migration deferred
 
 use goldy::{
-    BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph, Vertex2D,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,15 +64,18 @@ fn waveform_to_vertices(samples: &[f32], y_offset: f32, color: Color) -> Vec<Ver
 
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
     shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
-    channel_parcels: Option<[Parcel; NUM_CHANNELS]>,
+    channel_parcels: Option<[Buffer; NUM_CHANNELS]>,
     window: Option<Arc<Window>>,
-    surface: Option<Surface>,
-    scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
+    scheme: Option<Scheme>,
     start_time: Instant,
     frame_count: u32,
 }
@@ -78,13 +84,16 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
+            ctx: None,
             device: None,
             pipeline: None,
             shader: None,
             window: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             start_time: Instant::now(),
             frame_count: 0,
             _retained_pool: None,
@@ -92,9 +101,48 @@ impl App {
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
+    fn create_pipeline(
+        device: &goldy::Device,
+        shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> anyhow::Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
+            device,
+            shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: Vertex2D::layout(),
+                topology: PrimitiveTopology::LineStrip,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        channel_parcels: &[Buffer; NUM_CHANNELS],
+        scene_rt: &Lease<LeaseRenderTarget>,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        let mut pass = scheme.render_pass("waveform", scene_rt);
+        for parcel in channel_parcels {
+            pass.with_parcel(parcel, NodeAccess::Read);
+        }
+        pass.clear(Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.08,
+            a: 1.0,
+        });
+        pass.set_pipeline(pipeline);
+        for parcel in channel_parcels {
+            pass.set_vertex_buffer(0, parcel);
+            pass.draw(0..NUM_SAMPLES as u32, 0..1);
+        }
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -104,20 +152,11 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
+
         let shader = ShaderModule::from_slang(&device, goldy::shader::builtins::VERTEX_COLOR_2D)?;
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                vertex_layout: Vertex2D::layout(),
-                target_format: surface.format(),
-                topology: PrimitiveTopology::LineStrip,
-                ..Default::default()
-            },
-        )?;
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let channel_parcels = std::array::from_fn(|_| {
@@ -126,13 +165,22 @@ impl App {
                 .expect("waveform channel parcel")
         });
 
+        let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let present = Self::record_scheme(&mut scheme, &pipeline, &channel_parcels, &scene_rt, &screen);
+
+        self.ctx = Some(ctx);
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.channel_parcels = Some(channel_parcels);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
+        self.scheme = Some(scheme);
         Ok(())
     }
 
@@ -145,13 +193,11 @@ impl App {
             return Ok(());
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
+        let ctx = self.ctx.as_ref().unwrap();
         let channel_parcels = self.channel_parcels.as_ref().unwrap();
+        let scheme = self.scheme.as_mut().unwrap();
         let time = self.start_time.elapsed().as_secs_f32();
 
-        // Colors for each channel
         let colors = [
             Color {
                 r: 1.0,
@@ -178,55 +224,49 @@ impl App {
                 a: 1.0,
             },
         ];
-
-        // Y offsets for each channel
         let y_offsets = [0.6, 0.2, -0.2, -0.6];
 
-        let mut vertex_counts = Vec::with_capacity(NUM_CHANNELS);
-        self.frame_graph.clear();
         for ch in 0..NUM_CHANNELS {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
-            vertex_counts.push(vertices.len() as u32);
-            self.frame_graph
-                .write_parcel(&channel_parcels[ch], 0, bytemuck::cast_slice(&vertices).to_vec())?;
+            write_to_parcel(ctx, &channel_parcels[ch], 0, bytemuck::cast_slice(&vertices))?;
         }
 
-        let mut pass = self.frame_graph.render_pass("waveform", scene_rt);
-        for parcel in channel_parcels {
-            pass.bind_parcel_mut(parcel, NodeAccess::Read);
-        }
-        pass.clear(Color {
-            r: 0.02,
-            g: 0.02,
-            b: 0.08,
-            a: 1.0,
-        });
-        pass.set_pipeline(pipeline);
-        for (ch, parcel) in channel_parcels.iter().enumerate() {
-            pass.set_vertex_buffer(0, parcel);
-            pass.draw(0..vertex_counts[ch], 0..1);
-        }
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
-
+        let present = self.present.as_ref().unwrap();
+        let submission = scheme.submit()?;
+        present.consume(&submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                let _ = surface.resize(new_size.width, new_size.height);
+            if let Some(swapchain) = &self.swapchain {
+                let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                if let Ok(rt) = Self::create_scene_rt(device, surface) {
-                    self.scene_rt = Some(rt);
+            if let (Some(device), Some(swapchain), Some(shader)) = (&self.device, &self.swapchain, &self.shader) {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                    self.pipeline = Some(pipeline);
+                    if let (Some(ctx), Some(pipeline), Some(channel_parcels), Some(screen)) = (
+                        self.ctx.as_ref(),
+                        self.pipeline.as_ref(),
+                        self.channel_parcels.as_ref(),
+                        self.screen.as_ref(),
+                    ) {
+                        let mut scheme = Scheme::new(ctx);
+
+                        let (width, height) = swapchain.size();
+
+                        if let Ok(rt) =
+                            scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)
+                        {
+                            let present = Self::record_scheme(&mut scheme, pipeline, channel_parcels, &rt, screen);
+
+                            self.scheme = Some(scheme);
+                            self.present = Some(present);
+
+                            self.scene_rt = Some(rt);
+                        }
+                    }
                 }
             }
         }
@@ -255,7 +295,7 @@ impl ApplicationHandler for App {
                 event_loop
                     .create_window(
                         Window::default_attributes()
-                            .with_title("Goldy - Waveform Visualizer (Surface API)")
+                            .with_title("Goldy - Waveform Visualizer (Scheme + Present)")
                             .with_inner_size(winit::dpi::LogicalSize::new(1024, 600)),
                     )
                     .unwrap(),

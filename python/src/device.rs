@@ -1,6 +1,7 @@
 //! Python wrapper for Device.
 
 use crate::error::IntoPyResult;
+use crate::scheme::PyContext;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -55,6 +56,12 @@ impl PyDevice {
     ///     True if the library was found and removed, False otherwise.
     fn unregister_library(&self, name: &str) -> bool {
         self.inner.unregister_library(name)
+    }
+
+    /// Create a GPU submission context for retained schemes.
+    fn create_context(&self) -> PyResult<PyContext> {
+        let inner = self.inner.create_context().into_py_result()?;
+        Ok(PyContext { inner })
     }
 
     fn __repr__(&self) -> String {

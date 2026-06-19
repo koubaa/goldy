@@ -14,14 +14,14 @@ def test_import():
     # Verify core exports exist
     assert hasattr(goldy, 'Instance')
     assert hasattr(goldy, 'Device')
+    assert hasattr(goldy, 'Buffer')
     assert hasattr(goldy, 'Parcel')
     assert hasattr(goldy, 'RetainedPool')
-    assert hasattr(goldy, 'MosaicBuilder')
+    assert hasattr(goldy, 'RecordBuilder')
     assert hasattr(goldy, 'RenderTarget')
     assert hasattr(goldy, 'ShaderModule')
     assert hasattr(goldy, 'RenderPipeline')
-    assert hasattr(goldy, 'TaskGraph')
-    assert hasattr(goldy, 'RenderPass')
+    assert hasattr(goldy, 'Scheme')
     assert hasattr(goldy, 'NodeAccess')
     
     # Verify enums

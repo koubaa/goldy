@@ -1,6 +1,6 @@
 //! Persistent placement heap with paged frame allocation.
 //!
-//! A [`PlacementHeap`] owns a single large GPU [`Buffer`] divided into `depth`
+//! A [`PlacementHeap`] owns a single large GPU backing buffer divided into `depth`
 //! fixed-size pages. Frame N uses page `N % depth` at offset `(N % depth) * page_alloc_size`.
 //! Since the offset is deterministic for a given page slot, the view cache hits in
 //! steady state.
@@ -8,7 +8,7 @@
 //! Call [`PlacementHeap::configure_pages`] once when transient heap size is known,
 //! then [`PlacementHeap::advance_page`] each frame for that frame's base offset.
 //!
-//! This eliminates per-frame `Buffer::new` overhead: in steady state the backing
+//! This eliminates per-frame allocation overhead: in steady state the backing
 //! buffer is allocated once and reused across all frames.
 //!
 //! ## Stable transient slot IDs
@@ -32,7 +32,7 @@
 //! across frames.
 
 use crate::backend::TextureHandle;
-use crate::buffer::{Buffer, BufferView};
+use crate::buffer::{Allocation, BufferView};
 use crate::device::Device;
 use crate::task_graph::TransientTextureKey;
 use crate::texture::Texture;
@@ -77,7 +77,7 @@ struct CachedTexture {
 
 /// Persistent GPU buffer with paged allocation for graph-colored transient heaps.
 ///
-/// The heap owns a single large [`Buffer`]. After [`Self::configure_pages`], each
+/// The heap owns a single large backing buffer allocation. After [`Self::configure_pages`], each
 /// frame obtains a deterministic page offset via [`Self::advance_page`].
 ///
 /// ## View and texture cache
@@ -87,7 +87,7 @@ struct CachedTexture {
 /// descriptor work is skipped. Eviction via `Device::defer_release` ensures
 /// GPU safety when shapes or placements change.
 pub struct PlacementHeap {
-    buffer: Buffer,
+    buffer: Allocation,
     page_size: u64,
     /// Paged allocation state. Set by [`Self::configure_pages`].
     pages: Option<PagedState>,
@@ -511,7 +511,7 @@ impl PlacementHeap {
     }
 
     /// Reference to the backing buffer (for creating views).
-    pub fn buffer(&self) -> &Buffer {
+    pub(crate) fn buffer(&self) -> &Allocation {
         &self.buffer
     }
 

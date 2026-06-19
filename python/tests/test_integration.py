@@ -70,29 +70,32 @@ def test_parcel_creation_numpy(device):
     ], dtype=np.float32)
 
     pool = goldy.RetainedPool(device)
-    parcel = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
-    assert parcel.byte_size == vertices.nbytes
+    vertex_buffer = pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
+    assert vertex_buffer.byte_size == vertices.nbytes
+    assert vertex_buffer[0].byte_size == vertices.nbytes
 
     indices = np.array([0, 1, 2], dtype=np.uint16)
-    index_parcel = pool.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
-    assert index_parcel.byte_size == indices.nbytes
+    index_buffer = pool.acquire_buffer(indices, goldy.BufferKind.SCATTERED)
+    assert index_buffer.byte_size == indices.nbytes
+    assert index_buffer[0].byte_size == indices.nbytes
 
 
-def test_parcel_write_via_graph(device):
-    """Upload bytes into a parcel through TaskGraph.write_parcel."""
+def test_parcel_write(device):
+    """Upload bytes into a parcel through write_to_parcel."""
     import goldy
 
     pool = goldy.RetainedPool(device)
-    parcel = pool.acquire_buffer(
+    buffer = pool.acquire_buffer(
         np.zeros(16, dtype=np.uint32),
         goldy.BufferKind.SCATTERED,
     )
-    graph = goldy.TaskGraph()
-    graph.write_parcel(
-        parcel,
-        0,
+    ctx = device.create_context()
+    frame = goldy.write_to_parcel(
+        ctx,
+        buffer[0],
         np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes(),
     )
+    frame.wait(ctx)
 
 
 def test_shader_compilation(device):
@@ -153,17 +156,32 @@ def test_render_target_with_depth(device):
     assert target.has_depth()
 
 
-def test_render_clear_via_graph(device):
-    """Clear a render target through TaskGraph and verify readback."""
+def test_render_clear_via_scheme(device):
+    """Clear a render target through Scheme and verify readback."""
     import goldy
 
-    target = goldy.RenderTarget(device, 2, 2, goldy.TextureFormat.RGBA8_UNORM)
-    graph = goldy.TaskGraph()
-    with graph.render_pass("clear", target) as rp:
-        rp.clear(goldy.Color.RED)
-    graph.dispatch(device)
+    width = height = 2
+    ctx = device.create_context()
+    pool = goldy.RetainedPool(device)
+    readback = pool.acquire_texture(
+        width,
+        height,
+        goldy.TextureFormat.RGBA8_UNORM,
+        goldy.TextureKind.DIRECT,
+        copy_src=True,
+        copy_dst=True,
+    )
 
-    pixels = target.read_to_cpu()
+    scheme = goldy.Scheme(ctx)
+    rt = scheme.lease_render_target(width, height, goldy.TextureFormat.RGBA8_UNORM)
+    with scheme.render_pass("clear", rt) as rp:
+        rp.clear(goldy.Color.RED)
+
+    scheme.copy_to_texture(rt, readback)
+    grant = scheme.grant_read_texture(readback)
+    submission = scheme.submit()
+    pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(height, width, 4)
+
     assert pixels.shape == (2, 2, 4)
     assert np.all(pixels[:, :, 0] == 255)
     assert np.all(pixels[:, :, 1] == 0)
@@ -172,7 +190,7 @@ def test_render_clear_via_graph(device):
 
 
 def test_compute_node_fills_buffer_with_42(device):
-    """Fill a buffer via TaskGraph compute_node and verify readback."""
+    """Fill a buffer via Scheme compute node and verify readback."""
     import goldy
 
     fill_shader = """
@@ -187,24 +205,24 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
     retained_pool = goldy.RetainedPool(device)
     zeros = np.zeros(64, dtype=np.uint32)
-    parcel = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
+    buffer = retained_pool.acquire_buffer(zeros, goldy.BufferKind.SCATTERED)
     shader = goldy.ShaderModule.from_slang(device, fill_shader)
     pipeline = goldy.ComputePipeline(device, shader)
-    idx = parcel.resource_index(goldy.ResourceAccess.WRITE)
 
-    graph = goldy.TaskGraph()
-    with graph.compute_node("fill", pipeline, workgroups=(1, 1, 1)) as node:
-        node.bind_parcel(parcel, goldy.NodeAccess.WRITE).bind_resources_raw([idx])
-
-    graph.dispatch(device)
-
-    values = np.frombuffer(parcel.read_to_cpu(device), dtype=np.uint32)
+    ctx = device.create_context()
+    scheme = goldy.Scheme(ctx)
+    scheme.node("fill", pipeline).with_parcel(
+        buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+    ).dispatch(1, 1, 1)
+    grant = scheme.grant_read(buffer[0])
+    frame = scheme.submit()
+    values = np.frombuffer(grant.consume(frame), dtype=np.uint32)
     assert values.shape == (64,)
     assert np.all(values == 42)
 
 
-def test_triangle_via_graph(device):
-    """Render a triangle through TaskGraph and verify non-empty readback."""
+def test_triangle_via_scheme(device):
+    """Render a triangle through Scheme and verify non-empty readback."""
     import goldy
 
     shader = goldy.ShaderModule.from_slang(device, goldy.Builtins.VERTEX_COLOR_2D)
@@ -242,21 +260,33 @@ def test_triangle_via_graph(device):
         dtype=np.float32,
     )
     retained_pool = goldy.RetainedPool(device)
-    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
-    target = goldy.RenderTarget(device, 100, 100, goldy.TextureFormat.RGBA8_UNORM)
+    vertex_parcel = retained_pool.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)[0]
+    readback = retained_pool.acquire_texture(
+        100,
+        100,
+        goldy.TextureFormat.RGBA8_UNORM,
+        goldy.TextureKind.DIRECT,
+        copy_src=True,
+        copy_dst=True,
+    )
 
-    graph = goldy.TaskGraph()
-    with graph.render_pass("triangle", target) as rp:
+    ctx = device.create_context()
+    scheme = goldy.Scheme(ctx)
+    rt = scheme.lease_render_target(100, 100, goldy.TextureFormat.RGBA8_UNORM)
+    with scheme.render_pass("triangle", rt) as rp:
         (
-            rp.bind_parcel(vertex_parcel, goldy.NodeAccess.READ)
+            rp.with_parcel(vertex_parcel, goldy.NodeAccess.READ)
             .clear(goldy.Color(0.0, 0.0, 0.0, 1.0))
             .set_pipeline(pipeline)
             .set_vertex_buffer_parcel(0, vertex_parcel)
             .draw(range(3))
         )
 
-    graph.dispatch(device)
-    pixels = target.read_to_cpu()
+    scheme.copy_to_texture(rt, readback)
+    grant = scheme.grant_read_texture(readback)
+    submission = scheme.submit()
+    pixels = np.frombuffer(grant.consume(submission), dtype=np.uint8).reshape(100, 100, 4)
+
     assert pixels.shape == (100, 100, 4)
     assert np.any(pixels[:, :, :3] > 0)
 

@@ -72,12 +72,14 @@ pub(super) fn record(
                 frame_table_base,
             } => {
                 if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
-                    crate::backend::validate_bindless_slot_kinds(
-                        raw_indices,
-                        &pipeline.push_constant_slot_kinds,
-                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                        &pipeline.shader_debug_name,
-                    )?;
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_bindless_slot_kinds(
+                            raw_indices,
+                            &pipeline.push_constant_slot_kinds,
+                            |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
                 }
                 let mut layout = types::PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
@@ -98,12 +100,14 @@ pub(super) fn record(
                         &pipeline.shader_debug_name,
                     )?;
                     let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
-                    crate::backend::validate_bindless_slot_kinds(
-                        &indices,
-                        &pipeline.push_constant_slot_kinds,
-                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                        &pipeline.shader_debug_name,
-                    )?;
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_bindless_slot_kinds(
+                            &indices,
+                            &pipeline.push_constant_slot_kinds,
+                            |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
                 }
                 anyhow::bail!(
                     "RenderCommand::BindResourcesTyped must be lowered before DX12 record; \

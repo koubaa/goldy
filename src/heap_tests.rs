@@ -16,9 +16,10 @@ mod heap_tests {
     //! Heap introspection and overflow tests are macOS + Metal only for now, since
     //! DX12 and Vulkan use committed resources without a shared heap cap.
 
+    use crate::buffer::Allocation;
     use crate::task_graph::TaskGraph;
     use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
-    use crate::{Buffer, BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+    use crate::{BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
 
     fn submission_context(device: &crate::Device) -> crate::Context {
         device.create_context().expect("context")
@@ -34,7 +35,7 @@ mod heap_tests {
     }
 
     // ===========================================================================
-    // Buffer heap introspection
+    // Allocation heap introspection
     // ===========================================================================
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -108,7 +109,7 @@ mod heap_tests {
 
         // Allocate a large buffer to create overflow.
         let alloc_size = 32 * 1024 * 1024u64;
-        let big_bufs: Vec<Buffer> = (0..3)
+        let big_bufs: Vec<Allocation> = (0..3)
             .map(|_| {
                 device
                     .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -220,7 +221,7 @@ mod heap_tests {
 
         // Now defer some buffers at that timeline value.
         let mut payload = crate::DeferredPayload::new();
-        let held_buffers: Vec<Buffer> = (0..8)
+        let held_buffers: Vec<Allocation> = (0..8)
             .map(|_| {
                 device
                     .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -254,7 +255,7 @@ mod heap_tests {
 
         for frame in 0..frames {
             // Each "frame" allocates a few buffers, submits a graph, and defers them.
-            let buffers: Vec<Buffer> = (0..4)
+            let buffers: Vec<Allocation> = (0..4)
                 .map(|_| {
                     device
                         .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -300,7 +301,7 @@ mod heap_tests {
 
         // Warmup: establish the pool (allocate + defer + flush pattern).
         for _ in 0..warmup_frames {
-            let buffers: Vec<Buffer> = (0..3)
+            let buffers: Vec<Allocation> = (0..3)
                 .map(|_| {
                     device
                         .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -330,7 +331,7 @@ mod heap_tests {
         // Steady state: same allocation pattern, overflow should not grow.
         let mut max_overflow = baseline_overflow;
         for _ in 0..steady_frames {
-            let buffers: Vec<Buffer> = (0..3)
+            let buffers: Vec<Allocation> = (0..3)
                 .map(|_| {
                     device
                         .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -696,7 +697,7 @@ mod heap_tests {
         // Submit 50 frames as fast as possible, with NO explicit wait between frames.
         // The self-regulation logic in allocate_mtl_storage_buffer must kick in.
         for frame in 0..50 {
-            let buffers: Vec<Buffer> = (0..3)
+            let buffers: Vec<Allocation> = (0..3)
                 .map(|_| {
                     device
                         .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -731,7 +732,7 @@ mod heap_tests {
         let alloc_size = 4 * 1024 * 1024u64;
 
         for frame in 0..50 {
-            let buffers: Vec<Buffer> = (0..2)
+            let buffers: Vec<Allocation> = (0..2)
                 .map(|_| {
                     device
                         .alloc_buffer(alloc_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -794,7 +795,7 @@ mod heap_tests {
         let buf_size = 2 * 1024 * 1024u64;
 
         for frame in 0..30 {
-            let bufs: Vec<Buffer> = (0..2)
+            let bufs: Vec<Allocation> = (0..2)
                 .map(|_| {
                     device
                         .alloc_buffer(buf_size, BufferKind::Scattered, None, BufferFlags::empty())
@@ -831,7 +832,7 @@ mod heap_tests {
     }
 
     // ===========================================================================
-    // Buffer resize under heap pressure (abstract-gpu-vram: growable buffers)
+    // Allocation resize under heap pressure (abstract-gpu-vram: growable buffers)
     // ===========================================================================
 
     #[test]
@@ -895,12 +896,12 @@ mod heap_tests {
 
         let device = make_device();
         let ctx = submission_context(&device);
-        let pending: Arc<Mutex<Vec<Buffer>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending: Arc<Mutex<Vec<Allocation>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Simulate ekrano's DeferredOwnedBuffersToken pattern.
+        // Simulate ekrano's DeferredOwnedAllocationsToken pattern.
         struct Token {
-            pending: Arc<Mutex<Vec<Buffer>>>,
-            buffers: Vec<Buffer>,
+            pending: Arc<Mutex<Vec<Allocation>>>,
+            buffers: Vec<Allocation>,
         }
         impl Drop for Token {
             fn drop(&mut self) {
@@ -910,7 +911,7 @@ mod heap_tests {
         }
 
         // Frame 1: allocate buffers, submit, defer.
-        let bufs: Vec<Buffer> = (0..3)
+        let bufs: Vec<Allocation> = (0..3)
             .map(|_| {
                 device
                     .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::empty())

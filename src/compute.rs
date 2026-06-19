@@ -40,6 +40,11 @@ pub struct ComputePipeline {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: ComputePipelineHandle,
+    /// Per push-constant resource slot (shader-signature order), the descriptor
+    /// access the shader signature requires. Used by [`crate::Scheme`] recording to
+    /// pick the correct SRV/UAV descriptor independent of the graph access (which
+    /// only drives barriers). Empty when the backend reports no reflection.
+    pub(crate) slot_access: Vec<Option<crate::types::ResourceAccess>>,
 }
 
 impl ComputePipeline {
@@ -55,10 +60,13 @@ impl ComputePipeline {
 
         tracing::debug!("Compute pipeline created");
 
+        let slot_access = backend.compute_pipeline_slot_access(handle);
+
         Ok(Self {
             _device: device.clone(),
             backend: Arc::clone(&device.inner.backend),
             handle,
+            slot_access,
         })
     }
 }

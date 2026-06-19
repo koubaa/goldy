@@ -36,6 +36,11 @@ public sealed class Device : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
+    /// <summary>
+    /// Create a GPU submission context for retained schemes.
+    /// </summary>
+    public Context CreateContext() => Context.Create(this);
+
     public void Dispose()
     {
         if (!_disposed)

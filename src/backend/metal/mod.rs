@@ -11,6 +11,7 @@
 //! - `types`: Internal state structs
 //! - `utils`: Format conversion and helpers
 
+pub(super) mod api_log;
 mod buffer;
 mod compute;
 mod context;
@@ -79,7 +80,8 @@ pub(in crate::backend::metal) fn wait_device_idle(state: &MetalState, device: De
         return Ok(());
     }
     const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
-    if !context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT) {
+    let reached = context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT);
+    if !reached {
         state.device_lost.store(true, Ordering::Relaxed);
         anyhow::bail!(
             "GPU wait_device_idle timed out after {}ms waiting for timeline {target}",
@@ -101,6 +103,8 @@ pub(in crate::backend::metal) fn wait_all_in_flight(state: &MetalState) -> Resul
     Ok(())
 }
 
+static METAL_VALIDATION_INIT: std::sync::Once = std::sync::Once::new();
+
 /// Metal backend for macOS.
 pub struct MetalBackend {
     state: MetalState,
@@ -112,12 +116,19 @@ impl MetalBackend {
         let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
 
-        // Runtime Metal shader validation reads `MTL_SHADER_VALIDATION` before the first
-        // device is created when GPU API validation is on (`GOLDY_VALIDATION=1`, `api`, `all`, …).
-        if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
-            std::env::set_var("MTL_SHADER_VALIDATION", "1");
-            tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION); was unset");
-        }
+        // Initialise API call logger (GOLDY_API_LOG) as early as possible so
+        // even device-creation calls can be captured if desired.
+        api_log::init();
+
+        // `MTL_SHADER_VALIDATION` must be set before the first MTLDevice is created.
+        // Use a process-wide Once so parallel test threads do not race on `setenv`.
+        METAL_VALIDATION_INIT.call_once(|| {
+            if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
+                // SAFETY: called exactly once per process, before `Device::all()` below.
+                unsafe { std::env::set_var("MTL_SHADER_VALIDATION", "1") };
+                tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION api)");
+            }
+        });
 
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
@@ -173,6 +184,10 @@ impl Drop for MetalBackend {
 }
 
 impl GpuBackend for MetalBackend {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Metal
     }
@@ -324,6 +339,45 @@ impl GpuBackend for MetalBackend {
         buffer::read_to_cpu(&self.state, device, buffer, output)
     }
 
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        buffer::alloc_readback_buffer(&mut self.state, device, size)
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        buffer::read_readback_buffer(&self.state, buffer, output)
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        buffer::destroy(&mut self.state, buffer);
+    }
+
+    fn query_texture_readback_layout(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        Ok(buffer::query_texture_readback_layout(width, height, format))
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        buffer::alloc_texture_readback_staging(&mut self.state, device, layout)
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_texture_readback_staging(&self.state, buffer, layout, output)
+    }
+
     fn clear_buffer(&mut self, device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
         buffer::clear(&self.state, device, buffer, offset, size)
     }
@@ -456,7 +510,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()> {
-        texture::write(&self.state, texture, data, width, height)
+        texture::write(&mut self.state, texture, data, width, height)
     }
 
     fn write_texture_region(
@@ -468,7 +522,7 @@ impl GpuBackend for MetalBackend {
         height: u32,
         data: &[u8],
     ) -> Result<()> {
-        texture::write_region(&self.state, texture, x, y, width, height, data)
+        texture::write_region(&mut self.state, texture, x, y, width, height, data)
     }
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
@@ -522,6 +576,8 @@ impl GpuBackend for MetalBackend {
                 surface,
                 image,
                 context: ctx,
+                // Metal bindless slot and returned image index both use current_frame.
+                frame_slot: image as u32,
             },
             tex,
         ))
@@ -750,16 +806,45 @@ impl GpuBackend for MetalBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&mut self.state, ctx, commands)
+        compute::submit(&mut self.state, ctx, commands, sync)
     }
 
     fn submit_graph(
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, ctx, commands)
+        compute::submit_graph(&mut self.state, ctx, commands, None, sync)
+    }
+
+    fn submit_graph_and_retain(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        compute::submit_graph_and_retain(&mut self.state, ctx, commands, key, sync)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        compute::try_resubmit_retained(&mut self.state, ctx, key, sync)
+    }
+
+    fn retains_present_partitions(&self) -> bool {
+        false
+    }
+
+    fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
+        compute::evict_retained(&mut self.state, ctx, key);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {

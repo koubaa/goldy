@@ -1,20 +1,18 @@
 //! Multi-window example - three simultaneous effects in separate windows.
 //!
-//! Each window runs its own demo and handles keyboard/mouse independently.
-//! - Window 1: Plasma effect (press Space to pause)
-//! - Window 2: Tunnel effect (press Space to reverse direction)
-//! - Window 3: Starfield (press Space to toggle warp speed)
+//! Each window runs its own demo with an independent SwapchainPool + Scheme.
 //!
 //! Run with: cargo run --example multi_window
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use goldy::{
-    shaders, BufferFlags, BufferKind, Color, DeviceDescriptor, Instance, NodeAccess, Parcel, RenderPipeline,
-    RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool, ShaderModule, Surface, TaskGraph,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
 
-// Plasma shader that reads time from vertex attribute (compatible with QuadVertex)
 const PLASMA_VERTEX_TIME: &str = r#"
 struct VertexInput {
     float2 position : POSITION;
@@ -51,7 +49,6 @@ float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = input.uv * 4.0;
     float t = input.time;
     
-    // Classic plasma formula
     float v = sin(uv.x + t);
     v += sin(uv.y + t);
     v += sin(uv.x + uv.y + t);
@@ -66,7 +63,6 @@ float4 fs_main(VertexOutput input) : SV_Target {
 }
 "#;
 
-// Tunnel shader that reads time from vertex attribute (compatible with QuadVertex)
 const TUNNEL_VERTEX_TIME: &str = r#"
 struct VertexInput {
     float2 position : POSITION;
@@ -94,23 +90,18 @@ float4 fs_main(VertexOutput input) : SV_Target {
     float2 uv = (input.uv - 0.5) * 2.0;
     float t = input.time;
     
-    // Polar coordinates
     float dist = length(uv);
     float angle = atan2(uv.y, uv.x);
     
-    // Tunnel coordinates
     float tunnel_depth = 1.0 / (dist + 0.1);
     float tunnel_angle = angle / 3.14159 + t * 0.2;
     
-    // Animated texture coordinates
     float tx = tunnel_angle * 4.0;
     float ty = tunnel_depth - t * 2.0;
     
-    // Checkerboard pattern
     float checker = floor(tx) + floor(ty);
     bool is_white = fmod(checker, 2.0) == 0.0;
     
-    // Color based on depth and checker
     float depth_color = 1.0 - dist * 0.5;
     float3 color;
     
@@ -120,15 +111,13 @@ float4 fs_main(VertexOutput input) : SV_Target {
         color = float3(0.2, 0.4, 0.8) * depth_color;
     }
     
-    // Add glow at center
     color += float3(0.3, 0.5, 1.0) * (1.0 - dist) * (1.0 - dist);
-    
-    // Fog at edges
     color *= 1.0 - dist * 0.3;
     
     return float4(color, 1.0);
 }
 "#;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -140,10 +129,6 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowAttributes, WindowId},
 };
-
-// ============================================================================
-// Shared vertex type for fullscreen quads
-// ============================================================================
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -214,10 +199,6 @@ fn create_quad(time: f32) -> [QuadVertex; 6] {
     ]
 }
 
-// ============================================================================
-// Effect types
-// ============================================================================
-
 #[derive(Clone, Copy, PartialEq)]
 enum EffectType {
     Plasma,
@@ -236,7 +217,6 @@ impl EffectType {
 
     fn shader_source(&self) -> &'static str {
         match self {
-            // Use vertex-time shaders that read time from vertex attribute
             EffectType::Plasma => PLASMA_VERTEX_TIME,
             EffectType::Tunnel => TUNNEL_VERTEX_TIME,
             EffectType::Starfield => shaders::STARFIELD,
@@ -244,63 +224,116 @@ impl EffectType {
     }
 }
 
-// ============================================================================
-// Per-window state
-// ============================================================================
-
 struct WindowState {
     window: Arc<Window>,
-    surface: Surface,
-    scene_rt: RenderTarget,
-    frame_graph: TaskGraph,
+    ctx: goldy::Context,
+    swapchain: SwapchainPool,
+    screen: goldy::PresentLease,
+    present: PresentGrant,
+    scheme: Scheme,
+    scene_rt: Lease<LeaseRenderTarget>,
     pipeline: RenderPipeline,
+    shader: ShaderModule,
     effect_type: EffectType,
-
-    // Per-window animation state
     start_time: Instant,
     paused: bool,
     paused_at: f32,
     time_multiplier: f32,
-
     _retained_pool: RetainedPool,
-    vertex_parcel: Parcel,
-
-    // For status display
+    vertex_parcel: Buffer,
     has_focus: bool,
 }
 
 impl WindowState {
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new(device, width.max(1), height.max(1), surface.format())
-    }
-
-    fn new(window: Arc<Window>, device: &Arc<goldy::Device>, effect_type: EffectType) -> anyhow::Result<Self> {
-        let ctx = device.create_context()?;
-        let surface = Surface::new(&ctx, window.as_ref())?;
-        let scene_rt = Self::create_scene_rt(device, &surface)?;
-        let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
-        let pipeline = RenderPipeline::new(
+    fn create_pipeline(
+        device: &goldy::Device,
+        shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> anyhow::Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
             device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
+            shader,
+            swapchain,
+            RenderPipelineDesc {
                 vertex_layout: QuadVertex::layout(),
-                target_format: surface.format(),
                 ..Default::default()
             },
-        )?;
+        )
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        vertex_parcel: &Buffer,
+        scene_rt: &Lease<LeaseRenderTarget>,
+        screen: &goldy::PresentLease,
+        label: &'static str,
+    ) -> PresentGrant {
+        let mut pass = scheme.render_pass(label, scene_rt);
+        pass.with_parcel(vertex_parcel, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, vertex_parcel);
+        pass.draw(0..6, 0..1);
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
+    }
+
+    fn rerecord_scheme(&mut self) {
+        let mut scheme = Scheme::new(&self.ctx);
+        let (width, height) = self.swapchain.size();
+        if let Ok(rt) = scheme.lease_render_target(width.max(1), height.max(1), self.swapchain.format(), None) {
+            self.scene_rt = rt;
+            self.present = Self::record_scheme(
+                &mut scheme,
+                &self.pipeline,
+                &self.vertex_parcel,
+                &self.scene_rt,
+                &self.screen,
+                self.effect_type.title(),
+            );
+            self.scheme = scheme;
+        }
+    }
+
+    fn new(
+        window: Arc<Window>,
+        ctx: &goldy::Context,
+        device: &Arc<goldy::Device>,
+        effect_type: EffectType,
+    ) -> anyhow::Result<Self> {
+        let swapchain = SwapchainPool::new(ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
+        let shader = ShaderModule::from_slang(device, effect_type.shader_source())?;
+        let pipeline = Self::create_pipeline(device, &shader, &swapchain)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let vertex_parcel =
             retained_pool.acquire_buffer_sized::<QuadVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
+        let mut scheme = Scheme::new(ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(width.max(1), height.max(1), swapchain.format(), None)?;
+        let present = Self::record_scheme(
+            &mut scheme,
+            &pipeline,
+            &vertex_parcel,
+            &scene_rt,
+            &screen,
+            effect_type.title(),
+        );
+
         Ok(Self {
             window,
-            surface,
+            ctx: ctx.clone(),
+            swapchain,
+            screen,
+            present,
+            scheme,
             scene_rt,
-            frame_graph: TaskGraph::new(),
             pipeline,
+            shader,
             effect_type,
             start_time: Instant::now(),
             paused: false,
@@ -322,11 +355,9 @@ impl WindowState {
 
     fn toggle_pause(&mut self) {
         if self.paused {
-            // Resuming - reset start time
             self.start_time = Instant::now();
             self.paused = false;
         } else {
-            // Pausing - save current time
             self.paused_at = self.current_time();
             self.paused = true;
         }
@@ -336,13 +367,11 @@ impl WindowState {
         match self.effect_type {
             EffectType::Plasma => self.toggle_pause(),
             EffectType::Tunnel => {
-                // Reverse direction
                 self.paused_at = self.current_time();
                 self.start_time = Instant::now();
                 self.time_multiplier *= -1.0;
             }
             EffectType::Starfield => {
-                // Toggle warp speed
                 self.paused_at = self.current_time();
                 self.start_time = Instant::now();
                 self.time_multiplier = if self.time_multiplier > 2.0 { 1.0 } else { 5.0 };
@@ -357,56 +386,37 @@ impl WindowState {
         self.time_multiplier = 1.0;
     }
 
-    fn render(&mut self, _device: &goldy::Device) -> anyhow::Result<()> {
+    fn render(&mut self, ctx: &goldy::Context) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
 
-        let time = self.current_time();
-        let vertices = create_quad(time);
+        let vertices = create_quad(self.current_time());
+        write_to_parcel(ctx, &self.vertex_parcel, 0, bytemuck::cast_slice(&vertices))?;
 
-        let frame = self.surface.begin()?;
-
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
-
-        let mut pass = self.frame_graph.render_pass(self.effect_type.title(), &self.scene_rt);
-        pass.bind_parcel_mut(&self.vertex_parcel, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_vertex_buffer(0, &self.vertex_parcel);
-        pass.draw(0..6, 0..1);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph
-            .copy_render_target_to_swapchain(&self.scene_rt, swapchain);
-
-        let frame = self.surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
-
+        let submission = self.scheme.submit()?;
+        self.present.consume(&submission)?;
         Ok(())
     }
 
     fn handle_resize(&mut self, device: &goldy::Device, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            let _ = self.surface.resize(width, height);
-            match Self::create_scene_rt(device, &self.surface) {
-                Ok(rt) => self.scene_rt = rt,
-                Err(e) => tracing::error!("[{}] Failed to recreate scene RT: {}", self.effect_type.title(), e),
+            let _ = self.swapchain.resize(width, height);
+            match Self::create_pipeline(device, &self.shader, &self.swapchain) {
+                Ok(pipeline) => {
+                    self.pipeline = pipeline;
+                    self.rerecord_scheme();
+                }
+                Err(e) => tracing::error!("[{}] Failed to recreate pipeline: {}", self.effect_type.title(), e),
             }
         }
     }
 }
 
-// ============================================================================
-// Main application
-// ============================================================================
-
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     windows: HashMap<WindowId, WindowState>,
     effects_to_create: Vec<EffectType>,
@@ -418,6 +428,7 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         Ok(Self {
             instance: Instance::new()?,
+            ctx: None,
             device: None,
             windows: HashMap::new(),
             effects_to_create: vec![EffectType::Plasma, EffectType::Tunnel, EffectType::Starfield],
@@ -433,6 +444,7 @@ impl App {
         position: (i32, i32),
     ) -> anyhow::Result<()> {
         let device = self.device.as_ref().unwrap().clone();
+        let ctx = self.ctx.as_ref().unwrap();
 
         let attrs = WindowAttributes::default()
             .with_title(format!("Goldy - {}", effect_type.title()))
@@ -442,28 +454,28 @@ impl App {
         let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
 
-        let mut state = WindowState::new(window.clone(), &device, effect_type)?;
-
-        // Render first frame immediately to avoid white/undefined swapchain content
-        state.render(&device)?;
-        window.request_redraw(); // Start animation loop
+        let mut state = WindowState::new(window.clone(), ctx, &device, effect_type)?;
+        state.render(ctx)?;
+        window.request_redraw();
 
         self.windows.insert(window_id, state);
-
         Ok(())
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Initialize device if needed
         if self.device.is_none() {
             match self
                 .instance
                 .request_adapter(&RequestAdapterOptions::default())
                 .and_then(|a| a.request_device(&DeviceDescriptor::default()))
             {
-                Ok(device) => self.device = Some(Arc::new(device)),
+                Ok(device) => {
+                    let device = Arc::new(device);
+                    self.ctx = Some(device.create_context().expect("create context"));
+                    self.device = Some(device);
+                }
                 Err(e) => {
                     tracing::error!("Failed to create device: {}", e);
                     event_loop.exit();
@@ -472,10 +484,8 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Create windows for each effect (each window renders first frame immediately)
         let effects: Vec<_> = self.effects_to_create.drain(..).collect();
         for (i, effect) in effects.into_iter().enumerate() {
-            // Position windows side by side
             let x = 50 + (i as i32) * 520;
             let y = 100;
 
@@ -486,7 +496,6 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
-        // Get the specific window state
         let state = match self.windows.get_mut(&window_id) {
             Some(s) => s,
             None => return,
@@ -494,15 +503,11 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => {
-                // Remove this window
                 self.windows.remove(&window_id);
-
-                // If all windows closed, exit
                 if self.windows.is_empty() {
                     event_loop.exit();
                 }
             }
-
             WindowEvent::Focused(focused) => {
                 state.has_focus = focused;
                 if focused {
@@ -513,11 +518,9 @@ impl ApplicationHandler for App {
                     );
                 }
             }
-
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 match event.logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        // Close just this window
                         self.windows.remove(&window_id);
                         if self.windows.is_empty() {
                             event_loop.exit();
@@ -538,7 +541,6 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -549,11 +551,7 @@ impl ApplicationHandler for App {
                     println!("[{}] Reset (click)", s.effect_type.title());
                 }
             }
-
-            WindowEvent::RedrawRequested => {
-                // Rendering is handled in about_to_wait for all windows
-            }
-
+            WindowEvent::RedrawRequested => {}
             WindowEvent::Resized(new_size) => {
                 if let Some(s) = self.windows.get_mut(&window_id) {
                     if let Some(device) = self.device.as_ref() {
@@ -561,24 +559,22 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         common::exit_if_timed_out(event_loop, self.start_time);
-        // Request redraw for ALL windows every frame, regardless of focus
-        // This ensures unfocused windows continue animating
-        let device = match &self.device {
-            Some(d) => d.clone(),
+
+        let ctx = match &self.ctx {
+            Some(c) => c,
             None => return,
         };
 
         self.frame_count += 1;
 
         for state in self.windows.values_mut() {
-            if let Err(e) = state.render(&device) {
+            if let Err(e) = state.render(ctx) {
                 tracing::error!("[{}] Render error: {}", state.effect_type.title(), e);
             }
         }
@@ -608,8 +604,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Multi-Window Example");
-    println!("========================");
+    println!("Goldy Multi-Window Example (Scheme + Present)");
     println!("Three windows, three effects, independent controls:");
     println!();
     println!("  Plasma:    Space=pause     Click/R=reset");
@@ -622,6 +617,5 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut App::new()?)?;
-
     Ok(())
 }

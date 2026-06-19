@@ -439,22 +439,60 @@ impl<'a> DestroyDeviceRef<'a> {
     }
 }
 
+/// Wait only for GPU work tied to `surface_handle`, not the entire device.
+///
+/// Multi-window apps destroy surfaces one at a time while others keep rendering;
+/// `device_wait_idle` here would stall every live window on each close.
+fn wait_surface_gpu_idle(state: &super::types::VulkanState, surface_handle: SurfaceHandle) {
+    let Some(surface_state) = state.surfaces.get(&surface_handle) else {
+        return;
+    };
+    let device_handle = surface_state.device_handle;
+    let Some(ld) = state.devices.get(&device_handle) else {
+        return;
+    };
+
+    for frame in &surface_state.frame_sync {
+        if frame.fence_pending {
+            unsafe {
+                let _ = ld.device.wait_for_fences(&[frame.in_flight_fence], true, u64::MAX);
+            }
+        }
+    }
+
+    let max_timeline = surface_state
+        .frame_sync
+        .iter()
+        .flat_map(|f| f.frame_timeline_value.into_iter().chain(f.copy_timeline_value))
+        .chain(surface_state.frame_sync.iter().map(|f| f.last_compute_timeline_value))
+        .max()
+        .unwrap_or(0);
+
+    if max_timeline > 0 {
+        super::context::wait_until_device_seq_at_least(state, device_handle, max_timeline);
+    }
+
+    // Timeline retirement covers compute/copy submits, but `queuePresent` may still be
+    // waiting on `render_finished_semaphore` after the copy submit returns. Drain the
+    // queue before destroying per-frame binary semaphores (VUID-vkDestroySemaphore).
+    if let Some(ld) = state.devices.get(&device_handle) {
+        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
+        unsafe {
+            let _ = ld.device.queue_wait_idle(ld.queue);
+        }
+    }
+}
+
 /// Destroy a surface and all associated resources.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn destroy(
-    entry: &Entry,
-    instance: &Instance,
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    surface_handle: SurfaceHandle,
-) {
+pub(super) fn destroy(state: &mut super::types::VulkanState, surface_handle: SurfaceHandle) {
+    wait_surface_gpu_idle(state, surface_handle);
     destroy_impl(
-        entry,
-        instance,
-        DestroyDeviceRef::Map(devices),
-        surfaces,
-        textures,
+        &state.entry,
+        &state.instance,
+        DestroyDeviceRef::Map(&state.devices),
+        &mut state.surfaces,
+        &mut state.textures,
         surface_handle,
     );
 }
@@ -470,7 +508,12 @@ pub(super) fn destroy_with_logical_device(
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
     textures: &mut HashMap<TextureHandle, TextureState>,
     surface_handle: SurfaceHandle,
+    gpu_already_idle: bool,
 ) {
+    if !gpu_already_idle {
+        // During normal surface drop the caller must use [`destroy`] instead.
+        tracing::warn!("destroy_with_logical_device called without gpu_already_idle during live teardown");
+    }
     destroy_impl(
         entry,
         instance,
@@ -527,8 +570,6 @@ fn destroy_impl(
     if let Some(mut surface_state) = surfaces.remove(&surface_handle) {
         if let Some(logical_device) = device_ref.get_ld(surface_state.device_handle) {
             unsafe {
-                let _ = logical_device.device.device_wait_idle();
-
                 for frame in &mut surface_state.frame_sync {
                     frame.frame_timeline_value = None;
                     frame.copy_timeline_value = None;
@@ -838,23 +879,28 @@ pub(super) fn frame_texture(
     surfaces.get(&surface_handle).and_then(|s| s.current_texture_handle)
 }
 
+/// In-flight slot index for the frame most recently acquired on this surface.
+pub(super) fn current_frame_slot(
+    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
+    surface_handle: SurfaceHandle,
+) -> Option<u32> {
+    surfaces.get(&surface_handle).map(|s| s.current_frame as u32)
+}
+
 /// Render commands to the surface's current swapchain image.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render<F>(
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    frame_tables: &HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
-    buffers: &HashMap<super::BufferHandle, types::BufferState>,
-    pipelines: &HashMap<super::PipelineHandle, types::PipelineState>,
-    surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
+#[allow(clippy::too_many_lines)]
+pub(super) fn render(
+    state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     _image: SwapchainImageHandle,
     timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
-    record_commands_fn: F,
-) -> Result<()>
-where
-    F: FnOnce(vk::CommandBuffer, &[RenderCommand], &LogicalDevice, &mut Option<PipelineHandle>) -> Result<()>,
-{
+) -> Result<()> {
+    let devices = &state.devices;
+    let frame_tables = &state.frame_tables;
+    let buffers = &state.buffers;
+    let pipelines = &state.pipelines;
+    let surfaces = &mut state.surfaces;
     let (
         _image_index,
         current_frame,
@@ -955,6 +1001,7 @@ where
 
         if has_bindings {
             super::frame_table::record_prologue_for_tables(
+                &state.contexts,
                 frame_tables,
                 buffers,
                 device_handle,
@@ -1086,8 +1133,8 @@ where
         // Track current pipeline for bind group binding
         let mut current_pipeline: Option<PipelineHandle> = None;
 
-        // Execute render commands using provided callback
-        record_commands_fn(cmd, &lowered, logical_device, &mut current_pipeline)?;
+        // Execute render commands
+        super::render_commands::record(cmd, &lowered, logical_device, pipelines, buffers, &mut current_pipeline)?;
 
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };
@@ -1198,7 +1245,7 @@ pub(super) fn submit_frame(
     };
 
     if !pending.is_empty() {
-        return super::compute::submit(state, frame.context, &pending);
+        return super::compute::submit(state, frame.context, &pending, None);
     }
 
     let ld = state.devices.get(&dh).context("Surface's device is invalid")?;

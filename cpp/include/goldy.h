@@ -23,14 +23,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Graphics backend type.
-typedef enum GoldyBackendType {
-    GOLDY_BACKEND_TYPE_VULKAN = 0,
-    GOLDY_BACKEND_TYPE_METAL = 1,
-    GOLDY_BACKEND_TYPE_DX12 = 2,
-    GOLDY_BACKEND_TYPE_WEB_GPU = 3,
-} GoldyBackendType;
-
 // Result codes for FFI functions.
 typedef enum GoldyResult {
     // Operation succeeded.
@@ -49,6 +41,20 @@ typedef enum GoldyResult {
     GOLDY_RESULT_INTERNAL_ERROR = 6,
 } GoldyResult;
 
+// Shader resource binding access (SRV vs UAV).
+typedef enum GoldyResourceAccess {
+    GOLDY_RESOURCE_ACCESS_READ = 0,
+    GOLDY_RESOURCE_ACCESS_WRITE = 1,
+    GOLDY_RESOURCE_ACCESS_READ_WRITE = 2,
+} GoldyResourceAccess;
+
+// Graphics backend type.
+typedef enum GoldyBackendType {
+    GOLDY_BACKEND_TYPE_VULKAN = 0,
+    GOLDY_BACKEND_TYPE_METAL = 1,
+    GOLDY_BACKEND_TYPE_DX12 = 2,
+} GoldyBackendType;
+
 // GPU device type.
 typedef enum GoldyDeviceType {
     GOLDY_DEVICE_TYPE_DISCRETE_GPU = 0,
@@ -56,13 +62,6 @@ typedef enum GoldyDeviceType {
     GOLDY_DEVICE_TYPE_CPU = 2,
     GOLDY_DEVICE_TYPE_OTHER = 3,
 } GoldyDeviceType;
-
-// Shader resource binding access (SRV vs UAV).
-typedef enum GoldyResourceAccess {
-    GOLDY_RESOURCE_ACCESS_READ = 0,
-    GOLDY_RESOURCE_ACCESS_WRITE = 1,
-    GOLDY_RESOURCE_ACCESS_READ_WRITE = 2,
-} GoldyResourceAccess;
 
 // Vertex format.
 typedef enum GoldyVertexFormat {
@@ -169,8 +168,14 @@ typedef enum GoldyIndexFormat {
     GOLDY_INDEX_FORMAT_UINT32 = 1,
 } GoldyIndexFormat;
 
+// Opaque handle to an acquired [`goldy::Buffer`].
+typedef struct GoldyBuffer GoldyBuffer;
+
 // Opaque handle to a Goldy ComputePipeline.
 typedef struct GoldyComputePipeline GoldyComputePipeline;
+
+// Opaque handle to a Goldy submission context.
+typedef struct GoldyContext GoldyContext;
 
 // Opaque handle to a Goldy Device.
 typedef struct GoldyDevice GoldyDevice;
@@ -178,11 +183,22 @@ typedef struct GoldyDevice GoldyDevice;
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
-// Builder for a retained mosaic parcel (one backing buffer, multiple sub-views).
-typedef struct GoldyMosaicBuilder GoldyMosaicBuilder;
-
-// Opaque handle to a retained [`goldy::Parcel`].
+// Opaque handle to a bindable [`goldy::Parcel`] (texture parcels; buffer units use [`GoldyBuffer`] + index).
 typedef struct GoldyParcel GoldyParcel;
+
+// Opaque present easement grant handle returned by [`goldy_scheme_grant_present`].
+typedef struct GoldyPresentGrant GoldyPresentGrant;
+
+// Opaque handle to a stable present lease from a swapchain pool.
+typedef struct GoldyPresentLease GoldyPresentLease;
+
+// Opaque read-easement grant handle returned by [`goldy_scheme_grant_read`].
+//
+// Heap-allocated; destroy with [`goldy_read_grant_destroy`].
+typedef struct GoldyReadGrant GoldyReadGrant;
+
+// Builder for a retained record buffer (one backing buffer, multiple sub-views).
+typedef struct GoldyRecordBuilder GoldyRecordBuilder;
 
 // Opaque handle to a Goldy RenderPipeline.
 typedef struct GoldyRenderPipeline GoldyRenderPipeline;
@@ -196,6 +212,17 @@ typedef struct GoldyRetainedPool GoldyRetainedPool;
 // Opaque handle to a Goldy Sampler.
 typedef struct GoldySampler GoldySampler;
 
+// Opaque handle to a retained Goldy scheme.
+typedef struct GoldyScheme GoldyScheme;
+
+// Opaque handle to a scheme-held render-target lease.
+typedef struct GoldySchemeRenderTargetLease GoldySchemeRenderTargetLease;
+
+// Opaque per-submission token returned by [`goldy_scheme_submit`].
+//
+// Heap-allocated; destroy with [`goldy_scheme_submission_destroy`].
+typedef struct GoldySchemeSubmission GoldySchemeSubmission;
+
 // Opaque handle to a Goldy ShaderModule.
 typedef struct GoldyShaderModule GoldyShaderModule;
 
@@ -208,8 +235,8 @@ typedef struct GoldySurface GoldySurface;
 // Opaque handle to a Goldy SurfaceFrame.
 typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
-// Opaque handle to a Goldy TaskGraph.
-typedef struct GoldyTaskGraph GoldyTaskGraph;
+// Opaque handle to a swapchain pool.
+typedef struct GoldySwapchainPool GoldySwapchainPool;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -270,13 +297,6 @@ typedef struct GoldySamplerDesc {
     float lod_max_clamp;
 } GoldySamplerDesc;
 
-// Opaque token returned by [`goldy_task_graph_declare_swapchain_output`].
-//
-// Carries no data; exists for type safety at the C ABI boundary.
-typedef struct GoldySwapchainOutput {
-    uint8_t _private[0];
-} GoldySwapchainOutput;
-
 // RGBA color with floating point components (0.0 - 1.0).
 typedef struct GoldyColor {
     float r;
@@ -285,9 +305,40 @@ typedef struct GoldyColor {
     float a;
 } GoldyColor;
 
+// Outcome counters for [`goldy_scheme_replay_stats`].
+typedef struct GoldyReplayStats {
+    uint64_t records;
+    uint64_t resubmit_hits;
+} GoldyReplayStats;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+uint64_t goldy_buffer_byte_size(const struct GoldyBuffer *buffer);
+
+void goldy_buffer_destroy(struct GoldyBuffer *buffer);
+
+// Borrow one bindable unit from a retained buffer as an owned [`GoldyParcel`] handle.
+//
+// The returned parcel shares dependency-tracking state with the buffer unit.
+// Destroy with [`goldy_parcel_destroy`]. The source buffer must remain alive
+// for the duration of GPU use.
+struct GoldyParcel *goldy_buffer_field(const struct GoldyBuffer *buffer, uint32_t unit);
+
+uint64_t goldy_buffer_unit_byte_size(const struct GoldyBuffer *buffer, uint32_t unit);
+
+uint32_t goldy_buffer_unit_count(const struct GoldyBuffer *buffer);
+
+enum GoldyResult goldy_buffer_unit_read_to_cpu(const struct GoldyBuffer *buffer,
+                                               uint32_t unit,
+                                               const struct GoldyDevice *device,
+                                               uint8_t *output,
+                                               size_t output_size);
+
+uint32_t goldy_buffer_unit_resource_index(const struct GoldyBuffer *buffer,
+                                          uint32_t unit,
+                                          enum GoldyResourceAccess access);
 
 // Clear the last error message.
 void goldy_clear_error(void);
@@ -306,6 +357,27 @@ struct GoldyComputePipeline *goldy_compute_pipeline_create(const struct GoldyDev
 // # Safety
 // The pointer must be valid and not used after this call.
 void goldy_compute_pipeline_destroy(struct GoldyComputePipeline *pipeline);
+
+// Create a context bound to `device`.
+//
+// A context is the submission lifetime anchor for retained [`crate::scheme::GoldyScheme`]
+// instances on the same device.
+//
+// # Safety
+// `device` must be valid.
+struct GoldyContext *goldy_context_create(const struct GoldyDevice *device);
+
+// Destroy a context.
+//
+// # Safety
+// `ctx` must be valid and not used after this call.
+void goldy_context_destroy(struct GoldyContext *ctx);
+
+// Smoke-test helper: returns [`GoldyResult::Ok`] when `ctx` is non-null.
+//
+// # Safety
+// `ctx` must be valid when non-null.
+enum GoldyResult goldy_context_is_valid(const struct GoldyContext *ctx);
 
 // Get the adapter ID this device was created on.
 //
@@ -381,95 +453,76 @@ enum GoldyResult goldy_instance_get_adapter(const struct GoldyInstance *instance
                                             uint32_t index,
                                             struct GoldyAdapterInfo *info);
 
-// Build a mosaic parcel from a builder and destroy the builder.
+uint64_t goldy_parcel_byte_size(const struct GoldyParcel *parcel);
+
+void goldy_parcel_destroy(struct GoldyParcel *parcel);
+
+// Present the swapchain for `(grant × submission)`.
 //
-// Returns a heap-allocated parcel handle, or null on failure.
+// Blocks until this submission's GPU work completes, then presents.
 //
 // # Safety
-// `builder` and `pool` must be valid. `builder` is consumed regardless of outcome.
-struct GoldyParcel *goldy_mosaic_builder_build(struct GoldyMosaicBuilder *builder,
+// All pointers must be valid.
+enum GoldyResult goldy_present_grant_consume(const struct GoldyPresentGrant *grant,
+                                             const struct GoldySchemeSubmission *submission);
+
+// Destroy a present grant from [`goldy_scheme_grant_present`].
+//
+// # Safety
+// `grant` must be valid and not used after this call.
+void goldy_present_grant_destroy(struct GoldyPresentGrant *grant);
+
+// Destroy a present lease handle.
+//
+// Does not remove the lease from the pool; the backing remains until the pool is dropped.
+//
+// # Safety
+// `lease` must be valid and not used after this call.
+void goldy_present_lease_destroy(struct GoldyPresentLease *lease);
+
+// Logical byte size of readable data for this grant.
+//
+// # Safety
+// `grant` must be valid.
+uint64_t goldy_read_grant_byte_size(const struct GoldyReadGrant *grant);
+
+// Consume bytes for the `(grant × submission)` cell into `output`.
+//
+// Blocks until this submission's GPU work (dispatch + grant staging copy) completes.
+// Each submission may be consumed at most once per grant. Drop the submission when done if you
+// rely on staging-buffer reuse.
+//
+// # Safety
+// All pointers must be valid. `output` must point to at least `output_size` bytes.
+enum GoldyResult goldy_read_grant_consume(const struct GoldyReadGrant *grant,
+                                          const struct GoldySchemeSubmission *submission,
+                                          uint8_t *output,
+                                          size_t output_size);
+
+// Destroy a read grant from [`goldy_scheme_grant_read`].
+//
+// # Safety
+// `grant` must be valid and not used after this call.
+void goldy_read_grant_destroy(struct GoldyReadGrant *grant);
+
+struct GoldyBuffer *goldy_record_builder_build(struct GoldyRecordBuilder *builder,
                                                struct GoldyRetainedPool *pool);
 
-// Create a mosaic builder (call [`goldy_mosaic_builder_emplace`] then [`goldy_mosaic_builder_build`]).
-struct GoldyMosaicBuilder *goldy_mosaic_builder_create(void);
+struct GoldyRecordBuilder *goldy_record_builder_create(void);
 
-// Destroy a mosaic builder without building.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_mosaic_builder_destroy(struct GoldyMosaicBuilder *builder);
+void goldy_record_builder_destroy(struct GoldyRecordBuilder *builder);
 
-// Reserve a mosaic sub-view and upload `data` (`data_size` must equal `element_count * element_stride`).
-//
-// Returns the slot index, or `u32::MAX` on failure.
-//
-// # Safety
-// `builder` must be valid. `data` must point to at least `data_size` bytes when non-null.
-uint32_t goldy_mosaic_builder_emplace(struct GoldyMosaicBuilder *builder,
+uint32_t goldy_record_builder_emplace(struct GoldyRecordBuilder *builder,
+                                      const char *name,
                                       const uint8_t *data,
                                       size_t data_size,
                                       uint64_t element_count,
                                       uint32_t element_stride);
 
-// Approximate committed byte size of a parcel.
-//
-// # Safety
-// The parcel pointer must be valid.
-uint64_t goldy_parcel_byte_size(const struct GoldyParcel *parcel);
-
-// Destroy a retained parcel.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
-void goldy_parcel_destroy(struct GoldyParcel *parcel);
-
-// Read one mosaic sub-view back to CPU memory.
-//
-// `output_size` must equal the sub-view byte size.
-//
-// # Safety
-// All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_parcel_mosaic_view_read_to_cpu(const struct GoldyParcel *parcel,
-                                                      uint32_t slot,
-                                                      const struct GoldyDevice *device,
-                                                      uint8_t *output,
-                                                      size_t output_size);
-
-// Bindless resource index for one mosaic sub-view.
-//
-// Returns `u32::MAX` if unavailable.
-//
-// # Safety
-// The parcel pointer must be valid.
-uint32_t goldy_parcel_mosaic_view_resource_index(const struct GoldyParcel *parcel,
-                                                 uint32_t slot,
-                                                 enum GoldyResourceAccess access);
-
-// Byte size of one mosaic sub-view.
-//
-// Returns `0` if the parcel or slot is invalid.
-//
-// # Safety
-// The parcel pointer must be valid.
-uint64_t goldy_parcel_mosaic_view_size(const struct GoldyParcel *parcel, uint32_t slot);
-
-// Read buffer parcel contents back to CPU memory.
-//
-// # Safety
-// All pointers must be valid. `output` must point to at least `output_size` bytes.
-enum GoldyResult goldy_parcel_read_to_cpu(const struct GoldyParcel *parcel,
-                                          const struct GoldyDevice *device,
-                                          uint8_t *output,
-                                          size_t output_size);
-
-// Bindless resource slot index for shader binding.
-//
-// Returns `u32::MAX` if the index is unavailable (e.g. mosaic parcels).
-//
-// # Safety
-// The parcel pointer must be valid.
-uint32_t goldy_parcel_resource_index(const struct GoldyParcel *parcel,
-                                     enum GoldyResourceAccess access);
+uint32_t goldy_record_builder_reserve(struct GoldyRecordBuilder *builder,
+                                      const char *name,
+                                      uint64_t element_count,
+                                      uint32_t element_stride);
 
 // Create a new render pipeline.
 //
@@ -556,28 +609,13 @@ enum GoldyResult goldy_render_target_read_to_buffer(const struct GoldyRenderTarg
 // The target pointer must be valid.
 uint32_t goldy_render_target_width(const struct GoldyRenderTarget *target);
 
-// Acquire a retained buffer parcel.
-//
-// `element_stride` of `0` selects stride `1` (raw bytes). Pass `data == null` with
-// `data_size == 0` for an uninitialized buffer.
-//
-// Returns a heap-allocated parcel handle, or null on failure.
-//
-// # Safety
-// `pool` and `device` must be valid. `data` must point to at least `data_size` bytes when non-null.
-struct GoldyParcel *goldy_retained_pool_acquire_buffer(struct GoldyRetainedPool *pool,
+struct GoldyBuffer *goldy_retained_pool_acquire_buffer(struct GoldyRetainedPool *pool,
                                                        uint64_t size,
                                                        enum GoldyBufferKind access,
                                                        uint32_t element_stride,
                                                        const uint8_t *data,
                                                        size_t data_size);
 
-// Acquire a retained texture parcel with optional initial pixel data.
-//
-// `data` may be null when `data_size == 0` (uninitialized texture).
-//
-// # Safety
-// `pool` must be valid. `data` must point to at least `data_size` bytes when non-null.
 struct GoldyParcel *goldy_retained_pool_acquire_texture(struct GoldyRetainedPool *pool,
                                                         uint32_t width,
                                                         uint32_t height,
@@ -587,18 +625,8 @@ struct GoldyParcel *goldy_retained_pool_acquire_texture(struct GoldyRetainedPool
                                                         const uint8_t *data,
                                                         size_t data_size);
 
-// Create a retained pool tied to `device`.
-//
-// # Safety
-// The device pointer must be valid.
 struct GoldyRetainedPool *goldy_retained_pool_create(const struct GoldyDevice *device);
 
-// Destroy a retained pool.
-//
-// Parcels acquired from this pool remain valid until destroyed separately.
-//
-// # Safety
-// The pointer must be valid and not used after this call.
 void goldy_retained_pool_destroy(struct GoldyRetainedPool *pool);
 
 // Create a new sampler with the given descriptor.
@@ -623,6 +651,284 @@ struct GoldySampler *goldy_sampler_create_default(const struct GoldyDevice *devi
 // # Safety
 // The pointer must be valid and not used after this call.
 void goldy_sampler_destroy(struct GoldySampler *sampler);
+
+// Begin recording a compute dispatch node.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_begin(struct GoldyScheme *scheme,
+                                                 const char *label,
+                                                 const struct GoldyComputePipeline *pipeline);
+
+// Finalize the active compute node with a direct dispatch.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_compute_node_dispatch(struct GoldyScheme *scheme,
+                                                    uint32_t workgroups_x,
+                                                    uint32_t workgroups_y,
+                                                    uint32_t workgroups_z);
+
+// Declare a buffer unit for the active compute node (shader binding + dependency).
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_with_buffer_unit(struct GoldyScheme *scheme,
+                                                            const struct GoldyBuffer *buffer,
+                                                            uint32_t unit,
+                                                            enum GoldyNodeAccess node_access,
+                                                            enum GoldyResourceAccess resource_access);
+
+// Bind one field of a partitioned retained buffer to the active compute node.
+enum GoldyResult goldy_scheme_compute_node_with_field(struct GoldyScheme *scheme,
+                                                      const struct GoldyBuffer *buffer,
+                                                      uint32_t unit,
+                                                      enum GoldyNodeAccess node_access,
+                                                      enum GoldyResourceAccess resource_access);
+
+// Append one scalar virtual-main parameter for the active compute node.
+//
+// # Safety
+// `scheme` must be valid and a compute node must be active.
+enum GoldyResult goldy_scheme_compute_node_with_param(struct GoldyScheme *scheme, uint32_t value);
+
+// Declare a retained parcel for the active compute node.
+//
+// Registers both the graph dependency and the bindless shader slot internally —
+// callers never pass resource indices.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_with_parcel(struct GoldyScheme *scheme,
+                                                       const struct GoldyParcel *parcel,
+                                                       enum GoldyNodeAccess node_access,
+                                                       enum GoldyResourceAccess resource_access);
+
+// Copy a scheme-held render target into a present lease drawable.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_copy_to_present(struct GoldyScheme *scheme,
+                                              const struct GoldySchemeRenderTargetLease *src_lease,
+                                              const struct GoldyPresentLease *dst_lease);
+
+// Copy a scheme-held render target into a texture parcel (for grant readback).
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_copy_to_texture(struct GoldyScheme *scheme,
+                                              const struct GoldySchemeRenderTargetLease *src_lease,
+                                              const struct GoldyParcel *dst_parcel);
+
+// Create a scheme bound to `ctx`.
+//
+// # Safety
+// `ctx` must be valid.
+struct GoldyScheme *goldy_scheme_create(const struct GoldyContext *ctx);
+
+// Destroy a scheme.
+//
+// # Safety
+// `scheme` must be valid and not used after this call.
+void goldy_scheme_destroy(struct GoldyScheme *scheme);
+
+// Record a present easement grant over a swapchain lease (once per scheme).
+//
+// Returns a heap-allocated [`GoldyPresentGrant`]; destroy with [`goldy_present_grant_destroy`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyPresentGrant *goldy_scheme_grant_present(struct GoldyScheme *scheme,
+                                                     const struct GoldyPresentLease *lease);
+
+// Record a read-easement grant over a buffer parcel (once per scheme).
+//
+// Returns a heap-allocated [`GoldyReadGrant`]; destroy with [`goldy_read_grant_destroy`].
+// Call after the producing dispatch node(s). Marks the scheme dirty.
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyReadGrant *goldy_scheme_grant_read(struct GoldyScheme *scheme,
+                                               const struct GoldyParcel *parcel);
+
+// Record a read easement over a texture parcel (once per scheme).
+//
+// Like [`goldy_scheme_grant_read`] but requires a texture parcel with [`TextureFlags::COPY_SRC`].
+//
+// # Safety
+// All pointers must be valid.
+struct GoldyReadGrant *goldy_scheme_grant_read_texture(struct GoldyScheme *scheme,
+                                                       const struct GoldyParcel *parcel);
+
+// True when the next submit must re-record.
+//
+// # Safety
+// `scheme` must be valid.
+bool goldy_scheme_is_dirty(const struct GoldyScheme *scheme);
+
+// Declare a render-target lease on `scheme` (N=1 backing).
+//
+// Returns a heap-allocated lease handle; destroy with [`goldy_scheme_render_target_lease_destroy`].
+// The lease is valid until the scheme is destroyed.
+//
+// # Safety
+// `scheme` must be valid.
+struct GoldySchemeRenderTargetLease *goldy_scheme_lease_render_target(struct GoldyScheme *scheme,
+                                                                      uint32_t width,
+                                                                      uint32_t height,
+                                                                      enum GoldyTextureFormat format,
+                                                                      bool has_depth,
+                                                                      enum GoldyDepthFormat depth_format);
+
+// Number of nodes recorded in the scheme IR.
+//
+// # Safety
+// `scheme` must be valid.
+uint32_t goldy_scheme_len(const struct GoldyScheme *scheme);
+
+// Begin recording an offscreen render pass on a scheme-held lease.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_begin(struct GoldyScheme *scheme,
+                                                const char *label,
+                                                const struct GoldySchemeRenderTargetLease *lease);
+
+// Clear the color attachment in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_clear(struct GoldyScheme *scheme,
+                                                struct GoldyColor color);
+
+// Clear the depth attachment in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_clear_depth(struct GoldyScheme *scheme, float depth);
+
+// Draw non-indexed primitives in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_draw(struct GoldyScheme *scheme,
+                                               uint32_t first_vertex,
+                                               uint32_t vertex_count,
+                                               uint32_t first_instance,
+                                               uint32_t instance_count);
+
+// Draw a fullscreen triangle in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_draw_fullscreen(struct GoldyScheme *scheme);
+
+// Draw indexed primitives in the active render pass.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_draw_indexed(struct GoldyScheme *scheme,
+                                                       uint32_t first_index,
+                                                       uint32_t index_count,
+                                                       int32_t base_vertex,
+                                                       uint32_t first_instance,
+                                                       uint32_t instance_count);
+
+// Finalize the active render pass and append it to the scheme.
+//
+// # Safety
+// `scheme` must be valid.
+enum GoldyResult goldy_scheme_render_pass_finish(struct GoldyScheme *scheme);
+
+// Bind an index buffer parcel for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_set_index_buffer(struct GoldyScheme *scheme,
+                                                           const struct GoldyParcel *parcel,
+                                                           enum GoldyIndexFormat format);
+
+// Set the render pipeline for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_set_pipeline(struct GoldyScheme *scheme,
+                                                       const struct GoldyRenderPipeline *pipeline);
+
+// Bind a vertex buffer slot from a retained buffer parcel.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_set_vertex_buffer_parcel(struct GoldyScheme *scheme,
+                                                                   uint32_t slot,
+                                                                   const struct GoldyParcel *parcel);
+
+// Declare a buffer unit dependency for the active render pass.
+enum GoldyResult goldy_scheme_render_pass_with_buffer_unit(struct GoldyScheme *scheme,
+                                                           const struct GoldyBuffer *buffer,
+                                                           uint32_t unit,
+                                                           enum GoldyNodeAccess access);
+
+// Bind one field of a partitioned retained buffer to the active render pass.
+enum GoldyResult goldy_scheme_render_pass_with_field(struct GoldyScheme *scheme,
+                                                     const struct GoldyBuffer *buffer,
+                                                     uint32_t unit,
+                                                     enum GoldyNodeAccess access);
+
+// Declare a graph dependency on a retained parcel for the active render pass.
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_render_pass_with_parcel(struct GoldyScheme *scheme,
+                                                      const struct GoldyParcel *parcel,
+                                                      enum GoldyNodeAccess access);
+
+// Destroy a render-target lease handle.
+//
+// Does not remove the lease from the scheme; the backing remains until the scheme is dropped.
+//
+// # Safety
+// `lease` must be valid and not used after this call.
+void goldy_scheme_render_target_lease_destroy(struct GoldySchemeRenderTargetLease *lease);
+
+// Submission outcome counters.
+//
+// # Safety
+// `scheme` and `out_stats` must be valid.
+enum GoldyResult goldy_scheme_replay_stats(const struct GoldyScheme *scheme,
+                                           struct GoldyReplayStats *out_stats);
+
+// Destroy a submission token from [`goldy_scheme_submit`].
+//
+// # Safety
+// `submission` must be valid and not used after this call.
+void goldy_scheme_submission_destroy(struct GoldySchemeSubmission *submission);
+
+// Timeline value for this submission (for debugging only).
+//
+// # Safety
+// `submission` must be valid.
+uint64_t goldy_scheme_submission_timeline_value(const struct GoldySchemeSubmission *submission);
+
+// Block until the GPU work for `submission` has completed.
+//
+// Prefer [`goldy_read_grant_consume`] when verifying compute output through a grant.
+//
+// # Safety
+// `ctx` and `submission` must be valid.
+enum GoldyResult goldy_scheme_submission_wait(const struct GoldyContext *ctx,
+                                              const struct GoldySchemeSubmission *submission);
+
+// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
+//
+// Does not block. The caller owns `*out_submission` and must call
+// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded grant, use
+// [`goldy_read_grant_consume`] with a [`GoldyReadGrant`] from [`goldy_scheme_grant_read`].
+//
+// # Safety
+// `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
+enum GoldyResult goldy_scheme_submit(struct GoldyScheme *scheme,
+                                     struct GoldySchemeSubmission **out_submission);
 
 // Get the built-in vertex color 2D shader source.
 //
@@ -734,231 +1040,77 @@ enum GoldyResult goldy_surface_resize(struct GoldySurface *surface,
                                       uint32_t width,
                                       uint32_t height);
 
-// Submit a task graph that writes to an already-acquired swapchain frame.
-//
-// The graph must include [`goldy_task_graph_declare_swapchain_output`] and
-// [`goldy_task_graph_copy_render_target_to_swapchain`] (or another swapchain
-// binding). Updates `frame` in place with any parcel stamp targets from the graph.
-//
-// # Safety
-// All pointers must be valid. No render pass may be open on `graph`.
-enum GoldyResult goldy_surface_submit_graph_to_frame(const struct GoldySurface *surface,
-                                                     struct GoldyTaskGraph *graph,
-                                                     struct GoldySurfaceFrame *frame);
-
 // Get the surface width.
 //
 // # Safety
 // The surface pointer must be valid.
 uint32_t goldy_surface_width(const struct GoldySurface *surface);
 
-// Reset the graph to empty while retaining internal capacity.
+// Create a swapchain pool from an AppKit `NSView` pointer.
 //
 // # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_clear(struct GoldyTaskGraph *graph);
+// `ctx` must be valid. `ns_view` must be a valid `NSView*` for the window's content view.
+struct GoldySwapchainPool *goldy_swapchain_pool_create_appkit(const struct GoldyContext *ctx,
+                                                              void *ns_view,
+                                                              uint32_t depth);
 
-// Begin recording a compute dispatch node.
-//
-// Only one recorder (render pass or compute node) may be open at a time per graph.
+// Create a swapchain pool from Wayland `wl_display` and `wl_surface` pointers.
 //
 // # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_begin(struct GoldyTaskGraph *graph,
-                                                     const char *label,
-                                                     const struct GoldyComputePipeline *pipeline);
+// `ctx` must be valid. `display` and `surface` must be valid Wayland handles.
+struct GoldySwapchainPool *goldy_swapchain_pool_create_wayland(const struct GoldyContext *ctx,
+                                                               void *display,
+                                                               void *surface,
+                                                               uint32_t depth);
 
-// Declare a graph dependency on a retained parcel for the active compute node.
+// Create a swapchain pool from a Win32 HWND.
 //
 // # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_bind_parcel(struct GoldyTaskGraph *graph,
-                                                           const struct GoldyParcel *parcel,
-                                                           enum GoldyNodeAccess access);
+// `ctx` must be valid. `hwnd` must be a valid Win32 window handle.
+struct GoldySwapchainPool *goldy_swapchain_pool_create_win32(const struct GoldyContext *ctx,
+                                                             void *hwnd,
+                                                             uint32_t depth);
 
-// Declare a mosaic sub-view dependency for the active compute node.
+// Destroy a swapchain pool.
 //
 // # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_compute_node_bind_parcel_view(struct GoldyTaskGraph *graph,
-                                                                const struct GoldyParcel *parcel,
-                                                                uint32_t slot,
-                                                                enum GoldyNodeAccess access);
+// `pool` must be valid and not used after this call.
+void goldy_swapchain_pool_destroy(struct GoldySwapchainPool *pool);
 
-// Set bindless resource slot indices for the active compute node.
+// Swapchain surface format.
 //
 // # Safety
-// All pointers must be valid. `indices` must contain `count` elements.
-enum GoldyResult goldy_task_graph_compute_node_bind_resources_raw(struct GoldyTaskGraph *graph,
-                                                                  const uint32_t *indices,
-                                                                  uint32_t count);
+// `pool` must be valid.
+enum GoldyTextureFormat goldy_swapchain_pool_format(const struct GoldySwapchainPool *pool);
 
-// Finalize the active compute node with a direct dispatch.
+// Current swapchain drawable height.
 //
 // # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_compute_node_dispatch(struct GoldyTaskGraph *graph,
-                                                        uint32_t workgroups_x,
-                                                        uint32_t workgroups_y,
-                                                        uint32_t workgroups_z);
+// `pool` must be valid.
+uint32_t goldy_swapchain_pool_height(const struct GoldySwapchainPool *pool);
 
-// Add a render-target → swapchain blit node to the graph.
+// Acquire a stable present lease from `pool`.
+//
+// Returns a heap-allocated lease handle; destroy with [`goldy_present_lease_destroy`].
+// The lease identity remains valid until the pool is destroyed.
 //
 // # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_copy_render_target_to_swapchain(struct GoldyTaskGraph *graph,
-                                                                  const struct GoldyRenderTarget *src,
-                                                                  const struct GoldySwapchainOutput *_swapchain);
+// `pool` must be valid.
+struct GoldyPresentLease *goldy_swapchain_pool_lease(const struct GoldySwapchainPool *pool);
 
-// Create a new task graph.
-struct GoldyTaskGraph *goldy_task_graph_create(void);
-
-// Declare that this graph will copy to the swapchain at submit time.
-//
-// Returns a pointer to a per-graph sentinel (not heap-allocated). The pointer is
-// valid until the graph is destroyed and must be passed to
-// [`goldy_task_graph_copy_render_target_to_swapchain`].
+// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
 //
 // # Safety
-// The graph pointer must be valid.
-struct GoldySwapchainOutput *goldy_task_graph_declare_swapchain_output(struct GoldyTaskGraph *graph);
+// `pool` must be valid.
+enum GoldyResult goldy_swapchain_pool_resize(struct GoldySwapchainPool *pool,
+                                             uint32_t width,
+                                             uint32_t height);
 
-// Destroy a task graph.
+// Current swapchain drawable width.
 //
 // # Safety
-// The pointer must be valid and not used after this call.
-void goldy_task_graph_destroy(struct GoldyTaskGraph *graph);
-
-// Analyze the graph, submit GPU work, and block until complete.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_dispatch(struct GoldyTaskGraph *graph,
-                                           const struct GoldyDevice *device);
-
-// Number of task nodes recorded in the graph (for tests and diagnostics).
-//
-// # Safety
-// The graph pointer must be valid.
-uint32_t goldy_task_graph_len(const struct GoldyTaskGraph *graph);
-
-// Begin recording an offscreen render pass on `target`.
-//
-// Only one render pass may be open at a time per graph.
-//
-// # Safety
-// All pointers must be valid. `target` must outlive the graph recording session.
-enum GoldyResult goldy_task_graph_render_pass_begin(struct GoldyTaskGraph *graph,
-                                                    const char *label,
-                                                    const struct GoldyRenderTarget *target);
-
-// Declare a graph dependency on a retained parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_bind_parcel(struct GoldyTaskGraph *graph,
-                                                          const struct GoldyParcel *parcel,
-                                                          enum GoldyNodeAccess access);
-
-// Declare a mosaic sub-view dependency for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_bind_parcel_view(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyParcel *parcel,
-                                                               uint32_t slot,
-                                                               enum GoldyNodeAccess access);
-
-// Bind typed resource handles (category + index pairs) for the active render pass.
-//
-// `indices` is a flat array of u32 values: `[category0, index0, category1, index1, ...]`.
-// Use `GoldyResourceCategory::Scattered` (0) for buffer views.
-//
-// # Safety
-// All pointers must be valid. `indices` must contain `handle_count * 2` elements.
-enum GoldyResult goldy_task_graph_render_pass_bind_resources_typed(struct GoldyTaskGraph *graph,
-                                                                   const uint32_t *indices,
-                                                                   uint32_t handle_count);
-
-// Clear the color attachment in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_clear(struct GoldyTaskGraph *graph,
-                                                    struct GoldyColor color);
-
-// Clear the depth attachment in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_clear_depth(struct GoldyTaskGraph *graph,
-                                                          float depth);
-
-// Draw non-indexed primitives in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_draw(struct GoldyTaskGraph *graph,
-                                                   uint32_t first_vertex,
-                                                   uint32_t vertex_count,
-                                                   uint32_t first_instance,
-                                                   uint32_t instance_count);
-
-// Draw a fullscreen triangle (3 vertices, 1 instance) in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_draw_fullscreen(struct GoldyTaskGraph *graph);
-
-// Draw indexed primitives in the active render pass.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_draw_indexed(struct GoldyTaskGraph *graph,
-                                                           uint32_t first_index,
-                                                           uint32_t index_count,
-                                                           int32_t base_vertex,
-                                                           uint32_t first_instance,
-                                                           uint32_t instance_count);
-
-// Finalize the active render pass and append it to the graph.
-//
-// # Safety
-// The graph pointer must be valid.
-enum GoldyResult goldy_task_graph_render_pass_finish(struct GoldyTaskGraph *graph);
-
-// Bind an index buffer parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
-enum GoldyResult goldy_task_graph_render_pass_set_index_buffer(struct GoldyTaskGraph *graph,
-                                                               const struct GoldyParcel *parcel,
-                                                               enum GoldyIndexFormat format);
-
-// Set the render pipeline for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_task_graph_render_pass_set_pipeline(struct GoldyTaskGraph *graph,
-                                                           const struct GoldyRenderPipeline *pipeline);
-
-// Bind a vertex buffer slot from a retained buffer parcel for the active render pass.
-//
-// # Safety
-// All pointers must be valid. `parcel` must be a non-mosaic buffer parcel.
-enum GoldyResult goldy_task_graph_render_pass_set_vertex_buffer_parcel(struct GoldyTaskGraph *graph,
-                                                                       uint32_t slot,
-                                                                       const struct GoldyParcel *parcel);
-
-// Add a CPU→GPU upload node targeting a retained buffer parcel.
-//
-// # Safety
-// All pointers must be valid. `data` must point to at least `size` bytes when non-null.
-enum GoldyResult goldy_task_graph_write_parcel(struct GoldyTaskGraph *graph,
-                                               const struct GoldyParcel *parcel,
-                                               uint64_t offset,
-                                               const uint8_t *data,
-                                               size_t size);
+// `pool` must be valid.
+uint32_t goldy_swapchain_pool_width(const struct GoldySwapchainPool *pool);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -29,10 +29,12 @@ macro_rules! impl_structured_buffer_element_for_primitives {
 
 impl_structured_buffer_element_for_primitives!((), i16, u16, i32, u32, i64, u64, i128, u128, isize, usize, f32, f64,);
 
+impl StructuredBufferElement for crate::types::DispatchShape {}
+
 impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T; N] where [T; N]: bytemuck::Pod {}
 
-/// A GPU buffer.
-pub struct Buffer {
+/// Low-level GPU buffer allocation.
+pub(crate) struct Allocation {
     device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: BufferHandle,
@@ -52,7 +54,7 @@ pub struct Buffer {
 }
 
 #[allow(dead_code)]
-impl Buffer {
+impl Allocation {
     #[inline]
     pub(crate) fn gpu_buffer_handle(&self) -> BufferHandle {
         self.handle
@@ -171,12 +173,12 @@ impl Buffer {
     /// load-bearing: passing a **`&[u8]`** (for example from `bytemuck::bytes_of(&uniforms)`)
     /// fixes stride at **1 byte** while shaders usually expect `size_of::<YourStruct>()`.
     /// On some backends that mismatch reads as zeros or garbage with no error. Prefer a
-    /// typed slice such as `&[YourStruct]` or [`Buffer::with_bytes_stride`] /
-    /// [`Buffer::with_bytes`] with an explicit stride.
+    /// typed slice such as `&[YourStruct]` or [`Allocation::with_bytes_stride`] /
+    /// [`Allocation::with_bytes`] with an explicit stride.
     ///
     /// See [`StructuredBufferElement`] for which `T` are allowed (`u8` / `i8` are not).
     ///
-    /// See [`Buffer::new`] and [`BufferKind::Scattered`] for access-pattern details.
+    /// See [`Allocation::new`] and [`BufferKind::Scattered`] for access-pattern details.
     pub(crate) fn with_data<T: StructuredBufferElement>(
         device: &Device,
         data: &[T],
@@ -223,10 +225,10 @@ impl Buffer {
 
     /// Create a buffer initialized with raw bytes (element stride **1**).
     ///
-    /// Use this or [`Buffer::with_bytes_stride`] when data is naturally `&[u8]`. For typed
-    /// structs, prefer [`Buffer::with_data`] with `&[T]` so stride matches the shader type.
+    /// Use this or [`Allocation::with_bytes_stride`] when data is naturally `&[u8]`. For typed
+    /// structs, prefer [`Allocation::with_data`] with `&[T]` so stride matches the shader type.
     ///
-    /// See [`Buffer::new`] for access pattern documentation.
+    /// See [`Allocation::new`] for access pattern documentation.
     pub(crate) fn with_bytes(device: &Device, data: &[u8], access: BufferKind) -> Result<Self> {
         // For raw bytes, use stride of 1 (byte-addressable)
         Self::with_bytes_stride_and_flags(device, data, access, 1, BufferFlags::empty())
@@ -238,7 +240,7 @@ impl Buffer {
     /// if the data contains u32 values, use stride=4 so the GPU can correctly
     /// interpret the buffer as `StructuredBuffer<uint>`.
     ///
-    /// See [`Buffer::new`] for access pattern documentation.
+    /// See [`Allocation::new`] for access pattern documentation.
     pub(crate) fn with_bytes_stride(
         device: &Device,
         data: &[u8],
@@ -438,6 +440,10 @@ impl Buffer {
         backend.read_buffer_to_cpu(device.inner.handle, self.handle, output)
     }
 
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// Clear the buffer (fill with zeros) from offset for size bytes.
     pub fn clear(&self, device: &Device, offset: u64, size: u64) -> Result<()> {
         let mut backend = self.backend.lock().unwrap();
@@ -477,7 +483,7 @@ impl Buffer {
     }
 }
 
-impl Drop for Buffer {
+impl Drop for Allocation {
     fn drop(&mut self) {
         tracing::trace!(size = self.size, access = ?self.access, "Destroying buffer");
         let mut backend = self.backend.lock().unwrap();
@@ -490,10 +496,10 @@ impl Drop for Buffer {
 
 /// Trait for types that can be bound as vertex or index buffers.
 ///
-/// [`Buffer`], [`BufferView`], and non-mosaic [`crate::Parcel`] buffers implement this trait,
+/// [`BufferView`], and [`crate::Parcel`] implement this trait,
 /// allowing any of them to be passed to `set_vertex_buffer` and `set_index_buffer`.
 /// For `BufferView`, the encoder binds the parent buffer at the view's offset internally.
-/// For mosaic parcels, use [`crate::Parcel::view`] instead.
+/// For partitioned buffers, bind a specific range [`crate::Parcel`] via [`crate::Buffer::field`] or indexing.
 pub trait BufferSource {
     #[doc(hidden)]
     fn source_handle(&self) -> BufferHandle;
@@ -501,7 +507,7 @@ pub trait BufferSource {
     fn source_offset(&self) -> u64;
 }
 
-impl BufferSource for Buffer {
+impl BufferSource for Allocation {
     fn source_handle(&self) -> BufferHandle {
         self.handle
     }
@@ -510,7 +516,7 @@ impl BufferSource for Buffer {
     }
 }
 
-/// A view into a sub-region of a [`Buffer`].
+/// A view into a sub-region of a backing GPU buffer allocation.
 ///
 /// A `BufferView` shares the parent buffer's GPU memory but gets its own bindless
 /// descriptor pointing at `[offset, offset+size)`. The shader sees the sub-region
@@ -520,6 +526,7 @@ impl BufferSource for Buffer {
 /// each logical sub-allocation. Each view can be independently bound via resource slots.
 ///
 /// Dropping a `BufferView` unregisters its descriptor but does not free the parent's memory.
+#[derive(Clone)]
 pub struct BufferView {
     _device: Device,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
@@ -691,7 +698,7 @@ pub(crate) fn lcm(a: u64, b: u64) -> u64 {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct BufferPool {
-    backing: Buffer,
+    backing: Allocation,
     offset: u64,
     alignment: u64,
 }
@@ -875,12 +882,22 @@ impl BufferPool {
         self.backing.size().saturating_sub(self.offset)
     }
 
+    /// Consume the pool and return its backing allocation.
+    pub(crate) fn into_backing(self) -> Allocation {
+        self.backing
+    }
+
     /// Get a reference to the backing buffer (e.g., for bulk writes or clears).
-    pub fn backing_buffer(&self) -> &Buffer {
+    pub(crate) fn backing_buffer(&self) -> &Allocation {
         &self.backing
     }
 
-    /// Forward [`Buffer::hint_unused_above`] on the backing allocation.
+    /// Read the entire backing allocation to CPU memory.
+    pub fn read_to_cpu(&self, device: &Device, output: &mut [u8]) -> Result<()> {
+        self.backing.read_to_cpu(device, output)
+    }
+
+    /// Forward `hint_unused_above` on the backing allocation.
     pub fn hint_unused_above(&mut self, offset: u64) {
         self.backing.hint_unused_above(offset);
     }

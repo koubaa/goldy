@@ -1,5 +1,5 @@
 /**
- * Headless triangle — TaskGraph render pass + CPU readback (no GLFW).
+ * Headless triangle — Scheme render pass + grant readback (no GLFW).
  *
  * Mirrors python/examples/triangle_headless.py and ffi-client triangle_headless.
  * Used on headless Linux CI (lavapipe container has no Wayland display).
@@ -38,15 +38,22 @@ void write_ppm(const char* path, const std::vector<uint8_t>& rgba, uint32_t widt
     }
 }
 
+GoldyTextureFlags copy_readback_flags() {
+    GoldyTextureFlags flags{};
+    flags._0 = (1 << 0) | (1 << 1);
+    return flags;
+}
+
 } // namespace
 
 int main() {
     try {
-        std::cout << "Goldy Triangle Headless (C++ / TaskGraph)\n";
-        std::cout << "========================================\n";
+        std::cout << "Goldy Triangle Headless (C++ / Scheme)\n";
+        std::cout << "=====================================\n";
 
         goldy::Instance instance;
         goldy::Device device = instance.request_adapter().request_device();
+        goldy::Context ctx(device);
 
         const Vertex vertices[] = {
             {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f, 1.0f}},
@@ -55,7 +62,7 @@ int main() {
         };
 
         goldy::RetainedPool pool(device);
-        goldy::Parcel vertex_buffer = pool.acquire_buffer_with_data(
+        goldy::Buffer vertex_buffer = pool.acquire_buffer_with_data(
             std::span<const Vertex>(vertices),
             goldy::BufferKind::Scattered);
 
@@ -78,21 +85,27 @@ int main() {
 
         constexpr uint32_t kWidth = 64;
         constexpr uint32_t kHeight = 64;
-        goldy::RenderTarget target(device, kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
+        goldy::Parcel readback = pool.acquire_texture(
+            kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM,
+            GOLDY_TEXTURE_KIND_DIRECT, copy_readback_flags());
 
-        goldy::TaskGraph graph;
+        goldy::Scheme scheme(ctx);
+        goldy::SchemeRenderTargetLease rt = scheme.lease_render_target(
+            kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
         {
-            auto pass = graph.render_pass("triangle", target);
-            pass.bind_parcel(vertex_buffer, goldy::NodeAccess::Read)
+            auto pass = scheme.render_pass("triangle", rt);
+            pass.with_field(vertex_buffer, 0, goldy::NodeAccess::Read)
                 .clear(goldy::Color::black())
                 .set_pipeline(pipeline)
-                .set_vertex_buffer_parcel(0, vertex_buffer)
+                .set_vertex_buffer(0, vertex_buffer)
                 .draw(0, 3);
         }
 
-        graph.dispatch(device);
+        scheme.copy_to_texture(rt, readback);
+        goldy::ReadGrant grant = scheme.grant_read_texture(readback);
+        goldy::SchemeSubmission submission = scheme.submit();
+        auto pixels = grant.consume(submission);
 
-        auto pixels = target.read_to_cpu();
         const bool has_lit_pixel = std::any_of(pixels.begin(), pixels.end(), [](uint8_t b) { return b > 0; });
         if (!has_lit_pixel) {
             throw std::runtime_error("readback should contain lit triangle pixels");

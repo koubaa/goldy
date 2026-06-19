@@ -94,7 +94,8 @@ Vulkan API misuse is easiest to catch with the Khronos validation layer. CI clea
 | `GOLDY_VALIDATION=layout` | Layout / stride checks only (no built-in API validation hooks unless combined). |
 | `GOLDY_VALIDATION=layout,api` or `layout api` or `layout;api` | Layout plus graphics API validation (separators: comma, semicolon, or whitespace). |
 | `GOLDY_VALIDATION=timeline` | WSI timeline invariants: post-wait semaphore counter check in Vulkan `acquire()`. |
-| `GOLDY_VALIDATION=all` | Layout + API + timeline (same as `layout,api,timeline`). |
+| `GOLDY_VALIDATION=scheme` or `readback` | Retained-scheme grant readback invariants (frame/grant pairing, staging pool checks). |
+| `GOLDY_VALIDATION=all` | Layout + API + timeline + scheme (same as `layout,api,timeline,scheme`). |
 | `GOLDY_VALIDATION=1` / `true` / `yes` | **GPU API only** — does **not** enable layout checks (keeps dispatch-time layout work off unless you opt in). |
 
 The **`api`** token selects Goldy’s graphics-API validation path (Vulkan validation layer + `VK_EXT_debug_utils` where built; Metal `MTL_SHADER_VALIDATION` when applicable). For Vulkan you can still set **`VK_INSTANCE_LAYERS`**, **`VK_LAYER_PATH`**, etc. yourself if you prefer the loader directly. **`GOLDY_VALIDATE_LAYOUTS=1`** still works unchanged and is equivalent to enabling the layout family only.

@@ -468,7 +468,26 @@ impl Drop for Dx12Backend {
     }
 }
 
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+fn slot_access_from_push_constant_slot_kinds(
+    kinds: &[Option<crate::types::BindlessSlotKind>],
+) -> Vec<Option<crate::types::ResourceAccess>> {
+    use crate::types::{BindlessSlotKind, ResourceAccess};
+    kinds
+        .iter()
+        .map(|kind| match kind {
+            Some(BindlessSlotKind::StorageUav) => Some(ResourceAccess::ReadWrite),
+            Some(BindlessSlotKind::ReadOnlySrv) => Some(ResourceAccess::Read),
+            Some(BindlessSlotKind::UniformCbv) | None => None,
+        })
+        .collect()
+}
+
 impl GpuBackend for Dx12Backend {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Dx12
     }
@@ -628,6 +647,45 @@ impl GpuBackend for Dx12Backend {
         buffer::read_to_cpu(&mut self.state, device, buffer, output)
     }
 
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        buffer::alloc_readback_buffer(&mut self.state, device, size)
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        buffer::read_readback_buffer(&self.state.buffers, buffer, output)
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        buffer::destroy(&mut self.state, buffer);
+    }
+
+    fn query_texture_readback_layout(
+        &self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        texture::query_readback_layout(&self.state, device, width, height, format)
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        buffer::alloc_texture_readback_staging(&mut self.state, device, layout)
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
+    }
+
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let adapter_id = self.state.devices.get(&device).map(|d| d.adapter_id).unwrap_or(0);
         self.adapter_capabilities(adapter_id)
@@ -753,6 +811,7 @@ impl GpuBackend for Dx12Backend {
                 surface: surface_handle,
                 image,
                 context: ctx,
+                frame_slot: image as u32,
             },
             tex,
         ))
@@ -950,16 +1009,18 @@ impl GpuBackend for Dx12Backend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit(&mut self.state, ctx, commands)
+        compute::submit(&mut self.state, ctx, commands, sync)
     }
 
     fn submit_graph(
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, ctx, commands, None)
+        compute::submit_graph(&mut self.state, ctx, commands, None, sync)
     }
 
     fn submit_graph_and_retain(
@@ -967,20 +1028,23 @@ impl GpuBackend for Dx12Backend {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        compute::submit_graph(&mut self.state, ctx, commands, Some(key))
+        compute::evict_retained(&self.state, ctx, key);
+        compute::submit_graph(&mut self.state, ctx, commands, Some(key), sync)
     }
 
     fn try_resubmit_retained(
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        compute::try_resubmit_retained(&mut self.state, ctx, key)
+        compute::try_resubmit_retained(&mut self.state, ctx, key, sync)
     }
 
-    fn evict_retained(&mut self, ctx: ContextHandle, _key: u64) {
-        compute::evict_retained(&mut self.state, ctx);
+    fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
+        compute::evict_retained(&self.state, ctx, key);
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
@@ -1128,6 +1192,23 @@ impl GpuBackend for Dx12Backend {
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
         compute::destroy(&mut self.state, pipeline_handle);
+    }
+
+    fn compute_pipeline_slot_access(
+        &self,
+        pipeline: ComputePipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        let Some(ps) = self.state.compute_pipelines.get(&pipeline) else {
+            return Vec::new();
+        };
+        slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
+    }
+
+    fn render_pipeline_slot_access(&self, pipeline: PipelineHandle) -> Vec<Option<crate::types::ResourceAccess>> {
+        let Some(ps) = self.state.pipelines.get(&pipeline) else {
+            return Vec::new();
+        };
+        slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {

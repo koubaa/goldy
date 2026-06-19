@@ -1,7 +1,6 @@
 use crate::device::Device;
 use crate::error::{check, non_null, Result};
 use crate::sys::{self, GoldySurface, GoldySurfaceFrame};
-use crate::task_graph::TaskGraph;
 use crate::types::TextureFormat;
 use std::ffi::c_void;
 
@@ -54,17 +53,6 @@ impl Surface {
     /// Begin the next frame (acquire swapchain image).
     pub fn begin(&self) -> Result<Frame> {
         let ptr = non_null(unsafe { sys::goldy_surface_acquire(self.ptr) })?;
-        Ok(Frame { surface: self.ptr, ptr })
-    }
-
-    pub fn submit_graph_to_frame(&self, graph: &mut TaskGraph, frame: Frame) -> Result<Frame> {
-        if frame.surface != self.ptr {
-            return Err(crate::error::GoldyError::from_message(
-                "frame does not belong to this surface",
-            ));
-        }
-        let ptr = frame.into_raw();
-        check(unsafe { sys::goldy_surface_submit_graph_to_frame(self.ptr, graph.as_mut_ptr(), ptr) })?;
         Ok(Frame { surface: self.ptr, ptr })
     }
 }

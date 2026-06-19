@@ -70,14 +70,14 @@ System-value wrapper types are mapped to `SV_*` semantics. The generated entry p
 
 ### Scalar Parameters
 
-Plain scalar types (`uint`, `float`, `int`, `bool`, and vector variants) become **user parameters** — full-precision `u32` words in a separate region of the push constants. These are bound from Rust via `bind_resources_raw_with_user`:
+Plain scalar types (`uint`, `float`, `int`, `bool`, and vector variants) become **user parameters** — full-precision `u32` words in a separate region of the push constants. Bind them with `with_param` on the compute node builder (after `with_parcel` calls for resource params):
 
-```hlsl
-[goldy_compute]
-[numthreads(64, 1, 1)]
-void cs_main(Scattered<uint> data, uint offset, ThreadId id) {
-    data[id.x + offset] += 1;
-}
+```rust
+scheme
+    .node("offset", &pipeline)
+    .with_parcel(&data, NodeAccess::ReadWrite)
+    .with_param(offset)
+    .dispatch(1, 1, 1);
 ```
 
 ### Pass-Through Parameters

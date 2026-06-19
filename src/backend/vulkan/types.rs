@@ -591,7 +591,8 @@ pub(crate) struct SubmissionContext {
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
     pub command_pool: vk::CommandPool,
     pub free_cmd_buffers: Vec<vk::CommandBuffer>,
-    pub retained_compute_cb: Option<RetainedVkCb>,
+    /// Retained dispatch CBs keyed by scheme fingerprint for zero-recording-cost re-submission.
+    pub retained_compute_cbs: HashMap<u64, RetainedVkCb>,
     /// Command buffers to free once this context's timeline reaches the key.
     pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
     /// Per-context staging belt for DEVICE_LOCAL WriteBuffer uploads.
@@ -699,14 +700,15 @@ pub(crate) struct LogicalDevice {
 
 /// A Vulkan command buffer retained for resubmission.
 pub(crate) struct RetainedVkCb {
-    /// Opaque key used to detect staleness (binding fingerprint).
-    pub fingerprint: u64,
     /// The retained `VkCommandBuffer` (in executable state when GPU has completed).
     pub command_buffer: vk::CommandBuffer,
     /// Bindless slots baked into this command buffer (for slot retirement on resubmit).
     pub used_slots: Vec<SlotKey>,
     /// Frame-table staging row pinned while this CB may re-copy from upload staging.
     pub frame_table_row: Option<u32>,
+    /// Timeline value signalled by the most recent submission of this CB.
+    /// Used to defer free-listing until the GPU has retired the CB.
+    pub last_signal_value: u64,
 }
 
 impl LogicalDevice {
@@ -770,6 +772,9 @@ pub(crate) struct BufferState {
     pub sparse_block_size: u64,
     /// Per sparse page: physical backing from the page pool (`None` = unbound tile).
     pub sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>>,
+    /// Grant-read staging buffer (host-visible, persistently mapped; no bindless slot).
+    pub is_grant_readback: bool,
+    pub grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
 }
 
 /// Shader module state with cached compiled stages.

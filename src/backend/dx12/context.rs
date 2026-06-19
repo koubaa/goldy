@@ -75,7 +75,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence_shutdown,
             fence_thread,
             compute_allocator_pool,
-            retained_graph: None,
+            retained_graphs: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
@@ -112,7 +112,7 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
 
-    if let Some(old) = sc.retained_graph.take() {
+    for old in sc.retained_graphs.drain().map(|(_, g)| g) {
         if let Some(row) = old.frame_table_row {
             if let Some(ft) = state.frame_tables.get(&device) {
                 super::frame_table::unpin_row(ft, row);

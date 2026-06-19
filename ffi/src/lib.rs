@@ -4,6 +4,7 @@
 //! other languages (C#, Python via ctypes, etc.).
 
 mod compute;
+mod context;
 mod device;
 mod error;
 mod instance;
@@ -11,12 +12,14 @@ mod pipeline;
 mod render_target;
 mod retained_pool;
 mod sampler;
+mod scheme;
 mod shader;
 mod surface;
-mod task_graph;
+mod swapchain_pool;
 mod types;
 
 pub use compute::*;
+pub use context::*;
 pub use device::*;
 pub use error::*;
 pub use instance::*;
@@ -24,7 +27,8 @@ pub use pipeline::*;
 pub use render_target::*;
 pub use retained_pool::*;
 pub use sampler::*;
+pub use scheme::*;
 pub use shader::*;
 pub use surface::*;
-pub use task_graph::*;
+pub use swapchain_pool::*;
 pub use types::*;

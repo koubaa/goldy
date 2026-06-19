@@ -31,14 +31,14 @@
 //! graph.clear_buffer(&pool_backing, 0, pool.capacity());
 //!
 //! graph.node("pathtag_reduce", &pipeline_a)
-//!     .bind_buffer(&scene_buf, NodeAccess::Read)
-//!     .bind_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
-//!     .bind_resources_raw_slice(&[scene_idx, tagmonoid_idx])
+//!     .with_buffer(&scene_buf, NodeAccess::Read)
+//!     .with_buffer(&tagmonoid_buf, NodeAccess::ReadWrite)
+//!     .with_resource_slots_slice(&[scene_idx, tagmonoid_idx])
 //!     .dispatch(64, 1, 1);
 //!
 //! graph.node("bbox_clear", &pipeline_b)
-//!     .bind_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
-//!     .bind_resources_raw_slice(&[bbox_idx])
+//!     .with_buffer(&bbox_buf, NodeAccess::Write)      // independent of above
+//!     .with_resource_slots_slice(&[bbox_idx])
 //!     .dispatch(16, 1, 1);
 //!
 //! let tv = graph.submit(&ctx)?;
@@ -53,8 +53,8 @@
 //! | Builder method            | GPU operation                      |
 //! |---------------------------|------------------------------------|
 //! | [`TaskGraph::node`]       | Compute dispatch (direct/indirect) |
-//! | [`TaskGraph::clear_buffer`] / [`TaskGraph::clear_buffer_view`] | GPU-side buffer zero-fill |
-//! | [`TaskGraph::write_buffer`] / [`TaskGraph::write_parcel`] | CPU→GPU buffer upload |
+//! | [`TaskGraph::clear_parcel`] / [`TaskGraph::clear_buffer_view`] | GPU-side buffer zero-fill |
+//! | [`TaskGraph::write_parcel`] | CPU→GPU buffer upload |
 //! | [`TaskGraph::copy_render_target_to_swapchain`] | Offscreen render target → swapchain blit |
 //!
 //! # SWMR scheduling
@@ -84,13 +84,16 @@
 //! full design rationale.
 
 pub(crate) mod analysis;
+pub(crate) mod cross_submit;
+pub(crate) use cross_submit::CrossSubmitSync;
 mod graph;
 mod ir;
 pub mod record;
 
-pub(crate) use graph::apply_stamp_targets;
+pub(crate) use graph::{apply_stamp_targets, IrSubmitState, ResolvedPresentSlot};
 pub use graph::{NodeBuilder, RenderPassBuilder, ShaderResourceSlot, TaskGraph};
-pub use ir::{BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+pub use ir::{BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeAccessUnion, SlotUsageSet, UsageKindFlags};
+pub(crate) use ir::{DispatchDim, NodeKind, ResourceBinding, TaskNode};
 pub use record::{ComputeNodeRecord, RenderPassRecord};
 
 use crate::backend::{BufferHandle, TextureHandle};
@@ -109,9 +112,14 @@ pub struct TransientTextureId(pub u32);
 /// `TaskGraph::lower_swapchain_output` after `surface.begin()`.
 pub const SWAPCHAIN_SLOT_PLACEHOLDER: u32 = u32::MAX - 1;
 
+/// Sentinel value stored in `NodeKind::Dispatch::resource_slots` at the position
+/// of a `ResourceId::PresentLease` binding. Replaced by the real UAV bindless
+/// index when the swapchain pool resolves backing at submit time.
+pub const PRESENT_LEASE_SLOT_PLACEHOLDER: u32 = u32::MAX - 2;
+
 /// Opaque handle returned by [`TaskGraph::declare_swapchain_output`].
 ///
-/// Passed to [`NodeBuilder::bind_swapchain_output`] when recording the
+/// Passed to [`NodeBuilder::with_swapchain_output`] when recording the
 /// fine-pass dispatch.  Carries no data — it exists purely for type-safety so
 /// callers cannot accidentally swap a concrete texture with a swapchain output.
 ///
@@ -189,6 +197,11 @@ pub(crate) enum ResourceId {
     /// swapchain image.  Lowered to [`ResourceId::Texture`] after
     /// `surface.begin()` runs between early and final partition submission.
     SwapchainOutput,
+    /// Present lease: scheme-scoped name for a swapchain-pool drawable.
+    ///
+    /// Lowered to [`ResourceId::Texture`] when the pool acquires a backing slot
+    /// at [`crate::Scheme::submit`] time.
+    PresentLease(u32),
 }
 
 impl ResourceId {
@@ -205,6 +218,7 @@ impl ResourceId {
             ResourceId::TransientBuffer(_) => None,
             ResourceId::TransientTexture(_) => None,
             ResourceId::SwapchainOutput => None,
+            ResourceId::PresentLease(_) => None,
         }
     }
 }
@@ -248,6 +262,8 @@ pub(crate) struct SlotResolver {
     pub buffers: std::collections::HashMap<u32, ResolvedTransientBuffer>,
     pub textures: std::collections::HashMap<u32, ResolvedTransientTexture>,
     pub swapchain: Option<ResolvedSwapchain>,
+    /// Per [`ResourceId::PresentLease`] id, resolved at scheme submit time.
+    pub present_leases: std::collections::HashMap<u32, ResolvedSwapchain>,
 }
 
 impl SlotResolver {
@@ -275,6 +291,13 @@ impl SlotResolver {
                     .expect("SlotResolver::resolve: SwapchainOutput accessed before swapchain acquired");
                 ResourceId::Texture(sc.handle)
             }
+            ResourceId::PresentLease(id) => {
+                let sc = self
+                    .present_leases
+                    .get(&id)
+                    .expect("SlotResolver::resolve: PresentLease accessed before pool acquire");
+                ResourceId::Texture(sc.handle)
+            }
             other => other,
         }
     }
@@ -298,6 +321,13 @@ impl SlotResolver {
                         .swapchain
                         .as_ref()
                         .expect("SlotResolver::resolve_slots: SwapchainOutput before acquire");
+                    out[i] = sc.uav_index;
+                }
+                ResourceId::PresentLease(id) if out[i] == PRESENT_LEASE_SLOT_PLACEHOLDER => {
+                    let sc = self
+                        .present_leases
+                        .get(&id)
+                        .expect("SlotResolver::resolve_slots: PresentLease before pool acquire");
                     out[i] = sc.uav_index;
                 }
                 _ => {}

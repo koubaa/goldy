@@ -38,6 +38,14 @@ pub struct Frame {
     presented: bool,
     /// Timeline returned by [`GpuBackend::submit_frame`] for this bracket.
     submit_tv: Option<TimelineValue>,
+    /// Timeline of the early (pre-swapchain) compute partition submitted during
+    /// [`Surface::submit_graph_to_frame`]. The single-buffered per-frame
+    /// resources (scene/config/pipeline buffers) are consumed only by this
+    /// partition; the late (blit) partition reads the RT-cached `out_image`.
+    /// Frame-pipeline depth enforcement can therefore gate on this value rather
+    /// than `submit_tv` (the blit), allowing the blit + present to overlap the
+    /// next frame's CPU recording.
+    early_tv: Option<TimelineValue>,
     /// Resources (e.g. transient textures) that must outlive the frame's GPU work.
     /// Deferred to the VramAllocator ring at present time. Uses a Mutex so
     /// submit_compute can push to it via &self without requiring &mut Frame.
@@ -137,6 +145,7 @@ impl Surface {
             height: h,
             presented: false,
             submit_tv: None,
+            early_tv: None,
             keepalive: Mutex::new(DeferredPayload::new()),
             stamp_targets: Vec::new(),
         })
@@ -217,14 +226,14 @@ impl Surface {
     ///
     /// The graph **must** contain at least one swapchain-output binding
     /// (declared via [`TaskGraph::declare_swapchain_output`] and bound
-    /// via [`NodeBuilder::bind_swapchain_output`](crate::NodeBuilder::bind_swapchain_output)).
+    /// via [`NodeBuilder::with_swapchain_output`](crate::NodeBuilder::with_swapchain_output)).
     pub fn submit_graph(&self, graph: &mut TaskGraph) -> Result<Frame> {
         let _tz = tracy_zone!("surface.submit_graph");
 
         if !graph.has_swapchain_output() {
             anyhow::bail!(
                 "Surface::submit_graph: graph contains no SwapchainOutput binding; \
-                 use TaskGraph::declare_swapchain_output + NodeBuilder::bind_swapchain_output, \
+                 use TaskGraph::declare_swapchain_output + NodeBuilder::with_swapchain_output, \
                  or render to a texture and copy in a separate graph"
             );
         }
@@ -262,13 +271,13 @@ impl Surface {
                     resolver.as_ref(),
                 );
                 if !early_g.is_empty() {
-                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                    backend.submit_graph(self.ctx_handle, &early_g, None)?;
                 }
             } else {
                 let early_cmds =
                     crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
                 if !early_cmds.is_empty() {
-                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                    backend.submit_standalone(self.ctx_handle, &early_cmds, None)?;
                 }
             }
         }
@@ -344,6 +353,20 @@ impl Surface {
             self.build_resolver_for_submit_graph(graph, &node_waves)?
         };
 
+        // The drawable is already acquired, but the early (pre-swapchain) partition
+        // does not touch it. Submit that partition as its own command buffer — the
+        // GPU starts coarse/fine compute immediately while the CPU keeps recording
+        // the swapchain-copy partition and walks toward present. This is main's
+        // 2-commit-per-frame structure.
+        //
+        // Fusing both partitions into the single present command buffer (the prior
+        // behaviour here) serializes that overlap away: nothing reaches the GPU until
+        // the entire frame — copy included — is recorded. It also keeps the whole
+        // frame's transient resources live until that one fused CB retires, which
+        // starves heap reclaim during warmup (CPU races ahead, heaps fill, allocation
+        // blocks on GPU completion → the ~1s startup hitch). Splitting lets the early
+        // CB retire and free its transients while the late partition is still being
+        // recorded. The early waves resolve against the non-swapchain `resolver`.
         if split_wave > 0 {
             let early_waves = &schedule.waves[..split_wave];
             let mut backend = self.backend.lock().unwrap();
@@ -355,13 +378,13 @@ impl Surface {
                     resolver.as_ref(),
                 );
                 if !early_g.is_empty() {
-                    backend.submit_graph(self.ctx_handle, &early_g)?;
+                    frame.early_tv = Some(backend.submit_graph(self.ctx_handle, &early_g, None)?);
                 }
             } else {
                 let early_cmds =
                     crate::task_graph::analysis::emit_waves_to_commands(graph.ir(), early_waves, resolver.as_ref());
                 if !early_cmds.is_empty() {
-                    backend.submit_standalone(self.ctx_handle, &early_cmds)?;
+                    frame.early_tv = Some(backend.submit_standalone(self.ctx_handle, &early_cmds, None)?);
                 }
             }
         }
@@ -383,8 +406,7 @@ impl Surface {
             &schedule.waves[split_wave..],
             Some(&full_resolver),
         );
-
-        {
+        if !final_cmds.is_empty() {
             let mut backend = self.backend.lock().unwrap();
             let _tz = tracy_zone!("surface.submit_graph_to_frame.partition_late");
             backend.record_gpu_work(&frame.token, &final_cmds)?;
@@ -521,6 +543,14 @@ impl Frame {
             .expect("swapchain texture is only cleared after present")
     }
 
+    /// Timeline of the early (pre-swapchain) compute partition, if one was
+    /// submitted during [`Surface::submit_graph_to_frame`]. `None` when the
+    /// graph was not split (e.g. all work touches the swapchain). See the
+    /// `early_tv` field docs for why depth enforcement can gate on this.
+    pub fn early_timeline(&self) -> Option<TimelineValue> {
+        self.early_tv
+    }
+
     /// Submit recorded GPU work for this frame. Does not present.
     ///
     /// Safe to call once per frame before [`Self::present`].
@@ -595,6 +625,25 @@ impl Frame {
     /// Swapchain image index acquired by [`Surface::begin`] for this frame.
     pub fn image_index(&self) -> u32 {
         self.token.image as u32
+    }
+
+    /// In-flight slot index for the compute/scratch texture bound this frame.
+    ///
+    /// Present-lease retention keys must use this, not [`Self::image_index`], because
+    /// on Vulkan the WSI swapchain image and the shader-target scratch texture are
+    /// indexed independently.
+    pub fn frame_slot(&self) -> u32 {
+        self.token.frame_slot
+    }
+
+    /// Abandon this frame without presenting.
+    ///
+    /// Marks the frame as already-presented so the `Drop` impl does not trigger
+    /// an implicit swapchain present. Use this to cancel a frame when submission
+    /// fails after the swapchain image was acquired but before work was submitted.
+    pub(crate) fn cancel(mut self) {
+        self.presented = true;
+        // Drop self — with `presented = true` the Drop impl is a no-op.
     }
 }
 
@@ -921,8 +970,8 @@ mod tests {
         let sc = graph.declare_swapchain_output();
         graph
             .node("fine", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
-            .bind_swapchain_output(sc, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_swapchain_output(sc, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let mut frame = surface.submit_graph(&mut graph).unwrap();
@@ -958,8 +1007,8 @@ mod tests {
         let sc = graph.declare_swapchain_output();
         graph
             .node("fine", &pipeline)
-            .bind_parcel(&parcel, NodeAccess::ReadWrite)
-            .bind_swapchain_output(sc, NodeAccess::Write)
+            .with_parcel(&parcel, NodeAccess::ReadWrite)
+            .with_swapchain_output(sc, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
         let acquired = surface.begin().unwrap();

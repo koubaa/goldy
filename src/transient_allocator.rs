@@ -84,7 +84,7 @@ impl Default for TransientAllocatorConfig {
 
 /// A pluggable strategy for sub-allocating short-lived GPU buffers across rendering frames.
 ///
-/// Implementations carve [`BufferView`]s out of one or more backing [`Buffer`](crate::buffer::Buffer)s and must
+/// Implementations carve [`BufferView`]s out of one or more backing buffer allocations and must
 /// guarantee that memory returned from [`Self::alloc`] is safe for GPU consumption until at
 /// least the corresponding [`Self::end_frame`]'s epoch has been reached on the device timeline.
 ///
@@ -132,8 +132,8 @@ pub trait TransientAllocator: Send {
     }
 
     /// Hint that bytes at and above `offset` in the most-recently-active region are unused
-    /// for the rest of this frame. Strategies may forward to [`Buffer::hint_unused_above`](crate::buffer::Buffer::hint_unused_above)
-    /// to release physical pages. Default is a no-op.
+    /// for the rest of this frame. Strategies may forward to `hint_unused_above` on the backing
+    /// allocation to release physical pages. Default is a no-op.
     fn hint_unused_above(&mut self, _offset: u64) {}
 
     /// Return a sub-allocation's byte range to the allocator for reuse.

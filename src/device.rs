@@ -352,13 +352,13 @@ pub struct DeviceCapabilities {
     /// (requires GPU copy to a READBACK heap).
     pub has_zero_copy_storage_readback: bool,
 
-    /// How [`crate::Buffer::resize_to`] is implemented on this device.
+    /// How costly in-place buffer resize (`resize_to`) is on this device.
     pub buffer_resize_cost: BufferResizeCost,
 
     /// Sparse / tile page size when applicable; informational for aligning resize hints.
     pub buffer_page_size: u64,
 
-    /// Whether [`crate::Buffer::hint_unused_above`] can return physical memory to the system.
+    /// Whether `hint_unused_above` on backing buffer allocations can return physical memory to the system.
     pub buffer_decommit_supported: bool,
 }
 
@@ -424,7 +424,7 @@ pub(crate) struct DeviceInner {
     pub(crate) handle: DeviceHandle,
     adapter: Adapter,
     library_registry: Arc<Mutex<ShaderLibraryRegistry>>,
-    vram_allocator: Arc<dyn crate::vram_allocator::VramAllocator>,
+    vram_allocator: Arc<dyn crate::vram_allocator::VramAllocatorAlloc>,
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
@@ -553,13 +553,14 @@ impl Device {
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
     /// [`DefaultVramAllocator`]: crate::vram_allocator::DefaultVramAllocator
     pub fn vram_allocator(&self) -> &dyn crate::vram_allocator::VramAllocator {
-        &*self.inner.vram_allocator
+        self.inner.vram_allocator.as_ref()
     }
 
-    /// Returns a clone of the [`Arc`] holding the current [`VramAllocator`].
+    /// Returns a clone of the [`Arc`] holding the current buffer allocator.
     ///
-    /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn vram_allocator_arc(&self) -> Arc<dyn crate::vram_allocator::VramAllocator> {
+    /// [`VramAllocatorAlloc`]: crate::vram_allocator::VramAllocatorAlloc
+    #[allow(dead_code)] // device alias tests
+    pub(crate) fn vram_allocator_arc(&self) -> Arc<dyn crate::vram_allocator::VramAllocatorAlloc> {
         Arc::clone(&self.inner.vram_allocator)
     }
 
@@ -571,7 +572,8 @@ impl Device {
     /// unaffected.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    pub fn with_vram_allocator(&self, allocator: Arc<dyn crate::vram_allocator::VramAllocator>) -> Self {
+    #[allow(dead_code)] // device alias tests
+    pub(crate) fn with_vram_allocator(&self, allocator: Arc<dyn crate::vram_allocator::VramAllocatorAlloc>) -> Self {
         Self {
             inner: Arc::new(DeviceInner {
                 backend: Arc::clone(&self.inner.backend),
@@ -599,7 +601,7 @@ impl Device {
         crate::vram_allocator::ParcelDeed::new(Arc::downgrade(&self.inner.vram_allocator))
     }
 
-    fn finish_buffer_alloc(&self, mut buf: crate::buffer::Buffer) -> anyhow::Result<crate::buffer::Buffer> {
+    fn finish_buffer_alloc(&self, mut buf: crate::buffer::Allocation) -> anyhow::Result<crate::buffer::Allocation> {
         buf.set_deed(self.parcel_deed());
         Ok(buf)
     }
@@ -624,7 +626,7 @@ impl Device {
         access: BufferKind,
         element_stride: Option<u32>,
         flags: BufferFlags,
-    ) -> anyhow::Result<crate::buffer::Buffer> {
+    ) -> anyhow::Result<crate::buffer::Allocation> {
         let buf = self
             .inner
             .vram_allocator
@@ -641,7 +643,7 @@ impl Device {
         expected_max: u64,
         access: BufferKind,
         flags: BufferFlags,
-    ) -> anyhow::Result<crate::buffer::Buffer> {
+    ) -> anyhow::Result<crate::buffer::Allocation> {
         let buf =
             self.inner
                 .vram_allocator
@@ -655,7 +657,7 @@ impl Device {
         &self,
         data: &[T],
         access: BufferKind,
-    ) -> anyhow::Result<crate::buffer::Buffer> {
+    ) -> anyhow::Result<crate::buffer::Allocation> {
         let bytes = bytemuck::cast_slice(data);
         let stride = std::mem::size_of::<T>() as u32;
         self.alloc_buffer_with_bytes_stride(bytes, access, stride)
@@ -668,7 +670,7 @@ impl Device {
         data: &[u8],
         access: BufferKind,
         element_stride: u32,
-    ) -> anyhow::Result<crate::buffer::Buffer> {
+    ) -> anyhow::Result<crate::buffer::Allocation> {
         self.alloc_buffer_with_bytes_stride_and_flags(data, access, element_stride, BufferFlags::empty())
     }
 
@@ -679,7 +681,7 @@ impl Device {
         access: BufferKind,
         element_stride: u32,
         flags: BufferFlags,
-    ) -> anyhow::Result<crate::buffer::Buffer> {
+    ) -> anyhow::Result<crate::buffer::Allocation> {
         let buf = self.alloc_buffer(data.len() as u64, access, Some(element_stride), flags)?;
         buf.write(0, data)?;
         Ok(buf)
@@ -997,16 +999,13 @@ impl Device {
             BackendType::Vulkan => ShaderTarget::Spirv,
             BackendType::Dx12 => ShaderTarget::Dxil,
             BackendType::Metal => ShaderTarget::Metal,
-            BackendType::WebGPU => {
-                anyhow::bail!("reflect_struct is not supported on the WebGPU backend yet");
-            }
         };
         let compiler = SlangCompiler::new().context("Failed to create Slang compiler for reflect_struct")?;
         compiler.reflect_struct_layout(shader_source, target, &path_refs, type_name)
     }
 
     /// Create a device from a backend for testing purposes.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub(crate) fn from_backend(backend: Box<dyn GpuBackend>) -> anyhow::Result<Self> {
         let backend = Arc::new(Mutex::new(backend));
         let adapter_info = {
@@ -1045,6 +1044,25 @@ impl Device {
                 owns_backend_device: true,
             }),
         })
+    }
+
+    #[doc(hidden)]
+    pub fn with_mock_backend<R>(&self, f: impl FnOnce(&mut crate::backend::mock::MockBackend) -> R) -> R {
+        let mut guard = self.inner.backend.lock().unwrap();
+        let mock = guard
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<crate::backend::mock::MockBackend>()
+            .expect("Device::with_mock_backend: backend is not MockBackend");
+        f(mock)
+    }
+
+    /// Access the inner [`MockBackend`] for test introspection.
+    ///
+    /// Panics if the device was not created with `Device::from_backend(Box::new(MockBackend::new()))`.
+    #[cfg(test)]
+    pub(crate) fn with_mock<R>(&self, f: impl FnOnce(&mut crate::backend::mock::MockBackend) -> R) -> R {
+        self.with_mock_backend(f)
     }
 }
 

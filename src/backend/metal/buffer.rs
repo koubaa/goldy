@@ -5,7 +5,7 @@ use super::types::{BufferState, MetalState, ResourceRegistry, ARGUMENT_BUFFER_SI
 use crate::backend::BufferKind;
 use crate::types::BufferFlags;
 use ::metal as mtl;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
 
 fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
@@ -71,39 +71,23 @@ fn allocate_mtl_storage_buffer(
         }
     }
 
-    // Attempt 3 (blocking): wait for the oldest in-flight command buffer to
-    // complete — a runtime boundary action that reclaims one frame's worth of
-    // archive. Invisible to the caller; fires only during warmup when the CPU
-    // races ahead of the GPU before caches are warm.
-    let oldest_cb = super::context::oldest_in_flight_cb(state, device_handle);
-
-    if let Some(cb) = oldest_cb {
-        let _tz = crate::tracy_zone!("mtl.heap_allocator.wait_reclaim");
-        tracing::info!(
-            target: "goldy::diag::alloc",
-            allocation_size_mb = allocation_size / (1024 * 1024),
-            "heap.wait_reclaim: heap saturated, blocking on oldest in-flight CB"
-        );
-        cb.wait_until_completed();
-        let retired = super::context::device_retired(state, device_handle);
-        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        logical_device.process_deletion_queue_up_to(retired);
-        logical_device.heap_allocator.lock().unwrap().compact_overflow();
-        if let Some(buf) = logical_device
-            .heap_allocator
-            .lock()
-            .unwrap()
-            .allocate(allocation_size, options)
-        {
-            return Ok((buf, false));
-        }
-    }
-
+    // Attempt 3 (non-blocking pressure-relief valve): the overflow-heap cap is
+    // reached and a synchronous drain is unsafe here — this runs with the backend
+    // mutex held, so blocking on a command buffer would deadlock against the GPU
+    // completion handlers that need that same lock. Instead of failing (which the
+    // client turns into a retry storm that spikes VRAM), satisfy the request from a
+    // standalone device buffer, exactly as the jumbo/GPU-only path above does. These
+    // are transient warmup spikes (the CPU racing ahead before caches are warm, more
+    // pronounced under the 2-commit-per-frame split); the direct buffer is tracked as
+    // device-allocated and freed through the normal deletion queue, so steady state
+    // returns to the heap once the GPU catches up.
     crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
         reason: crate::signal::OversubscribedReason::BufferHeap,
         size_hint: allocation_size,
     });
-    bail!("Metal buffer heap allocation failed — all heaps exhausted");
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let buf = logical_device.device.new_buffer(allocation_size, options);
+    Ok((buf, true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -181,6 +165,8 @@ fn insert_buffer_common(
             parent_for_view,
             access,
             view_byte_offset,
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -407,6 +393,8 @@ pub(super) fn create_view(
             parent_for_view: Some(parent_handle),
             access: BufferKind::Scattered,
             view_byte_offset: Some(offset),
+            is_grant_readback: false,
+            grant_texture_readback: None,
         },
     );
 
@@ -513,6 +501,8 @@ pub(super) fn resize(
         parent_for_view: None,
         access: old_state.access,
         view_byte_offset: None,
+        is_grant_readback: false,
+        grant_texture_readback: None,
     };
 
     let new_mtl = state.buffers.get(&buffer_handle).unwrap().buffer.clone();
@@ -769,5 +759,112 @@ pub(super) fn clear(
     blit.end_encoding();
     command_buffer.commit();
 
+    Ok(())
+}
+
+/// Allocate a shared-storage staging buffer for grant readback (no argument-buffer slot).
+pub(super) fn alloc_readback_buffer(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    size: u64,
+) -> Result<BufferHandle> {
+    use metal as mtl;
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let buffer = logical_device.device.new_buffer(
+        size,
+        mtl::MTLResourceOptions::StorageModeShared | mtl::MTLResourceOptions::CPUCacheModeDefaultCache,
+    );
+    let handle = state.next_buffer_handle;
+    state.next_buffer_handle += 1;
+    state.buffers.insert(
+        handle,
+        BufferState {
+            device_handle,
+            buffer,
+            size,
+            allocation_size: size,
+            is_device_allocated: true,
+            arg_buffer_index: 0,
+            flags: BufferFlags::empty(),
+            element_stride: None,
+            parent_for_view: None,
+            access: BufferKind::Scattered,
+            view_byte_offset: None,
+            is_grant_readback: true,
+            grant_texture_readback: None,
+        },
+    );
+    Ok(handle)
+}
+
+pub(super) fn query_texture_readback_layout(
+    width: u32,
+    height: u32,
+    format: crate::types::TextureFormat,
+) -> crate::backend::TextureReadbackLayout {
+    let row_pitch = width.saturating_mul(format.bytes_per_pixel());
+    let logical_bytes = row_pitch as u64 * height as u64;
+    crate::backend::TextureReadbackLayout {
+        width,
+        height,
+        format,
+        logical_bytes,
+        staging_bytes: logical_bytes,
+        row_pitch,
+        footprint_offset: 0,
+    }
+}
+
+pub(super) fn alloc_texture_readback_staging(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+    layout: crate::backend::TextureReadbackLayout,
+) -> Result<BufferHandle> {
+    let handle = alloc_readback_buffer(state, device_handle, layout.staging_bytes)?;
+    if let Some(buf) = state.buffers.get_mut(&handle) {
+        buf.grant_texture_readback = Some(layout);
+    }
+    Ok(handle)
+}
+
+pub(super) fn read_texture_readback_staging(
+    state: &MetalState,
+    buffer_handle: BufferHandle,
+    layout: crate::backend::TextureReadbackLayout,
+    output: &mut [u8],
+) -> Result<()> {
+    if output.len() as u64 != layout.logical_bytes {
+        anyhow::bail!("read_texture_readback_staging size mismatch");
+    }
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+    }
+    let row_bytes = layout.tight_row_bytes() as usize;
+    let pitch = layout.row_pitch as usize;
+    unsafe {
+        let ptr = buffer.buffer.contents() as *const u8;
+        for row in 0..layout.height as usize {
+            let src_offset = layout.footprint_offset as usize + row * pitch;
+            let dst_offset = row * row_bytes;
+            std::ptr::copy_nonoverlapping(ptr.add(src_offset), output.as_mut_ptr().add(dst_offset), row_bytes);
+        }
+    }
+    Ok(())
+}
+
+/// Read bytes from a grant readback staging buffer.
+pub(super) fn read_readback_buffer(state: &MetalState, buffer_handle: BufferHandle, output: &mut [u8]) -> Result<()> {
+    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if !buffer.is_grant_readback {
+        anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+    }
+    if output.len() as u64 > buffer.size {
+        anyhow::bail!("read_readback_buffer would exceed buffer bounds");
+    }
+    unsafe {
+        let ptr = buffer.buffer.contents() as *const u8;
+        std::ptr::copy_nonoverlapping(ptr, output.as_mut_ptr(), output.len());
+    }
     Ok(())
 }

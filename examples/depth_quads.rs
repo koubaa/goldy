@@ -1,20 +1,18 @@
 //! Depth quads example - two fullscreen quads whose depths cross periodically.
 //!
 //! Depth-tested rendering via an offscreen [`RenderTarget`] with a depth attachment
-//! (`RenderTarget::new_with_depth`), then blit to the swapchain through the task graph.
-//! A warm (red/orange) quad and a cool (teal/blue) quad both cover the entire
-//! screen.  They are *always drawn in the same order* (warm first, cool second),
-//! so without a depth buffer cool would always win.  With depth testing the quad
-//! with the smaller z value wins regardless of draw order, so the screen flips
-//! colour every time the two z-curves cross.
+//! (`RenderTarget::new_with_depth`), then copy-to-present through a retained scheme.
 //!
 //! Run with: cargo run --example depth_quads
 
+#![allow(deprecated)] // write_to_parcel migration deferred
+
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Instance,
-    NodeAccess, Parcel, RenderPipeline, RenderPipelineDesc, RenderTarget, RequestAdapterOptions, RetainedPool,
-    ShaderModule, Surface, TaskGraph, VertexAttribute, VertexBufferLayout, VertexFormat,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState,
+    DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -25,10 +23,6 @@ use winit::{
     window::{Window, WindowId},
 };
 mod common;
-
-// ============================================================================
-// Vertex type: (x, y, z) NDC position + RGBA color
-// ============================================================================
 
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
@@ -65,7 +59,6 @@ fn depth_vertex_layout() -> VertexBufferLayout {
     }
 }
 
-/// Build 6 vertices for a screen-space quad (two triangles, CCW).
 #[allow(clippy::too_many_arguments)]
 fn quad_verts(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, r: f32, g: f32, b: f32) -> [DepthVertex; 6] {
     let tl = DepthVertex::new(x0, y1, z, r, g, b);
@@ -75,20 +68,20 @@ fn quad_verts(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, r: f32, g: f32, b: f32
     [tl, bl, br, tl, br, tr]
 }
 
-// ============================================================================
-// App state
-// ============================================================================
-
 struct App {
     instance: Instance,
+    ctx: Option<goldy::Context>,
     device: Option<Arc<goldy::Device>>,
     pipeline: Option<RenderPipeline>,
+    shader: Option<ShaderModule>,
     _retained_pool: Option<RetainedPool>,
-    warm_parcel: Option<Parcel>,
-    cool_parcel: Option<Parcel>,
-    surface: Option<Surface>,
-    scene_rt: Option<RenderTarget>,
-    frame_graph: TaskGraph,
+    warm_parcel: Option<Buffer>,
+    cool_parcel: Option<Buffer>,
+    swapchain: Option<SwapchainPool>,
+    screen: Option<goldy::PresentLease>,
+    present: Option<PresentGrant>,
+    scene_rt: Option<Lease<LeaseRenderTarget>>,
+    scheme: Option<Scheme>,
     window: Option<Arc<Window>>,
     frame_count: u64,
     start_time: std::time::Instant,
@@ -96,32 +89,68 @@ struct App {
 
 impl App {
     fn new() -> anyhow::Result<Self> {
-        let instance = Instance::new()?;
         Ok(Self {
-            instance,
+            instance: Instance::new()?,
+            ctx: None,
             device: None,
             pipeline: None,
+            shader: None,
             _retained_pool: None,
             warm_parcel: None,
             cool_parcel: None,
-            surface: None,
+            swapchain: None,
+            screen: None,
+            present: None,
             scene_rt: None,
-            frame_graph: TaskGraph::new(),
+            scheme: None,
             window: None,
             frame_count: 0,
             start_time: std::time::Instant::now(),
         })
     }
 
-    fn create_scene_rt(device: &goldy::Device, surface: &Surface) -> anyhow::Result<RenderTarget> {
-        let (width, height) = surface.size();
-        RenderTarget::new_with_depth(
+    fn create_pipeline(
+        device: &goldy::Device,
+        shader: &ShaderModule,
+        swapchain: &SwapchainPool,
+    ) -> anyhow::Result<RenderPipeline> {
+        common::render_pipeline_for_swapchain(
             device,
-            width.max(1),
-            height.max(1),
-            surface.format(),
-            Some(DepthFormat::Depth32Float),
+            shader,
+            swapchain,
+            RenderPipelineDesc {
+                vertex_layout: depth_vertex_layout(),
+                depth_stencil: Some(DepthStencilState {
+                    format: DepthFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: CompareFunction::Less,
+                }),
+                ..Default::default()
+            },
         )
+    }
+
+    fn record_scheme(
+        scheme: &mut Scheme,
+        pipeline: &RenderPipeline,
+        warm_parcel: &Buffer,
+        cool_parcel: &Buffer,
+        scene_rt: &Lease<LeaseRenderTarget>,
+        screen: &goldy::PresentLease,
+    ) -> PresentGrant {
+        let mut pass = scheme.render_pass("depth_quads", scene_rt);
+        pass.with_parcel(warm_parcel, NodeAccess::Read);
+        pass.with_parcel(cool_parcel, NodeAccess::Read);
+        pass.clear(Color::BLACK);
+        pass.clear_depth(1.0);
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, warm_parcel);
+        pass.draw(0..6, 0..1);
+        pass.set_vertex_buffer(0, cool_parcel);
+        pass.draw(0..6, 0..1);
+        pass.finish();
+        scheme.copy_to_present(scene_rt, screen);
+        scheme.grant_present(screen)
     }
 
     fn init_gpu(&mut self, window: &Arc<Window>) -> anyhow::Result<()> {
@@ -131,28 +160,11 @@ impl App {
                 .request_device(&DeviceDescriptor::default())?,
         );
         let ctx = device.create_context()?;
-
-        let surface = Surface::new(&ctx, window.as_ref())?;
+        let swapchain = SwapchainPool::new(&ctx, window.as_ref(), 3)?;
+        let screen = swapchain.lease();
 
         let shader = ShaderModule::from_slang(&device, include_str!("../shaders/depth_test.slang"))?;
-
-        let pipeline = RenderPipeline::new(
-            &device,
-            &shader,
-            &shader,
-            &RenderPipelineDesc {
-                vertex_layout: depth_vertex_layout(),
-                target_format: surface.format(),
-                depth_stencil: Some(DepthStencilState {
-                    format: DepthFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: CompareFunction::Less,
-                }),
-                ..Default::default()
-            },
-        )?;
-
-        let scene_rt = Self::create_scene_rt(&device, &surface)?;
+        let pipeline = Self::create_pipeline(&device, &shader, &swapchain)?;
 
         let mut retained_pool = RetainedPool::new(device.clone());
         let warm_parcel =
@@ -160,14 +172,28 @@ impl App {
         let cool_parcel =
             retained_pool.acquire_buffer_sized::<DepthVertex>(6, BufferKind::Scattered, BufferFlags::empty())?;
 
+        let mut scheme = Scheme::new(&ctx);
+        let (width, height) = swapchain.size();
+        let scene_rt = scheme.lease_render_target(
+            width.max(1),
+            height.max(1),
+            swapchain.format(),
+            Some(DepthFormat::Depth32Float),
+        )?;
+        let present = Self::record_scheme(&mut scheme, &pipeline, &warm_parcel, &cool_parcel, &scene_rt, &screen);
+
+        self.ctx = Some(ctx);
         self.device = Some(device);
+        self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self._retained_pool = Some(retained_pool);
         self.warm_parcel = Some(warm_parcel);
         self.cool_parcel = Some(cool_parcel);
-        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.screen = Some(screen);
+        self.present = Some(present);
         self.scene_rt = Some(scene_rt);
-
+        self.scheme = Some(scheme);
         Ok(())
     }
 
@@ -177,26 +203,13 @@ impl App {
             return Ok(());
         }
 
-        let pipeline = self.pipeline.as_ref().unwrap();
-        let surface = self.surface.as_ref().unwrap();
-        let scene_rt = self.scene_rt.as_ref().unwrap();
-        let warm_parcel = self.warm_parcel.as_ref().unwrap();
-        let cool_parcel = self.cool_parcel.as_ref().unwrap();
-
-        // Two independent sine-wave oscillations chosen so they cross ~twice per
-        // second at 60 fps.  Both stay in (0.1, 0.9) so neither is ever clipped.
         let t = self.frame_count as f32 * 0.04;
-        let warm_z = t.sin() * 0.4 + 0.5; // ~1 Hz
-        let cool_z = (t * 1.3 + 1.0).sin() * 0.4 + 0.5; // ~1.3 Hz
+        let warm_z = t.sin() * 0.4 + 0.5;
+        let cool_z = (t * 1.3 + 1.0).sin() * 0.4 + 0.5;
 
-        // Both quads are FULLSCREEN.  Draw order is always: warm first, cool second.
-        // Without depth testing cool would always overwrite warm.
-        // With depth testing (`Less`): whichever has the smaller z wins every pixel.
         let warm_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, warm_z, 0.95, 0.35, 0.1);
         let cool_verts = quad_verts(-1.0, -1.0, 1.0, 1.0, cool_z, 0.1, 0.6, 0.95);
 
-        // Update window title with live depth values so it is easy to reason
-        // about what is happening.
         let winner = if warm_z < cool_z { "WARM wins" } else { "COOL wins" };
         if let Some(window) = &self.window {
             window.set_title(&format!(
@@ -205,30 +218,23 @@ impl App {
             ));
         }
 
-        self.frame_graph.clear();
-        self.frame_graph
-            .write_parcel(warm_parcel, 0, bytemuck::cast_slice(&warm_verts).to_vec())?;
-        self.frame_graph
-            .write_parcel(cool_parcel, 0, bytemuck::cast_slice(&cool_verts).to_vec())?;
+        let ctx = self.ctx.as_ref().unwrap();
+        write_to_parcel(
+            ctx,
+            self.warm_parcel.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&warm_verts),
+        )?;
+        write_to_parcel(
+            ctx,
+            self.cool_parcel.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&cool_verts),
+        )?;
 
-        let mut pass = self.frame_graph.render_pass("depth_quads", scene_rt);
-        pass.bind_parcel_mut(warm_parcel, NodeAccess::Read);
-        pass.bind_parcel_mut(cool_parcel, NodeAccess::Read);
-        pass.clear(Color::BLACK);
-        pass.clear_depth(1.0);
-        pass.set_pipeline(pipeline);
-        pass.set_vertex_buffer(0, warm_parcel);
-        pass.draw(0..6, 0..1);
-        pass.set_vertex_buffer(0, cool_parcel);
-        pass.draw(0..6, 0..1);
-        pass.finish_recorded();
-
-        let swapchain = self.frame_graph.declare_swapchain_output();
-        self.frame_graph.copy_render_target_to_swapchain(scene_rt, swapchain);
-
-        let frame = surface.begin()?;
-        let frame = surface.submit_graph_to_frame(&mut self.frame_graph, frame)?;
-        frame.present()?;
+        let scheme = self.scheme.as_mut().unwrap();
+        let submission = scheme.submit()?;
+        self.present.as_ref().unwrap().consume(&submission)?;
 
         self.frame_count += 1;
         Ok(())
@@ -236,15 +242,35 @@ impl App {
 
     fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            if let Some(surface) = &mut self.surface {
-                if let Err(e) = surface.resize(new_size.width, new_size.height) {
-                    tracing::error!("Failed to resize surface: {}", e);
-                }
+            if let Some(swapchain) = &self.swapchain {
+                let _ = swapchain.resize(new_size.width, new_size.height);
             }
-            if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
-                match Self::create_scene_rt(device, surface) {
-                    Ok(rt) => self.scene_rt = Some(rt),
-                    Err(e) => tracing::error!("Failed to recreate scene render target: {}", e),
+            if let (Some(ctx), Some(device), Some(swapchain), Some(shader), Some(warm), Some(cool), Some(screen)) = (
+                self.ctx.as_ref(),
+                self.device.as_ref(),
+                self.swapchain.as_ref(),
+                self.shader.as_ref(),
+                self.warm_parcel.as_ref(),
+                self.cool_parcel.as_ref(),
+                self.screen.as_ref(),
+            ) {
+                if let Ok(pipeline) = Self::create_pipeline(device, shader, swapchain) {
+                    self.pipeline = Some(pipeline);
+                    if let Some(pipeline) = self.pipeline.as_ref() {
+                        let mut scheme = Scheme::new(ctx);
+                        let (width, height) = swapchain.size();
+                        if let Ok(rt) = scheme.lease_render_target(
+                            width.max(1),
+                            height.max(1),
+                            swapchain.format(),
+                            Some(DepthFormat::Depth32Float),
+                        ) {
+                            let present = Self::record_scheme(&mut scheme, pipeline, warm, cool, &rt, screen);
+                            self.scheme = Some(scheme);
+                            self.present = Some(present);
+                            self.scene_rt = Some(rt);
+                        }
+                    }
                 }
             }
         }
@@ -269,16 +295,17 @@ impl Drop for App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let attrs = Window::default_attributes()
-                .with_title("Goldy - Depth Quads (depth buffer demo)")
-                .with_inner_size(winit::dpi::LogicalSize::new(900, 600));
-
-            let window = Arc::new(event_loop.create_window(attrs).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Goldy - Depth Quads (Scheme + Present)")
+                            .with_inner_size(winit::dpi::LogicalSize::new(900, 600)),
+                    )
+                    .unwrap(),
+            );
             self.window = Some(window.clone());
-
-            if let Err(e) = self.init_gpu(&window) {
-                tracing::error!("Failed to initialize GPU: {}", e);
-            }
+            self.init_gpu(&window).unwrap();
             window.request_redraw();
         }
     }
@@ -289,9 +316,7 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     event_loop.exit();
@@ -324,17 +349,11 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("Goldy Depth Quads Example");
-    println!("=========================");
-    println!("Two overlapping quads whose depths oscillate independently.");
-    println!("The depth buffer ensures the nearer quad always wins the overlap region.");
+    println!("Goldy Depth Quads Example (Scheme + Present)");
     println!("Press Escape or close window to exit.\n");
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut app = App::new()?;
-    event_loop.run_app(&mut app)?;
-
+    event_loop.run_app(&mut App::new()?)?;
     Ok(())
 }

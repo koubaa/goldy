@@ -7,13 +7,57 @@ use super::graph::TaskGraph;
 use super::ir::{DispatchDim, NodeAccess, NodeKind, ResourceBinding, TaskNode};
 use super::ResourceId;
 use crate::backend::RenderCommand;
-use crate::buffer::{Buffer, BufferSource, BufferView};
+use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
-use crate::types::{Color, IndexFormat, ResourceHandle};
+use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle};
 use std::sync::Arc;
+
+/// Deferred push-constant slot for [`RenderPassRecord`].
+///
+/// Both the read (SRV) and read-write (UAV) handles are captured up front;
+/// the correct one is selected at [`RenderPassRecord::set_pipeline`] time by
+/// consulting the pipeline's reflected slot kinds.
+struct PendingRenderSlot {
+    graph_access: NodeAccess,
+    read_handle: Option<ResourceHandle>,
+    uav_handle: Option<ResourceHandle>,
+}
+
+impl PendingRenderSlot {
+    fn from_parcel(parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        Self {
+            graph_access: access,
+            read_handle: parcel.handle(ResourceAccess::Read),
+            uav_handle: parcel
+                .handle(ResourceAccess::ReadWrite)
+                .or_else(|| parcel.handle(ResourceAccess::Write)),
+        }
+    }
+
+    fn resolve(&self, slot_access: &[Option<ResourceAccess>], slot_idx: usize) -> ResourceHandle {
+        let descriptor_access = slot_access
+            .get(slot_idx)
+            .copied()
+            .flatten()
+            .unwrap_or(match self.graph_access {
+                NodeAccess::Read => ResourceAccess::Read,
+                NodeAccess::Write | NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+            });
+        match descriptor_access {
+            ResourceAccess::Read => self.read_handle.or(self.uav_handle),
+            ResourceAccess::Write | ResourceAccess::ReadWrite => self.uav_handle.or(self.read_handle),
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "render-pass shader slot {slot_idx}: no descriptor for {descriptor_access:?}; \
+                 check BufferKind/TextureKind is compatible with the shader parameter"
+            )
+        })
+    }
+}
 
 /// Accumulates one offscreen render-pass node before [`Self::commit`].
 pub struct RenderPassRecord {
@@ -22,6 +66,8 @@ pub struct RenderPassRecord {
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
     stamp_targets: Vec<Arc<ParcelStamp>>,
+    /// Shader-resource slots waiting for pipeline reflection at [`Self::set_pipeline`].
+    pending_push_constants: Vec<PendingRenderSlot>,
 }
 
 impl RenderPassRecord {
@@ -32,11 +78,34 @@ impl RenderPassRecord {
             bindings: Vec::new(),
             commands: Vec::new(),
             stamp_targets: Vec::new(),
+            pending_push_constants: Vec::new(),
         }
     }
 
-    pub fn bind_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
+        self.pending_push_constants
+            .push(PendingRenderSlot::from_parcel(parcel, access));
+        self
+    }
+
+    /// Register dependency on all parcels of a buffer without emitting a descriptor.
+    pub fn with_buffer_dependency(&mut self, buffer: &crate::Buffer, access: NodeAccess) -> &mut Self {
+        for parcel in buffer.parcels() {
+            self.stamp_targets.push(parcel.stamp_handle());
+            self.bindings.push(ResourceBinding {
+                resource: parcel.resource_id(),
+                access,
+            });
+        }
+        self
+    }
+
+    pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
@@ -44,15 +113,7 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::Buffer(buf.handle),
-            access,
-        });
-        self
-    }
-
-    pub fn bind_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+    pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -76,6 +137,15 @@ impl RenderPassRecord {
 
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.pending_push_constants.is_empty() {
+            let handles: Vec<ResourceHandle> = self
+                .pending_push_constants
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| slot.resolve(&pipeline.slot_access, i))
+                .collect();
+            self.commands.push(RenderCommand::BindResourcesTyped { handles });
+        }
         self
     }
 
@@ -88,7 +158,7 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &Buffer, offset: u64) -> &mut Self {
+    pub fn set_vertex_buffer_offset(&mut self, slot: u32, buffer: &impl BufferSource, offset: u64) -> &mut Self {
         self.commands.push(RenderCommand::SetVertexBuffer {
             slot,
             buffer: buffer.source_handle(),
@@ -148,25 +218,19 @@ impl RenderPassRecord {
         self.draw(0, 6, 0, count)
     }
 
-    pub fn bind_resources(&mut self, buffers: &[&Buffer]) -> &mut Self {
+    #[allow(dead_code)] // legacy bind-resources render path
+    pub(crate) fn with_resources(&mut self, buffers: &[&Allocation]) -> &mut Self {
         self.commands.push(RenderCommand::BindResources {
             buffers: buffers.iter().map(|b| b.handle).collect(),
         });
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         self.commands.push(RenderCommand::BindResourcesRaw {
             indices: indices.to_vec(),
             user: Vec::new(),
             frame_table_base: 0,
-        });
-        self
-    }
-
-    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.commands.push(RenderCommand::BindResourcesTyped {
-            handles: handles.to_vec(),
         });
         self
     }
@@ -181,6 +245,37 @@ impl RenderPassRecord {
                 commands: self.commands,
             },
         });
+    }
+
+    /// Begin accumulating a render pass targeting a scheme-held render-target lease.
+    pub fn new_for_scheme_lease(
+        label: &'static str,
+        scheme: &crate::Scheme,
+        lease: &crate::Lease<crate::LeaseRenderTarget>,
+    ) -> Self {
+        let handle = scheme.rt(lease).backend_handle();
+        Self {
+            label,
+            target: handle,
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::RenderTarget(handle),
+                access: NodeAccess::Write,
+            }],
+            commands: Vec::new(),
+            stamp_targets: Vec::new(),
+            pending_push_constants: Vec::new(),
+        }
+    }
+
+    /// Commit this render pass into a retained [`crate::Scheme`].
+    pub fn commit_scheme(self, scheme: &mut crate::Scheme) {
+        scheme.commit_render_pass(
+            self.label,
+            self.target,
+            self.bindings,
+            self.commands,
+            &self.stamp_targets,
+        );
     }
 }
 
@@ -206,8 +301,12 @@ impl ComputeNodeRecord {
         }
     }
 
-    pub fn bind_parcel(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
-        self.stamp_targets.push(parcel.stamp_handle());
+    /// Declare graph dependency on a parcel without resolving a shader slot.
+    pub fn with_parcel_access(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.register_parcel_binding(parcel, access)
+    }
+
+    pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
@@ -215,15 +314,11 @@ impl ComputeNodeRecord {
         self
     }
 
-    pub fn bind_buffer(&mut self, buf: &Buffer, access: NodeAccess) -> &mut Self {
-        self.bindings.push(ResourceBinding {
-            resource: ResourceId::Buffer(buf.handle),
-            access,
-        });
-        self
+    pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+        self.register_buffer_view_binding(view, access)
     }
 
-    pub fn bind_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
+    fn register_buffer_view_binding(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::BufferRange {
                 parent: view.parent_handle(),
@@ -235,8 +330,53 @@ impl ComputeNodeRecord {
         self
     }
 
-    pub fn bind_resources_raw(&mut self, indices: &[u32]) -> &mut Self {
+    pub fn with_resource_slots(&mut self, indices: &[u32]) -> &mut Self {
         self.resource_slots = indices.to_vec();
+        self
+    }
+
+    /// Declare a retained parcel as a graph dependency and shader binding slot atomically.
+    ///
+    /// This is the preferred entry-point for language-binding consumers. It resolves the
+    /// bindless slot internally so callers never handle raw resource indices.
+    /// Returns `None` if the parcel has no slot registered for `resource_access`.
+    pub fn with_parcel(
+        &mut self,
+        parcel: &crate::Parcel,
+        node_access: NodeAccess,
+        resource_access: crate::types::ResourceAccess,
+    ) -> Option<&mut Self> {
+        let idx = parcel.resource_index(resource_access)?;
+        self.register_parcel_binding(parcel, node_access);
+        self.resource_slots.push(idx);
+        Some(self)
+    }
+
+    /// Register dependency on all parcels of a buffer without emitting shader slots.
+    pub fn with_buffer_dependency(&mut self, buffer: &crate::Buffer, access: NodeAccess) -> &mut Self {
+        for parcel in buffer.parcels() {
+            self.register_parcel_binding(parcel, access);
+        }
+        self
+    }
+
+    /// Append one scalar virtual-main parameter (region B).
+    pub fn with_param(&mut self, value: u32) -> &mut Self {
+        use crate::backend::shared::MAX_USER_SLOTS;
+        assert!(
+            self.user_slots.len() < MAX_USER_SLOTS,
+            "with_param: at most {MAX_USER_SLOTS} scalar params per dispatch"
+        );
+        self.user_slots.push(value);
+        self
+    }
+
+    pub(crate) fn register_parcel_binding(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.stamp_targets.push(parcel.stamp_handle());
+        self.bindings.push(ResourceBinding {
+            resource: parcel.resource_id(),
+            access,
+        });
         self
     }
 
@@ -252,5 +392,18 @@ impl ComputeNodeRecord {
                 dispatch: DispatchDim::Direct { x, y, z },
             },
         });
+    }
+
+    /// Commit this compute node into a retained [`crate::Scheme`].
+    pub fn commit_dispatch_scheme(self, scheme: &mut crate::Scheme, x: u32, y: u32, z: u32) {
+        scheme.apply_compute_stamps(&self.stamp_targets);
+        scheme.commit_compute_dispatch(
+            self.label,
+            self.pipeline,
+            self.bindings,
+            self.resource_slots,
+            self.user_slots,
+            DispatchDim::Direct { x, y, z },
+        );
     }
 }

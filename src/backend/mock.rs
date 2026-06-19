@@ -50,10 +50,25 @@ pub struct MockBackend {
     pub textures_created: usize,
     /// Count of samplers created
     pub samplers_created: usize,
-    /// Count of compute dispatches performed
+    /// Count of compute/graph submits performed
     pub compute_dispatch_count: usize,
+    /// Cross-context epoch waits recorded per standalone/graph submit (mock tests).
+    pub recorded_waits: Vec<Vec<crate::timeline::Epoch>>,
+    /// Whether each `submit_graph` call received `sync = Some(...)`.
+    ///
+    /// When `Some`, the backend knows to suppress its legacy blanket-acquire barrier and
+    /// rely on the scoped prologue that was folded into the command list.
+    pub recorded_graph_syncs: Vec<bool>,
+    /// Retained command lists keyed by `(ctx, retention_key)`.
+    retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
+    /// Count of zero-record resubmits served from `retained_graphs`.
+    pub retained_resubmit_count: usize,
     /// Count of `wait_until` calls (for verifying no CPU waits in unified paths)
     pub wait_until_count: usize,
+    /// Count of grant readback staging buffer allocations
+    pub readback_alloc_count: usize,
+    /// Grant readback buffers freed via [`GpuBackend::free_readback_buffer`].
+    pub readback_free_count: usize,
     /// Count of `create_buffer_view` calls (for verifying transient view cache hit rate)
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
@@ -90,6 +105,9 @@ struct MockBuffer {
     data: Vec<u8>,
     bindless_index: u32,
     flags: BufferFlags,
+    /// Grant-read staging buffer (persistently CPU-readable; no bindless slot).
+    is_grant_readback: bool,
+    grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
 }
 
 #[allow(dead_code)]
@@ -191,7 +209,13 @@ impl MockBackend {
             textures_created: 0,
             samplers_created: 0,
             compute_dispatch_count: 0,
+            recorded_waits: Vec::new(),
+            recorded_graph_syncs: Vec::new(),
+            retained_graphs: HashMap::new(),
+            retained_resubmit_count: 0,
             wait_until_count: 0,
+            readback_alloc_count: 0,
+            readback_free_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             device_timeline_next: HashMap::new(),
@@ -243,12 +267,29 @@ impl MockBackend {
         self.context_state(ctx).signal_queue.push(signal);
     }
 
+    fn record_submit_sync(&mut self, sync: Option<&SubmitSync>) -> Result<()> {
+        if let Some(s) = sync {
+            self.recorded_waits.push(s.waits.clone());
+            for epoch in &s.waits {
+                self.wait_until(epoch.context, epoch.value)?;
+            }
+        } else {
+            self.recorded_waits.push(Vec::new());
+        }
+        Ok(())
+    }
+
     /// Set the default surface format for testing different GPU preferences.
     ///
     /// Use this to verify that your code correctly uses `Surface::format()`
     /// rather than assuming a hardcoded format.
     pub fn set_default_surface_format(&mut self, format: TextureFormat) {
         self.default_surface_format = format;
+    }
+
+    /// Number of live retained command lists (test introspection).
+    pub fn retained_graph_count(&self) -> usize {
+        self.retained_graphs.len()
     }
 
     /// Reset recorded state for a new test.
@@ -262,8 +303,61 @@ impl MockBackend {
         self.textures_created = 0;
         self.samplers_created = 0;
         self.compute_dispatch_count = 0;
+        self.recorded_waits.clear();
+        self.recorded_graph_syncs.clear();
         self.wait_until_count = 0;
         self.buffer_view_create_count = 0;
+    }
+
+    fn execute_copy_buffer(&mut self, src: BufferHandle, src_offset: u64, dst: BufferHandle, size: u64) -> Result<()> {
+        let copy_len = size as usize;
+        let src_data = {
+            let src_buf = self
+                .buffers
+                .get(&src)
+                .ok_or_else(|| anyhow::anyhow!("CopyBuffer: invalid src"))?;
+            if src_offset.saturating_add(copy_len as u64) > src_buf.size {
+                anyhow::bail!("CopyBuffer: size exceeds src bounds");
+            }
+            let start = src_offset as usize;
+            src_buf.data[start..start + copy_len].to_vec()
+        };
+        let dst_buf = self
+            .buffers
+            .get_mut(&dst)
+            .ok_or_else(|| anyhow::anyhow!("CopyBuffer: invalid dst"))?;
+        if copy_len as u64 > dst_buf.size {
+            anyhow::bail!("CopyBuffer: size exceeds dst bounds");
+        }
+        dst_buf.data[..copy_len].copy_from_slice(&src_data);
+        Ok(())
+    }
+
+    fn execute_copy_texture_to_readback(
+        &mut self,
+        src: TextureHandle,
+        dst: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<()> {
+        let tex = self
+            .textures
+            .get(&src)
+            .ok_or_else(|| anyhow::anyhow!("CopyTextureToReadback: invalid src"))?;
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        let dst_buf = self
+            .buffers
+            .get_mut(&dst)
+            .ok_or_else(|| anyhow::anyhow!("CopyTextureToReadback: invalid dst"))?;
+        if dst_buf.size < layout.staging_bytes {
+            anyhow::bail!("CopyTextureToReadback: dst too small");
+        }
+        for row in 0..layout.height as usize {
+            let src_off = row * row_bytes;
+            let dst_off = layout.footprint_offset as usize + row * pitch;
+            dst_buf.data[dst_off..dst_off + row_bytes].copy_from_slice(&tex.data[src_off..src_off + row_bytes]);
+        }
+        Ok(())
     }
 }
 
@@ -274,6 +368,10 @@ impl Default for MockBackend {
 }
 
 impl GpuBackend for MockBackend {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn backend_type(&self) -> BackendType {
         BackendType::Vulkan
     }
@@ -352,7 +450,9 @@ impl GpuBackend for MockBackend {
     fn destroy_context(&mut self, ctx: ContextHandle) {
         if let Some(state) = self.contexts.remove(&ctx) {
             let floor = self.device_retired_floor.entry(state.device).or_insert(0);
-            *floor = (*floor).max(state.completed);
+            // Mirror Metal context destroy: horizon is max(signaled, last_submitted).
+            let retired_horizon = state.completed.max(state.last_submitted_seq);
+            *floor = (*floor).max(retired_horizon);
         }
     }
 
@@ -387,6 +487,8 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; size as usize],
                 bindless_index,
                 flags,
+                is_grant_readback: false,
+                grant_texture_readback: None,
             },
         );
 
@@ -422,6 +524,8 @@ impl GpuBackend for MockBackend {
                 data: vec![0u8; cap as usize],
                 bindless_index,
                 flags,
+                is_grant_readback: false,
+                grant_texture_readback: None,
             },
         );
 
@@ -513,6 +617,8 @@ impl GpuBackend for MockBackend {
                 data: vec![0; size as usize],
                 bindless_index: index,
                 flags: BufferFlags::empty(),
+                is_grant_readback: false,
+                grant_texture_readback: None,
             },
         );
 
@@ -557,6 +663,144 @@ impl GpuBackend for MockBackend {
         let len = len_u64 as usize;
         output[..len].copy_from_slice(&buf.data[..len]);
         Ok(())
+    }
+
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+        self.readback_alloc_count += 1;
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle: device,
+                size,
+                alloc_size: size,
+                data: vec![0u8; size as usize],
+                bindless_index: 0,
+                flags: BufferFlags::empty(),
+                is_grant_readback: true,
+                grant_texture_readback: None,
+            },
+        );
+        Ok(handle)
+    }
+
+    fn query_texture_readback_layout(
+        &self,
+        _device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<crate::backend::TextureReadbackLayout> {
+        let row_pitch = width.saturating_mul(format.bytes_per_pixel());
+        let logical_bytes = row_pitch as u64 * height as u64;
+        Ok(crate::backend::TextureReadbackLayout {
+            width,
+            height,
+            format,
+            logical_bytes,
+            staging_bytes: logical_bytes,
+            row_pitch,
+            footprint_offset: 0,
+        })
+    }
+
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: crate::backend::TextureReadbackLayout,
+    ) -> Result<BufferHandle> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+        let handle = self.next_buffer_handle;
+        self.next_buffer_handle += 1;
+        self.readback_alloc_count += 1;
+        self.buffers.insert(
+            handle,
+            MockBuffer {
+                device_handle: device,
+                size: layout.staging_bytes,
+                alloc_size: layout.staging_bytes,
+                data: vec![0u8; layout.staging_bytes as usize],
+                bindless_index: 0,
+                flags: BufferFlags::empty(),
+                is_grant_readback: true,
+                grant_texture_readback: Some(layout),
+            },
+        );
+        Ok(handle)
+    }
+
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: crate::backend::TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()> {
+        if output.len() as u64 != layout.logical_bytes {
+            anyhow::bail!(
+                "read_texture_readback_staging size mismatch: expected {}, got {}",
+                layout.logical_bytes,
+                output.len()
+            );
+        }
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if !buf.is_grant_readback {
+            anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
+        }
+        let row_bytes = layout.tight_row_bytes() as usize;
+        let pitch = layout.row_pitch as usize;
+        for row in 0..layout.height as usize {
+            let src = row * pitch;
+            let dst = row * row_bytes;
+            output[dst..dst + row_bytes].copy_from_slice(&buf.data[src..src + row_bytes]);
+        }
+        Ok(())
+    }
+
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
+        let buf = self
+            .buffers
+            .get(&buffer)
+            .ok_or_else(|| anyhow::anyhow!("Invalid buffer handle"))?;
+        if !buf.is_grant_readback {
+            anyhow::bail!("read_readback_buffer requires a grant readback buffer");
+        }
+        let len = output.len().min(buf.data.len());
+        output[..len].copy_from_slice(&buf.data[..len]);
+        Ok(())
+    }
+
+    fn free_readback_buffer(&mut self, buffer: BufferHandle) {
+        self.buffers.remove(&buffer);
+        self.readback_free_count += 1;
+    }
+
+    #[cfg(test)]
+    fn test_readback_alloc_count(&self) -> usize {
+        self.readback_alloc_count
+    }
+
+    #[cfg(test)]
+    fn test_readback_free_count(&self) -> usize {
+        self.readback_free_count
+    }
+
+    #[cfg(test)]
+    fn test_surface_present_count(&self) -> usize {
+        self.surface_present_count
+    }
+
+    #[cfg(test)]
+    fn test_wait_until_count(&self) -> usize {
+        self.wait_until_count
     }
 
     fn clear_buffer(&mut self, _device: DeviceHandle, buffer: BufferHandle, offset: u64, size: u64) -> Result<()> {
@@ -858,6 +1102,7 @@ impl GpuBackend for MockBackend {
                 surface,
                 image,
                 context: ctx,
+                frame_slot: image as u32,
             },
             tex_handle,
         ))
@@ -1139,14 +1384,35 @@ impl GpuBackend for MockBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&super::SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let device = self.context_device(ctx);
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
 
-        self.recorded_compute_commands.push(commands.to_vec());
+        self.record_submit_sync(sync)?;
+
+        let effective = super::commands_with_sync_prologue(commands, sync);
+        self.recorded_compute_commands.push(effective.clone());
         self.compute_dispatch_count += 1;
+
+        for cmd in &effective {
+            match cmd {
+                GpuCommand::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    size,
+                } => {
+                    self.execute_copy_buffer(*src, *src_offset, *dst, *size)?;
+                }
+                GpuCommand::CopyTextureToReadback { src, dst, layout } => {
+                    self.execute_copy_texture_to_readback(*src, *dst, *layout)?;
+                }
+                _ => {}
+            }
+        }
 
         let next = self.device_timeline_next.entry(device).or_insert(0);
         *next += 1;
@@ -1166,14 +1432,18 @@ impl GpuBackend for MockBackend {
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&super::SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let device = self.context_device(ctx);
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
         }
 
+        self.recorded_graph_syncs.push(sync.is_some());
+
         let mut batch: Vec<GpuCommand> = Vec::new();
-        let mut last_tv = self.gpu_progress(ctx);
+        let mut last_tv;
+        last_tv = self.gpu_progress(ctx);
         for cmd in commands {
             match cmd {
                 GraphCommand::Compute(c) => batch.push(c.clone()),
@@ -1182,18 +1452,45 @@ impl GpuBackend for MockBackend {
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
-                        self.submit_standalone(ctx, &batch)?;
+                        #[allow(unused_assignments)]
+                        {
+                            last_tv = self.submit_standalone(ctx, &batch, sync)?;
+                        }
                         batch.clear();
                     }
                     self.render_to_target(device, *target, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[])?;
+                    last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }
         }
         if !batch.is_empty() {
-            last_tv = self.submit_standalone(ctx, &batch)?;
+            last_tv = self.submit_standalone(ctx, &batch, sync)?;
         }
         Ok(last_tv)
+    }
+
+    fn submit_graph_and_retain(
+        &mut self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&super::SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.retained_graphs.insert((ctx, key), commands.to_vec());
+        self.submit_graph(ctx, commands, sync)
+    }
+
+    fn try_resubmit_retained(
+        &mut self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&super::SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        let Some(commands) = self.retained_graphs.get(&(ctx, key)).cloned() else {
+            return Ok(None);
+        };
+        self.retained_resubmit_count += 1;
+        self.submit_graph(ctx, &commands, sync).map(Some)
     }
 
     fn record_gpu_work(&mut self, frame: &FrameToken, commands: &[GpuCommand]) -> Result<()> {
@@ -1850,7 +2147,7 @@ mod tests {
         ];
 
         let ctx = backend.create_context(device).unwrap();
-        let tv = backend.submit_standalone(ctx, &commands).unwrap();
+        let tv = backend.submit_standalone(ctx, &commands, None).unwrap();
         backend.wait_until(ctx, tv).unwrap();
 
         assert_eq!(backend.recorded_compute_commands.len(), 1);
@@ -1895,7 +2192,7 @@ mod tests {
 
         assert_eq!(backend.wait_until_count, 0);
         let ctx = backend.create_context(device).unwrap();
-        backend.submit_graph(ctx, &commands).unwrap();
+        backend.submit_graph(ctx, &commands, None).unwrap();
         assert_eq!(
             backend.wait_until_count, 0,
             "submit_graph should not call wait_until (no CPU waits)"
@@ -2024,5 +2321,26 @@ mod tests {
         assert!(!signals
             .iter()
             .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
+    }
+
+    #[test]
+    fn destroy_context_floors_device_retired_when_signaled_lags_submitted() {
+        let mut backend = MockBackend::new();
+        let device = backend.create_device(0).unwrap();
+        let ctx = backend.create_context(device).unwrap();
+        {
+            let state = backend.context_state_mut(ctx);
+            state.completed = 7;
+            state.last_submitted_seq = 10;
+        }
+        *backend.device_timeline_next.entry(device).or_insert(0) = 10;
+
+        backend.destroy_context(ctx);
+
+        assert_eq!(
+            backend.device_retired(device),
+            10,
+            "retired floor must include last_submitted_seq after destroy removes the context"
+        );
     }
 }

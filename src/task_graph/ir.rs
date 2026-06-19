@@ -201,6 +201,15 @@ pub enum NodeKind {
         target: RenderTargetHandle,
         commands: Vec<crate::backend::RenderCommand>,
     },
+    /// Read easement grant — recorded once, replayed with the scheme.
+    ///
+    /// Emits no GPU commands in v1; exists so the analyzer can eventually
+    /// choose host-visible backing vs an inserted device→host blit per backend.
+    GrantRead { grant_id: u32 },
+    /// Present easement grant — recorded once, replayed with the scheme.
+    ///
+    /// Emits no GPU commands; owns the ordering edge before scanout return.
+    GrantPresent { grant_id: u32 },
 }
 
 /// A single node in the task graph.
@@ -226,16 +235,17 @@ impl GraphIR {
     /// Used by the graph-colored transient path to guarantee that the
     /// placement-heap region is zeroed before any dispatch reads from it.
     pub fn prepend_clear_buffer(&mut self, buffer: &crate::Buffer, offset: u64, size: u64) {
+        let handle = buffer.backing_handle();
         self.nodes.insert(
             0,
             TaskNode {
                 label: "clear_transient_region",
                 bindings: vec![ResourceBinding {
-                    resource: super::ResourceId::Buffer(buffer.handle),
+                    resource: super::ResourceId::Buffer(handle),
                     access: NodeAccess::Write,
                 }],
                 kind: NodeKind::ClearBuffer {
-                    buffer: buffer.handle,
+                    buffer: handle,
                     offset,
                     size,
                 },
@@ -258,7 +268,7 @@ pub struct BarrierUsage {
 }
 
 /// Resources that need a barrier before a wave executes, with per-resource access semantics.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BarrierSet {
     pub buffers: Vec<(BufferHandle, BarrierUsage)>,
     pub textures: Vec<(TextureHandle, BarrierUsage)>,

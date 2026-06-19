@@ -7,6 +7,18 @@
 implementing goldy_exp;
 
 // ============================================================================
+// Dispatch Types
+// ============================================================================
+
+/// Workgroup-count triple for compute dispatch (direct or indirect).
+/// Rust equivalent: goldy::DispatchShape
+public struct DispatchShape {
+    public uint x;
+    public uint y;
+    public uint z;
+};
+
+// ============================================================================
 // Particle System Types
 // Used by: compute_particles, starfield, bouncing_lines, game_of_life
 // ============================================================================

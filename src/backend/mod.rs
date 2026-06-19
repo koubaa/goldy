@@ -43,7 +43,8 @@ pub(crate) mod signal_fence;
 
 use crate::types::{
     BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat, PresentMode,
-    PrimitiveTopology, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
+    PrimitiveTopology, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
+    VertexBufferLayout,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -74,11 +75,31 @@ use crate::types::ResourceCategory;
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 use crate::types::BindlessSlotKind;
 
+/// Gate for dispatch paths: run `f` only when layout validation is enabled.
+///
+/// Pure validators ([`validate_raw_binding_strides`], etc.) contain the check logic
+/// and never read env vars. Unit tests call those directly; backends call them
+/// through this wrapper.
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
+#[inline]
+pub(crate) fn with_layout_validation<F>(f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if crate::slang::layout_validation_enabled() {
+        f()
+    } else {
+        Ok(())
+    }
+}
+
 /// Validate raw bindless indices against per-slot SRV/UAV expectations (DX12).
 ///
-/// Only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
-/// `GOLDY_VALIDATION=layout`). Skips slots where reflection or index resolution
-/// is ambiguous.
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub(crate) fn validate_bindless_slot_kinds(
     indices: &[u32],
@@ -86,7 +107,7 @@ pub(crate) fn validate_bindless_slot_kinds(
     mut resolve: impl FnMut(u32) -> Option<BindlessSlotKind>,
     shader_name: &str,
 ) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() || expectations.is_empty() {
+    if expectations.is_empty() {
         return Ok(());
     }
     let mut mismatches: Vec<String> = Vec::new();
@@ -174,8 +195,6 @@ pub(crate) fn validate_typed_push_constants(
 /// reflection).  `None` on either side means "unknown / not applicable" and
 /// is silently skipped.
 ///
-/// Only runs when layout validation is enabled; designed for the bind hot
-/// path — allocates only on the error path.
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -221,9 +240,8 @@ pub(crate) fn validate_binding_strides(
 /// buffer's `element_stride` through `resolve_stride(index, category)` and delegates
 /// to [`validate_binding_strides`].
 ///
-/// With layout validation enabled (via `GOLDY_VALIDATION=layout|all`), this also
-/// reports any Scattered/Broadcast slot whose index is missing from `indices` — a
-/// silent out-of-bounds skip that would otherwise hide a "too few indices" bug.
+/// Also reports any Scattered/Broadcast slot whose index is missing from `indices`.
+///
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -237,7 +255,7 @@ pub(crate) fn validate_raw_binding_strides(
     mut resolve_stride: impl FnMut(u32, crate::types::ResourceCategory) -> Option<u32>,
     shader_name: &str,
 ) -> Result<()> {
-    if !crate::slang::layout_validation_enabled() || expected.is_empty() {
+    if expected.is_empty() {
         return Ok(());
     }
     let mut actual: Vec<Option<u32>> = vec![None; expected.len()];
@@ -280,7 +298,7 @@ pub(crate) fn validate_raw_binding_strides(
 ///
 /// Call from `prepare_render_commands` while buffer handles are still available.
 /// Legacy bind commands bail at record time; this is the only place stride checks run
-/// for standalone render passes when `GOLDY_VALIDATION=layout|all`.
+/// for standalone render passes.
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -296,9 +314,6 @@ where
     F: FnMut(PipelineHandle) -> Option<(Vec<Option<u32>>, String)>,
     G: FnMut(BufferHandle) -> Option<u32>,
 {
-    if !crate::slang::layout_validation_enabled() {
-        return Ok(());
-    }
     let mut current_pipeline: Option<PipelineHandle> = None;
     for cmd in commands {
         match cmd {
@@ -355,9 +370,16 @@ pub type SamplerHandle = u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameToken {
     pub surface: SurfaceHandle,
+    /// WSI swapchain image index (which drawable will be presented).
     pub image: SwapchainImageHandle,
     /// Submission context that owns this frame's timeline (set by [`crate::surface::Frame`]).
     pub context: ContextHandle,
+    /// In-flight slot index for the compute/scratch texture bound this frame.
+    ///
+    /// Used for present-lease retention keys: must match the physical backing that
+    /// shader dispatches and copies target, not necessarily [`Self::image`].
+    /// On Vulkan this is `current_frame`; on DX12 it equals the swapchain image index.
+    pub frame_slot: u32,
 }
 
 /// Render command for command buffer recording.
@@ -418,6 +440,92 @@ pub enum RenderCommand {
         base_vertex: i32,
         first_instance: u32,
     },
+}
+
+/// Layout of a grant-readback staging buffer for a 2D texture copy.
+///
+/// `logical_bytes` is the tight linear size clients observe (`width * height * bpp`).
+/// `staging_bytes` and `row_pitch` describe the GPU/readback layout (may include padding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureReadbackLayout {
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    pub logical_bytes: u64,
+    pub staging_bytes: u64,
+    pub row_pitch: u32,
+    /// Byte offset of the subresource footprint within the staging buffer (DX12 placed copy).
+    pub footprint_offset: u64,
+}
+
+impl TextureReadbackLayout {
+    pub fn tight_row_bytes(&self) -> u32 {
+        self.width.saturating_mul(self.format.bytes_per_pixel())
+    }
+}
+
+/// Cross-submission synchronization derived from the resource epoch ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubmitSync {
+    /// Same-context scoped memory barrier prepended before command execution.
+    pub prologue: crate::task_graph::BarrierSet,
+    /// Cross-context GPU queue-waits on producer timeline values.
+    pub waits: Vec<crate::timeline::Epoch>,
+}
+
+impl SubmitSync {
+    pub fn is_empty(&self) -> bool {
+        self.prologue.is_empty() && self.waits.is_empty()
+    }
+
+    pub fn from_cross_submit(cross: &crate::task_graph::CrossSubmitSync) -> Self {
+        Self {
+            prologue: cross.prologue.clone(),
+            waits: cross.waits.clone(),
+        }
+    }
+
+    /// True when this submit should use the legacy blanket cross-submission acquire
+    /// instead of epoch-driven scoped barriers.
+    ///
+    /// Epoch-driven scheme/task-graph submits pass `Some(SubmitSync)` with a scoped
+    /// prologue and/or cross-context waits; they must not also emit the blanket acquire.
+    pub fn use_legacy_acquire(&self) -> bool {
+        false
+    }
+
+    /// Whether `sync` selects the legacy blanket acquire path.
+    pub fn use_legacy_acquire_from(sync: Option<&SubmitSync>) -> bool {
+        match sync {
+            None => true,
+            Some(s) => s.use_legacy_acquire(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod submit_sync_tests {
+    use super::SubmitSync;
+
+    #[test]
+    fn use_legacy_acquire_from_none_means_legacy() {
+        assert!(SubmitSync::use_legacy_acquire_from(None));
+    }
+
+    #[test]
+    fn use_legacy_acquire_from_some_means_scoped() {
+        assert!(!SubmitSync::use_legacy_acquire_from(Some(&SubmitSync::default())));
+    }
+}
+
+/// Prepend cross-submit prologue commands when executing a submit with sync info.
+pub(crate) fn commands_with_sync_prologue(commands: &[GpuCommand], sync: Option<&SubmitSync>) -> Vec<GpuCommand> {
+    if let Some(s) = sync {
+        if !s.prologue.is_empty() {
+            return crate::task_graph::cross_submit::prepend_prologue(commands, &s.prologue);
+        }
+    }
+    commands.to_vec()
 }
 
 /// GPU command recorded into a command buffer / task-graph submission.
@@ -507,6 +615,19 @@ pub enum GpuCommand {
         src: RenderTargetHandle,
         dst: TextureHandle,
     },
+    /// Copy bytes from `src` buffer into `dst` buffer (grant-read staging path).
+    CopyBuffer {
+        src: BufferHandle,
+        src_offset: u64,
+        dst: BufferHandle,
+        size: u64,
+    },
+    /// Copy a texture subresource into a grant-readback staging buffer (placed footprint).
+    CopyTextureToReadback {
+        src: TextureHandle,
+        dst: BufferHandle,
+        layout: TextureReadbackLayout,
+    },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
     /// Each entry packs `[PushLayout bytes | wg_x u32 | wg_y u32 | wg_z u32]` into
@@ -561,6 +682,10 @@ pub type ComputeCommand = GpuCommand;
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 pub trait GpuBackend: Send + Sync {
+    /// Downcast to `&mut dyn std::any::Any` for test introspection.
+    #[doc(hidden)]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     /// Get the backend type.
     fn backend_type(&self) -> BackendType;
 
@@ -625,6 +750,66 @@ pub trait GpuBackend: Send + Sync {
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
     /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
     fn read_buffer_to_cpu(&mut self, device: DeviceHandle, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
+    /// Allocate a persistently mapped READBACK staging buffer for grant readback (no bindless slot).
+    fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle>;
+    /// Read bytes from a buffer created by [`Self::alloc_readback_buffer`].
+    fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
+    /// Release a grant-readback staging buffer.
+    fn free_readback_buffer(&mut self, buffer: BufferHandle);
+    /// Query copy/readback layout for a 2D texture grant (uncompressed formats only in v1).
+    fn query_texture_readback_layout(
+        &self,
+        device: DeviceHandle,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+    ) -> Result<TextureReadbackLayout>;
+    /// Allocate a persistently mapped READBACK staging buffer for a texture grant.
+    fn alloc_texture_readback_staging(
+        &mut self,
+        device: DeviceHandle,
+        layout: TextureReadbackLayout,
+    ) -> Result<BufferHandle>;
+    /// Read tight linear bytes from a texture grant staging buffer.
+    fn read_texture_readback_staging(
+        &self,
+        buffer: BufferHandle,
+        layout: TextureReadbackLayout,
+        output: &mut [u8],
+    ) -> Result<()>;
+
+    /// Mock-backend grant readback allocation counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_readback_alloc_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
+    /// Mock-backend grant readback free counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_readback_free_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
+    /// Mock-backend surface present counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_surface_present_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
+    /// Mock-backend wait_until call counter (tests only).
+    #[doc(hidden)]
+    #[cfg(test)]
+    fn test_wait_until_count(&self) -> usize {
+        let _ = self;
+        0
+    }
+
     /// Capability snapshot for `device` (surface formats, [`crate::device::DeviceCapabilities::has_zero_copy_storage_readback`], …).
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
         let _ = device;
@@ -647,7 +832,7 @@ pub trait GpuBackend: Send + Sync {
         new_logical_size: u64,
     ) -> Result<()>;
 
-    /// Hint that bytes at and above `offset` may be discarded by the system (see [`crate::Buffer::hint_unused_above`]).
+    /// Hint that bytes at and above `offset` may be discarded by the system (see `hint_unused_above` on the backing allocation).
     fn hint_buffer_unused_above(&mut self, buffer: BufferHandle, offset: u64) {
         let _ = (buffer, offset);
     }
@@ -885,10 +1070,15 @@ pub trait GpuBackend: Send + Sync {
     ) -> Result<bool>;
 
     /// Submit compute (and transfer) commands on the context timeline, not tied to a surface frame.
+    ///
+    /// When `sync` is `Some`, the backend emits the scoped prologue barrier and GPU-side
+    /// queue-waits instead of the legacy blanket cross-submission acquire
+    /// ([`SubmitSync::use_legacy_acquire_from`]).
     fn submit_standalone(
         &mut self,
         ctx: ContextHandle,
         commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue>;
 
     /// Submit an analyzed task graph with optional offscreen [`GraphCommand::Render`] segments.
@@ -902,6 +1092,7 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         ctx: ContextHandle,
         commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let mut batch: Vec<GpuCommand> = Vec::new();
         let mut last_tv = self.gpu_progress(ctx);
@@ -913,18 +1104,18 @@ pub trait GpuBackend: Send + Sync {
                     commands: render_cmds,
                 } => {
                     if !batch.is_empty() {
-                        last_tv = self.submit_standalone(ctx, &batch)?;
+                        last_tv = self.submit_standalone(ctx, &batch, sync)?;
                         self.wait_until(ctx, last_tv)?;
                         batch.clear();
                     }
                     let device = self.context_device(ctx);
                     self.render_to_target(device, *target, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[])?;
+                    last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }
         }
         if !batch.is_empty() {
-            last_tv = self.submit_standalone(ctx, &batch)?;
+            last_tv = self.submit_standalone(ctx, &batch, sync)?;
         }
         Ok(last_tv)
     }
@@ -947,9 +1138,10 @@ pub trait GpuBackend: Send + Sync {
         ctx: ContextHandle,
         commands: &[GraphCommand],
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
         let _ = key;
-        self.submit_graph(ctx, commands)
+        self.submit_graph(ctx, commands, sync)
     }
 
     /// Re-execute a previously retained command list without re-recording.
@@ -961,9 +1153,19 @@ pub trait GpuBackend: Send + Sync {
         &mut self,
         ctx: ContextHandle,
         key: u64,
+        sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        let _ = (ctx, key);
+        let _ = (ctx, key, sync);
         Ok(None)
+    }
+
+    /// Whether the backend can retain present-touching partitions across submits.
+    ///
+    /// Backends that resolve the drawable to a fresh [`TextureHandle`] each frame
+    /// (Metal) return `false` so the present partition is re-resolved and re-recorded
+    /// each submit rather than resubmitting a stale cached command list.
+    fn retains_present_partitions(&self) -> bool {
+        true
     }
 
     /// Drop the retained command list associated with `key`, marking its allocator slot
@@ -1018,6 +1220,25 @@ pub trait GpuBackend: Send + Sync {
 
     /// Destroy a compute pipeline.
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
+
+    /// Per push-constant resource slot (in shader-signature order), the descriptor
+    /// access the shader *signature* requires — independent of the graph access used
+    /// for barriers.
+    ///
+    /// `Some(ResourceAccess::Read)` for read-only SRV params (`BufRO<T>`),
+    /// `Some(ResourceAccess::ReadWrite)` for storage UAV params (`Scattered<T>`),
+    /// and `None` for slots with no reflected preference (callers fall back to the
+    /// graph access). The default returns an empty vec, meaning "no reflection
+    /// available"; backends where the read/write descriptor split is irrelevant
+    /// (e.g. Metal argument buffers) can leave it unimplemented.
+    fn compute_pipeline_slot_access(&self, _pipeline: ComputePipelineHandle) -> Vec<Option<ResourceAccess>> {
+        Vec::new()
+    }
+
+    /// Like [`Self::compute_pipeline_slot_access`] but for a graphics pipeline.
+    fn render_pipeline_slot_access(&self, _pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
+        Vec::new()
+    }
 
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap
@@ -1339,7 +1560,6 @@ mod bindless_slot_validation_tests {
 
     #[test]
     fn srv_where_uav_expected_fails() {
-        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
         let expectations = vec![Some(BindlessSlotKind::StorageUav)];
         let err = validate_bindless_slot_kinds(
             &[5],
@@ -1349,7 +1569,6 @@ mod bindless_slot_validation_tests {
         )
         .unwrap_err()
         .to_string();
-        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
         assert!(err.contains("SRV/UAV mismatch"), "{err}");
         assert!(err.contains("slot 0"), "{err}");
         assert!(err.contains("storage UAV"), "{err}");
@@ -1446,29 +1665,19 @@ mod binding_stride_validation_tests {
         ];
         let expected = vec![Some(16u32), Some(16u32)];
 
-        // Enable layout validation for this call (tests run with it on by default
-        // when GOLDY_VALIDATE_LAYOUTS=1 is set in CI; we assert on the error path
-        // regardless since the function still runs its check in test builds).
         let err = validate_raw_binding_strides(
             &indices,
             &categories,
             &expected,
             |_idx, _cat| Some(16),
             "my_compute_shader",
-        );
+        )
+        .unwrap_err()
+        .to_string();
 
-        // The function early-returns Ok when layout validation is disabled, so we
-        // only assert on the error if validation is on.  In CI with
-        // GOLDY_VALIDATION=all this check must fail.
-        if crate::slang::layout_validation_enabled() {
-            let msg = err.unwrap_err().to_string();
-            assert!(msg.contains("slot"), "error must name missing slot: {msg}");
-            assert!(msg.contains("my_compute_shader"), "error must name the shader: {msg}");
-            assert!(msg.contains('1'), "error must mention slot index 1: {msg}");
-        } else {
-            // Validation disabled: passes silently.
-            err.unwrap();
-        }
+        assert!(err.contains("slot"), "error must name missing slot: {err}");
+        assert!(err.contains("my_compute_shader"), "error must name the shader: {err}");
+        assert!(err.contains('1'), "error must mention slot index 1: {err}");
     }
 
     /// Providing exactly the right number of indices for all Scattered/Broadcast
@@ -1496,13 +1705,104 @@ mod binding_stride_validation_tests {
         .unwrap();
     }
 
+    /// Broadcast slot correct, scattered slot wrong — only slot 1 reported.
+    #[test]
+    fn multi_binding_second_slot_mismatch() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Broadcast), Some(ResourceCategory::Scattered)];
+        let expected = vec![Some(16u32), Some(16u32)];
+
+        let err = validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |idx, cat| match (idx, cat) {
+                (0, ResourceCategory::Broadcast) => Some(16),
+                (1, ResourceCategory::Scattered) => Some(4),
+                _ => None,
+            },
+            "struct_shader",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("slot 1"), "error must identify slot 1: {err}");
+        assert!(err.contains("stride"), "error must mention stride: {err}");
+    }
+
+    /// Broadcast 16 + Scattered<float4> 16 both match.
+    #[test]
+    fn multi_binding_all_correct_passes() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Broadcast), Some(ResourceCategory::Scattered)];
+        let expected = vec![Some(16u32), Some(16u32)];
+
+        validate_raw_binding_strides(&indices, &categories, &expected, |_idx, _cat| Some(16), "struct_shader").unwrap();
+    }
+
+    /// SimParams natural stride 4 (not cbuffer-padded 16).
+    #[test]
+    fn broadcast_single_float_natural_stride_passes() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
+        let expected = vec![Some(4u32), Some(4u32)];
+
+        validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |idx, cat| match (idx, cat) {
+                (0, ResourceCategory::Scattered) => Some(4),
+                (1, ResourceCategory::Broadcast) => Some(4),
+                _ => None,
+            },
+            "sim_params_shader",
+        )
+        .unwrap();
+    }
+
+    /// Broadcast buffer with stride 16 must fail against natural stride 4.
+    #[test]
+    fn broadcast_single_float_cbuffer_stride_fails() {
+        use super::validate_raw_binding_strides;
+        use crate::types::ResourceCategory;
+
+        let indices = vec![0u32, 1u32];
+        let categories = vec![Some(ResourceCategory::Scattered), Some(ResourceCategory::Broadcast)];
+        let expected = vec![Some(4u32), Some(4u32)];
+
+        let err = validate_raw_binding_strides(
+            &indices,
+            &categories,
+            &expected,
+            |idx, cat| match (idx, cat) {
+                (0, ResourceCategory::Scattered) => Some(4),
+                (1, ResourceCategory::Broadcast) => Some(16),
+                _ => None,
+            },
+            "sim_params_shader",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("slot 1"), "params is slot 1: {err}");
+        assert!(err.contains("stride"), "error must mention stride: {err}");
+    }
+
     /// Stride validation for render passes runs at prepare time (before lowering).
     #[test]
     fn validate_render_pass_bind_resources_catches_mismatch() {
         use super::validate_render_pass_bind_resources;
         use crate::backend::{BufferHandle, PipelineHandle, RenderCommand};
-
-        std::env::set_var("GOLDY_VALIDATE_LAYOUTS", "1");
 
         let pipeline: PipelineHandle = 1;
         let buf: BufferHandle = 1;
@@ -1529,7 +1829,6 @@ mod binding_stride_validation_tests {
             },
         )
         .expect_err("mismatched render bind must fail");
-        std::env::remove_var("GOLDY_VALIDATE_LAYOUTS");
         assert!(err.to_string().contains("slot 0"));
     }
 }

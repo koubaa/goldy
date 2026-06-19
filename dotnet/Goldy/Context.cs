@@ -1,0 +1,44 @@
+using Goldy.Native;
+
+namespace Goldy;
+
+/// <summary>
+/// GPU submission context — one per retained <see cref="Scheme"/>.
+/// </summary>
+public sealed class Context : IDisposable
+{
+    internal nint Handle;
+    private bool _disposed;
+
+    internal Context(nint handle)
+    {
+        Handle = handle;
+    }
+
+    /// <summary>
+    /// Create a context bound to a device.
+    /// </summary>
+    public static Context Create(Device device)
+    {
+        device.ThrowIfDisposed();
+        var handle = NativeMethods.ContextCreate(device.Handle);
+        if (handle == nint.Zero)
+            throw GoldyException.FromLastError("Context creation");
+        return new Context(handle);
+    }
+
+    internal void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    public void Dispose()
+    {
+        if (!_disposed)
+        {
+            NativeMethods.ContextDestroy(Handle);
+            Handle = nint.Zero;
+            _disposed = true;
+        }
+    }
+}
