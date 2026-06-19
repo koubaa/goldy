@@ -2450,3 +2450,67 @@ fn scheme_stress_zeros_then_indirect_dispatch() {
         "expected all zeros after zero-fill + indirect copy, but {nonzero_count}/{N} were nonzero"
     );
 }
+
+/// Migrated from `stress_alternating_write_dispatch` in `task_graph_integration.rs`.
+///
+/// Two `commit_write_parcel` calls on the same buffer, each followed by a dispatch
+/// that reads it, all within one `Scheme` submission.  This exercises the
+/// write → dispatch → write → dispatch (WAW + RAW) barrier sequence and confirms
+/// that the upload remap table correctly tracks both write nodes despite them
+/// sharing the same `(buffer, offset)` key.
+///
+/// Because the scheme contains `WriteBuffer` nodes it is never retained — it
+/// records fresh on every `submit()`.
+#[test]
+fn scheme_stress_alternating_write_dispatch() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+
+    const N: usize = 256;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .unwrap();
+    let out1 = pool
+        .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .unwrap();
+    let out2 = pool
+        .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .unwrap();
+
+    let data1: Vec<u32> = (0..N as u32).map(|i| i + 100).collect();
+    let data2: Vec<u32> = (0..N as u32).map(|i| i + 200).collect();
+    let bytes1: Vec<u8> = bytemuck::cast_slice(&data1).to_vec();
+    let bytes2: Vec<u8> = bytemuck::cast_slice(&data2).to_vec();
+
+    let mut scheme = Scheme::new(&ctx);
+    // Phase 1: write data1 into buf, copy to out1.
+    scheme.commit_write_parcel(&buf, 0, bytes1).expect("commit write 1");
+    scheme
+        .node("copy1", &copy_pipe)
+        .with_parcel(&buf, NodeAccess::Read)
+        .with_parcel(&out1, NodeAccess::Write)
+        .dispatch((N / 64) as u32, 1, 1);
+    // Phase 2: overwrite buf with data2 (WAW), copy to out2.
+    scheme.commit_write_parcel(&buf, 0, bytes2).expect("commit write 2");
+    scheme
+        .node("copy2", &copy_pipe)
+        .with_parcel(&buf, NodeAccess::Read)
+        .with_parcel(&out2, NodeAccess::Write)
+        .dispatch((N / 64) as u32, 1, 1);
+
+    let grant1 = scheme.grant_read(&out1).expect("grant_read out1");
+    let grant2 = scheme.grant_read(&out2).expect("grant_read out2");
+    let submission = scheme.submit().expect("submit");
+
+    let result1 = read_grant_u32(&grant1, &submission, N);
+    for (i, &val) in result1.iter().enumerate() {
+        assert_eq!(val, data1[i], "out1[{i}]: expected {}, got {val}", data1[i]);
+    }
+    let result2 = read_grant_u32(&grant2, &submission, N);
+    for (i, &val) in result2.iter().enumerate() {
+        assert_eq!(val, data2[i], "out2[{i}]: expected {}, got {val}", data2[i]);
+    }
+}

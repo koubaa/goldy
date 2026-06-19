@@ -892,6 +892,7 @@ void cs_main(Scattered<uint> args, ThreadId id) {
 /// Two write_buffer nodes each followed by a dispatch that reads the buffer,
 /// all in one graph. The second write overwrites what the first dispatch read.
 /// Tests WAW and RAW barrier insertion in sequence.
+// Scheme migration: see scheme_stress_alternating_write_dispatch
 #[test]
 fn stress_alternating_write_dispatch() {
     let device = make_device();

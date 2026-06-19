@@ -5230,6 +5230,35 @@ mod partitioning_tests {
     }
 
     #[test]
+    fn two_uploads_same_buffer_same_offset_remap_covers_both() {
+        // Interleaved WAW pattern: write buf → dispatch → write buf → dispatch, all in one IR.
+        // Both WriteBuffer nodes share (buffer=0, offset=0). The remap must cover both via
+        // the consumed-flag walk in find_upload_node, not by key uniqueness.
+        let ir = GraphIR {
+            nodes: vec![
+                write_node("write1", buf(0), 0),
+                dispatch_node("copy1", 1, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                write_node("write2", buf(0), 0),
+                dispatch_node("copy2", 1, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+            ],
+        };
+        let entry = build_cache(&ir);
+        assert_upload_remap_invariant(&ir, &entry);
+        assert_eq!(
+            entry.partitioned_upload_remap.len(),
+            2,
+            "both WriteBuffer nodes must appear in the remap"
+        );
+        // Node indices in the remap must be distinct (0 and 2, not 0 twice).
+        let remapped_nodes: Vec<usize> = entry.partitioned_upload_remap.iter().map(|&(_, _, ni)| ni).collect();
+        assert_eq!(
+            remapped_nodes.iter().collect::<std::collections::HashSet<_>>().len(),
+            2,
+            "remap must reference two distinct IR nodes, not the same node twice"
+        );
+    }
+
+    #[test]
     fn no_uploads_remap_is_empty() {
         let ir = GraphIR {
             nodes: vec![
