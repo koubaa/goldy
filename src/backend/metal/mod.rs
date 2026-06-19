@@ -11,6 +11,7 @@
 //! - `types`: Internal state structs
 //! - `utils`: Format conversion and helpers
 
+pub(super) mod api_log;
 mod buffer;
 mod compute;
 mod context;
@@ -114,6 +115,10 @@ impl MetalBackend {
     pub fn new() -> Result<Self> {
         let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
+
+        // Initialise API call logger (GOLDY_API_LOG) as early as possible so
+        // even device-creation calls can be captured if desired.
+        api_log::init();
 
         // `MTL_SHADER_VALIDATION` must be set before the first MTLDevice is created.
         // Use a process-wide Once so parallel test threads do not race on `setenv`.

@@ -363,6 +363,9 @@ pub(super) fn record_commands_to_buffer(
     macro_rules! end_compute {
         () => {
             if let Some(enc) = guard.compute.take() {
+                if super::api_log::enabled() {
+                    super::api_log::log_encoder_end("compute");
+                }
                 enc.end_encoding();
             }
         };
@@ -371,6 +374,9 @@ pub(super) fn record_commands_to_buffer(
     macro_rules! end_blit {
         () => {
             if let Some(enc) = guard.blit.take() {
+                if super::api_log::enabled() {
+                    super::api_log::log_encoder_end("blit");
+                }
                 enc.end_encoding();
             }
         };
@@ -382,6 +388,9 @@ pub(super) fn record_commands_to_buffer(
             blit_touched_bufs.clear();
             blit_touched_texs.clear();
             if guard.compute.is_none() {
+                if super::api_log::enabled() {
+                    super::api_log::log_encoder_open("compute");
+                }
                 let enc = begin_compute_encoder(command_buffer, state, logical_device, device_handle);
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
@@ -397,6 +406,9 @@ pub(super) fn record_commands_to_buffer(
         () => {
             end_compute!();
             end_blit!();
+            if super::api_log::enabled() {
+                super::api_log::log_encoder_open("blit");
+            }
             guard.blit = Some(command_buffer.new_blit_command_encoder());
             blit_touched_bufs.clear();
             blit_touched_texs.clear();
@@ -442,6 +454,9 @@ pub(super) fn record_commands_to_buffer(
                 if clear_size > 0 {
                     ensure_blit_buf!(*buffer);
                     let range = mtl::NSRange::new(*offset, clear_size);
+                    if super::api_log::enabled() {
+                        super::api_log::log_fill_buffer(*buffer, clear_size);
+                    }
                     guard.blit.unwrap().fill_buffer(&buf_state.buffer, range, 0);
                 }
             }
@@ -531,6 +546,9 @@ pub(super) fn record_commands_to_buffer(
                     .context("WriteTexture: texture_scratches index out of range")?;
                 *tex_idx += 1;
                 let bytes_per_row = (*width as u64) * (bpp as u64);
+                if super::api_log::enabled() {
+                    super::api_log::log_write_texture(*tex_handle, *width, *height, data.len());
+                }
                 guard.blit.unwrap().copy_from_buffer_to_texture(
                     &scratch.buffer,
                     0,
@@ -648,7 +666,7 @@ pub(super) fn record_commands_to_buffer(
                 anyhow::bail!("BindResourcesTyped in frame-table path: call frame_table::lower_gpu_commands first");
             }
             GpuCommand::Dispatch {
-                label: _,
+                label,
                 workgroups_x,
                 workgroups_y,
                 workgroups_z,
@@ -665,6 +683,9 @@ pub(super) fn record_commands_to_buffer(
                         height: *workgroups_y as u64,
                         depth: *workgroups_z as u64,
                     };
+                    if super::api_log::enabled() {
+                        super::api_log::log_dispatch(*label, *workgroups_x, *workgroups_y, *workgroups_z);
+                    }
                     guard
                         .compute
                         .expect("encoder must be set after ensure_compute!()")
@@ -672,11 +693,14 @@ pub(super) fn record_commands_to_buffer(
                 }
             }
             GpuCommand::DispatchBatch {
-                label: _,
+                label,
                 arg_data,
                 count,
             } => {
                 ensure_compute!();
+                if super::api_log::enabled() {
+                    super::api_log::log_dispatch_batch(*label, *count);
+                }
                 if let Some(pipeline) = current_pipeline {
                     let push_size = std::mem::size_of::<PushLayout>();
                     let stride = shared::DISPATCH_BATCH_STRIDE;
@@ -732,7 +756,7 @@ pub(super) fn record_commands_to_buffer(
                 }
             }
             GpuCommand::DispatchIndirect {
-                label: _,
+                label,
                 buffer,
                 offset,
             } => {
@@ -747,6 +771,9 @@ pub(super) fn record_commands_to_buffer(
                     height: pipeline.workgroup_size[1] as u64,
                     depth: pipeline.workgroup_size[2] as u64,
                 };
+                if super::api_log::enabled() {
+                    super::api_log::log_dispatch_indirect(*label, *buffer, *offset);
+                }
                 guard
                     .compute
                     .expect("encoder must be set after ensure_compute!()")
@@ -759,6 +786,9 @@ pub(super) fn record_commands_to_buffer(
                 let dst_state = state.textures.get(dst).context("CopyTexture: dst texture not found")?;
                 let w = src_state.width as u64;
                 let h = src_state.height as u64;
+                if super::api_log::enabled() {
+                    super::api_log::log_copy_texture(*src, *dst, w, h);
+                }
                 guard.blit.unwrap().copy_from_texture(
                     &src_state.texture,
                     0,
@@ -791,6 +821,9 @@ pub(super) fn record_commands_to_buffer(
                     }
                     (src_state.buffer.clone(), dst_state.buffer.clone())
                 };
+                if super::api_log::enabled() {
+                    super::api_log::log_copy_buffer(*src, *dst, *size);
+                }
                 guard
                     .blit
                     .unwrap()
@@ -854,6 +887,9 @@ pub(super) fn record_commands_to_buffer(
             }
             GpuCommand::Barrier => {
                 if let Some(enc) = guard.compute {
+                    if super::api_log::enabled() {
+                        super::api_log::log_barrier();
+                    }
                     const MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES: mtl::NSUInteger = 1 | 2;
                     let () = unsafe { msg_send![enc, memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS_AND_TEXTURES] };
                 }
@@ -880,6 +916,9 @@ pub(super) fn record_commands_to_buffer(
                         }
                     }
                     if !resources.is_empty() {
+                        if super::api_log::enabled() {
+                            super::api_log::log_resource_barrier(buf_entries.len(), tex_entries.len());
+                        }
                         let count: mtl::NSUInteger = resources.len() as mtl::NSUInteger;
                         let ptr = resources.as_ptr();
                         let () = unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
@@ -1142,6 +1181,9 @@ pub(super) fn submit(
         .clone();
 
     let compute_commit_instant = std::time::Instant::now();
+    if super::api_log::enabled() {
+        super::api_log::log_commit(signal_value);
+    }
     let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
         let status = cb.status();
         if status != MTLCommandBufferStatus::Completed {

@@ -239,6 +239,10 @@ pub(super) fn acquire(
         unsafe { msg_send![layer, nextDrawable] }
     };
 
+    if super::api_log::enabled() {
+        super::api_log::log_next_drawable(drawable != nil);
+    }
+
     if drawable == nil {
         anyhow::bail!("Failed to get next drawable from CAMetalLayer");
     }
@@ -492,6 +496,9 @@ pub(super) fn present(
     let drawable = drawable_ptr as id;
     let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
     command_buffer.present_drawable(drawable_ref);
+    if super::api_log::enabled() {
+        super::api_log::log_present_drawable(signal_value);
+    }
     command_buffer.commit();
 
     // Release the retained drawable
