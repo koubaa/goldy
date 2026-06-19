@@ -38,15 +38,14 @@ impl PendingRenderSlot {
     }
 
     fn resolve(&self, slot_access: &[Option<ResourceAccess>], slot_idx: usize) -> ResourceHandle {
-        let descriptor_access =
-            slot_access
-                .get(slot_idx)
-                .copied()
-                .flatten()
-                .unwrap_or_else(|| match self.graph_access {
-                    NodeAccess::Read => ResourceAccess::Read,
-                    NodeAccess::Write | NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
-                });
+        let descriptor_access = slot_access
+            .get(slot_idx)
+            .copied()
+            .flatten()
+            .unwrap_or(match self.graph_access {
+                NodeAccess::Read => ResourceAccess::Read,
+                NodeAccess::Write | NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+            });
         match descriptor_access {
             ResourceAccess::Read => self.read_handle.or(self.uav_handle),
             ResourceAccess::Write | ResourceAccess::ReadWrite => self.uav_handle.or(self.read_handle),

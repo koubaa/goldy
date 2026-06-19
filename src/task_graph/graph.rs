@@ -5237,9 +5237,19 @@ mod partitioning_tests {
         let ir = GraphIR {
             nodes: vec![
                 write_node("write1", buf(0), 0),
-                dispatch_node("copy1", 1, vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)], 1),
+                dispatch_node(
+                    "copy1",
+                    1,
+                    vec![(buf(0), NodeAccess::Read), (buf(1), NodeAccess::Write)],
+                    1,
+                ),
                 write_node("write2", buf(0), 0),
-                dispatch_node("copy2", 1, vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)], 1),
+                dispatch_node(
+                    "copy2",
+                    1,
+                    vec![(buf(0), NodeAccess::Read), (buf(2), NodeAccess::Write)],
+                    1,
+                ),
             ],
         };
         let entry = build_cache(&ir);
