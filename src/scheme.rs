@@ -1354,13 +1354,20 @@ impl IntoDispatch for &Parcel {
     }
 }
 
-/// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, and scheme-held leases.
+/// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, scheme-held
+/// leases, and samplers.
+///
+/// Returns a `(resource_identity, bindless_slot_index)` pair where:
+/// - `resource_identity` is `Some((ResourceId, ParcelStamp))` for resources that participate in
+///   barrier generation and cross-scheme hazard tracking (buffers, textures). `None` for
+///   barrier-free resources such as samplers, which only need a bindless slot index.
+/// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
 pub(crate) trait SchemeBindable {
     fn resolve(
         &self,
         scheme: &Scheme,
         access: ResourceAccess,
-    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>);
+    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>);
 }
 
 impl SchemeBindable for Parcel {
@@ -1368,8 +1375,8 @@ impl SchemeBindable for Parcel {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
-        (self.resource_id(), self.resource_index(access), self.stamp_handle())
+    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+        (Some((self.resource_id(), self.stamp_handle())), self.resource_index(access))
     }
 }
 
@@ -1378,12 +1385,11 @@ impl SchemeBindable for crate::Buffer {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
+    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
         let parcel = self.whole();
         (
-            parcel.resource_id(),
+            Some((parcel.resource_id(), parcel.stamp_handle())),
             parcel.resource_index(access),
-            parcel.stamp_handle(),
         )
     }
 }
@@ -1393,7 +1399,7 @@ impl<T> SchemeBindable for Lease<T> {
         &self,
         scheme: &Scheme,
         access: ResourceAccess,
-    ) -> (ResourceId, Option<u32>, Arc<crate::parcel::ParcelStamp>) {
+    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
         let parcel = &scheme.leases[self.id.0 as usize];
         // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
         // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
@@ -1401,10 +1407,21 @@ impl<T> SchemeBindable for Lease<T> {
         // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
         // the unique-minimal-write shape-check lands (design §8).
         (
-            parcel.resource_id(),
+            Some((parcel.resource_id(), parcel.stamp_handle())),
             parcel.resource_index(access),
-            parcel.stamp_handle(),
         )
+    }
+}
+
+impl SchemeBindable for crate::Sampler {
+    fn resolve(
+        &self,
+        _: &Scheme,
+        access: ResourceAccess,
+    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+        // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
+        // Only the bindless heap index is needed.
+        (None, self.resource_index(access))
     }
 }
 
@@ -1440,15 +1457,17 @@ impl<'a> SchemeNodeBuilder<'a> {
             .copied()
             .flatten()
             .unwrap_or_else(|| node_access_to_resource_access(access));
-        let (resource, slot, stamp) = bindable.resolve(self.scheme, descriptor_access);
+        let (resource_identity, slot) = bindable.resolve(self.scheme, descriptor_access);
         let slot = slot.unwrap_or_else(|| {
             panic!(
                 "with_parcel: resource has no descriptor for {access:?} access; \
                  check BufferKind/TextureKind is compatible with NodeAccess"
             );
         });
-        self.scheme.submit_state.register_stamp_parts(resource, stamp);
-        self.bindings.push(ResourceBinding { resource, access });
+        if let Some((resource, stamp)) = resource_identity {
+            self.scheme.submit_state.register_stamp_parts(resource, stamp);
+            self.bindings.push(ResourceBinding { resource, access });
+        }
         self.resource_slots.push(slot);
         self
     }

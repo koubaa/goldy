@@ -13,7 +13,7 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::{BufferFlags, DispatchShape, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
+    types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
     BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
     RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
 };
@@ -1768,10 +1768,6 @@ fn scheme_texture_dual_view_round_trip() {
     let read_pipeline = ComputePipeline::new(&device, &read_shader).expect("read pipeline");
     let sampler = Sampler::nearest(&device).expect("sampler");
 
-    let tex_r = tex.handle(ResourceAccess::Read).expect("tex read");
-    let smp_r = sampler.handle(ResourceAccess::Read).expect("sampler");
-    let out_w = out.handle(ResourceAccess::Write).expect("out write");
-
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("write", &write_pipeline)
@@ -1780,8 +1776,8 @@ fn scheme_texture_dual_view_round_trip() {
     scheme
         .node("read", &read_pipeline)
         .with_parcel(&tex, NodeAccess::Read)
+        .with_parcel(&sampler, NodeAccess::Read)
         .with_parcel(&out, NodeAccess::Write)
-        .with_views(&[tex_r, smp_r, out_w])
         .dispatch(1, 1, 1);
     let grant = scheme.grant_read(&out).expect("grant_read");
     let frame = scheme.submit().expect("submit");
