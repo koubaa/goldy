@@ -1081,7 +1081,7 @@ impl Scheme {
                 access: NodeAccess::Write,
             }],
             commands: Vec::new(),
-            push_constant_handles: Vec::new(),
+            pending_push_constants: Vec::new(),
         }
     }
 }
@@ -1569,6 +1569,56 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 }
 
+/// Deferred push-constant slot recorded before [`SchemeRenderPassBuilder::set_pipeline`].
+///
+/// Read and read-write handles are captured at record time; the descriptor actually
+/// bound is chosen from pipeline reflection when the pipeline is set.
+struct PendingPushConstant {
+    graph_access: NodeAccess,
+    read_handle: Option<ResourceHandle>,
+    read_write_handle: Option<ResourceHandle>,
+}
+
+impl PendingPushConstant {
+    fn from_parcel(parcel: &Parcel, access: NodeAccess) -> Self {
+        Self {
+            graph_access: access,
+            read_handle: parcel.handle(ResourceAccess::Read),
+            read_write_handle: parcel
+                .handle(ResourceAccess::ReadWrite)
+                .or_else(|| parcel.handle(ResourceAccess::Write)),
+        }
+    }
+
+    fn from_sampler(sampler: &crate::Sampler) -> Self {
+        Self {
+            graph_access: NodeAccess::Read,
+            read_handle: sampler.handle(ResourceAccess::Read),
+            read_write_handle: None,
+        }
+    }
+
+    fn resolve(&self, slot_access: &[Option<ResourceAccess>], slot_idx: usize) -> ResourceHandle {
+        let descriptor_access = slot_access
+            .get(slot_idx)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| node_access_to_resource_access(self.graph_access));
+        match descriptor_access {
+            ResourceAccess::Read => self.read_handle.or(self.read_write_handle),
+            ResourceAccess::Write | ResourceAccess::ReadWrite => {
+                self.read_write_handle.or(self.read_handle)
+            }
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "render pass resource slot {slot_idx}: no descriptor for {descriptor_access:?}; \
+                 check BufferKind/TextureKind is compatible with the shader parameter"
+            )
+        })
+    }
+}
+
 /// Builder for a render pass recorded on a [`Scheme`].
 pub struct SchemeRenderPassBuilder<'a> {
     scheme: &'a mut Scheme,
@@ -1576,7 +1626,7 @@ pub struct SchemeRenderPassBuilder<'a> {
     target: crate::backend::RenderTargetHandle,
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
-    push_constant_handles: Vec<ResourceHandle>,
+    pending_push_constants: Vec<PendingPushConstant>,
 }
 
 impl<'a> SchemeRenderPassBuilder<'a> {
@@ -1590,14 +1640,8 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             resource: parcel.resource_id(),
             access,
         });
-        let resource_access = node_access_to_resource_access(access);
-        let handle = parcel.handle(resource_access).unwrap_or_else(|| {
-            panic!(
-                "with_parcel: parcel has no descriptor for {access:?} access; \
-                 check BufferKind/TextureKind is compatible with NodeAccess"
-            );
-        });
-        self.push_constant_handles.push(handle);
+        self.pending_push_constants
+            .push(PendingPushConstant::from_parcel(parcel, access));
         self
     }
 
@@ -1621,25 +1665,23 @@ impl<'a> SchemeRenderPassBuilder<'a> {
         for slot in slots {
             match slot {
                 ShaderResourceSlot::Parcel { parcel, access } => {
-                    let resource_access = node_access_to_resource_access(*access);
                     self.scheme.submit_state.register_parcel_stamp(parcel);
                     self.bindings.push(ResourceBinding {
                         resource: parcel.resource_id(),
                         access: *access,
                     });
-                    let handle = parcel.handle(resource_access).unwrap_or_else(|| {
+                    let pending = PendingPushConstant::from_parcel(parcel, *access);
+                    if pending.read_handle.is_none() && pending.read_write_handle.is_none() {
                         panic!(
                             "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
                              use with_parcel for geometry and with_views at draw time"
-                        )
-                    });
-                    self.push_constant_handles.push(handle);
+                        );
+                    }
+                    self.pending_push_constants.push(pending);
                 }
                 ShaderResourceSlot::Sampler(sampler) => {
-                    let handle = sampler
-                        .handle(ResourceAccess::Read)
-                        .expect("ShaderResourceSlot::Sampler: missing bindless sampler index");
-                    self.push_constant_handles.push(handle);
+                    self.pending_push_constants
+                        .push(PendingPushConstant::from_sampler(sampler));
                 }
             }
         }
@@ -1658,10 +1700,14 @@ impl<'a> SchemeRenderPassBuilder<'a> {
 
     pub fn set_pipeline(&mut self, pipeline: &crate::RenderPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
-        if !self.push_constant_handles.is_empty() {
-            self.commands.push(RenderCommand::BindResourcesTyped {
-                handles: self.push_constant_handles.clone(),
-            });
+        if !self.pending_push_constants.is_empty() {
+            let handles: Vec<ResourceHandle> = self
+                .pending_push_constants
+                .iter()
+                .enumerate()
+                .map(|(i, pending)| pending.resolve(&pipeline.slot_access, i))
+                .collect();
+            self.commands.push(RenderCommand::BindResourcesTyped { handles });
         }
         self
     }
@@ -1735,7 +1781,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             target,
             bindings,
             commands,
-            push_constant_handles: _,
+            pending_push_constants: _,
         } = self;
         scheme.ir.nodes.push(TaskNode {
             label,

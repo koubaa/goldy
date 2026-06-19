@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
     Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -123,10 +123,9 @@ impl RenderState {
         };
 
         let mut pass = scheme.render_pass("particles", scene_rt);
-        pass.with_buffer_dependency(particle_buffer, NodeAccess::Read);
+        pass.with_parcel(particle_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
-        pass.with_views(&[particle_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..6, 0..NUM_PARTICLES);
         pass.finish();
 

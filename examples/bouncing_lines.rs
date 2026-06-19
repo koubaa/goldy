@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    Buffer, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
     LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -122,7 +122,6 @@ impl RenderState {
         pass.with_parcel(line_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
-        pass.with_views(&[line_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..2, 0..NUM_LINES);
         pass.finish();
 

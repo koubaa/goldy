@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
     Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -137,10 +137,9 @@ impl RenderState {
             .dispatch(NUM_STARS.div_ceil(64), 1, 1);
 
         let mut pass = scheme.render_pass("starfield", scene_rt);
-        pass.with_buffer_dependency(star_buffer, NodeAccess::Read);
+        pass.with_parcel(star_buffer, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
-        pass.with_views(&[star_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..6, 0..NUM_STARS);
         pass.finish();
 

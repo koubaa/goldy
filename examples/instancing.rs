@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use goldy::{
-    types::ResourceAccess, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
     Grant, Instance, Instance2D, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -123,12 +123,9 @@ impl RenderState {
         };
 
         let mut pass = scheme.render_pass("instancing", scene_rt);
-        // Graph dependency only — do not push Read SRV into set_pipeline; after compute
-        // UAV writes, WARP reads zeros through the SRV slot (see scheme_compute_integration).
-        pass.with_buffer_dependency(&instance_buffer, NodeAccess::Read);
+        pass.with_parcel(&instance_buffer, NodeAccess::Read);
         pass.clear(bg_color);
         pass.set_pipeline(render_pipeline);
-        pass.with_views(&[instance_buffer.handle(ResourceAccess::ReadWrite).unwrap()]);
         pass.draw(0..6, 0..NUM_QUADS);
         pass.finish();
 

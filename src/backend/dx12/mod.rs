@@ -468,6 +468,21 @@ impl Drop for Dx12Backend {
     }
 }
 
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+fn slot_access_from_push_constant_slot_kinds(
+    kinds: &[Option<crate::types::BindlessSlotKind>],
+) -> Vec<Option<crate::types::ResourceAccess>> {
+    use crate::types::{BindlessSlotKind, ResourceAccess};
+    kinds
+        .iter()
+        .map(|kind| match kind {
+            Some(BindlessSlotKind::StorageUav) => Some(ResourceAccess::ReadWrite),
+            Some(BindlessSlotKind::ReadOnlySrv) => Some(ResourceAccess::Read),
+            Some(BindlessSlotKind::UniformCbv) | None => None,
+        })
+        .collect()
+}
+
 impl GpuBackend for Dx12Backend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -1183,19 +1198,20 @@ impl GpuBackend for Dx12Backend {
         &self,
         pipeline: ComputePipelineHandle,
     ) -> Vec<Option<crate::types::ResourceAccess>> {
-        use crate::types::{BindlessSlotKind, ResourceAccess};
         let Some(ps) = self.state.compute_pipelines.get(&pipeline) else {
             return Vec::new();
         };
-        ps.push_constant_slot_kinds
-            .iter()
-            .map(|kind| match kind {
-                Some(BindlessSlotKind::StorageUav) => Some(ResourceAccess::ReadWrite),
-                Some(BindlessSlotKind::ReadOnlySrv) => Some(ResourceAccess::Read),
-                // Uniform/CBV and unreflected slots: defer to the graph access.
-                Some(BindlessSlotKind::UniformCbv) | None => None,
-            })
-            .collect()
+        slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
+    }
+
+    fn render_pipeline_slot_access(
+        &self,
+        pipeline: PipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        let Some(ps) = self.state.pipelines.get(&pipeline) else {
+            return Vec::new();
+        };
+        slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {

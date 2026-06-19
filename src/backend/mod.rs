@@ -1235,6 +1235,11 @@ pub trait GpuBackend: Send + Sync {
         Vec::new()
     }
 
+    /// Like [`Self::compute_pipeline_slot_access`] but for a graphics pipeline.
+    fn render_pipeline_slot_access(&self, _pipeline: PipelineHandle) -> Vec<Option<ResourceAccess>> {
+        Vec::new()
+    }
+
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap
     /// allocations. No-op by default.
