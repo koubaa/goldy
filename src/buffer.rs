@@ -29,6 +29,8 @@ macro_rules! impl_structured_buffer_element_for_primitives {
 
 impl_structured_buffer_element_for_primitives!((), i16, u16, i32, u32, i64, u64, i128, u128, isize, usize, f32, f64,);
 
+impl StructuredBufferElement for crate::types::DispatchShape {}
+
 impl<T: StructuredBufferElement, const N: usize> StructuredBufferElement for [T; N] where [T; N]: bytemuck::Pod {}
 
 /// Low-level GPU buffer allocation.

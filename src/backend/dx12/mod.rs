@@ -1179,6 +1179,25 @@ impl GpuBackend for Dx12Backend {
         compute::destroy(&mut self.state, pipeline_handle);
     }
 
+    fn compute_pipeline_slot_access(
+        &self,
+        pipeline: ComputePipelineHandle,
+    ) -> Vec<Option<crate::types::ResourceAccess>> {
+        use crate::types::{BindlessSlotKind, ResourceAccess};
+        let Some(ps) = self.state.compute_pipelines.get(&pipeline) else {
+            return Vec::new();
+        };
+        ps.push_constant_slot_kinds
+            .iter()
+            .map(|kind| match kind {
+                Some(BindlessSlotKind::StorageUav) => Some(ResourceAccess::ReadWrite),
+                Some(BindlessSlotKind::ReadOnlySrv) => Some(ResourceAccess::Read),
+                // Uniform/CBV and unreflected slots: defer to the graph access.
+                Some(BindlessSlotKind::UniformCbv) | None => None,
+            })
+            .collect()
+    }
+
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
         for sc_arc in self.state.contexts.values() {
             let mut sc = sc_arc.lock().unwrap();

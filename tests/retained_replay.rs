@@ -22,7 +22,7 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::{BufferFlags, ResourceAccess},
+    types::{BufferFlags, DispatchShape, ResourceAccess},
     BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
     ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
     TextureKind,
@@ -149,6 +149,80 @@ fn clean_scheme_resubmits_without_rerecord() {
     let frame = scheme.submit().expect("submit 1");
     frame.wait(&ctx).expect("wait");
     assert!(output.is_settled(&ctx), "completed work must leave parcel settled");
+
+    assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "submission 1 must be a zero-record retention hit"
+    );
+}
+
+const WRITE_DISPATCH_SHAPE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
+    DispatchShape s;
+    s.x = 1;
+    s.y = 1;
+    s.z = 1;
+    shape[0] = s;
+}
+"#;
+
+const DOUBLE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void cs_main(Scattered<uint> data, ThreadId id) {
+    data[id.x] = data[id.x] * 2;
+}
+"#;
+
+/// Indirect-dispatch scheme records once, then resubmits without re-record.
+#[test]
+fn indirect_scheme_resubmits_without_rerecord() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let write_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, WRITE_DISPATCH_SHAPE_SHADER).expect("compile write shape shader"),
+    )
+    .expect("create write pipeline");
+    let work_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile double shader"),
+    )
+    .expect("create work pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let shape = pool
+        .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
+        .expect("shape buffer");
+    let work = pool
+        .acquire_buffer_with_data(&(0..64).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("work buffer");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_shape", &write_pipe)
+        .with_parcel(&shape, NodeAccess::Write)
+        .with_views(&[shape.handle(ResourceAccess::Write).expect("shape handle")])
+        .dispatch(1, 1, 1);
+    scheme
+        .node("work", &work_pipe)
+        .with_parcel(&work, NodeAccess::Write)
+        .with_views(&[work.handle(ResourceAccess::Write).expect("work handle")])
+        .dispatch_shape(&*shape)
+        .expect("indirect dispatch");
+
+    scheme.submit().expect("submit 0");
+    scheme.submit().expect("submit 1");
 
     assert_eq!(scheme.replay_stats().records, 1, "exactly one record");
     #[cfg(not(feature = "metal"))]

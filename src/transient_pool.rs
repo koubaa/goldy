@@ -329,8 +329,7 @@ mod tests {
     }
 
     const TEST_BUFFER_SIZE: u64 = 64;
-    const SCATTERED_EMPTY: (BufferKind, BufferFlags) =
-        (BufferKind::Scattered, BufferFlags::empty());
+    const SCATTERED_EMPTY: (BufferKind, BufferFlags) = (BufferKind::Scattered, BufferFlags::empty());
 
     fn park_ready_buffer(ctx: &Context) {
         let alloc = ctx

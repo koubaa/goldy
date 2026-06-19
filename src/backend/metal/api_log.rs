@@ -115,7 +115,9 @@ pub(super) fn init() {
                 // Flush lazily: drain the channel first, then flush.
                 loop {
                     match rx.try_recv() {
-                        Ok(extra) => { let _ = writeln!(writer, "{extra}"); }
+                        Ok(extra) => {
+                            let _ = writeln!(writer, "{extra}");
+                        }
                         Err(_) => break,
                     }
                 }

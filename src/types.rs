@@ -121,6 +121,36 @@ impl TextureFormat {
 }
 
 // ============================================================================
+// Dispatch Types
+// ============================================================================
+
+/// Workgroup-count triple for compute dispatch (direct or indirect).
+///
+/// Matches `goldy_exp.types.DispatchShape` in shaders. When held in a device
+/// parcel, the first 12 bytes at the parcel's byte offset are consumed by
+/// indirect dispatch commands (`vkCmdDispatchIndirect` / DX12 `ExecuteIndirect`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
+pub struct DispatchShape {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+impl DispatchShape {
+    /// Create a workgroup-count triple.
+    pub const fn new(x: u32, y: u32, z: u32) -> Self {
+        Self { x, y, z }
+    }
+}
+
+impl From<(u32, u32, u32)> for DispatchShape {
+    fn from((x, y, z): (u32, u32, u32)) -> Self {
+        Self::new(x, y, z)
+    }
+}
+
+// ============================================================================
 // Access Pattern Types
 // ============================================================================
 
@@ -921,6 +951,11 @@ mod tests {
     }
 
     // Texture types tests
+    #[test]
+    fn test_dispatch_shape_size() {
+        assert_eq!(std::mem::size_of::<DispatchShape>(), 12);
+    }
+
     #[test]
     fn test_texture_flags() {
         let flags = TextureFlags::COPY_SRC | TextureFlags::COPY_DST;

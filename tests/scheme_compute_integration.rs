@@ -13,7 +13,7 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::{BufferFlags, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
+    types::{BufferFlags, DispatchShape, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
     BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
     RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
 };
@@ -2379,4 +2379,190 @@ fn scheme_buffer_view_isolation() {
             i, expected, val
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Indirect dispatch (DispatchShape parcels)
+// ---------------------------------------------------------------------------
+
+const WRITE_DISPATCH_SHAPE_SHADER: &str = r#"
+import goldy_exp;
+
+[goldy_compute]
+[numthreads(1, 1, 1)]
+void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
+    DispatchShape s;
+    s.x = 4;
+    s.y = 1;
+    s.z = 1;
+    shape[0] = s;
+}
+"#;
+
+/// Producer writes `DispatchShape{4,1,1}`; consumer `dispatch(&shape)` doubles 256 values.
+#[test]
+fn scheme_compute_dispatch_indirect() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let write_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, WRITE_DISPATCH_SHAPE_SHADER).expect("compile write shape shader"),
+    )
+    .expect("create write pipeline");
+    let work_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, IN_PLACE_DOUBLE_SHADER).expect("compile double shader"),
+    )
+    .expect("create work pipeline");
+
+    const N: usize = 256;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let shape = pool
+        .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
+        .expect("shape buffer");
+    let work = pool
+        .acquire_buffer_with_data(&(0..N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("work buffer");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_shape", &write_pipe)
+        .with_parcel(&shape, NodeAccess::Write)
+        .with_views(&[shape.handle(ResourceAccess::Write).expect("shape handle")])
+        .dispatch(1, 1, 1);
+    scheme
+        .node("work", &work_pipe)
+        .with_parcel(&work, NodeAccess::ReadWrite)
+        .with_views(&[work.handle(ResourceAccess::ReadWrite).expect("work handle")])
+        .dispatch_shape(&*shape)
+        .expect("indirect dispatch");
+
+    let grant = scheme.grant_read(&work).expect("grant_read");
+    let submission = scheme.submit().expect("submit");
+    let result = read_grant_u32(&grant, &submission, N);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, (i as u32) * 2, "element {i}: expected {}, got {val}", i * 2);
+    }
+}
+
+/// Indirect dispatch fails when the shape parcel's backing buffer was released before submit.
+#[test]
+fn scheme_dispatch_indirect_invalid_buffer() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let work_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile double shader"),
+    )
+    .expect("create work pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let work = pool
+        .acquire_buffer_with_data(&vec![1u32; 64], BufferKind::Scattered)
+        .expect("work buffer");
+
+    let mut scheme = Scheme::new(&ctx);
+    {
+        let shape = pool
+            .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
+            .expect("shape buffer");
+        scheme
+            .node("work", &work_pipe)
+            .with_parcel(&work, NodeAccess::Write)
+            .with_views(&[work.handle(ResourceAccess::Write).expect("work handle")])
+            .dispatch_shape(&*shape)
+            .expect("record indirect dispatch");
+        drop(shape);
+    }
+
+    let err = scheme.submit().expect_err("submit with destroyed shape buffer");
+    let _ = format!("{err:?}");
+}
+
+/// Non-`DispatchShape` parcels are rejected at scheme-build time.
+#[test]
+fn scheme_dispatch_indirect_wrong_type_rejected() {
+    let device = make_device();
+    let _ctx = submission_context(&device);
+
+    let work_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("compile double shader"),
+    )
+    .expect("create work pipeline");
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let shape = pool
+        .acquire_buffer_sized::<u32>(3, BufferKind::Scattered, BufferFlags::empty())
+        .expect("u32 buffer standing in for shape");
+    let work = pool
+        .acquire_buffer_with_data(&vec![0u32; 64], BufferKind::Scattered)
+        .expect("work buffer");
+
+    let mut scheme = Scheme::new(&_ctx);
+    let err = scheme
+        .node("work", &work_pipe)
+        .with_parcel(&work, NodeAccess::Write)
+        .dispatch_shape(&*shape)
+        .expect_err("wrong element stride must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("stride") || msg.contains("DispatchShape"),
+        "unexpected error: {msg}"
+    );
+}
+
+/// Zero-fill via upload, then producer-written indirect shape, then copy dispatch.
+#[test]
+fn scheme_stress_zeros_then_indirect_dispatch() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let write_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, WRITE_DISPATCH_SHAPE_SHADER).expect("compile write shape shader"),
+    )
+    .expect("create write pipeline");
+    let copy_pipe = ComputePipeline::new(
+        &device,
+        &ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader"),
+    )
+    .expect("create copy pipeline");
+
+    const N: usize = 256;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let shape = pool
+        .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
+        .expect("shape buffer");
+    let src = pool
+        .acquire_buffer_with_data(&(1..=N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("src buffer");
+    let out = pool
+        .acquire_buffer((N * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("out buffer");
+
+    write_zeros_to_parcel(&ctx, &src, N * 4);
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_shape", &write_pipe)
+        .with_parcel(&shape, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    scheme
+        .node("copy_indirect", &copy_pipe)
+        .with_parcel(&src, NodeAccess::Read)
+        .with_parcel(&out, NodeAccess::Write)
+        .dispatch_shape(&*shape)
+        .expect("indirect dispatch");
+
+    let grant = scheme.grant_read(&out).expect("grant_read");
+    let submission = scheme.submit().expect("submit");
+    let result = read_grant_u32(&grant, &submission, N);
+    let nonzero_count = result.iter().filter(|&&v| v != 0).count();
+    assert_eq!(
+        nonzero_count, 0,
+        "expected all zeros after zero-fill + indirect copy, but {nonzero_count}/{N} were nonzero"
+    );
 }

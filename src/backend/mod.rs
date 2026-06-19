@@ -43,7 +43,8 @@ pub(crate) mod signal_fence;
 
 use crate::types::{
     BackendType, BufferFlags, BufferKind, Color, DepthFormat, DepthStencilState, DeviceType, IndexFormat, PresentMode,
-    PrimitiveTopology, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind, VertexBufferLayout,
+    PrimitiveTopology, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
+    VertexBufferLayout,
 };
 use anyhow::Result;
 use std::sync::Arc;
@@ -1219,6 +1220,20 @@ pub trait GpuBackend: Send + Sync {
 
     /// Destroy a compute pipeline.
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle);
+
+    /// Per push-constant resource slot (in shader-signature order), the descriptor
+    /// access the shader *signature* requires — independent of the graph access used
+    /// for barriers.
+    ///
+    /// `Some(ResourceAccess::Read)` for read-only SRV params (`BufRO<T>`),
+    /// `Some(ResourceAccess::ReadWrite)` for storage UAV params (`Scattered<T>`),
+    /// and `None` for slots with no reflected preference (callers fall back to the
+    /// graph access). The default returns an empty vec, meaning "no reflection
+    /// available"; backends where the read/write descriptor split is irrelevant
+    /// (e.g. Metal argument buffers) can leave it unimplemented.
+    fn compute_pipeline_slot_access(&self, _pipeline: ComputePipelineHandle) -> Vec<Option<ResourceAccess>> {
+        Vec::new()
+    }
 
     /// Notify the backend that a frame has completed and all transient buffers
     /// have been freed. Backends may use this to right-size internal heap

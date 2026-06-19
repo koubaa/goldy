@@ -264,6 +264,15 @@ impl Parcel {
         }
     }
 
+    /// Structured-buffer element stride for whole-buffer parcels, if set at allocation.
+    pub(crate) fn buffer_element_stride(&self) -> Option<u32> {
+        match &self.backing {
+            ParcelBacking::WholeBuffer(b) => b.element_stride(),
+            ParcelBacking::BufferRange { .. } => None,
+            ParcelBacking::Texture(_) => None,
+        }
+    }
+
     pub(crate) fn grant_buffer_keepalive(&self) -> Result<Arc<Allocation>, anyhow::Error> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => Ok(Arc::clone(b)),

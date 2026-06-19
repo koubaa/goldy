@@ -28,8 +28,8 @@ use crate::task_graph::{
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{
-    BackendType, Color, DepthFormat, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags, TextureFormat,
-    TextureKind,
+    BackendType, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
+    TextureFormat, TextureKind,
 };
 use crate::validation_env;
 use std::fmt;
@@ -738,8 +738,13 @@ impl Scheme {
         &self.rt_leases[lease.id.0 as usize]
     }
 
-    /// Typed resource descriptor handle for a scheme-held lease (advanced binding).
+    /// Typed resource descriptor handle for a scheme-held texture lease (advanced binding).
     pub fn lease_handle(&self, lease: &Lease<LeaseTexture>, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.leases[lease.id.0 as usize].handle(access)
+    }
+
+    /// Typed resource descriptor handle for a scheme-held buffer lease (advanced binding).
+    pub fn lease_buffer_handle(&self, lease: &Lease<LeaseBuffer>, access: ResourceAccess) -> Option<ResourceHandle> {
         self.leases[lease.id.0 as usize].handle(access)
     }
 
@@ -759,6 +764,7 @@ impl Scheme {
             bindings: Vec::new(),
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
+            slot_access: pipeline.slot_access.clone(),
         }
     }
 
@@ -1259,6 +1265,95 @@ fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     }
 }
 
+const DISPATCH_SHAPE_BYTE_SIZE: u64 = std::mem::size_of::<DispatchShape>() as u64;
+const DISPATCH_SHAPE_STRIDE: u32 = DISPATCH_SHAPE_BYTE_SIZE as u32;
+
+fn validate_dispatch_shape_parcel(parcel: &Parcel) -> Result<u64, GoldyError> {
+    if parcel.buffer_handle().is_none() {
+        return Err(GoldyError::Backend(anyhow::anyhow!(
+            "dispatch(shape parcel): requires a buffer parcel holding a DispatchShape"
+        )));
+    }
+    if parcel.byte_size() < DISPATCH_SHAPE_BYTE_SIZE {
+        return Err(GoldyError::Backend(anyhow::anyhow!(
+            "dispatch(shape parcel): parcel byte size {} is smaller than DispatchShape ({} bytes)",
+            parcel.byte_size(),
+            DISPATCH_SHAPE_BYTE_SIZE
+        )));
+    }
+    match parcel.buffer_element_stride() {
+        Some(stride) if stride == DISPATCH_SHAPE_STRIDE => {}
+        Some(stride) => {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "dispatch(shape parcel): expected element stride {DISPATCH_SHAPE_STRIDE}, got {stride}"
+            )));
+        }
+        None if parcel.byte_size() == DISPATCH_SHAPE_BYTE_SIZE => {}
+        None => {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "dispatch(shape parcel): expected element stride {DISPATCH_SHAPE_STRIDE}"
+            )));
+        }
+    }
+    Ok(parcel.source_offset())
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Argument to [`SchemeNodeBuilder::dispatch`]: fixed workgroup counts or a device-resident shape parcel.
+///
+/// Implemented for [`DispatchShape`] and [`Parcel`]. Fixed triples use
+/// [`SchemeNodeBuilder::dispatch`] `(x, y, z)`.
+pub trait IntoDispatch: sealed::Sealed {
+    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError>;
+}
+
+impl sealed::Sealed for DispatchShape {}
+impl sealed::Sealed for &Parcel {}
+
+impl IntoDispatch for DispatchShape {
+    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError> {
+        builder.push_dispatch_node(DispatchDim::Direct {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        });
+        Ok(())
+    }
+}
+
+impl IntoDispatch for &Parcel {
+    fn finish(self, builder: SchemeNodeBuilder<'_>) -> Result<(), GoldyError> {
+        let offset = validate_dispatch_shape_parcel(self)?;
+        let resource = self.resource_id();
+        builder
+            .scheme
+            .submit_state
+            .register_stamp_parts(resource, self.stamp_handle());
+        let mut bindings = builder.bindings;
+        bindings.push(ResourceBinding {
+            resource,
+            access: NodeAccess::Read,
+        });
+        let buffer = self
+            .buffer_handle()
+            .expect("validate_dispatch_shape_parcel ensures buffer parcel");
+        builder.scheme.ir.nodes.push(TaskNode {
+            label: builder.label,
+            bindings,
+            kind: NodeKind::Dispatch {
+                pipeline: builder.pipeline,
+                resource_slots: builder.resource_slots,
+                user_slots: builder.user_slots,
+                dispatch: DispatchDim::Indirect { buffer, offset },
+            },
+        });
+        Ok(())
+    }
+}
+
 /// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, and scheme-held leases.
 pub(crate) trait SchemeBindable {
     fn resolve(
@@ -1321,6 +1416,10 @@ pub struct SchemeNodeBuilder<'a> {
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
     user_slots: Vec<u32>,
+    /// Per-slot descriptor access required by the shader signature (from pipeline
+    /// reflection), in shader-signature order. Lets [`Self::with_parcel`] pick the
+    /// correct SRV/UAV descriptor independent of the graph [`NodeAccess`].
+    slot_access: Vec<Option<ResourceAccess>>,
 }
 
 impl<'a> SchemeNodeBuilder<'a> {
@@ -1330,8 +1429,18 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// The nth call corresponds to the nth resource-kind parameter in the shader signature.
     #[allow(private_bounds)]
     pub fn with_parcel(mut self, bindable: &impl SchemeBindable, access: NodeAccess) -> Self {
-        let resource_access = node_access_to_resource_access(access);
-        let (resource, slot, stamp) = bindable.resolve(self.scheme, resource_access);
+        // The graph `access` drives barriers; the *descriptor* (SRV vs UAV) is chosen
+        // from the shader signature's reflected requirement for this slot, so a
+        // `Scattered<T>` read still binds its UAV without the caller reaching for
+        // `with_views`. Slots with no reflected preference fall back to the graph access.
+        let slot_idx = self.resource_slots.len();
+        let descriptor_access = self
+            .slot_access
+            .get(slot_idx)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| node_access_to_resource_access(access));
+        let (resource, slot, stamp) = bindable.resolve(self.scheme, descriptor_access);
         let slot = slot.unwrap_or_else(|| {
             panic!(
                 "with_parcel: resource has no descriptor for {access:?} access; \
@@ -1413,6 +1522,21 @@ impl<'a> SchemeNodeBuilder<'a> {
 
     /// Finalize the node with fixed workgroup dimensions.
     pub fn dispatch(self, x: u32, y: u32, z: u32) {
+        self.push_dispatch_node(DispatchDim::Direct { x, y, z });
+    }
+
+    /// Finalize the node with a host [`DispatchShape`] or a device-resident shape parcel.
+    ///
+    /// Passing a `&Parcel` selects device-sourced (indirect) dispatch. The shape parcel's
+    /// ordering dependency is registered automatically and is not a shader resource slot.
+    ///
+    /// Rust does not allow overloading [`Self::dispatch`] `(x, y, z)` and this shape/parcel
+    /// form under the same name; this is the shape/parcel dispatch entry point.
+    pub fn dispatch_shape(self, dim: impl IntoDispatch) -> Result<(), GoldyError> {
+        dim.finish(self)
+    }
+
+    fn push_dispatch_node(self, dispatch: DispatchDim) {
         self.scheme.ir.nodes.push(TaskNode {
             label: self.label,
             bindings: self.bindings,
@@ -1420,7 +1544,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 pipeline: self.pipeline,
                 resource_slots: self.resource_slots,
                 user_slots: self.user_slots,
-                dispatch: DispatchDim::Direct { x, y, z },
+                dispatch,
             },
         });
     }

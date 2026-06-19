@@ -692,11 +692,7 @@ pub(super) fn record_commands_to_buffer(
                         .dispatch_thread_groups(threadgroups, threads_per_group);
                 }
             }
-            GpuCommand::DispatchBatch {
-                label,
-                arg_data,
-                count,
-            } => {
+            GpuCommand::DispatchBatch { label, arg_data, count } => {
                 ensure_compute!();
                 if super::api_log::enabled() {
                     super::api_log::log_dispatch_batch(*label, *count);
@@ -755,11 +751,7 @@ pub(super) fn record_commands_to_buffer(
                     }
                 }
             }
-            GpuCommand::DispatchIndirect {
-                label,
-                buffer,
-                offset,
-            } => {
+            GpuCommand::DispatchIndirect { label, buffer, offset } => {
                 ensure_compute!();
                 let buf_state = state
                     .buffers
