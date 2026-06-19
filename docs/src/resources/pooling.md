@@ -48,14 +48,11 @@ Each allocation is aligned to satisfy both the pool alignment (256) and `offset 
 
 ### Using Allocated Views
 
-Every `BufferView` from a pool has its own bindless descriptor. Bind it like any buffer:
+Every `BufferView` from a pool has its own bindless descriptor. Bind it like any other parcel:
 
 ```rust
-let tile_handle = tiles.handle(ResourceAccess::Write).unwrap();
-pass.with_views(&[tile_handle]);
-
-// Or as a vertex/index buffer
-pass.set_vertex_buffer(0, &tiles);
+pass.with_parcel(&tiles, NodeAccess::Write);
+pass.set_pipeline(&pipeline);
 ```
 
 Write data into a view:

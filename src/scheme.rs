@@ -1451,8 +1451,8 @@ impl<'a> SchemeNodeBuilder<'a> {
     pub fn with_parcel(mut self, bindable: &impl SchemeBindable, access: NodeAccess) -> Self {
         // The graph `access` drives barriers; the *descriptor* (SRV vs UAV) is chosen
         // from the shader signature's reflected requirement for this slot, so a
-        // `Scattered<T>` read still binds its UAV without the caller reaching for
-        // `with_views`. Slots with no reflected preference fall back to the graph access.
+        // `Scattered<T>` read still binds its UAV without the caller passing raw handles.
+        // Slots with no reflected preference fall back to the graph access.
         let slot_idx = self.resource_slots.len();
         let descriptor_access = self
             .slot_access
@@ -1501,11 +1501,12 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Declare explicit resource view handles (advanced: mosaic parcels and non-default views).
+    /// Declare explicit resource view handles (internal: present-lease slot bookkeeping).
     ///
     /// Replaces resource slot indices while preserving trailing
     /// [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entries appended by [`Self::with_present`].
-    pub fn with_views(mut self, handles: &[crate::types::ResourceHandle]) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_views(mut self, handles: &[crate::types::ResourceHandle]) -> Self {
         let trailing_placeholders: Vec<u32> = self
             .resource_slots
             .iter()
@@ -1522,17 +1523,11 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Like [`Self::with_views`]; retained for internal/tests.
-    #[allow(dead_code)]
-    pub(crate) fn with_views_typed(self, handles: &[crate::types::ResourceHandle]) -> Self {
-        self.with_views(handles)
-    }
-
     /// Declare a UAV write to a present lease (swapchain drawable).
     ///
     /// Appends a [`PRESENT_LEASE_SLOT_PLACEHOLDER`] entry at the end of `resource_slots`
     /// so the resolver can patch it to the correct UAV index at submit time.
-    /// May be called before or after [`Self::with_views`].
+    /// May be called before or after other slot-binding calls on the same node.
     pub fn with_present(mut self, lease: &PresentLease) -> Self {
         self.bindings.push(ResourceBinding {
             resource: ResourceId::PresentLease(lease.id),
@@ -1675,7 +1670,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
                     if pending.read_handle.is_none() && pending.read_write_handle.is_none() {
                         panic!(
                             "ShaderResourceSlot::Parcel: mosaic parcels cannot be push-constant slots; \
-                             use with_parcel for geometry and with_views at draw time"
+                             use with_parcel for geometry bindings"
                         );
                     }
                     self.pending_push_constants.push(pending);
@@ -1711,20 +1706,6 @@ impl<'a> SchemeRenderPassBuilder<'a> {
             self.commands.push(RenderCommand::BindResourcesTyped { handles });
         }
         self
-    }
-
-    /// Declare explicit resource view handles at draw time (advanced: mosaic parcels and non-default views).
-    pub fn with_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.commands.push(RenderCommand::BindResourcesTyped {
-            handles: handles.to_vec(),
-        });
-        self
-    }
-
-    /// Like [`Self::with_views`]; retained for internal/tests.
-    #[allow(dead_code)]
-    pub(crate) fn with_views_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.with_views(handles)
     }
 
     pub fn set_vertex_buffer(&mut self, slot: u32, buffer: &impl BufferSource) -> &mut Self {

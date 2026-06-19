@@ -246,12 +246,19 @@ let index = sampler.resource_index(ResourceAccess::Read).unwrap();
 
 ## Binding Textures and Samplers in Shaders
 
-Pass texture and sampler indices together through resource bindings:
+Pass texture and sampler parcels through [`ShaderResourceSlot`] bindings:
 
 ```rust
-let tex = texture.handle(ResourceAccess::Read).unwrap();
-let samp = sampler.handle(ResourceAccess::Read).unwrap();
-pass.with_views(&[tex, samp]);
+use goldy::ShaderResourceSlot;
+
+pass.with_shader_resources(&[
+    ShaderResourceSlot::Parcel {
+        parcel: &texture_parcel,
+        access: NodeAccess::Read,
+    },
+    ShaderResourceSlot::Sampler(&sampler),
+]);
+pass.set_pipeline(&pipeline);
 ```
 
 In Slang:

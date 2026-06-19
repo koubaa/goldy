@@ -2668,12 +2668,6 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
-    /// Bind resource slots from typed [`ResourceHandle`]s (region A indices only).
-    pub fn with_views(mut self, handles: &[ResourceHandle]) -> Self {
-        self.resource_slots = handles.iter().map(|h| h.index()).collect();
-        self
-    }
-
     /// Append one scalar virtual-main parameter (region B).
     pub fn with_param(mut self, value: u32) -> Self {
         use crate::backend::shared::MAX_USER_SLOTS;
@@ -2941,13 +2935,6 @@ impl<'a> RenderPassBuilder<'a> {
             indices: indices.to_vec(),
             user: Vec::new(),
             frame_table_base: 0,
-        });
-        self
-    }
-
-    pub fn with_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.commands.push(RenderCommand::BindResourcesTyped {
-            handles: handles.to_vec(),
         });
         self
     }

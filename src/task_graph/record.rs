@@ -236,13 +236,6 @@ impl RenderPassRecord {
         self
     }
 
-    pub fn with_views(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        self.commands.push(RenderCommand::BindResourcesTyped {
-            handles: handles.to_vec(),
-        });
-        self
-    }
-
     pub fn commit(self, graph: &mut TaskGraph) {
         graph.extend_stamp_targets(self.stamp_targets);
         graph.push_task_node(TaskNode {
