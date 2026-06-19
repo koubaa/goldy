@@ -4,11 +4,9 @@
 //!
 //! Run with: `cargo run --example compute_particles`
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use anyhow::Result;
 use goldy::{
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
     LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -234,12 +232,13 @@ impl RenderState {
         let dt = self.last_frame_time.elapsed().as_secs_f32().min(0.05);
         self.last_frame_time = std::time::Instant::now();
 
-        write_to_parcel(
-            &self.ctx,
+        let mut upload = Scheme::new(&self.ctx);
+        upload.commit_write_parcel(
             &self.params_buffer,
             0,
-            bytemuck::bytes_of(&SimParams { delta_time: dt }),
+            bytemuck::bytes_of(&SimParams { delta_time: dt }).to_vec(),
         )?;
+        upload.submit()?;
 
         let submission = self.scheme.submit()?;
         self.present.consume(&submission)?;

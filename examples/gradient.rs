@@ -7,10 +7,8 @@
 //!
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use goldy::{
-    shaders, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance,
     LayoutCheckable, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -164,7 +162,9 @@ impl App {
 
         let time = self.start_time.elapsed().as_secs_f32();
         let uniforms = TimeUniforms { time };
-        write_to_parcel(ctx, uniform, 0, bytemuck::bytes_of(&uniforms))?;
+        let mut upload = Scheme::new(ctx);
+        upload.commit_write_parcel(uniform, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+        upload.submit()?;
 
         let present = self.present.as_ref().unwrap();
         let submission = scheme.submit()?;

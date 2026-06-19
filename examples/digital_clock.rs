@@ -6,11 +6,9 @@
 //!
 //! Run with: `cargo run --example digital_clock`
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
+    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
     LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RetainedPool, Scheme, ShaderModule, SwapchainPool,
 };
@@ -227,7 +225,9 @@ impl App {
 
         let ctx = self.ctx.as_ref().unwrap();
         let vertex_parcel = self.vertex_parcel.as_ref().unwrap();
-        write_to_parcel(ctx, vertex_parcel, 0, bytemuck::cast_slice(&vertices))?;
+        let mut upload = Scheme::new(ctx);
+        upload.commit_write_parcel(vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
+        upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
         let present = self.present.as_ref().unwrap();

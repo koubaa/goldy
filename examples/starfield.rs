@@ -4,11 +4,9 @@
 //!
 //! Run with: `cargo run --example starfield`
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use anyhow::Result;
 use goldy::{
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
     LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
@@ -254,7 +252,9 @@ impl RenderState {
             _pad2: 0.0,
         };
 
-        write_to_parcel(&self.ctx, &self.params_buffer, 0, bytemuck::bytes_of(&params))?;
+        let mut upload = Scheme::new(&self.ctx);
+        upload.commit_write_parcel(&self.params_buffer, 0, bytemuck::bytes_of(&params).to_vec())?;
+        upload.submit()?;
 
         let submission = self.scheme.submit()?;
         self.present.consume(&submission)?;

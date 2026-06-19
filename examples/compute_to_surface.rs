@@ -5,11 +5,9 @@
 //!
 //! Run with: cargo run --example compute_to_surface
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, write_to_parcel, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance,
+    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance,
     PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
 };
 use std::sync::Arc;
@@ -307,7 +305,9 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
         _padding: 0.0,
     };
 
-    write_to_parcel(&state.ctx, &state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))?;
+    let mut upload = Scheme::new(&state.ctx);
+    upload.commit_write_parcel(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms).to_vec())?;
+    upload.submit()?;
 
     let submission = state.scheme.submit()?;
     state.present.consume(&submission)?;
