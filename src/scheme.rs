@@ -1376,7 +1376,10 @@ impl SchemeBindable for Parcel {
         _: &Scheme,
         access: ResourceAccess,
     ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
-        (Some((self.resource_id(), self.stamp_handle())), self.resource_index(access))
+        (
+            Some((self.resource_id(), self.stamp_handle())),
+            self.resource_index(access),
+        )
     }
 }
 
@@ -1606,9 +1609,7 @@ impl PendingPushConstant {
             .unwrap_or_else(|| node_access_to_resource_access(self.graph_access));
         match descriptor_access {
             ResourceAccess::Read => self.read_handle.or(self.read_write_handle),
-            ResourceAccess::Write | ResourceAccess::ReadWrite => {
-                self.read_write_handle.or(self.read_handle)
-            }
+            ResourceAccess::Write | ResourceAccess::ReadWrite => self.read_write_handle.or(self.read_handle),
         }
         .unwrap_or_else(|| {
             panic!(

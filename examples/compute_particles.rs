@@ -8,9 +8,9 @@
 
 use anyhow::Result;
 use goldy::{
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor,
-    Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{

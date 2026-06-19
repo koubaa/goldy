@@ -262,22 +262,6 @@ public sealed class SchemeRenderPassScope : IDisposable
     public SchemeRenderPassScope WithBufferUnit(Buffer buffer, uint unit, NodeAccess access) =>
         WithField(buffer, unit, access);
 
-    public SchemeRenderPassScope BindResourceIndex(uint scatteredIndex)
-    {
-        EnsureOpen();
-        unsafe
-        {
-            uint category = 0; // Scattered
-            Span<uint> pair = stackalloc uint[] { category, scatteredIndex };
-            fixed (uint* p = pair)
-            {
-                var result = NativeMethods.SchemeRenderPassWithViews(_scheme.Handle, (nint)p, 1);
-                if (result != GoldyResult.Ok)
-                    throw GoldyException.FromLastError("Scheme render_pass_with_views");
-            }
-        }
-        return this;
-    }
 
     public SchemeRenderPassScope Clear(Color color)
     {

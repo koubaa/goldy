@@ -105,7 +105,6 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
     pub goldy_scheme_render_pass_with_buffer_unit: FnGoldySchemeRenderPassWithBufferUnit,
     pub goldy_scheme_render_pass_with_parcel: FnGoldySchemeRenderPassWithParcel,
-    pub goldy_scheme_render_pass_with_views: FnGoldySchemeRenderPassWithViews,
     pub goldy_scheme_render_pass_clear: FnGoldySchemeRenderPassClear,
     pub goldy_scheme_render_pass_clear_depth: FnGoldySchemeRenderPassClearDepth,
     pub goldy_scheme_render_pass_set_pipeline: FnGoldySchemeRenderPassSetPipeline,
@@ -281,10 +280,6 @@ impl GoldyFfi {
             goldy_scheme_render_pass_with_parcel: sym!(
                 "goldy_scheme_render_pass_with_parcel",
                 FnGoldySchemeRenderPassWithParcel
-            ),
-            goldy_scheme_render_pass_with_views: sym!(
-                "goldy_scheme_render_pass_with_views",
-                FnGoldySchemeRenderPassWithViews
             ),
             goldy_scheme_render_pass_clear: sym!("goldy_scheme_render_pass_clear", FnGoldySchemeRenderPassClear),
             goldy_scheme_render_pass_clear_depth: sym!(

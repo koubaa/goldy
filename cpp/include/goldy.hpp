@@ -1586,13 +1586,6 @@ public:
         return set_index_buffer(buffer.field(unit), format);
     }
 
-    RenderPass& bind_resource_index(uint32_t scattered_index) {
-        const uint32_t pair[2] = {0, scattered_index};
-        detail::throw_on_result(goldy_scheme_render_pass_with_views(
-            scheme_.ptr_.get(), pair, 1));
-        return *this;
-    }
-
     RenderPass& clear(const Color& color) {
         detail::throw_on_result(goldy_scheme_render_pass_clear(scheme_.ptr_.get(), color));
         return *this;

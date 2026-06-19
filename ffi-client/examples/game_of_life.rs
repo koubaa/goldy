@@ -8,8 +8,8 @@
 
 use goldy_ffi_client::{
     Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PresentGrant,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, ResourceCategory,
-    ResourceHandle, RetainedPool, Scheme, SchemeRenderTargetLease, ShaderModule, SwapchainPool,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, RetainedPool, Scheme,
+    SchemeRenderTargetLease, ShaderModule, SwapchainPool,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
@@ -155,16 +155,11 @@ fn record_display_scheme(
 ) -> goldy_ffi_client::Result<PresentGrant> {
     let unit = field_unit(current_field);
     let current = cells.field(unit)?;
-    let render_idx = cells.unit_resource_index(unit, ResourceAccess::ReadWrite)?;
     {
         let mut pass = scheme.render_pass("game_of_life_render", scene_rt);
         pass.with_parcel(&current, NodeAccess::Read);
         pass.clear(Color::BLACK);
         pass.set_pipeline(render_pipeline);
-        pass.bind_resources_typed(&[ResourceHandle {
-            category: ResourceCategory::Scattered,
-            index: render_idx,
-        }]);
         pass.draw_fullscreen();
         pass.finish_recorded();
     }

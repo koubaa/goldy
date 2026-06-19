@@ -12,8 +12,53 @@ use crate::compute::ComputePipeline;
 use crate::parcel::ParcelStamp;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
-use crate::types::{Color, IndexFormat, ResourceHandle};
+use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle};
 use std::sync::Arc;
+
+/// Deferred push-constant slot for [`RenderPassRecord`].
+///
+/// Both the read (SRV) and read-write (UAV) handles are captured up front;
+/// the correct one is selected at [`RenderPassRecord::set_pipeline`] time by
+/// consulting the pipeline's reflected slot kinds.
+struct PendingRenderSlot {
+    graph_access: NodeAccess,
+    read_handle: Option<ResourceHandle>,
+    uav_handle: Option<ResourceHandle>,
+}
+
+impl PendingRenderSlot {
+    fn from_parcel(parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        Self {
+            graph_access: access,
+            read_handle: parcel.handle(ResourceAccess::Read),
+            uav_handle: parcel
+                .handle(ResourceAccess::ReadWrite)
+                .or_else(|| parcel.handle(ResourceAccess::Write)),
+        }
+    }
+
+    fn resolve(&self, slot_access: &[Option<ResourceAccess>], slot_idx: usize) -> ResourceHandle {
+        let descriptor_access =
+            slot_access
+                .get(slot_idx)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| match self.graph_access {
+                    NodeAccess::Read => ResourceAccess::Read,
+                    NodeAccess::Write | NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+                });
+        match descriptor_access {
+            ResourceAccess::Read => self.read_handle.or(self.uav_handle),
+            ResourceAccess::Write | ResourceAccess::ReadWrite => self.uav_handle.or(self.read_handle),
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "render-pass shader slot {slot_idx}: no descriptor for {descriptor_access:?}; \
+                 check BufferKind/TextureKind is compatible with the shader parameter"
+            )
+        })
+    }
+}
 
 /// Accumulates one offscreen render-pass node before [`Self::commit`].
 pub struct RenderPassRecord {
@@ -22,6 +67,8 @@ pub struct RenderPassRecord {
     bindings: Vec<ResourceBinding>,
     commands: Vec<RenderCommand>,
     stamp_targets: Vec<Arc<ParcelStamp>>,
+    /// Shader-resource slots waiting for pipeline reflection at [`Self::set_pipeline`].
+    pending_push_constants: Vec<PendingRenderSlot>,
 }
 
 impl RenderPassRecord {
@@ -32,6 +79,7 @@ impl RenderPassRecord {
             bindings: Vec::new(),
             commands: Vec::new(),
             stamp_targets: Vec::new(),
+            pending_push_constants: Vec::new(),
         }
     }
 
@@ -41,6 +89,8 @@ impl RenderPassRecord {
             resource: parcel.resource_id(),
             access,
         });
+        self.pending_push_constants
+            .push(PendingRenderSlot::from_parcel(parcel, access));
         self
     }
 
@@ -88,6 +138,15 @@ impl RenderPassRecord {
 
     pub fn set_pipeline(&mut self, pipeline: &RenderPipeline) -> &mut Self {
         self.commands.push(RenderCommand::SetPipeline(pipeline.handle));
+        if !self.pending_push_constants.is_empty() {
+            let handles: Vec<ResourceHandle> = self
+                .pending_push_constants
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| slot.resolve(&pipeline.slot_access, i))
+                .collect();
+            self.commands.push(RenderCommand::BindResourcesTyped { handles });
+        }
         self
     }
 
@@ -212,6 +271,7 @@ impl RenderPassRecord {
             }],
             commands: Vec::new(),
             stamp_targets: Vec::new(),
+            pending_push_constants: Vec::new(),
         }
     }
 

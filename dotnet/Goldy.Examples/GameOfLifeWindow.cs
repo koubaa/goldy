@@ -52,7 +52,6 @@ static class GameOfLifeWindow
                 .WithParcel(current, NodeAccess.Read)
                 .Clear(Color.Black)
                 .SetPipeline(renderPipeline)
-                .BindResourceIndex(cells.UnitResourceIndex(FieldUnit(currentField), ResourceAccess.ReadWrite))
                 .DrawFullscreen();
         }
         scheme.CopyToPresent(sceneRt, screen);

@@ -8,7 +8,7 @@ use crate::sys::{
     self, GoldyPresentGrant, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme,
     GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
-use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, ResourceAccess, ResourceHandle, TextureFormat};
+use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, ResourceAccess, TextureFormat};
 use std::ffi::CString;
 use std::ops::Range;
 
@@ -396,18 +396,6 @@ impl SchemeRenderPassBuilder<'_> {
 
     pub fn draw_fullscreen(&mut self) -> &mut Self {
         expect_ok(unsafe { sys::goldy_scheme_render_pass_draw_fullscreen(self.scheme.ptr) });
-        self
-    }
-
-    pub fn bind_resources_typed(&mut self, handles: &[ResourceHandle]) -> &mut Self {
-        let mut flat = Vec::with_capacity(handles.len() * 2);
-        for h in handles {
-            flat.push(h.category as u32);
-            flat.push(h.index);
-        }
-        expect_ok(unsafe {
-            sys::goldy_scheme_render_pass_with_views(self.scheme.ptr, flat.as_ptr(), handles.len() as u32)
-        });
         self
     }
 

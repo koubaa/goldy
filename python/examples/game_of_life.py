@@ -120,13 +120,11 @@ def record_display_scheme(
     scene_rt: goldy.SchemeRenderTargetLease,
     screen: goldy.PresentLease,
 ) -> goldy.PresentGrant:
-    render_idx = cells.field(current_field).resource_index(goldy.ResourceAccess.READ_WRITE)
     with scheme.render_pass("game_of_life_render", scene_rt) as rp:
         (
             rp.with_field(cells, current_field, goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
-            .bind_resource_index(render_idx)
             .draw_fullscreen()
         )
     scheme.copy_to_present(scene_rt, screen)

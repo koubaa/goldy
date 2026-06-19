@@ -457,14 +457,6 @@ pub unsafe fn goldy_scheme_render_pass_with_parcel(
     (lib().goldy_scheme_render_pass_with_parcel)(scheme, parcel, access)
 }
 
-pub unsafe fn goldy_scheme_render_pass_with_views(
-    scheme: *mut GoldyScheme,
-    indices: *const u32,
-    handle_count: u32,
-) -> GoldyResult {
-    (lib().goldy_scheme_render_pass_with_views)(scheme, indices, handle_count)
-}
-
 pub unsafe fn goldy_scheme_render_pass_clear(scheme: *mut GoldyScheme, color: GoldyColor) -> GoldyResult {
     (lib().goldy_scheme_render_pass_clear)(scheme, color)
 }

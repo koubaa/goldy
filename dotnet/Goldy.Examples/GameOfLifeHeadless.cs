@@ -76,7 +76,6 @@ static class GameOfLifeHeadless
                 .WithParcel(current, NodeAccess.Read)
                 .Clear(Color.Black)
                 .SetPipeline(renderPipeline)
-                .BindResourceIndex(cells.UnitResourceIndex(1, ResourceAccess.ReadWrite))
                 .DrawFullscreen();
         }
 

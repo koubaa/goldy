@@ -1204,10 +1204,7 @@ impl GpuBackend for Dx12Backend {
         slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
     }
 
-    fn render_pipeline_slot_access(
-        &self,
-        pipeline: PipelineHandle,
-    ) -> Vec<Option<crate::types::ResourceAccess>> {
+    fn render_pipeline_slot_access(&self, pipeline: PipelineHandle) -> Vec<Option<crate::types::ResourceAccess>> {
         let Some(ps) = self.state.pipelines.get(&pipeline) else {
             return Vec::new();
         };

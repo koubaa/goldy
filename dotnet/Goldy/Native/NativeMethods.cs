@@ -257,8 +257,6 @@ internal static partial class NativeMethods
     internal static partial GoldyResult SchemeRenderPassWithBufferUnit(
         nint scheme, nint buffer, uint unit, NodeAccess access);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_with_views")]
-    internal static partial GoldyResult SchemeRenderPassWithViews(nint scheme, nint indices, uint handleCount);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_render_pass_clear")]
     internal static partial GoldyResult SchemeRenderPassClear(nint scheme, Color color);

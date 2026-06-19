@@ -10,7 +10,6 @@ use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyResourceAccess, PyTex
 use goldy::scheme::{Lease, LeaseRenderTarget, PresentGrant, ReadGrant};
 use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
-use goldy::types::{ResourceCategory, ResourceHandle};
 use goldy::{Grant, GrantBuffer, GrantTexture, Scheme, Submission};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes};
@@ -526,20 +525,6 @@ impl PySchemeRenderPass {
     ) -> PyResult<PyRef<'py, Self>> {
         slf.scheme.borrow(py).with_active_render_pass(|pass| {
             pass.set_vertex_buffer(slot, parcel.inner.as_parcel());
-        })?;
-        Ok(slf)
-    }
-
-    fn bind_resource_index<'py>(
-        slf: PyRef<'py, Self>,
-        py: Python<'py>,
-        scattered_index: u32,
-    ) -> PyResult<PyRef<'py, Self>> {
-        slf.scheme.borrow(py).with_active_render_pass(|pass| {
-            pass.with_views(&[ResourceHandle {
-                category: ResourceCategory::Scattered,
-                index: scattered_index,
-            }]);
         })?;
         Ok(slf)
     }

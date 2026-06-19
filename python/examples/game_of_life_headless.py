@@ -86,13 +86,11 @@ def main() -> int:
     )
 
     rt = scheme.lease_render_target(GRID_WIDTH, GRID_HEIGHT, goldy.TextureFormat.RGBA8_UNORM)
-    render_idx = cells.field("b").resource_index(goldy.ResourceAccess.READ_WRITE)
     with scheme.render_pass("game_of_life_render", rt) as rp:
         (
             rp.with_field(cells, "b", goldy.NodeAccess.READ)
             .clear(goldy.Color.BLACK)
             .set_pipeline(render_pipeline)
-            .bind_resource_index(render_idx)
             .draw_fullscreen()
         )
 

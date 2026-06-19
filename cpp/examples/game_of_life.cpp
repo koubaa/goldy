@@ -209,13 +209,11 @@ goldy::PresentGrant record_display_scheme(
     const goldy::PresentLease& screen) {
     const uint32_t unit = field_unit(current_field);
     goldy::Parcel current = cells.field(unit);
-    const uint32_t cells_idx = cells.unit_resource_index(unit, goldy::ResourceAccess::ReadWrite);
     {
         auto pass = scheme.render_pass("game_of_life_render", scene_rt);
         pass.with_parcel(current, goldy::NodeAccess::Read)
             .clear(goldy::Color::black())
             .set_pipeline(render_pipeline)
-            .bind_resource_index(cells_idx)
             .draw_fullscreen();
     }
     scheme.copy_to_present(scene_rt, screen);

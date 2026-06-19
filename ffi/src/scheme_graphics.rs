@@ -7,7 +7,6 @@ use crate::scheme::{GoldyPresentGrant, GoldyReadGrant, GoldyScheme, GoldySchemeS
 use crate::types::{GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget};
 use goldy::task_graph::{NodeAccess, RenderPassRecord};
-use goldy::types::{ResourceCategory, ResourceHandle};
 use goldy::{Grant, ParcelType};
 use std::ffi::CStr;
 
@@ -177,44 +176,6 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_with_parcel(
         Err(e) => return e,
     };
     pass.with_parcel(&(*parcel).inner, map_node_access(access));
-    GoldyResult::Ok
-}
-
-/// Bind typed resource handles for the active render pass.
-///
-/// # Safety
-/// All pointers must be valid.
-#[no_mangle]
-pub unsafe extern "C" fn goldy_scheme_render_pass_with_views(
-    scheme: *mut GoldyScheme,
-    indices: *const u32,
-    handle_count: u32,
-) -> GoldyResult {
-    if scheme.is_null() || (handle_count > 0 && indices.is_null()) {
-        return GoldyResult::NullPointer;
-    }
-    let pass = match active_render_pass_mut(&mut *scheme) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let mut handles = Vec::with_capacity(handle_count as usize);
-    for i in 0..handle_count as usize {
-        let category = *indices.add(i * 2);
-        let index = *indices.add(i * 2 + 1);
-        let cat = match category {
-            0 => ResourceCategory::Scattered,
-            1 => ResourceCategory::Broadcast,
-            2 => ResourceCategory::StorageImage,
-            3 => ResourceCategory::Texture,
-            4 => ResourceCategory::Sampler,
-            _ => {
-                set_last_error("Invalid resource category in with_views");
-                return GoldyResult::InvalidArgument;
-            }
-        };
-        handles.push(ResourceHandle::new(cat, index));
-    }
-    pass.with_views(&handles);
     GoldyResult::Ok
 }
 

@@ -883,14 +883,6 @@ enum GoldyResult goldy_scheme_render_pass_with_parcel(struct GoldyScheme *scheme
                                                       const struct GoldyParcel *parcel,
                                                       enum GoldyNodeAccess access);
 
-// Bind typed resource handles for the active render pass.
-//
-// # Safety
-// All pointers must be valid.
-enum GoldyResult goldy_scheme_render_pass_with_views(struct GoldyScheme *scheme,
-                                                     const uint32_t *indices,
-                                                     uint32_t handle_count);
-
 // Destroy a render-target lease handle.
 //
 // Does not remove the lease from the scheme; the backing remains until the scheme is dropped.
