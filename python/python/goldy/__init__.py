@@ -82,7 +82,6 @@ from goldy._goldy import (
     SwapchainPool,
     NodeAccess,
     ResourceAccess,
-    write_to_parcel,
     # Shader builtins
     Builtins,
     # Compute
@@ -135,7 +134,6 @@ __all__ = [
     "SwapchainPool",
     "NodeAccess",
     "ResourceAccess",
-    "write_to_parcel",
     # Shader builtins
     "Builtins",
     # Compute

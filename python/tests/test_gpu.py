@@ -109,11 +109,9 @@ class TestRetainedPool:
             goldy.BufferKind.SCATTERED,
         )
         ctx = device.create_context()
-        frame = goldy.write_to_parcel(
-            ctx,
-            buffer[0],
-            np.array([1, 2, 3, 4], dtype=np.uint32).tobytes(),
-        )
+        upload = goldy.Scheme(ctx)
+        upload.commit_write_parcel(buffer[0], np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
+        frame = upload.submit()
         frame.wait(ctx)
 
 

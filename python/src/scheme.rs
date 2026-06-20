@@ -255,6 +255,19 @@ impl PyScheme {
         })
     }
 
+    /// Append a CPU→GPU write node for a retained buffer parcel.
+    ///
+    /// Marks the scheme dirty. Use an ephemeral upload scheme for per-frame
+    /// uniform / vertex uploads and call `submit()` to dispatch.
+    #[pyo3(signature = (parcel, data, offset=0))]
+    fn commit_write_parcel(&self, parcel: &PyParcel, data: &[u8], offset: u64) -> PyResult<()> {
+        self.ensure_no_active_recorder()?;
+        self.inner
+            .borrow_mut()
+            .commit_write_parcel(parcel.inner.as_parcel(), offset, data.to_vec())
+            .into_py_result()
+    }
+
     fn submit(&self) -> PyResult<PySchemeSubmission> {
         self.ensure_no_active_recorder()?;
         let submission = self.inner.borrow_mut().submit().into_py_result()?;
@@ -584,14 +597,3 @@ impl PySchemeRenderPass {
     }
 }
 
-/// Upload CPU bytes into a retained buffer parcel via a property-only dispatch.
-#[pyfunction]
-#[pyo3(signature = (ctx, parcel, data))]
-pub fn write_to_parcel(ctx: &PyContext, parcel: &PyParcel, data: &[u8]) -> PyResult<PySchemeSubmission> {
-    let mut upload = Scheme::new(&ctx.inner);
-    upload
-        .commit_write_parcel(parcel.inner.as_parcel(), 0, data.to_vec())
-        .into_py_result()?;
-    let submission = upload.submit().into_py_result()?;
-    Ok(PySchemeSubmission { inner: submission })
-}
