@@ -1720,18 +1720,6 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Finalize the node with device-resident indirect dispatch at `offset` into `parcel`.
-    ///
-    /// Mirrors [`crate::task_graph::NodeBuilder::dispatch_indirect_parcel`].
-    /// The parcel must hold a [`DispatchShape`]-sized buffer.
-    pub fn dispatch_indirect_parcel(self, parcel: &Parcel, offset: u64) -> Result<(), GoldyError> {
-        let buffer = parcel
-            .buffer_handle()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("dispatch_indirect_parcel: requires a buffer parcel")))?;
-        self.push_dispatch_node(DispatchDim::Indirect { buffer, offset });
-        Ok(())
-    }
-
     /// Finalize the node with fixed workgroup dimensions.
     pub fn dispatch(self, x: u32, y: u32, z: u32) {
         self.push_dispatch_node(DispatchDim::Direct { x, y, z });
