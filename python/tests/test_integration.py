@@ -210,7 +210,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
     scheme.node("fill", pipeline).with_parcel(
-        buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        buffer[0], goldy.NodeAccess.WRITE
     ).dispatch(1, 1, 1)
     grant = scheme.grant_read(buffer[0])
     frame = scheme.submit()

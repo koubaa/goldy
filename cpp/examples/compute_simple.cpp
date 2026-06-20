@@ -53,7 +53,7 @@ int main() {
         goldy::Scheme scheme(ctx);
         {
             auto node = scheme.compute_node("double", pipeline);
-            node.with_buffer(buffer, goldy::NodeAccess::ReadWrite, goldy::ResourceAccess::Write);
+            node.with_buffer(buffer, goldy::NodeAccess::ReadWrite);
             node.dispatch(1, 1, 1);
         }
         auto grant = scheme.grant_read(buffer);

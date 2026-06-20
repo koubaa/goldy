@@ -8,7 +8,7 @@
 
 use goldy_ffi_client::{
     Buffer, Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, PresentGrant,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, RetainedPool, Scheme,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
     SchemeRenderTargetLease, ShaderModule, SwapchainPool,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -137,8 +137,8 @@ fn run_compute_step(
     let mut scheme = Scheme::new(ctx)?;
     {
         let mut node = scheme.compute_node("game_of_life", pipeline);
-        node.with_parcel(&read, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.with_parcel(&write, NodeAccess::Write, ResourceAccess::Write);
+        node.with_parcel(&read, NodeAccess::Read);
+        node.with_parcel(&write, NodeAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
     scheme.submit()?;

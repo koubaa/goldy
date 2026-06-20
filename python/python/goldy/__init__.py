@@ -81,7 +81,6 @@ from goldy._goldy import (
     PresentGrant,
     SwapchainPool,
     NodeAccess,
-    ResourceAccess,
     # Shader builtins
     Builtins,
     # Compute
@@ -133,7 +132,6 @@ __all__ = [
     "PresentGrant",
     "SwapchainPool",
     "NodeAccess",
-    "ResourceAccess",
     # Shader builtins
     "Builtins",
     # Compute

@@ -9,10 +9,9 @@ use crate::compute::GoldyComputePipeline;
 use crate::context::GoldyContext;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel};
-use crate::types::{GoldyNodeAccess, GoldyResourceAccess};
+use crate::types::GoldyNodeAccess;
 use goldy::scheme::{ReadGrant, Scheme};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord};
-use goldy::types::ResourceAccess;
 use goldy::{Grant, GrantBuffer, GrantTexture, ParcelType};
 use std::ffi::CStr;
 
@@ -106,10 +105,6 @@ fn map_node_access(access: GoldyNodeAccess) -> NodeAccess {
         GoldyNodeAccess::Write => NodeAccess::Write,
         GoldyNodeAccess::ReadWrite => NodeAccess::ReadWrite,
     }
-}
-
-fn map_resource_access(access: GoldyResourceAccess) -> ResourceAccess {
-    access.into()
 }
 
 fn active_compute_mut(scheme: &mut GoldyScheme) -> Result<&mut ComputeNodeRecord, GoldyResult> {
@@ -232,7 +227,6 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     node_access: GoldyNodeAccess,
-    resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
     if scheme.is_null() || parcel.is_null() {
         return GoldyResult::NullPointer;
@@ -241,11 +235,10 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel(
         Ok(n) => n,
         Err(e) => return e,
     };
-    let res_access = map_resource_access(resource_access);
-    match node.with_parcel(&(*parcel).inner, map_node_access(node_access), res_access) {
+    match node.with_parcel(&(*parcel).inner, map_node_access(node_access)) {
         Some(_) => GoldyResult::Ok,
         None => {
-            set_last_error("Parcel has no resource index for the requested access");
+            set_last_error("Parcel has no bindless slot for the shader binding");
             GoldyResult::InvalidArgument
         }
     }
@@ -261,7 +254,6 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_buffer_unit(
     buffer: *const GoldyBuffer,
     unit: u32,
     node_access: GoldyNodeAccess,
-    resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
     if scheme.is_null() || buffer.is_null() {
         return GoldyResult::NullPointer;
@@ -270,15 +262,14 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_buffer_unit(
         Ok(n) => n,
         Err(e) => return e,
     };
-    let res_access = map_resource_access(resource_access);
     let parcel = match buffer_unit_at(buffer, unit) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    match node.with_parcel(parcel, map_node_access(node_access), res_access) {
+    match node.with_parcel(parcel, map_node_access(node_access)) {
         Some(_) => GoldyResult::Ok,
         None => {
-            set_last_error("Buffer unit has no resource index for the requested access");
+            set_last_error("Buffer unit has no bindless slot for the shader binding");
             GoldyResult::InvalidArgument
         }
     }
@@ -291,9 +282,8 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_field(
     buffer: *const GoldyBuffer,
     unit: u32,
     node_access: GoldyNodeAccess,
-    resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
-    goldy_scheme_compute_node_with_buffer_unit(scheme, buffer, unit, node_access, resource_access)
+    goldy_scheme_compute_node_with_buffer_unit(scheme, buffer, unit, node_access)
 }
 
 /// Append one scalar virtual-main parameter for the active compute node.

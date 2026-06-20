@@ -3,7 +3,6 @@
 use crate::device::PyDevice;
 use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::{parcel_from_buffer_unit, PyParcel};
-use crate::types::PyResourceAccess;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -55,21 +54,6 @@ impl PyBuffer {
             }
         }
         Err(GoldyError::new_err(format!("unknown buffer field {name:?}")))
-    }
-
-    /// Bindless resource index for one buffer unit.
-    fn unit_resource_index(&self, unit: u32, access: PyResourceAccess) -> PyResult<u32> {
-        let idx = unit as usize;
-        if idx >= self.inner.unit_count() {
-            return Err(GoldyError::new_err(format!(
-                "buffer unit index {unit} out of range (unit_count={})",
-                self.inner.unit_count()
-            )));
-        }
-        self.inner
-            .unit(idx)
-            .resource_index(access.into())
-            .ok_or_else(|| GoldyError::new_err("buffer unit resource index unavailable"))
     }
 
     /// Read one buffer unit back to CPU memory.

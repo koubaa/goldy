@@ -22,18 +22,6 @@ public sealed class Parcel : IDisposable
     /// </summary>
     public ulong ByteSize { get; }
 
-    /// <summary>
-    /// Bindless resource slot index for shader binding.
-    /// </summary>
-    public uint ResourceIndex(ResourceAccess access)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        var idx = NativeMethods.ParcelResourceIndex(Handle, access);
-        if (idx == uint.MaxValue)
-            throw GoldyException.FromLastError("Parcel resource_index");
-        return idx;
-    }
-
     public void Dispose()
     {
         if (!_disposed)

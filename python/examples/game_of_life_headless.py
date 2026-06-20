@@ -80,8 +80,8 @@ def main() -> int:
     scheme = goldy.Scheme(ctx)
     node = scheme.node("game_of_life", compute_pipeline)
     (
-        node.with_field(cells, "a", goldy.NodeAccess.READ, goldy.ResourceAccess.READ_WRITE)
-        .with_field(cells, "b", goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE)
+        node.with_field(cells, "a", goldy.NodeAccess.READ)
+        .with_field(cells, "b", goldy.NodeAccess.WRITE)
         .dispatch(WORKGROUPS_X, WORKGROUPS_Y, 1)
     )
 

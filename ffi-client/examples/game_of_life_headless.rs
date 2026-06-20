@@ -7,7 +7,7 @@
 
 use goldy_ffi_client::{
     Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, ResourceAccess, RetainedPool, Scheme, ShaderModule, TextureFlags,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags,
     TextureFormat, TextureKind,
 };
 
@@ -73,8 +73,8 @@ fn main() -> goldy_ffi_client::Result<()> {
 
     {
         let mut node = scheme.compute_node("game_of_life", &compute_pipeline);
-        node.with_parcel(&read, NodeAccess::Read, ResourceAccess::ReadWrite);
-        node.with_parcel(&write, NodeAccess::Write, ResourceAccess::Write);
+        node.with_parcel(&read, NodeAccess::Read);
+        node.with_parcel(&write, NodeAccess::Write);
         node.dispatch(GRID_WIDTH.div_ceil(8), GRID_HEIGHT.div_ceil(8), 1);
     }
 

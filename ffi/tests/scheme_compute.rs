@@ -13,7 +13,7 @@ use goldy_ffi::{
     goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_param, goldy_scheme_compute_node_with_parcel,
     goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read, goldy_scheme_len, goldy_scheme_replay_stats,
     goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind,
-    GoldyNodeAccess, GoldyReplayStats, GoldyResourceAccess, GoldyResult,
+    GoldyNodeAccess, GoldyReplayStats, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -61,7 +61,7 @@ fn scheme_compute_node_fills_buffer_with_42() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(scheme, parcel, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
+            goldy_scheme_compute_node_with_parcel(scheme, parcel, GoldyNodeAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -177,7 +177,7 @@ fn scheme_compute_node_with_param_uint_roundtrip() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(scheme, parcel, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
+            goldy_scheme_compute_node_with_parcel(scheme, parcel, GoldyNodeAccess::Write),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

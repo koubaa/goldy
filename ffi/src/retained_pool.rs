@@ -2,7 +2,7 @@
 
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
-use crate::types::{GoldyBufferKind, GoldyResourceAccess, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind};
+use crate::types::{GoldyBufferKind, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind};
 use goldy::{field, Init, RecordField};
 use std::ptr;
 use std::slice;
@@ -197,19 +197,6 @@ pub unsafe extern "C" fn goldy_buffer_unit_count(buffer: *const GoldyBuffer) -> 
         return 0;
     }
     (*buffer).inner.unit_count() as u32
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn goldy_buffer_unit_resource_index(
-    buffer: *const GoldyBuffer,
-    unit: u32,
-    access: GoldyResourceAccess,
-) -> u32 {
-    let parcel = match buffer_unit_at(buffer, unit) {
-        Ok(p) => p,
-        Err(_) => return u32::MAX,
-    };
-    parcel.resource_index(access.into()).unwrap_or(u32::MAX)
 }
 
 #[no_mangle]

@@ -6,7 +6,7 @@ use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::pipeline::PyRenderPipeline;
 use crate::pyutil::parse_index_range;
-use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyResourceAccess, PyTextureFormat};
+use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget, PresentGrant, ReadGrant};
 use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
@@ -344,7 +344,6 @@ impl PySchemeComputeNode {
         py: Python<'py>,
         parcel: &PyParcel,
         node_access: PyNodeAccess,
-        resource_access: PyResourceAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         {
             let scheme = slf.scheme.borrow(py);
@@ -352,20 +351,19 @@ impl PySchemeComputeNode {
             let node = active
                 .as_mut()
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
-            node.with_parcel(parcel.inner.as_parcel(), node_access.into(), resource_access.into())
-                .ok_or_else(|| GoldyError::new_err("Parcel has no resource index for the requested access"))?;
+            node.with_parcel(parcel.inner.as_parcel(), node_access.into())
+                .ok_or_else(|| GoldyError::new_err("Parcel has no bindless slot for the shader binding"))?;
         }
         Ok(slf)
     }
 
-    #[pyo3(signature = (buffer, unit, node_access, resource_access))]
+    #[pyo3(signature = (buffer, unit, node_access))]
     fn with_buffer_unit<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         buffer: &PyBuffer,
         unit: u32,
         node_access: PyNodeAccess,
-        resource_access: PyResourceAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         {
             let scheme = slf.scheme.borrow(py);
@@ -380,20 +378,19 @@ impl PySchemeComputeNode {
                     buffer.inner.unit_count()
                 )));
             }
-            node.with_parcel(buffer.inner.unit(idx), node_access.into(), resource_access.into())
-                .ok_or_else(|| GoldyError::new_err("Buffer unit has no resource index for the requested access"))?;
+            node.with_parcel(buffer.inner.unit(idx), node_access.into())
+                .ok_or_else(|| GoldyError::new_err("Buffer unit has no bindless slot for the shader binding"))?;
         }
         Ok(slf)
     }
 
-    #[pyo3(signature = (buffer, name, node_access, resource_access))]
+    #[pyo3(signature = (buffer, name, node_access))]
     fn with_field<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
         buffer: &PyBuffer,
         name: &str,
         node_access: PyNodeAccess,
-        resource_access: PyResourceAccess,
     ) -> PyResult<PyRef<'py, Self>> {
         {
             let scheme = slf.scheme.borrow(py);
@@ -407,8 +404,8 @@ impl PySchemeComputeNode {
                 Ok(p) => p,
                 Err(_) => return Err(GoldyError::new_err(format!("unknown buffer field {name:?}"))),
             };
-            node.with_parcel(unsafe { &*parcel_ptr }, node_access.into(), resource_access.into())
-                .ok_or_else(|| GoldyError::new_err("Buffer field has no resource index for the requested access"))?;
+            node.with_parcel(unsafe { &*parcel_ptr }, node_access.into())
+                .ok_or_else(|| GoldyError::new_err("Buffer field has no bindless slot for the shader binding"))?;
         }
         Ok(slf)
     }

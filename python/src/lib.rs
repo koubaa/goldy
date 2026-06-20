@@ -48,7 +48,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyDepthFormat>()?;
     m.add_class::<types::PyCompareFunction>()?;
     m.add_class::<types::PyNodeAccess>()?;
-    m.add_class::<types::PyResourceAccess>()?;
     m.add_class::<types::PyColor>()?;
     m.add_class::<types::PyVertexAttribute>()?;
     m.add_class::<types::PyVertexBufferLayout>()?;

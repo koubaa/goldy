@@ -200,7 +200,7 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_parcel")]
     internal static partial GoldyResult SchemeComputeNodeWithParcel(
-        nint scheme, nint parcel, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+        nint scheme, nint parcel, NodeAccess nodeAccess);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_param")]
     internal static partial GoldyResult SchemeComputeNodeWithParam(nint scheme, uint value);
@@ -279,11 +279,11 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_field")]
     internal static partial GoldyResult SchemeComputeNodeWithField(
-        nint scheme, nint buffer, uint unit, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+        nint scheme, nint buffer, uint unit, NodeAccess nodeAccess);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_buffer_unit")]
     internal static partial GoldyResult SchemeComputeNodeWithBufferUnit(
-        nint scheme, nint buffer, uint unit, NodeAccess nodeAccess, ResourceAccess resourceAccess);
+        nint scheme, nint buffer, uint unit, NodeAccess nodeAccess);
 
     [LibraryImport(LibName, EntryPoint = "goldy_present_grant_consume")]
     internal static partial GoldyResult PresentGrantConsume(nint grant, nint submission);
@@ -333,9 +333,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_byte_size")]
     internal static partial ulong BufferUnitByteSize(nint buffer, uint unit);
 
-    [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_resource_index")]
-    internal static partial uint BufferUnitResourceIndex(nint buffer, uint unit, ResourceAccess access);
-
     [LibraryImport(LibName, EntryPoint = "goldy_buffer_unit_read_to_cpu")]
     internal static partial GoldyResult BufferUnitReadToCpu(
         nint buffer, uint unit, nint device, nint output, nuint outputSize);
@@ -378,9 +375,6 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName, EntryPoint = "goldy_parcel_byte_size")]
     internal static partial ulong ParcelByteSize(nint parcel);
-
-    [LibraryImport(LibName, EntryPoint = "goldy_parcel_resource_index")]
-    internal static partial uint ParcelResourceIndex(nint parcel, ResourceAccess access);
 
     // ========================================================================
     // Surface - Platform-specific creation
