@@ -599,6 +599,118 @@ impl Scheme {
         Ok(())
     }
 
+    /// Append a zero-fill node for `parcel[offset..offset+size]`.
+    ///
+    /// Mirrors [`crate::TaskGraph::clear_parcel`].
+    pub fn commit_clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let buffer = parcel
+            .buffer_handle()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_clear_parcel: requires a buffer parcel")))?;
+        let abs_offset = match parcel.resource_id() {
+            ResourceId::BufferRange { offset: base, .. } => base + offset,
+            _ => offset,
+        };
+        let clear_size = if size == 0 {
+            parcel.byte_size().saturating_sub(offset)
+        } else {
+            size
+        };
+        self.submit_state.register_parcel_stamp(parcel);
+        self.ir.nodes.push(TaskNode {
+            label: "clear_parcel",
+            bindings: vec![ResourceBinding {
+                resource: parcel.resource_id(),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer,
+                offset: abs_offset,
+                size: clear_size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Append a CPU→GPU full-texture upload node.
+    ///
+    /// Mirrors [`crate::TaskGraph::write_texture`].
+    pub fn commit_write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
+        let expected = texture.byte_size();
+        if data.len() != expected {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "commit_write_texture: expected {} bytes, got {}",
+                expected,
+                data.len()
+            )));
+        }
+        self.dirty = true;
+        let th = texture.gpu_handle();
+        self.ir.nodes.push(TaskNode {
+            label: "write_texture",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(th),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTexture {
+                texture: th,
+                data: std::sync::Arc::from(data),
+                width: texture.width(),
+                height: texture.height(),
+            },
+        });
+        Ok(())
+    }
+
+    /// Append a CPU→GPU partial-texture upload node for a rectangular sub-region.
+    ///
+    /// Mirrors [`crate::TaskGraph::write_texture_region`].
+    pub fn commit_write_texture_region(
+        &mut self,
+        texture: &crate::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    ) -> Result<(), GoldyError> {
+        let x_end = x.checked_add(width).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: x+width overflow"))
+        })?;
+        let y_end = y.checked_add(height).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: y+height overflow"))
+        })?;
+        if x_end > texture.width() || y_end > texture.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "commit_write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                texture.width(),
+                texture.height()
+            )));
+        }
+        self.dirty = true;
+        let th = texture.gpu_handle();
+        self.ir.nodes.push(TaskNode {
+            label: "write_texture_region",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(th),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTextureRegion {
+                texture: th,
+                data: std::sync::Arc::from(data),
+                x,
+                y,
+                width,
+                height,
+            },
+        });
+        Ok(())
+    }
+
     /// Append a compute dispatch node to the scheme IR.
     pub(crate) fn commit_compute_dispatch(
         &mut self,
@@ -999,6 +1111,36 @@ impl Scheme {
         });
     }
 
+    /// Copy a texture (UAV-writable parcel) into a present lease drawable.
+    ///
+    /// Analogous to [`TaskGraph::copy_texture_to_swapchain`](crate::TaskGraph::copy_texture_to_swapchain)
+    /// but targets a scheme [`PresentLease`] instead of the task-graph swapchain output.
+    ///
+    /// Record this after all compute nodes that write `src`. The present slot is
+    /// resolved by [`Self::submit`] at acquire time — the same partition-slot-key
+    /// mechanism used by [`Self::copy_to_present`].
+    pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
+        self.dirty = true;
+        let src_h = src.handle;
+        self.ir.nodes.push(TaskNode {
+            label: "copy_texture_to_present",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Texture(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(dst.id),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyTexture {
+                src: src_h,
+                dst: ResourceId::PresentLease(dst.id),
+            },
+        });
+    }
+
     /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
     /// [`Self::grant_read_texture`]).
     ///
@@ -1257,7 +1399,7 @@ impl Scheme {
     }
 }
 
-fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+pub(crate) fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     match access {
         NodeAccess::Read => ResourceAccess::Read,
         NodeAccess::Write => ResourceAccess::Write,
@@ -1355,19 +1497,21 @@ impl IntoDispatch for &Parcel {
 }
 
 /// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, scheme-held
-/// leases, and samplers.
+/// leases, samplers, and textures.
 ///
 /// Returns a `(resource_identity, bindless_slot_index)` pair where:
-/// - `resource_identity` is `Some((ResourceId, ParcelStamp))` for resources that participate in
-///   barrier generation and cross-scheme hazard tracking (buffers, textures). `None` for
-///   barrier-free resources such as samplers, which only need a bindless slot index.
+/// - `resource_identity` is `Some((ResourceId, Option<ParcelStamp>))` for resources that
+///   participate in barrier generation. The stamp is `Some` for resources that also participate in
+///   cross-scheme hazard tracking (buffers, parcel-wrapped textures). It is `None` for resources
+///   that need barriers but carry no stamp, such as [`crate::Texture`] objects. `resource_identity`
+///   is `None` for barrier-free resources such as samplers, which only need a bindless slot.
 /// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
 pub(crate) trait SchemeBindable {
     fn resolve(
         &self,
         scheme: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>);
+    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>);
 }
 
 impl SchemeBindable for Parcel {
@@ -1375,9 +1519,9 @@ impl SchemeBindable for Parcel {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
         (
-            Some((self.resource_id(), self.stamp_handle())),
+            Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
         )
     }
@@ -1388,10 +1532,10 @@ impl SchemeBindable for crate::Buffer {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
         let parcel = self.whole();
         (
-            Some((parcel.resource_id(), parcel.stamp_handle())),
+            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
         )
     }
@@ -1402,7 +1546,7 @@ impl<T> SchemeBindable for Lease<T> {
         &self,
         scheme: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
         let parcel = &scheme.leases[self.id.0 as usize];
         // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
         // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
@@ -1410,7 +1554,7 @@ impl<T> SchemeBindable for Lease<T> {
         // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
         // the unique-minimal-write shape-check lands (design §8).
         (
-            Some((parcel.resource_id(), parcel.stamp_handle())),
+            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
         )
     }
@@ -1421,10 +1565,36 @@ impl SchemeBindable for crate::Sampler {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
+    }
+}
+
+impl SchemeBindable for crate::Texture {
+    fn resolve(
+        &self,
+        _: &Scheme,
+        access: ResourceAccess,
+    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
+        // Raw textures participate in barrier generation but carry no ParcelStamp because
+        // they are not parcel-wrapped (e.g. TexturePool-managed). Cross-submit hazard
+        // tracking is handled by frame pipeline depth, matching the classic TaskGraph path.
+        //
+        // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
+        // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
+        // fall back to the UAV bindless index — mirroring the TaskGraph path's behaviour in
+        // `collect_bindless_indices_into`.
+        let slot = self.resource_index(access).or_else(|| {
+            if access == ResourceAccess::Read {
+                self.resource_index(ResourceAccess::Write)
+                    .or_else(|| self.resource_index(ResourceAccess::ReadWrite))
+            } else {
+                None
+            }
+        });
+        (Some((ResourceId::Texture(self.handle), None)), slot)
     }
 }
 
@@ -1467,8 +1637,10 @@ impl<'a> SchemeNodeBuilder<'a> {
                  check BufferKind/TextureKind is compatible with NodeAccess"
             );
         });
-        if let Some((resource, stamp)) = resource_identity {
-            self.scheme.submit_state.register_stamp_parts(resource, stamp);
+        if let Some((resource, maybe_stamp)) = resource_identity {
+            if let Some(stamp) = maybe_stamp {
+                self.scheme.submit_state.register_stamp_parts(resource, stamp);
+            }
             self.bindings.push(ResourceBinding { resource, access });
         }
         self.resource_slots.push(slot);
@@ -1535,6 +1707,29 @@ impl<'a> SchemeNodeBuilder<'a> {
         });
         self.resource_slots.push(PRESENT_LEASE_SLOT_PLACEHOLDER);
         self
+    }
+
+    /// Append pre-computed bindless slot indices to `resource_slots`.
+    ///
+    /// Use for stateless resources whose bindless index is known ahead of time (e.g. samplers
+    /// or persistent read-only buffers stored as a raw `u32`), where no barrier tracking is
+    /// needed. Resource-bearing types (buffers, parcels, textures) should use
+    /// [`Self::with_parcel`] instead, which registers both the barrier and the slot.
+    pub fn with_resource_slots(mut self, slots: Vec<u32>) -> Self {
+        self.resource_slots.extend(slots);
+        self
+    }
+
+    /// Finalize the node with device-resident indirect dispatch at `offset` into `parcel`.
+    ///
+    /// Mirrors [`crate::task_graph::NodeBuilder::dispatch_indirect_parcel`].
+    /// The parcel must hold a [`DispatchShape`]-sized buffer.
+    pub fn dispatch_indirect_parcel(self, parcel: &Parcel, offset: u64) -> Result<(), GoldyError> {
+        let buffer = parcel
+            .buffer_handle()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("dispatch_indirect_parcel: requires a buffer parcel")))?;
+        self.push_dispatch_node(DispatchDim::Indirect { buffer, offset });
+        Ok(())
     }
 
     /// Finalize the node with fixed workgroup dimensions.

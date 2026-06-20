@@ -280,6 +280,14 @@ impl RenderPassRecord {
     }
 }
 
+fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+    match access {
+        NodeAccess::Read => ResourceAccess::Read,
+        NodeAccess::Write => ResourceAccess::Write,
+        NodeAccess::ReadWrite => ResourceAccess::ReadWrite,
+    }
+}
+
 /// Accumulates one compute dispatch node before [`Self::commit_dispatch`].
 pub struct ComputeNodeRecord {
     label: &'static str,
@@ -288,6 +296,8 @@ pub struct ComputeNodeRecord {
     resource_slots: Vec<u32>,
     user_slots: Vec<u32>,
     stamp_targets: Vec<Arc<ParcelStamp>>,
+    /// Per-slot descriptor access from pipeline reflection (shader-signature order).
+    slot_access: Vec<Option<ResourceAccess>>,
 }
 
 impl ComputeNodeRecord {
@@ -299,6 +309,7 @@ impl ComputeNodeRecord {
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
             stamp_targets: Vec::new(),
+            slot_access: pipeline.slot_access.clone(),
         }
     }
 
@@ -334,16 +345,23 @@ impl ComputeNodeRecord {
 
     /// Declare a retained parcel as a graph dependency and shader binding slot atomically.
     ///
-    /// This is the preferred entry-point for language-binding consumers. It resolves the
-    /// bindless slot internally so callers never handle raw resource indices.
-    /// Returns `None` if the parcel has no slot registered for `resource_access`.
+    /// This is the preferred entry-point for language-binding consumers. Descriptor access
+    /// (SRV vs UAV) is inferred from pipeline reflection in [`Self::slot_access`], matching
+    /// [`crate::SchemeNodeBuilder::with_parcel`]. Returns `None` when no bindless slot
+    /// exists for the inferred descriptor access.
     pub fn with_parcel(
         &mut self,
         parcel: &crate::Parcel,
         node_access: NodeAccess,
-        resource_access: crate::types::ResourceAccess,
     ) -> Option<&mut Self> {
-        let idx = parcel.resource_index(resource_access)?;
+        let slot_idx = self.resource_slots.len();
+        let descriptor_access = self
+            .slot_access
+            .get(slot_idx)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| node_access_to_resource_access(node_access));
+        let idx = parcel.resource_index(descriptor_access)?;
         self.register_parcel_binding(parcel, node_access);
         self.resource_slots.push(idx);
         Some(self)
