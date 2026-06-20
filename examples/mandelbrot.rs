@@ -5,9 +5,9 @@
 //! Run with: `cargo run --example mandelbrot`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool,
 };
 use std::sync::Arc;
 use winit::{

@@ -6,9 +6,9 @@
 
 use anyhow::Result;
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance,
-    Instance2D, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DeviceDescriptor, Grant, Instance, Instance2D, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;

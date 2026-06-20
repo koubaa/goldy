@@ -7,9 +7,9 @@
 //! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example checkerboard`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance,
-    LayoutCheckable, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, LayoutCheckable, Lease,
+    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;

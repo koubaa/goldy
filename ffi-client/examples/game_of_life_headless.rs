@@ -7,8 +7,8 @@
 
 use goldy_ffi_client::{
     Color, ComputePipeline, Context, DepthFormat, DeviceDescriptor, Instance, NodeAccess, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags,
-    TextureFormat, TextureKind,
+    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, TextureFlags, TextureFormat,
+    TextureKind,
 };
 
 const GRID_WIDTH: u32 = 128;

@@ -134,23 +134,13 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_field(
-                scheme,
-                cells,
-                SLOT_A,
-                GoldyNodeAccess::Read,
-            ),
+            goldy_scheme_compute_node_with_field(scheme, cells, SLOT_A, GoldyNodeAccess::Read,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_field(
-                scheme,
-                cells,
-                SLOT_B,
-                GoldyNodeAccess::Write,
-            ),
+            goldy_scheme_compute_node_with_field(scheme, cells, SLOT_B, GoldyNodeAccess::Write,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

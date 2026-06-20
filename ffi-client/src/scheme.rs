@@ -246,28 +246,14 @@ pub struct ComputeNodeBuilder<'a> {
 impl ComputeNodeBuilder<'_> {
     pub fn with_parcel(&mut self, parcel: &Parcel, node_access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_with_parcel(
-                self.scheme.ptr,
-                parcel.as_ptr(),
-                node_access.into(),
-            )
+            sys::goldy_scheme_compute_node_with_parcel(self.scheme.ptr, parcel.as_ptr(), node_access.into())
         });
         self
     }
 
-    pub fn with_buffer_unit(
-        &mut self,
-        buffer: &Buffer,
-        unit: u32,
-        node_access: NodeAccess,
-    ) -> &mut Self {
+    pub fn with_buffer_unit(&mut self, buffer: &Buffer, unit: u32, node_access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_with_buffer_unit(
-                self.scheme.ptr,
-                buffer.as_ptr(),
-                unit,
-                node_access.into(),
-            )
+            sys::goldy_scheme_compute_node_with_buffer_unit(self.scheme.ptr, buffer.as_ptr(), unit, node_access.into())
         });
         self
     }

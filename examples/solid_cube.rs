@@ -5,9 +5,9 @@
 //! Run with: cargo run --example solid_cube
 
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, IndexFormat, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, IndexFormat, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;

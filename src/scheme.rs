@@ -674,12 +674,12 @@ impl Scheme {
         height: u32,
         data: Vec<u8>,
     ) -> Result<(), GoldyError> {
-        let x_end = x.checked_add(width).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: x+width overflow"))
-        })?;
-        let y_end = y.checked_add(height).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: y+height overflow"))
-        })?;
+        let x_end = x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: x+width overflow")))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: y+height overflow")))?;
         if x_end > texture.width() || y_end > texture.height() {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "commit_write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
@@ -1511,7 +1511,10 @@ pub(crate) trait SchemeBindable {
         &self,
         scheme: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>);
+    ) -> (
+        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+        Option<u32>,
+    );
 }
 
 impl SchemeBindable for Parcel {
@@ -1519,7 +1522,10 @@ impl SchemeBindable for Parcel {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
+    ) -> (
+        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+        Option<u32>,
+    ) {
         (
             Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
@@ -1532,7 +1538,10 @@ impl SchemeBindable for crate::Buffer {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
+    ) -> (
+        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+        Option<u32>,
+    ) {
         let parcel = self.whole();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
@@ -1546,7 +1555,10 @@ impl<T> SchemeBindable for Lease<T> {
         &self,
         scheme: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
+    ) -> (
+        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+        Option<u32>,
+    ) {
         let parcel = &scheme.leases[self.id.0 as usize];
         // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
         // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
@@ -1565,7 +1577,10 @@ impl SchemeBindable for crate::Sampler {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
+    ) -> (
+        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+        Option<u32>,
+    ) {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
@@ -1577,7 +1592,10 @@ impl SchemeBindable for crate::Texture {
         &self,
         _: &Scheme,
         access: ResourceAccess,
-    ) -> (Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>, Option<u32>) {
+    ) -> (
+        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+        Option<u32>,
+    ) {
         // Raw textures participate in barrier generation but carry no ParcelStamp because
         // they are not parcel-wrapped (e.g. TexturePool-managed). Cross-submit hazard
         // tracking is handled by frame pipeline depth, matching the classic TaskGraph path.
@@ -1706,17 +1724,6 @@ impl<'a> SchemeNodeBuilder<'a> {
             access: NodeAccess::Write,
         });
         self.resource_slots.push(PRESENT_LEASE_SLOT_PLACEHOLDER);
-        self
-    }
-
-    /// Append pre-computed bindless slot indices to `resource_slots`.
-    ///
-    /// Use for stateless resources whose bindless index is known ahead of time (e.g. samplers
-    /// or persistent read-only buffers stored as a raw `u32`), where no barrier tracking is
-    /// needed. Resource-bearing types (buffers, parcels, textures) should use
-    /// [`Self::with_parcel`] instead, which registers both the barrier and the slot.
-    pub fn with_resource_slots(mut self, slots: Vec<u32>) -> Self {
-        self.resource_slots.extend(slots);
         self
     }
 

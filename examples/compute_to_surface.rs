@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use goldy::{
-    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance,
-    PresentMode, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
+    task_graph::NodeAccess, Buffer, BufferKind, ComputePipeline, DeviceDescriptor, Grant, Instance, PresentMode,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SurfaceConfig, SwapchainPool,
 };
 use std::sync::Arc;
 use winit::{

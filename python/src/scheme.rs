@@ -593,4 +593,3 @@ impl PySchemeRenderPass {
         "SchemeRenderPass(recording)".to_string()
     }
 }
-

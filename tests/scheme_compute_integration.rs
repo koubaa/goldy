@@ -1687,7 +1687,10 @@ fn scheme_with_parcel_raw_texture() {
     assert_eq!(output[2], 0, "B channel");
     assert_eq!(output[3], 255, "A channel");
     let nonzero = output.iter().filter(|&&b| b != 0).count();
-    assert!(nonzero > 0, "texture readback all zeros — barrier not recorded correctly");
+    assert!(
+        nonzero > 0,
+        "texture readback all zeros — barrier not recorded correctly"
+    );
 }
 
 #[test]

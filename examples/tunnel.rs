@@ -5,9 +5,9 @@
 //! Run with: `cargo run --example tunnel`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexBufferLayout,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool, VertexBufferLayout,
 };
 use std::sync::Arc;
 use std::time::Instant;

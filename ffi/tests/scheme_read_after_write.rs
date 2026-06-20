@@ -75,21 +75,13 @@ fn scheme_read_after_acquire_then_copy() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(
-                scheme,
-                src_parcel,
-                GoldyNodeAccess::Read,
-            ),
+            goldy_scheme_compute_node_with_parcel(scheme, src_parcel, GoldyNodeAccess::Read,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(
-                scheme,
-                dst_parcel,
-                GoldyNodeAccess::Write,
-            ),
+            goldy_scheme_compute_node_with_parcel(scheme, dst_parcel, GoldyNodeAccess::Write,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

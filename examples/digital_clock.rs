@@ -8,9 +8,9 @@
 
 use goldy::{
     examples::digital_clock::{generate_clock_vertices, ClockState, ClockVertex, TimeData, SHADER_SOURCE},
-    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool,
+    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule,
+    SwapchainPool,
 };
 use std::sync::Arc;
 use std::time::Instant;

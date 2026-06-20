@@ -349,11 +349,7 @@ impl ComputeNodeRecord {
     /// (SRV vs UAV) is inferred from pipeline reflection in [`Self::slot_access`], matching
     /// [`crate::SchemeNodeBuilder::with_parcel`]. Returns `None` when no bindless slot
     /// exists for the inferred descriptor access.
-    pub fn with_parcel(
-        &mut self,
-        parcel: &crate::Parcel,
-        node_access: NodeAccess,
-    ) -> Option<&mut Self> {
+    pub fn with_parcel(&mut self, parcel: &crate::Parcel, node_access: NodeAccess) -> Option<&mut Self> {
         let slot_idx = self.resource_slots.len();
         let descriptor_access = self
             .slot_access

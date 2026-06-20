@@ -7,10 +7,10 @@
 
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState,
-    DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Grant,
+    Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
