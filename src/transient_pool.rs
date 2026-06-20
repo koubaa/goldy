@@ -45,10 +45,12 @@ struct TexturePendingEntry {
     ready_after: ReferenceTable,
 }
 
-/// Recycle-bin key for scheme buffer leases: buffers are interchangeable iff size, kind, and flags match.
+/// Recycle-bin key for buffer parcels: buffers are interchangeable iff size, kind, and flags match.
 ///
-/// Only parcels returned via [`TransientPool::return_buffer_parcel`] enter this bin.
-/// [`RetainedPool::release_buffer`] uses the separate `holding` queue (drain-only).
+/// Keying on size alone would allow an adopted non-Scattered buffer (from
+/// [`crate::retained_pool::RetainedPool::release_buffer`]) to be handed out to a
+/// [`TransientPool::acquire_buffer`] caller that expects a specific kind — which would produce
+/// wrong descriptor categories or silent garbage in the shader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BufferKey {
     size: u64,
@@ -69,15 +71,9 @@ impl BufferKey {
     }
 }
 
-/// A scheme-recycled buffer parcel; reissued by [`TransientPool::acquire_buffer`].
+/// A parked buffer parcel awaiting epoch retirement; reissued by [`TransientPool::acquire_buffer`].
 struct BufferBinEntry {
     parcel: Parcel,
-    ready_after: ReferenceTable,
-}
-
-/// A [`RetainedPool::release_buffer`] intake held until ready, then dropped (not recycled).
-struct HoldingEntry {
-    hold: RetainedHold,
     ready_after: ReferenceTable,
 }
 
@@ -91,8 +87,6 @@ pub struct TransientPool {
     /// Buffer parcels keyed by `(size, kind, flags)`; excess ready entries are trimmed by
     /// [`Self::drain_ready`] (see [`MAX_BUFFER_BIN_READY_SPARES`]).
     buffer_bins: HashMap<BufferKey, Vec<BufferBinEntry>>,
-    /// [`RetainedPool::release_buffer`] intake (TaskGraph / ekrano): drained, never reissued.
-    holding: Vec<HoldingEntry>,
     /// Monotonic count of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`].
     ///
     /// Does **not** increment when a retired bin entry is reused. Exposed via
@@ -108,7 +102,6 @@ impl TransientPool {
             outstanding: Arc::new(PoolBookkeeping::new()),
             texture_bins: HashMap::new(),
             buffer_bins: HashMap::new(),
-            holding: Vec::new(),
             buffer_alloc_count: 0,
         }
     }
@@ -204,11 +197,6 @@ impl TransientPool {
             .push(BufferBinEntry { parcel, ready_after });
     }
 
-    /// Intake from [`crate::retained_pool::RetainedPool::release_texture`] /
-    /// [`crate::retained_pool::RetainedPool::release_buffer`].
-    ///
-    /// Textures may be reissued via [`Self::acquire_texture`]. Buffers park in `holding` and are
-    /// dropped once ready — ekrano/TaskGraph does not call [`Self::acquire_buffer`].
     pub(crate) fn adopt(&mut self, stamped: StampedParcel) {
         let StampedParcel { hold, ready_after } = stamped;
         match hold {
@@ -216,12 +204,38 @@ impl TransientPool {
                 self.park_texture(parcel, ready_after);
             }
             RetainedHold::Buffer(buffer) => {
-                let bytes = buffer.byte_size();
-                self.pending.add(ParcelType::Buffer, bytes);
-                self.holding.push(HoldingEntry {
-                    hold: RetainedHold::Buffer(buffer),
-                    ready_after,
-                });
+                // Partitioned buffers (from `RetainedPool::acquire_record`) cannot be
+                // reissued from the bin since the pool keys on single-parcel descriptors.
+                // Drop them directly; the backend's deferred deletion queue provides the
+                // same epoch-gated reclamation the bin would otherwise give.
+                //
+                // NOTE: as of this writing, no caller actually routes a partitioned
+                // buffer through `park_buffer` → `adopt`. The composite
+                // `cached_scheme_indirect` buffer is evicted via `drop(buf)` in
+                // `alloc_or_reuse_scheme_indirect` and never touches this path. This
+                // branch is defensive for future callers.
+                let byte_size = buffer.byte_size();
+                match buffer.into_transient_parcel() {
+                    Ok(parcel) => {
+                        let bytes = parcel.byte_size();
+                        let key = BufferKey::from_parcel(&parcel);
+                        self.pending.add(ParcelType::Buffer, bytes);
+                        self.buffer_bins
+                            .entry(key)
+                            .or_default()
+                            .push(BufferBinEntry { parcel, ready_after });
+                    }
+                    Err(_) => {
+                        // Partitioned buffer — not binneable for reuse; drop it.
+                        // `Buffer::drop` queues deferred Vulkan deletion at the
+                        // current timeline epoch, so GPU retirement is still respected.
+                        tracing::trace!(
+                            byte_size,
+                            "transient_pool: dropping partitioned buffer — \
+                             epoch-gated reclamation via backend deletion queue",
+                        );
+                    }
+                }
             }
         }
     }
@@ -258,15 +272,6 @@ impl TransientPool {
             });
         }
         self.texture_bins.retain(|_, bin| !bin.is_empty());
-        self.holding.retain(|e| {
-            if ctx.parcel_ready(&e.ready_after) {
-                pending.subtract(ParcelType::Buffer, e.hold.byte_size());
-                released += 1;
-                false
-            } else {
-                true
-            }
-        });
         released += self.trim_buffer_bins(ctx);
         released
     }
@@ -310,9 +315,7 @@ impl TransientPool {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.texture_bins.values().map(Vec::len).sum::<usize>()
-            + self.buffer_bins.values().map(Vec::len).sum::<usize>()
-            + self.holding.len()
+        self.texture_bins.values().map(Vec::len).sum::<usize>() + self.buffer_bins.values().map(Vec::len).sum::<usize>()
     }
 
     /// Total number of fresh `alloc_buffer` calls made by [`Self::acquire_buffer`] since
@@ -390,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn adopted_buffer_is_held_not_reissued() {
+    fn adopted_buffer_bins_and_reissues_via_acquire_buffer() {
         let device = test_device();
         let ctx = device.create_context().unwrap();
         let mut retained = RetainedPool::new(device.clone());
@@ -403,13 +406,32 @@ mod tests {
                 None,
             )
             .unwrap();
+        let handle_before = b.whole().buffer_handle().unwrap();
         retained.release_buffer(&ctx, b);
         assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 1);
         assert!(ctx.with_transient_pool(|t| t.pending_bytes().buffer >= 64));
 
         let released = ctx.with_transient_pool(|t| t.drain_ready(&ctx));
-        assert_eq!(released, 1);
-        assert_eq!(ctx.with_transient_pool(|t| t.pending_count()), 0);
+        assert_eq!(
+            released, 0,
+            "1 ready entry is within the cap (<= MAX_BUFFER_BIN_READY_SPARES); nothing trimmed"
+        );
+
+        let p = ctx
+            .with_transient_pool(|pool| {
+                pool.acquire_buffer(
+                    &ctx,
+                    64,
+                    crate::types::BufferKind::Scattered,
+                    crate::types::BufferFlags::empty(),
+                )
+            })
+            .expect("reuse binned buffer");
+        assert_eq!(
+            p.buffer_handle(),
+            Some(handle_before),
+            "adopted buffer parcel is reusable from buffer_bins"
+        );
     }
 
     /// Tests the [`super::TransientPool::return_buffer_parcel`] → [`super::TransientPool::acquire_buffer`]

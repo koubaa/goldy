@@ -60,6 +60,14 @@ impl ParcelStamp {
 /// Backing storage for a bindable [`Parcel`].
 enum ParcelBacking {
     WholeBuffer(Arc<Allocation>),
+
+
+    /// BufferRange is a sub-region of a partitioned buffer.
+    ///
+    /// This is an internal Goldy type. The public API is [`RetainedPool::acquire_record`]
+    /// with [`ordinal`] / [`field`] descriptors; the resulting [`Buffer`] yields
+    /// `BufferRange`-backed parcels via [`Buffer::unit`] / [`Buffer::field`].
+    /// [`Parcel::from_buffer_range`] is intentionally `pub(crate)`.
     BufferRange {
         view: BufferView,
         parent: BufferHandle,
@@ -530,6 +538,18 @@ impl Buffer {
 
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
+    }
+
+    /// Peel a single-unit buffer into a transient-pool parcel (no bookkeeping).
+    pub(crate) fn into_transient_parcel(mut self) -> anyhow::Result<Parcel> {
+        if self.is_partitioned() {
+            anyhow::bail!("into_transient_parcel requires a single-unit buffer");
+        }
+        self.release_bookkeeping();
+        match self.storage {
+            BufferStorage::Single(arc) => Ok(Parcel::from_whole_buffer(arc, self.home_device)),
+            BufferStorage::Partitioned { .. } => unreachable!(),
+        }
     }
 
     /// Iterate all bindable parcels for dependency registration.
