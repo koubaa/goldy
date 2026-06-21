@@ -1585,12 +1585,12 @@ pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferH
 }
 
 /// View tightly packed bytes in a CPU-writable storage buffer's upload mapping.
-pub(super) fn cpu_writable_flat_slice(
-    buffers: &std::collections::HashMap<BufferHandle, super::types::BufferState>,
+pub(super) fn cpu_writable_flat_slice<'a>(
+    buffers: &'a std::collections::HashMap<BufferHandle, super::types::BufferState>,
     buffer_handle: BufferHandle,
     offset: u64,
     len: usize,
-) -> Result<&[u8]> {
+) -> Result<&'a [u8]> {
     let buffer = buffers
         .get(&buffer_handle)
         .context("cpu_writable_flat_slice: invalid buffer handle")?;
