@@ -473,6 +473,46 @@ pub(super) fn stage_texture_upload_region(
     })
 }
 
+/// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+pub(super) fn stage_copy_buffer_to_texture_upload(
+    devices: &std::collections::HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
+    textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,
+    buffers: &std::collections::HashMap<super::super::BufferHandle, super::types::BufferState>,
+    pool: &mut super::staging::TextureStagingPool,
+    src: super::super::BufferHandle,
+    src_offset: u64,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<StagedTextureUpload> {
+    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
+    let bpp = texture.format.bytes_per_pixel();
+    let flat_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|h| h.checked_mul(bpp as usize))
+        .context("CopyBufferToTexture: flat byte size overflow")?;
+    let data = super::buffer::cpu_writable_flat_slice(buffers, src, src_offset, flat_len)?;
+    if x == 0 && y == 0 && width == texture.width && height == texture.height {
+        stage_texture_upload_full(devices, textures, pool, texture_handle, data, width, height)
+    } else {
+        stage_texture_upload_region(
+            devices,
+            textures,
+            pool,
+            TextureUploadRegion {
+                texture_handle,
+                x,
+                y,
+                width,
+                height,
+                data,
+            },
+        )
+    }
+}
+
 /// Record one staged texture upload on an open command list (task graph / compute submit).
 pub(super) fn record_staged_texture_upload(
     command_list: &ID3D12GraphicsCommandList,

@@ -620,7 +620,18 @@ pub enum GpuCommand {
         src: BufferHandle,
         src_offset: u64,
         dst: BufferHandle,
+        dst_offset: u64,
         size: u64,
+    },
+    /// Copy tightly packed pixels from a CPU-writable buffer into a texture subregion.
+    CopyBufferToTexture {
+        src: BufferHandle,
+        src_offset: u64,
+        dst: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
     },
     /// Copy a texture subresource into a grant-readback staging buffer (placed footprint).
     CopyTextureToReadback {

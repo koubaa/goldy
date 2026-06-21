@@ -427,6 +427,16 @@ bitflags! {
         ///
         /// **Backends**: implemented on Metal. Other backends treat this flag as unused for now.
         const GPU_ONLY = 1 << 3;
+        /// Host-visible storage buffer for per-frame CPU writes (staging uploads).
+        ///
+        /// On Vulkan/Metal the buffer is persistently mapped for [`crate::Buffer::write`].
+        /// On Direct3D 12, storage buffers use a paired UPLOAD heap for CPU writes and
+        /// a DEFAULT heap UAV for GPU access; [`crate::Scheme::copy_buffer_parcel`] copies
+        /// staging → device each submission.
+        ///
+        /// Only valid for [`BufferKind::Scattered`]. Cannot be combined with
+        /// [`Self::CPU_READABLE`] or [`Self::GPU_ONLY`].
+        const CPU_WRITABLE = 1 << 4;
     }
 }
 

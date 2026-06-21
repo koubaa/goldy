@@ -909,6 +909,8 @@ pub(crate) struct BufferState {
     /// Persistent map of `coherent_readback` (see above).
     /// Persistent `Map` result address for the readback resource (`usize` for `Send`/`Sync`).
     pub coherent_readback_mapped: Option<usize>,
+    /// Persistent map of the paired UPLOAD heap for [`crate::types::BufferFlags::CPU_WRITABLE`].
+    pub cpu_writable_upload_mapped: Option<usize>,
     /// Creation-time flags.
     pub flags: crate::types::BufferFlags,
     /// Created with [`crate::backend::GpuBackend::place_buffer_in_transient_heap`] (placed resource).

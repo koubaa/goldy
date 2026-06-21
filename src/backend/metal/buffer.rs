@@ -183,12 +183,22 @@ pub(super) fn create(
     flags: BufferFlags,
 ) -> Result<BufferHandle> {
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
     let is_storage = access == BufferKind::Scattered;
     if cpu_readable && !is_storage {
         anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
+    if cpu_writable && !is_storage {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE is only valid for BufferKind::Scattered (storage) buffers");
+    }
     if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
         anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_READABLE");
+    }
+    if cpu_writable && flags.contains(BufferFlags::GPU_ONLY) {
+        anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_WRITABLE");
+    }
+    if cpu_writable && cpu_readable {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE cannot be combined with CPU_READABLE");
     }
 
     let handle = state.next_buffer_handle;
@@ -225,12 +235,22 @@ pub(super) fn create_with_capacity(
     flags: BufferFlags,
 ) -> Result<(BufferHandle, u64)> {
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
     let is_storage = access == BufferKind::Scattered;
     if cpu_readable && !is_storage {
         anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
+    if cpu_writable && !is_storage {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE is only valid for BufferKind::Scattered (storage) buffers");
+    }
     if cpu_readable && flags.contains(BufferFlags::GPU_ONLY) {
         anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_READABLE");
+    }
+    if cpu_writable && flags.contains(BufferFlags::GPU_ONLY) {
+        anyhow::bail!("BufferFlags::GPU_ONLY cannot be combined with CPU_WRITABLE");
+    }
+    if cpu_writable && cpu_readable {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE cannot be combined with CPU_READABLE");
     }
     if logical_size > capacity {
         anyhow::bail!("logical_size {logical_size} exceeds capacity {capacity}");
@@ -577,6 +597,25 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
             device.deletion_queue.lock().unwrap().queue(barrier, deletion);
         }
     }
+}
+
+/// View tightly packed bytes in a CPU-writable storage buffer's shared mapping.
+pub(super) fn cpu_writable_flat_slice<'a>(
+    buffers: &'a std::collections::HashMap<BufferHandle, super::types::BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    len: usize,
+) -> Result<&'a [u8]> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("cpu_writable_flat_slice: invalid buffer handle")?;
+    if !buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+        anyhow::bail!("cpu_writable_flat_slice: buffer is not CPU_WRITABLE");
+    }
+    if offset + len as u64 > buffer.size {
+        anyhow::bail!("cpu_writable_flat_slice: slice exceeds buffer bounds");
+    }
+    Ok(unsafe { std::slice::from_raw_parts(buffer.buffer.contents().add(offset as usize) as *const u8, len) })
 }
 
 /// Write data to a buffer at the specified offset.

@@ -163,6 +163,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
+        | NodeKind::CopyBuffer { .. }
+        | NodeKind::CopyBufferToTexture { .. }
         | NodeKind::WriteTexture { .. }
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }

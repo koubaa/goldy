@@ -571,6 +571,7 @@ pub(super) fn resize(
             is_view: false,
             coherent_readback: new_readback,
             coherent_readback_mapped: new_readback_mapped,
+            cpu_writable_upload_mapped: None,
             flags: old.flags,
             transient_placed: false,
             parent_for_view: None,
@@ -631,8 +632,9 @@ pub(super) fn create(
         allocation_size
     };
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
     // First pass: create the resource (immutable borrow of device)
-    let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped) = {
+    let (resource, upload_buffer, is_storage, coherent_readback, coherent_readback_mapped, cpu_writable_upload_mapped) = {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
         // Scattered access -> storage buffer (UAV), Broadcast access -> uniform buffer (CBV)
@@ -640,6 +642,12 @@ pub(super) fn create(
 
         if cpu_readable && !is_storage {
             anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
+        }
+        if cpu_writable && !is_storage {
+            anyhow::bail!("BufferFlags::CPU_WRITABLE is only valid for BufferKind::Scattered (storage) buffers");
+        }
+        if cpu_writable && (cpu_readable || flags.contains(BufferFlags::GPU_ONLY)) {
+            anyhow::bail!("BufferFlags::CPU_WRITABLE cannot be combined with CPU_READABLE or GPU_ONLY");
         }
 
         // Storage buffers need DEFAULT heap for UAV support (bindless)
@@ -699,9 +707,53 @@ pub(super) fn create(
 
         let resource = resource.context("CreateCommittedResource returned null")?;
 
-        // Upload buffer is created lazily on first write() to avoid doubling memory
-        // for buffers that are only GPU-written (intermediate compute buffers, pool backing).
-        let upload_buffer = None;
+        // Upload buffer is created lazily on first write() for DEFAULT storage buffers.
+        // CPU_WRITABLE storage pairs DEFAULT (GPU) with an eagerly mapped UPLOAD heap.
+        let (upload_buffer, cpu_writable_upload_mapped) = if cpu_writable && is_storage {
+            let upload_heap = D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_UPLOAD,
+                CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+                MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+                CreationNodeMask: 0,
+                VisibleNodeMask: 0,
+            };
+            let upload_desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Alignment: 0,
+                Width: allocation_size,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: DXGI_FORMAT_UNKNOWN,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                Flags: D3D12_RESOURCE_FLAG_NONE,
+            };
+            let mut upload: Option<ID3D12Resource> = None;
+            unsafe {
+                logical_device.device.CreateCommittedResource(
+                    &upload_heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &upload_desc,
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    None,
+                    &mut upload,
+                )
+            }
+            .context("Failed to create CPU_WRITABLE upload buffer")?;
+            let upload = upload.context("CreateCommittedResource upload returned null")?;
+            let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+            let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+            unsafe { upload.Map(0, Some(&no_read), Some(&mut mapped)) }
+                .context("Failed to map CPU_WRITABLE upload buffer")?;
+            let p = mapped as *mut u8;
+            if p.is_null() {
+                anyhow::bail!("Map returned null for CPU_WRITABLE upload");
+            }
+            (Some(upload), Some(p as usize))
+        } else {
+            (None, None)
+        };
 
         // CPU_READABLE storage: pair DEFAULT UAV with a READBACK heap for `read_coherent`.
         let (coherent_readback, coherent_readback_mapped) = if cpu_readable && is_storage {
@@ -756,6 +808,7 @@ pub(super) fn create(
             is_storage,
             coherent_readback,
             coherent_readback_mapped,
+            cpu_writable_upload_mapped,
         )
     };
 
@@ -911,6 +964,7 @@ pub(super) fn create(
             is_view: false,
             coherent_readback,
             coherent_readback_mapped,
+            cpu_writable_upload_mapped,
             flags,
             transient_placed: false,
             parent_for_view: None,
@@ -1054,6 +1108,7 @@ pub(super) fn create_reserved_with_capacity(
             is_view: false,
             coherent_readback: None,
             coherent_readback_mapped: None,
+            cpu_writable_upload_mapped: None,
             flags,
             transient_placed: false,
             parent_for_view: None,
@@ -1435,6 +1490,7 @@ pub(super) fn create_view(
             is_view: true,
             coherent_readback: None,
             coherent_readback_mapped: None,
+            cpu_writable_upload_mapped: None,
             flags: parent_flags,
             transient_placed: false,
             parent_for_view: Some(parent_handle),
@@ -1528,6 +1584,28 @@ pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferH
     Ok(())
 }
 
+/// View tightly packed bytes in a CPU-writable storage buffer's upload mapping.
+pub(super) fn cpu_writable_flat_slice<'a>(
+    buffers: &'a std::collections::HashMap<BufferHandle, super::types::BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    len: usize,
+) -> Result<&'a [u8]> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("cpu_writable_flat_slice: invalid buffer handle")?;
+    if !buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+        anyhow::bail!("cpu_writable_flat_slice: buffer is not CPU_WRITABLE");
+    }
+    if offset + len as u64 > buffer.size {
+        anyhow::bail!("cpu_writable_flat_slice: slice exceeds buffer bounds");
+    }
+    let base = buffer
+        .cpu_writable_upload_mapped
+        .context("cpu_writable_flat_slice: missing upload mapping")?;
+    Ok(unsafe { std::slice::from_raw_parts((base as *const u8).add(offset as usize), len) })
+}
+
 /// Write data to a buffer at the specified offset.
 ///
 /// For storage buffers (DEFAULT heap), uses a capped-size upload buffer and copies
@@ -1555,6 +1633,15 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
                     stride,
                 );
             }
+        }
+    }
+
+    if buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+        if let Some(base) = buffer.cpu_writable_upload_mapped {
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), (base as *mut u8).add(offset as usize), data.len());
+            }
+            return Ok(());
         }
     }
 
@@ -2193,6 +2280,7 @@ pub(super) fn alloc_readback_buffer(
             is_view: false,
             coherent_readback: None,
             coherent_readback_mapped: Some(mapped_addr),
+            cpu_writable_upload_mapped: None,
             flags: BufferFlags::empty(),
             transient_placed: false,
             parent_for_view: None,
@@ -2271,6 +2359,7 @@ pub(super) fn alloc_texture_readback_staging(
             is_view: false,
             coherent_readback: None,
             coherent_readback_mapped: Some(mapped_addr),
+            cpu_writable_upload_mapped: None,
             flags: BufferFlags::empty(),
             transient_placed: false,
             parent_for_view: None,

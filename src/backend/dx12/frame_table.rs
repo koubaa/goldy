@@ -205,6 +205,7 @@ fn create_scattered_u32_buffer_at_slot(
             is_view: false,
             coherent_readback: None,
             coherent_readback_mapped: None,
+            cpu_writable_upload_mapped: None,
             flags: crate::types::BufferFlags::empty(),
             transient_placed: false,
             parent_for_view: None,

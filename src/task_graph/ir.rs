@@ -163,6 +163,27 @@ pub enum NodeKind {
         offset: u64,
         data: Arc<[u8]>,
     },
+    /// GPU buffer-to-buffer copy addressed by parcel identity (no payload bytes in the IR).
+    CopyBuffer {
+        src: ResourceId,
+        src_offset: u64,
+        dst: ResourceId,
+        dst_offset: u64,
+        size: u64,
+    },
+    /// Copy flat pixel bytes from a CPU-writable buffer into a texture subregion.
+    ///
+    /// Source bytes are tightly packed (`width * height * bpp`); backend lowering
+    /// handles per-platform row-pitch alignment at submit time.
+    CopyBufferToTexture {
+        src: ResourceId,
+        src_offset: u64,
+        dst: TextureHandle,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
     /// Upload CPU pixel data into a texture (full image), batched with the same GPU submission.
     WriteTexture {
         texture: TextureHandle,

@@ -537,6 +537,7 @@ fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
                 NodeKind::WriteBuffer { .. }
                 | NodeKind::WriteTexture { .. }
                 | NodeKind::WriteTextureRegion { .. }
+                | NodeKind::CopyBufferToTexture { .. }
                 | NodeKind::CopyTexture { .. } => return false,
                 // CopyRenderTarget → PresentLease is retainable via the slot-key
                 // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.

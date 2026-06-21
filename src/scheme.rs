@@ -599,6 +599,118 @@ impl Scheme {
         Ok(())
     }
 
+    /// Append a GPU buffer-to-buffer copy between two buffer parcels (identity only; no bytes in IR).
+    ///
+    /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
+    /// on a [`crate::types::BufferFlags::CPU_WRITABLE`] staging parcel before each [`Self::submit`].
+    pub fn copy_buffer_parcel(
+        &mut self,
+        src: &Parcel,
+        src_offset: u64,
+        dst: &Parcel,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let src_resource = src.resource_id();
+        let dst_resource = dst.resource_id();
+        if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. })
+            || !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. })
+        {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_buffer_parcel requires buffer parcels"
+            )));
+        }
+        self.submit_state.register_parcel_stamp(src);
+        self.submit_state.register_parcel_stamp(dst);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_buffer_parcel",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst_resource,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src: src_resource,
+                src_offset,
+                dst: dst_resource,
+                dst_offset,
+                size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Append a CPU-writable buffer → texture copy node (identity only; no bytes in IR).
+    ///
+    /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
+    /// on a [`crate::types::BufferFlags::CPU_WRITABLE`] staging parcel before each [`Self::submit`].
+    pub fn copy_buffer_to_texture_parcel(
+        &mut self,
+        src: &Parcel,
+        src_offset: u64,
+        dst: &crate::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let src_resource = src.resource_id();
+        if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_buffer_to_texture_parcel requires a buffer parcel source"
+            )));
+        }
+        let x_end = x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_buffer_to_texture_parcel: x+width overflow")))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_buffer_to_texture_parcel: y+height overflow")))?;
+        if x_end > dst.width() || y_end > dst.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_buffer_to_texture_parcel: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                dst.width(),
+                dst.height()
+            )));
+        }
+        let th = dst.gpu_handle();
+        self.submit_state.register_parcel_stamp(src);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_buffer_to_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Texture(th),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBufferToTexture {
+                src: src_resource,
+                src_offset,
+                dst: th,
+                x,
+                y,
+                width,
+                height,
+            },
+        });
+        Ok(())
+    }
+
     /// Append a zero-fill node for `parcel[offset..offset+size]`.
     ///
     /// Mirrors [`crate::TaskGraph::clear_parcel`].
@@ -943,7 +1055,10 @@ impl Scheme {
         self.dirty = false;
         self.retention_key = None;
 
-        let recorded = !part_result.all_from_cache();
+        // Standalone upload partitions (WriteTexture, etc.) never increment
+        // `PartitionSubmitResult.records`, but the first submit after IR mutation still
+        // counts as a scheme record when `structurally_dirty`.
+        let recorded = !part_result.all_from_cache() || structurally_dirty;
         let on_record_path = structurally_dirty || topo_dirty || recorded;
 
         if on_record_path {
@@ -1025,6 +1140,7 @@ impl Scheme {
                             src: *source,
                             src_offset: *src_offset,
                             dst: staging,
+                            dst_offset: 0,
                             size: *byte_size,
                         });
                     }

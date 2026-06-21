@@ -130,6 +130,16 @@ fn resolve_copy_destination(id: ResourceId, resolver: Option<&SlotResolver>) -> 
     }
 }
 
+fn resolve_buffer_copy_target(id: ResourceId, offset: u64) -> (crate::backend::BufferHandle, u64) {
+    match id {
+        ResourceId::Buffer(h) => (h, offset),
+        ResourceId::BufferRange {
+            parent, offset: base, ..
+        } => (parent, base.saturating_add(offset)),
+        other => panic!("CopyBuffer resource resolved to non-buffer: {other:?}"),
+    }
+}
+
 /// Returns true when one node implicitly/explicitly writes a render target and
 /// the other reads the same target (e.g. [`NodeKind::RenderPass`] → copy).
 fn render_target_access_conflict(a: &super::ir::TaskNode, b: &super::ir::TaskNode) -> bool {
@@ -422,6 +432,8 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
+        | NodeKind::CopyBuffer { .. }
+        | NodeKind::CopyBufferToTexture { .. }
         | NodeKind::WriteTexture { .. }
         | NodeKind::WriteTextureRegion { .. }
         | NodeKind::CopyTexture { .. }
@@ -613,6 +625,43 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         buffer: *buffer,
                         offset: *offset,
                         data: data.clone(),
+                    });
+                }
+                NodeKind::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    size,
+                } => {
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
+                    let (dst_handle, dst_off) = resolve_buffer_copy_target(*dst, *dst_offset);
+                    commands.push(GpuCommand::CopyBuffer {
+                        src: src_handle,
+                        src_offset: src_off,
+                        dst: dst_handle,
+                        dst_offset: dst_off,
+                        size: *size,
+                    });
+                }
+                NodeKind::CopyBufferToTexture {
+                    src,
+                    src_offset,
+                    dst,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
+                    commands.push(GpuCommand::CopyBufferToTexture {
+                        src: src_handle,
+                        src_offset: src_off,
+                        dst: *dst,
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
                     });
                 }
                 NodeKind::WriteTexture {
@@ -1101,6 +1150,43 @@ pub(crate) fn emit_graph_commands_for_waves(
                         buffer: *buffer,
                         offset: *offset,
                         data: data.clone(),
+                    }));
+                }
+                NodeKind::CopyBuffer {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    size,
+                } => {
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
+                    let (dst_handle, dst_off) = resolve_buffer_copy_target(*dst, *dst_offset);
+                    commands.push(GraphCommand::Compute(GpuCommand::CopyBuffer {
+                        src: src_handle,
+                        src_offset: src_off,
+                        dst: dst_handle,
+                        dst_offset: dst_off,
+                        size: *size,
+                    }));
+                }
+                NodeKind::CopyBufferToTexture {
+                    src,
+                    src_offset,
+                    dst,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let (src_handle, src_off) = resolve_buffer_copy_target(*src, *src_offset);
+                    commands.push(GraphCommand::Compute(GpuCommand::CopyBufferToTexture {
+                        src: src_handle,
+                        src_offset: src_off,
+                        dst: *dst,
+                        x: *x,
+                        y: *y,
+                        width: *width,
+                        height: *height,
                     }));
                 }
                 NodeKind::WriteTexture {

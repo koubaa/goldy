@@ -108,8 +108,15 @@ pub(super) fn create(
     };
 
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
     if cpu_readable && !is_storage {
         anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
+    }
+    if cpu_writable && !is_storage {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE is only valid for BufferKind::Scattered (storage) buffers");
+    }
+    if cpu_writable && (cpu_readable || flags.contains(BufferFlags::GPU_ONLY)) {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE cannot be combined with CPU_READABLE or GPU_ONLY");
     }
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
@@ -124,11 +131,11 @@ pub(super) fn create(
 
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };
 
-    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_READABLE
+    // Storage buffers → DEVICE_LOCAL for GPU compute performance, unless CPU_READABLE/CPU_WRITABLE
     // (host-visible storage for persistent map + stable UAV bindless use).
     // Uniform buffers → HOST_VISIBLE|HOST_COHERENT for frequent CPU writes.
     let desired_flags = if is_storage {
-        if cpu_readable {
+        if cpu_readable || cpu_writable {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
         } else {
             vk::MemoryPropertyFlags::DEVICE_LOCAL
@@ -165,7 +172,7 @@ pub(super) fn create(
     // Clear uses vkCmdFillBuffer (GPU-side) so staging isn't needed for that.
     let (staging_buffer, staging_memory) = (None, None);
 
-    let host_mapped: Option<usize> = if cpu_readable && is_storage {
+    let host_mapped: Option<usize> = if (cpu_readable || cpu_writable) && is_storage {
         let device = devices
             .get(&device_handle)
             .context("Buffer's device is invalid for host map")?;
@@ -756,12 +763,19 @@ fn allocate_vk_buffer_memory(
     }
 
     let cpu_readable = flags.contains(BufferFlags::CPU_READABLE);
+    let cpu_writable = flags.contains(BufferFlags::CPU_WRITABLE);
     if cpu_readable && !is_storage {
         anyhow::bail!("BufferFlags::CPU_READABLE is only valid for BufferKind::Scattered (storage) buffers");
     }
+    if cpu_writable && !is_storage {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE is only valid for BufferKind::Scattered (storage) buffers");
+    }
+    if cpu_writable && (cpu_readable || flags.contains(BufferFlags::GPU_ONLY)) {
+        anyhow::bail!("BufferFlags::CPU_WRITABLE cannot be combined with CPU_READABLE or GPU_ONLY");
+    }
 
     let desired_flags = if is_storage {
-        if cpu_readable {
+        if cpu_readable || cpu_writable {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
         } else {
             vk::MemoryPropertyFlags::DEVICE_LOCAL
@@ -798,7 +812,7 @@ fn allocate_vk_buffer_memory(
     unsafe { logical_device.device.bind_buffer_memory(buffer, memory, 0) }
         .context("Failed to bind buffer memory (resize)")?;
 
-    let host_mapped: Option<usize> = if cpu_readable && is_storage {
+    let host_mapped: Option<usize> = if (cpu_readable || cpu_writable) && is_storage {
         let device = devices
             .get(&device_handle)
             .context("Buffer's device is invalid for host map")?;
@@ -1364,6 +1378,28 @@ pub(super) fn ensure_staging(
     Ok(())
 }
 
+/// View tightly packed bytes in a CPU-writable storage buffer's host mapping.
+pub(super) fn cpu_writable_flat_slice<'a>(
+    buffers: &'a HashMap<BufferHandle, BufferState>,
+    buffer_handle: BufferHandle,
+    offset: u64,
+    len: usize,
+) -> Result<&'a [u8]> {
+    let buffer = buffers
+        .get(&buffer_handle)
+        .context("cpu_writable_flat_slice: invalid buffer handle")?;
+    if !buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+        anyhow::bail!("cpu_writable_flat_slice: buffer is not CPU_WRITABLE");
+    }
+    if offset + len as u64 > buffer.size {
+        anyhow::bail!("cpu_writable_flat_slice: slice exceeds buffer bounds");
+    }
+    let base = buffer
+        .host_mapped
+        .context("cpu_writable_flat_slice: missing host mapping")?;
+    Ok(unsafe { std::slice::from_raw_parts((base as *const u8).add(offset as usize), len) })
+}
+
 /// Write data to a buffer at the specified offset.
 ///
 /// For DEVICE_LOCAL storage buffers, lazily creates a staging buffer then
@@ -1398,8 +1434,6 @@ pub(super) fn write(
             return Ok(());
         }
     }
-
-    // Lazily create staging buffer for storage buffers
     ensure_staging(instance, devices, buffers, buffer_handle)?;
 
     let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
