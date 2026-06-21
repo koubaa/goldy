@@ -429,6 +429,7 @@ pub(super) fn present(
     _image: SwapchainImageHandle,
     ctx: ContextHandle,
 ) -> Result<crate::timeline::TimelineValue> {
+    let _tz = crate::tracy_zone!("mtl.surface.present");
     let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
 
     let device_handle = surface_state.device_handle;
@@ -453,53 +454,62 @@ pub(super) fn present(
     };
     let tex_handle = surface_state.current_texture_handle;
 
-    let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
-        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-        v
-    };
-
     let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
-    let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
-    let command_buffer = owned_command_buffer.as_ref();
+    let (owned_command_buffer, signal_value) = {
+        let _tz = crate::tracy_zone!("mtl.present.encode");
+        let signal_value = {
+            let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
+            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
+            v
+        };
 
-    let (timeline_event, waiter, signal_queue_present, return_pending) = {
-        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        let sc = sc_arc.lock().unwrap();
-        (
-            sc.timeline_event.clone(),
-            sc.timeline_waiter.clone(),
-            std::sync::Arc::clone(&sc.signal_queue),
-            sc.pending_swapchain_returns.clone(),
-        )
-    };
-    command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
+        let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
+        let command_buffer = owned_command_buffer.as_ref();
 
-    let return_image = state.surfaces.get(&surface).and_then(|s| s.last_acquired_image_index);
-    let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
-        waiter.signal(signal_value);
-        if let Some(idx) = return_image {
-            // Metal has no WSI timeline to poll: push SwapchainReturned here from the
-            // completion handler. Vulkan/DX12 defer this signal until poll_signals when
-            // gpu_progress crosses the copy/fence value.
-            signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
-            if let Ok(mut pending) = return_pending.lock() {
-                pending.push((surface, idx));
+        let (timeline_event, waiter, signal_queue_present, return_pending) = {
+            let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+            let sc = sc_arc.lock().unwrap();
+            (
+                sc.timeline_event.clone(),
+                sc.timeline_waiter.clone(),
+                std::sync::Arc::clone(&sc.signal_queue),
+                sc.pending_swapchain_returns.clone(),
+            )
+        };
+        command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
+
+        let return_image = state.surfaces.get(&surface).and_then(|s| s.last_acquired_image_index);
+        let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+            waiter.signal(signal_value);
+            if let Some(idx) = return_image {
+                // Metal has no WSI timeline to poll: push SwapchainReturned here from the
+                // completion handler. Vulkan/DX12 defer this signal until poll_signals when
+                // gpu_progress crosses the copy/fence value.
+                signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                if let Ok(mut pending) = return_pending.lock() {
+                    pending.push((surface, idx));
+                }
             }
-        }
-    })
-    .copy();
-    command_buffer.add_completed_handler(&handler);
+        })
+        .copy();
+        command_buffer.add_completed_handler(&handler);
+
+        (owned_command_buffer, signal_value)
+    };
 
     let drawable = drawable_ptr as id;
-    let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
-    command_buffer.present_drawable(drawable_ref);
-    if super::api_log::enabled() {
-        super::api_log::log_present_drawable(signal_value);
+    {
+        let _tz = crate::tracy_zone!("mtl.present.present_drawable");
+        let command_buffer = owned_command_buffer.as_ref();
+        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
+        command_buffer.present_drawable(drawable_ref);
+        if super::api_log::enabled() {
+            super::api_log::log_present_drawable(signal_value);
+        }
+        command_buffer.commit();
     }
-    command_buffer.commit();
 
     // Release the retained drawable
     unsafe {

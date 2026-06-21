@@ -593,6 +593,7 @@ impl Frame {
         let _ = self.texture.take();
         let submit_tv = self.submit_frame()?;
         {
+            let _tz = tracy_zone!("frame.present.present_frame");
             let mut backend = self.backend.lock().unwrap();
             backend.present_frame(self.token, submit_tv)?;
         }

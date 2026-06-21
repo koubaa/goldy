@@ -272,6 +272,7 @@ impl Grant for PresentGrant {
     type Output = ();
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
+        let _tz = crate::tracy_zone!("scheme.grant_present.consume");
         if submission.data.scheme_id != self.scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "PresentGrant belongs to a different scheme than this submission"
@@ -1008,6 +1009,7 @@ impl Scheme {
         // `#[cfg(not(feature = "metal"))]` gate would omit this wait on Vulkan too.
         if let Some(prev_tv) = self.last_submitted_tv {
             if self.ctx.device().backend_type() != BackendType::Metal {
+                let _tz = crate::tracy_zone!("scheme.submit.wait_prev");
                 self.ctx.wait_until(prev_tv)?;
             }
         }
@@ -1020,21 +1022,26 @@ impl Scheme {
 
         let mut present_slots = Vec::with_capacity(self.present_grants.len());
         let mut surface_frames = Vec::with_capacity(self.present_grants.len());
-        for grant in &self.present_grants {
-            let (slot_id, surface_frame, uav_index, handle) =
-                SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
-            present_slots.push(ResolvedPresentSlot {
-                lease_id: grant.lease_id,
-                slot_id,
-                handle,
-                uav_index,
-            });
-            surface_frames.push(Mutex::new(Some(surface_frame)));
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
+            for grant in &self.present_grants {
+                let (slot_id, surface_frame, uav_index, handle) =
+                    SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
+                present_slots.push(ResolvedPresentSlot {
+                    lease_id: grant.lease_id,
+                    slot_id,
+                    handle,
+                    uav_index,
+                });
+                surface_frames.push(Mutex::new(Some(surface_frame)));
+            }
         }
 
-        let submit_result =
+        let submit_result = {
+            let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             self.submit_state
-                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots);
+                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots)
+        };
 
         let (tv, part_result) = match submit_result {
             Ok(ok) => ok,

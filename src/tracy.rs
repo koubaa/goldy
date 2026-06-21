@@ -39,12 +39,14 @@ macro_rules! tracy_zone {
 #[cfg(not(feature = "tracy"))]
 #[macro_export]
 macro_rules! tracy_zone {
-    ($name:expr) => {
+    ($name:expr) => {{
+        let _ = $name;
         $crate::tracy::NoopZone
-    };
-    ($name:expr, $text:expr) => {
+    }};
+    ($name:expr, $text:expr) => {{
+        let _ = ($name, $text);
         $crate::tracy::NoopZone
-    };
+    }};
 }
 
 /// Mark the end of the main frame (Tracy's primary frame counter).

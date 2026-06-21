@@ -858,6 +858,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
             if cached_key == Some(merged_fp) {
+                let _tz = crate::tracy_zone!("goldy.resubmit.merged");
                 if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync.as_ref())? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
@@ -914,6 +915,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
 
         // Try to resubmit from the retained cache if the fingerprint matches.
         if cached_key == Some(part_fp) {
+            let _tz = crate::tracy_zone!("goldy.resubmit.partition");
             if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync.as_ref())? {
                 last_tv = tv;
                 result.resubmit_hits += 1;
@@ -1026,6 +1028,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
             if cached_key == Some(merged_fp) {
+                let _tz = crate::tracy_zone!("goldy.resubmit.merged");
                 if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync.as_ref())? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
@@ -1118,6 +1121,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 .unwrap_or(false);
 
             if already_retained {
+                let _tz = crate::tracy_zone!("goldy.resubmit.present_slot");
                 if let Some(tv) = backend_try_resubmit_retained(backend, ctx, slot_key, sync.as_ref())? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
@@ -1151,6 +1155,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
         let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
         if cached_key == Some(part_fp) {
+            let _tz = crate::tracy_zone!("goldy.resubmit.partition");
             if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync.as_ref())? {
                 last_tv = tv;
                 result.resubmit_hits += 1;
