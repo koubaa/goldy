@@ -3,6 +3,7 @@
 //! These tests verify compute pipeline functionality with actual GPU backends.
 //! They are only compiled when at least one backend feature is enabled.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#![allow(deprecated)]
 
 mod common;
 #[path = "common/submission.rs"]
@@ -1188,7 +1189,7 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
     graph.dispatch(&ctx).expect("dispatch");
 
     let mut output = vec![0u8; (width * height * 4) as usize];
-    texture.read_to_cpu(&device, &mut output).expect("readback");
+    texture.read_to_cpu(&mut output).expect("readback");
 
     let nonzero = output.iter().filter(|&&b| b != 0).count();
     assert!(
@@ -1768,7 +1769,7 @@ fn test_alloc_texture(
     format: goldy::types::TextureFormat,
     kind: goldy::types::TextureKind,
     flags: goldy::types::TextureFlags,
-) -> goldy::Parcel {
+) -> goldy::Texture {
     use std::sync::Arc;
     goldy::RetainedPool::new(Arc::new(device.clone()))
         .acquire_texture(width, height, format, kind, flags, None)

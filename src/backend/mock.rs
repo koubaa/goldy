@@ -107,7 +107,7 @@ struct MockBuffer {
     flags: BufferFlags,
     /// Grant-read staging buffer (persistently CPU-readable; no bindless slot).
     is_grant_readback: bool,
-    grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
+    texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 
 #[allow(dead_code)]
@@ -345,7 +345,7 @@ impl MockBackend {
         &mut self,
         src: TextureHandle,
         dst: BufferHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
     ) -> Result<()> {
         let tex = self
             .textures
@@ -496,7 +496,7 @@ impl GpuBackend for MockBackend {
                 bindless_index,
                 flags,
                 is_grant_readback: false,
-                grant_texture_readback: None,
+                texture_copy_footprint: None,
             },
         );
 
@@ -533,7 +533,7 @@ impl GpuBackend for MockBackend {
                 bindless_index,
                 flags,
                 is_grant_readback: false,
-                grant_texture_readback: None,
+                texture_copy_footprint: None,
             },
         );
 
@@ -626,7 +626,7 @@ impl GpuBackend for MockBackend {
                 bindless_index: index,
                 flags: BufferFlags::empty(),
                 is_grant_readback: false,
-                grant_texture_readback: None,
+                texture_copy_footprint: None,
             },
         );
 
@@ -690,22 +690,22 @@ impl GpuBackend for MockBackend {
                 bindless_index: 0,
                 flags: BufferFlags::empty(),
                 is_grant_readback: true,
-                grant_texture_readback: None,
+                texture_copy_footprint: None,
             },
         );
         Ok(handle)
     }
 
-    fn query_texture_readback_layout(
+    fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,
         width: u32,
         height: u32,
         format: TextureFormat,
-    ) -> Result<crate::backend::TextureReadbackLayout> {
+    ) -> Result<crate::backend::TextureCopyFootprint> {
         let row_pitch = width.saturating_mul(format.bytes_per_pixel());
         let logical_bytes = row_pitch as u64 * height as u64;
-        Ok(crate::backend::TextureReadbackLayout {
+        Ok(crate::backend::TextureCopyFootprint {
             width,
             height,
             format,
@@ -719,7 +719,7 @@ impl GpuBackend for MockBackend {
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
     ) -> Result<BufferHandle> {
         if !self.devices.contains_key(&device) {
             anyhow::bail!("Invalid device handle");
@@ -737,7 +737,7 @@ impl GpuBackend for MockBackend {
                 bindless_index: 0,
                 flags: BufferFlags::empty(),
                 is_grant_readback: true,
-                grant_texture_readback: Some(layout),
+                texture_copy_footprint: Some(layout),
             },
         );
         Ok(handle)
@@ -746,7 +746,7 @@ impl GpuBackend for MockBackend {
     fn read_texture_readback_staging(
         &self,
         buffer: BufferHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()> {
         if output.len() as u64 != layout.logical_bytes {

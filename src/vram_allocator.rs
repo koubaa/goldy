@@ -67,7 +67,7 @@
 use crate::allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, AllocationPolicy, NoPolicy};
 use crate::buffer::Allocation;
 use crate::device::Device;
-use crate::texture::Texture;
+use crate::texture::TextureBacking;
 use crate::timeline::TimelineValue;
 use crate::types::*;
 use anyhow::Result;
@@ -176,21 +176,6 @@ impl ParcelDeed {
 /// Use [`AtomicI64`](std::sync::atomic::AtomicI64) / [`AtomicU64`](std::sync::atomic::AtomicU64) for lock-free counters,
 /// or a `Mutex` for more complex state.
 pub trait VramAllocator: Send + Sync {
-    /// Allocate a GPU texture.
-    ///
-    /// The default implementation calls the raw `Texture::new` constructor directly.
-    fn alloc_texture(
-        &self,
-        device: &Device,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-        access: TextureKind,
-        flags: TextureFlags,
-    ) -> Result<Texture> {
-        Texture::new(device, width, height, format, access, flags)
-    }
-
     /// Notify the allocator that a deed-holding parcel has been freed.
     ///
     /// Called automatically when a deed-holding buffer or texture is dropped after allocation
@@ -282,7 +267,8 @@ pub trait VramAllocator: Send + Sync {
     }
 }
 
-/// Crate-internal buffer allocation hooks for [`Device::alloc_buffer`].
+/// Crate-internal buffer and texture allocation hooks for [`Device::alloc_buffer`] /
+/// [`Device::alloc_texture`].
 pub(crate) trait VramAllocatorAlloc: VramAllocator {
     /// Allocate a GPU buffer.
     fn alloc_buffer(
@@ -306,6 +292,19 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
         flags: BufferFlags,
     ) -> Result<Allocation> {
         Allocation::new_with_capacity_hint_and_flags(device, initial_size, expected_max, access, flags)
+    }
+
+    /// Allocate a GPU texture.
+    fn alloc_texture(
+        &self,
+        device: &Device,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        access: TextureKind,
+        flags: TextureFlags,
+    ) -> Result<TextureBacking> {
+        TextureBacking::new(device, width, height, format, access, flags)
     }
 }
 
@@ -413,9 +412,7 @@ impl VramAllocatorAlloc for DefaultVramAllocator {
         });
         Ok(buf)
     }
-}
 
-impl VramAllocator for DefaultVramAllocator {
     fn alloc_texture(
         &self,
         device: &Device,
@@ -424,7 +421,7 @@ impl VramAllocator for DefaultVramAllocator {
         format: TextureFormat,
         access: TextureKind,
         flags: TextureFlags,
-    ) -> Result<Texture> {
+    ) -> Result<TextureBacking> {
         let estimated = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
         let req = AllocRequest {
             reserved_estimate: estimated,
@@ -432,13 +429,15 @@ impl VramAllocator for DefaultVramAllocator {
             kind: ParcelType::Texture,
         };
         self.with_policy_read(|policy| policy.before_alloc(&req))?;
-        let tex = Texture::new(device, width, height, format, access, flags)?;
+        let tex = TextureBacking::new(device, width, height, format, access, flags)?;
         self.with_policy_read(|policy| {
             policy.after_alloc(&AllocCommit::from_texture(&tex));
         });
         Ok(tex)
     }
+}
 
+impl VramAllocator for DefaultVramAllocator {
     fn notify_freed(&self, reserved: u64, committed: u64, kind: ParcelType) {
         let event = AllocFreeEvent {
             reserved,

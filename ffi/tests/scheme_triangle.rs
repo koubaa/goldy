@@ -6,6 +6,7 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_context_create, goldy_context_destroy, goldy_device_destroy,
     goldy_instance_destroy, goldy_parcel_destroy, goldy_read_grant_consume, goldy_read_grant_destroy,
+    goldy_texture_destroy,
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_retained_pool_acquire_buffer,
     goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read_texture,
@@ -227,7 +228,7 @@ fn scheme_triangle_readback_center_pixel_lit() {
         goldy_render_pipeline_destroy(pipeline);
         goldy_shader_destroy(shader);
         goldy_parcel_destroy(vertex_parcel);
-        goldy_parcel_destroy(readback);
+        goldy_texture_destroy(readback);
         goldy_buffer_destroy(vertex_buffer);
         goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);

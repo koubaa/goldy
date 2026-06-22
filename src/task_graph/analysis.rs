@@ -694,9 +694,22 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         data: data.clone(),
                     });
                 }
-                NodeKind::CopyTexture { src, dst } => {
-                    let dst = resolve_copy_destination(*dst, resolver);
-                    commands.push(GpuCommand::CopyTexture { src: *src, dst });
+                NodeKind::CopyTexture {
+                    src,
+                    dst,
+                    dst_buffer_layout,
+                } => {
+                    if let Some(layout) = dst_buffer_layout {
+                        let (dst_buf, _) = resolve_buffer_copy_target(*dst, 0);
+                        commands.push(GpuCommand::CopyTextureToReadback {
+                            src: *src,
+                            dst: dst_buf,
+                            layout: *layout,
+                        });
+                    } else {
+                        let dst = resolve_copy_destination(*dst, resolver);
+                        commands.push(GpuCommand::CopyTexture { src: *src, dst });
+                    }
                 }
                 NodeKind::CopyRenderTarget { src, dst } => {
                     let dst = resolve_copy_destination(*dst, resolver);
@@ -1219,9 +1232,22 @@ pub(crate) fn emit_graph_commands_for_waves(
                         data: data.clone(),
                     }));
                 }
-                NodeKind::CopyTexture { src, dst } => {
-                    let dst = resolve_copy_destination(*dst, resolver);
-                    commands.push(GraphCommand::Compute(GpuCommand::CopyTexture { src: *src, dst }));
+                NodeKind::CopyTexture {
+                    src,
+                    dst,
+                    dst_buffer_layout,
+                } => {
+                    if let Some(layout) = dst_buffer_layout {
+                        let (dst_buf, _) = resolve_buffer_copy_target(*dst, 0);
+                        commands.push(GraphCommand::Compute(GpuCommand::CopyTextureToReadback {
+                            src: *src,
+                            dst: dst_buf,
+                            layout: *layout,
+                        }));
+                    } else {
+                        let dst = resolve_copy_destination(*dst, resolver);
+                        commands.push(GraphCommand::Compute(GpuCommand::CopyTexture { src: *src, dst }));
+                    }
                 }
                 NodeKind::CopyRenderTarget { src, dst } => {
                     let dst = resolve_copy_destination(*dst, resolver);
@@ -1503,6 +1529,7 @@ mod tests {
                 kind: NodeKind::CopyTexture {
                     src: 1,
                     dst: ResourceId::SwapchainOutput,
+                    dst_buffer_layout: None,
                 },
             }],
         };

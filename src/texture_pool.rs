@@ -2,16 +2,17 @@
 //!
 //! On backends where texture allocation is expensive (notably Direct3D 12),
 //! destroying and recreating many transient textures each frame causes VRAM churn
-//! and heap fragmentation. [`TexturePool`] keeps released [`crate::texture::Texture`]
+//! and heap fragmentation. [`TexturePool`] keeps released [`crate::Texture`]
 //! values alive so [`TexturePool::acquire`] can reuse GPU resources instead of
 //! allocating fresh ones each time.
 //!
-//! **Semantics:** [`Texture::drop`] always destroys owned textures. Pooling is
-//! opt-in: call [`TexturePool::release`] only after GPU work using the texture
-//! has completed (e.g. after [`Context::wait_until`](crate::Context::wait_until) with the timeline from [`TaskGraph::submit`](crate::task_graph::TaskGraph::submit)).
+//! **Semantics:** dropping an owned [`crate::Texture`] destroys the GPU resource.
+//! Pooling is opt-in: call [`TexturePool::release`] only after GPU work using the
+//! texture has completed (e.g. after [`Context::wait_until`](crate::Context::wait_until)
+//! with the timeline from [`TaskGraph::submit`](crate::task_graph::TaskGraph::submit)).
 
 use crate::device::Device;
-use crate::texture::Texture;
+use crate::Texture;
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -78,7 +79,11 @@ impl TexturePool {
                 return Ok(tex);
             }
         }
-        device.alloc_texture(width, height, format, access, flags)
+        device
+            .alloc_texture(width, height, format, access, flags)
+            .map(|backing| {
+                crate::Texture::from_borrowed_backing(backing, std::sync::Arc::downgrade(&device.inner))
+            })
     }
 
     /// Return an owned texture to the pool after the GPU has finished using it.
@@ -107,7 +112,7 @@ impl TexturePool {
         for textures in self.map.values() {
             for tex in textures {
                 entries += 1;
-                estimated_bytes += tex.byte_size();
+                estimated_bytes += tex.byte_size() as usize;
             }
         }
         TexturePoolStats {

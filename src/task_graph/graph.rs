@@ -20,7 +20,7 @@ use crate::error::GoldyError;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::sampler::Sampler;
-use crate::texture::Texture;
+use crate::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFormat};
 use anyhow::Result;
@@ -1356,6 +1356,7 @@ impl IrSubmitState {
     }
 
     pub fn register_stamp_parts(&mut self, resource_id: ResourceId, stamp: Arc<crate::parcel::ParcelStamp>) {
+        stamp.mark_scheme_registered(); // in practice - `register_stamp_parts` is only used by Scheme.
         if let Some(key) = ResourceKey::from_resource_id(resource_id) {
             self.resource_stamps.insert(key, stamp);
         } else {
@@ -1371,6 +1372,7 @@ impl IrSubmitState {
     }
 
     pub fn register_stamp(&mut self, stamp: Arc<crate::parcel::ParcelStamp>) {
+        stamp.mark_scheme_registered();
         self.stamp_targets.push(stamp);
     }
 
@@ -2090,7 +2092,7 @@ impl TaskGraph {
     /// before any node that reads the texture.
     pub fn write_texture(&mut self, texture: &Texture, data: Vec<u8>) -> Result<()> {
         let expected = texture.byte_size();
-        if data.len() != expected {
+        if data.len() != expected as usize {
             anyhow::bail!("write_texture: expected {} bytes, got {}", expected, data.len());
         }
         let width = texture.width();
@@ -2136,6 +2138,7 @@ impl TaskGraph {
             kind: NodeKind::CopyTexture {
                 src: src_h,
                 dst: ResourceId::Texture(dst_h),
+                dst_buffer_layout: None,
             },
         });
     }
@@ -2162,6 +2165,7 @@ impl TaskGraph {
             kind: NodeKind::CopyTexture {
                 src: src_h,
                 dst: ResourceId::SwapchainOutput,
+                dst_buffer_layout: None,
             },
         });
     }
@@ -2769,7 +2773,7 @@ impl<'a> NodeBuilder<'a> {
     /// Declare that this node accesses a texture with the given logical access.
     pub fn with_texture(mut self, tex: &Texture, access: NodeAccess) -> Self {
         self.bindings.push(ResourceBinding {
-            resource: ResourceId::Texture(tex.handle),
+            resource: ResourceId::Texture(tex.gpu_handle()),
             access,
         });
         self
@@ -3013,7 +3017,7 @@ impl<'a> RenderPassBuilder<'a> {
     /// Like [`Self::with_texture`] but for use while recording on `&mut self`.
     pub fn with_texture(&mut self, tex: &Texture, access: NodeAccess) -> &mut Self {
         self.bindings.push(ResourceBinding {
-            resource: ResourceId::Texture(tex.handle),
+            resource: ResourceId::Texture(tex.gpu_handle()),
             access,
         });
         self
@@ -3174,7 +3178,6 @@ mod tests {
     use crate::render_target::RenderTarget;
     use crate::shader::ShaderModule;
     use crate::types::{Color, TextureFormat};
-    use crate::Texture;
 
     fn count_logical_dispatches(cmds: &[GpuCommand]) -> usize {
         cmds.iter()
@@ -3777,15 +3780,17 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let tex = Texture::new(
-            &device,
-            4,
-            4,
-            crate::types::TextureFormat::Rgba8Unorm,
-            crate::types::TextureKind::Interpolated,
-            crate::types::TextureFlags::COPY_DST,
-        )
-        .unwrap();
+        let mut pool = crate::retained_pool::RetainedPool::new(Arc::new(device.clone()));
+        let tex = pool
+            .acquire_texture(
+                4,
+                4,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Interpolated,
+                crate::types::TextureFlags::COPY_DST,
+                None,
+            )
+            .unwrap();
 
         let mut graph = TaskGraph::new();
         graph.write_texture(&tex, vec![0u8; 4 * 4 * 4]).unwrap();
@@ -3809,15 +3814,17 @@ mod tests {
         let shader = mock_shader(&device);
         let pipeline = mock_pipeline(&device, &shader);
 
-        let tex = Texture::new(
-            &device,
-            2,
-            2,
-            crate::types::TextureFormat::Rgba8Unorm,
-            crate::types::TextureKind::Interpolated,
-            crate::types::TextureFlags::COPY_DST,
-        )
-        .unwrap();
+        let mut pool = crate::retained_pool::RetainedPool::new(Arc::new(device.clone()));
+        let tex = pool
+            .acquire_texture(
+                2,
+                2,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureKind::Interpolated,
+                crate::types::TextureFlags::COPY_DST,
+                None,
+            )
+            .unwrap();
         let buf = Allocation::new(&device, 256, crate::BufferKind::Scattered).unwrap();
 
         let mut graph = TaskGraph::new();

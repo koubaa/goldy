@@ -251,6 +251,7 @@ pub(super) fn create(
             bindless_index,
             sampled_bindless_index,
             current_layout: std::sync::atomic::AtomicI32::new(initial_layout.as_raw()),
+            is_storage_image,
             transient_heap_suballoc: false,
             debug_name: Mutex::new(None),
         },
@@ -279,6 +280,9 @@ pub(super) fn write(
     let image = texture.image;
     let tex_width = texture.width;
     let tex_height = texture.height;
+    // Storage images (no SAMPLED usage) must settle to GENERAL, not
+    // SHADER_READ_ONLY_OPTIMAL (VUID-VkImageMemoryBarrier2-oldLayout-01211).
+    let settled_layout = texture.settled_shader_read_layout();
 
     // Validate dimensions
     if width != tex_width || height != tex_height {
@@ -430,14 +434,15 @@ pub(super) fn write(
             &[region],
         );
 
-        // Transition image to shader read
+        // Transition image to its settled shader-read layout. Storage images go to
+        // GENERAL (compute-readable); sampled-only images to SHADER_READ_ONLY_OPTIMAL.
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
             .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(settled_layout)
             .image(image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -477,7 +482,7 @@ pub(super) fn write(
     }
 
     if let Some(tex) = textures.get(&texture_handle) {
-        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        tex.set_image_layout(settled_layout);
     }
 
     tracing::debug!("Wrote {}x{} texture data ({} bytes)", width, height, data.len());
@@ -504,6 +509,9 @@ pub(super) fn write_region(
     let tex_width = texture.width;
     let tex_height = texture.height;
     let old_layout = texture.image_layout();
+    // Storage images must settle to GENERAL, not SHADER_READ_ONLY_OPTIMAL
+    // (VUID-VkImageMemoryBarrier2-oldLayout-01211).
+    let settled_layout = texture.settled_shader_read_layout();
 
     if x + width > tex_width || y + height > tex_height {
         anyhow::bail!(
@@ -658,7 +666,7 @@ pub(super) fn write_region(
             .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
             .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(settled_layout)
             .image(image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -697,7 +705,7 @@ pub(super) fn write_region(
     }
 
     if let Some(tex) = textures.get(&texture_handle) {
-        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        tex.set_image_layout(settled_layout);
     }
 
     tracing::debug!(
@@ -718,7 +726,7 @@ pub(super) fn record_copy_texture_to_readback(
     textures: &HashMap<TextureHandle, TextureState>,
     staging_buffer: vk::Buffer,
     src: TextureHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
 ) -> Result<()> {
     let (image, old_layout) = {
         let texture = textures
@@ -974,11 +982,13 @@ pub(super) fn read_to_cpu(
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
     unsafe {
-        logical_device.device.queue_submit(
-            logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            vk::Fence::null(),
-        )
+        logical_device
+            .device
+            .queue_submit(
+                logical_device.queue,
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
     }
     .context("Failed to submit command buffer")?;
 
@@ -1268,7 +1278,7 @@ pub(super) fn record_compute_texture_upload(
     cmd: vk::CommandBuffer,
     scratch: &ComputeTextureScratch,
 ) -> Result<()> {
-    let (device_handle, width, height, format, image, old_layout) = {
+    let (device_handle, width, height, format, image, old_layout, settled_layout) = {
         let texture = textures
             .get(&scratch.texture_handle)
             .context("record_compute_texture_upload: invalid texture")?;
@@ -1279,6 +1289,9 @@ pub(super) fn record_compute_texture_upload(
             texture.format,
             texture.image,
             texture.image_layout(),
+            // Storage images settle to GENERAL, not SHADER_READ_ONLY_OPTIMAL
+            // (VUID-VkImageMemoryBarrier2-oldLayout-01211).
+            texture.settled_shader_read_layout(),
         )
     };
 
@@ -1358,7 +1371,7 @@ pub(super) fn record_compute_texture_upload(
         .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
         .dst_access_mask(vk::AccessFlags2::SHADER_READ)
         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .new_layout(settled_layout)
         .image(image)
         .subresource_range(vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1372,7 +1385,7 @@ pub(super) fn record_compute_texture_upload(
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2) };
 
     if let Some(tex) = textures.get(&scratch.texture_handle) {
-        tex.set_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        tex.set_image_layout(settled_layout);
     }
 
     let _ = format;

@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use goldy::{
-    Context, DepthFormat, Device, Grant, GrantTexture, Parcel, ReadGrant, Scheme, Submission, TextureFlags,
+    Context, DepthFormat, Device, Grant, GrantTexture, Parcel, ReadGrant, Scheme, Submission, Texture, TextureFlags,
     TextureFormat, TextureKind,
 };
 use std::sync::Arc;
@@ -15,7 +15,7 @@ pub fn acquire_readback_texture(
     width: u32,
     height: u32,
     format: TextureFormat,
-) -> Parcel {
+) -> Texture {
     pool.acquire_texture(
         width,
         height,

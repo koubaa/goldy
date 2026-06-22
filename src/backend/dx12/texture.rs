@@ -779,13 +779,13 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
 }
 
 /// Query grant-readback staging layout for a 2D texture allocation.
-pub(super) fn query_readback_layout(
+pub(super) fn query_texture_copy_footprint(
     state: &Dx12State,
     device_handle: DeviceHandle,
     width: u32,
     height: u32,
     format: TextureFormat,
-) -> Result<crate::backend::TextureReadbackLayout> {
+) -> Result<crate::backend::TextureCopyFootprint> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let dxgi_format = format_to_dxgi(format);
     let res_desc = D3D12_RESOURCE_DESC {
@@ -815,7 +815,7 @@ pub(super) fn query_readback_layout(
         );
     }
     let logical_bytes = (width as u64) * (height as u64) * (format.bytes_per_pixel() as u64);
-    Ok(crate::backend::TextureReadbackLayout {
+    Ok(crate::backend::TextureCopyFootprint {
         width,
         height,
         format,
@@ -834,7 +834,7 @@ pub(super) fn record_copy_texture_to_readback(
     buffers: &std::collections::HashMap<BufferHandle, super::types::BufferState>,
     src: TextureHandle,
     dst: BufferHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
 ) -> Result<()> {
     // Extract everything we need from the immutable borrow before any mutable access.
     let (src_resource, dst_resource, layout_before, is_storage, dxgi_format) = {

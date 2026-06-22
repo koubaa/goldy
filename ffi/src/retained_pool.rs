@@ -1,4 +1,4 @@
-//! FFI bindings for [`goldy::RetainedPool`], [`goldy::Buffer`], [`goldy::Parcel`], and record builders.
+//! FFI bindings for [`goldy::RetainedPool`], [`goldy::Buffer`], [`goldy::Texture`], [`goldy::Parcel`], and record builders.
 
 use crate::device::GoldyDevice;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
@@ -52,7 +52,12 @@ pub(crate) unsafe fn buffer_unit_at<'a>(
     Ok((*buffer).inner.unit(idx))
 }
 
-/// Opaque handle to a bindable [`goldy::Parcel`] (texture parcels; buffer units use [`GoldyBuffer`] + index).
+/// Opaque handle to an acquired [`goldy::Texture`].
+pub struct GoldyTexture {
+    pub(crate) inner: goldy::Texture,
+}
+
+/// Opaque handle to a bindable [`goldy::Parcel`] (buffer units; textures use [`GoldyTexture`]).
 pub struct GoldyParcel {
     pub(crate) inner: goldy::Parcel,
 }
@@ -129,7 +134,7 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_texture(
     flags: GoldyTextureFlags,
     data: *const u8,
     data_size: usize,
-) -> *mut GoldyParcel {
+) -> *mut GoldyTexture {
     if pool.is_null() {
         set_last_error_from_anyhow(&anyhow::anyhow!("RetainedPool is null"));
         return ptr::null_mut();
@@ -153,7 +158,7 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_texture(
         .inner
         .acquire_texture(width, height, format.into(), access.into(), flags.into(), init)
     {
-        Ok(parcel) => Box::into_raw(Box::new(GoldyParcel { inner: parcel })),
+        Ok(texture) => Box::into_raw(Box::new(GoldyTexture { inner: texture })),
         Err(e) => {
             set_last_error_from_anyhow(&e);
             ptr::null_mut()
@@ -165,6 +170,13 @@ pub unsafe extern "C" fn goldy_retained_pool_acquire_texture(
 pub unsafe extern "C" fn goldy_buffer_destroy(buffer: *mut GoldyBuffer) {
     if !buffer.is_null() {
         drop(Box::from_raw(buffer));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn goldy_texture_destroy(texture: *mut GoldyTexture) {
+    if !texture.is_null() {
+        drop(Box::from_raw(texture));
     }
 }
 
@@ -181,6 +193,14 @@ pub unsafe extern "C" fn goldy_buffer_byte_size(buffer: *const GoldyBuffer) -> u
         return 0;
     }
     (*buffer).inner.byte_size()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn goldy_texture_byte_size(texture: *const GoldyTexture) -> u64 {
+    if texture.is_null() {
+        return 0;
+    }
+    (*texture).inner.byte_size()
 }
 
 #[no_mangle]

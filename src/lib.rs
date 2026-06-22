@@ -66,7 +66,7 @@ pub use allocation_policy::{AllocCommit, AllocFreeEvent, AllocRequest, Allocatio
 pub use error::GoldyError;
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
-pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField};
+pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField, Texture};
 pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
 pub use scheme::{
     Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture, Loan,
@@ -104,7 +104,6 @@ pub use task_graph::{
 };
 pub use task_graph::{SwapchainOutputHandle, SWAPCHAIN_SLOT_PLACEHOLDER};
 
-pub use texture::Texture;
 pub use texture_pool::{TexturePool, TexturePoolConfig, TexturePoolStats};
 pub use transient_allocator::{
     BumpResetAllocator, TransientAllocator, TransientAllocatorConfig, TransientAllocatorStrategy,

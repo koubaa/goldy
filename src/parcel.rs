@@ -8,9 +8,12 @@ use crate::buffer::{Allocation, BufferSource, BufferView, StructuredBufferElemen
 use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
-use crate::texture::Texture;
-use crate::timeline::{ReferenceTable, ResourceSync, TimelineValue, WRITE_KINDS_TRANSFER};
-use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle};
+use crate::texture::TextureBacking;
+use crate::timeline::{
+    PromiseState, ReferenceTable, ResourceSync, Settle, TimelinePromise, TimelineValue,
+    WRITE_KINDS_TRANSFER,
+};
+use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle, TextureFlags};
 use crate::vram_allocator::ParcelType;
 use std::borrow::Cow;
 use std::ops::{Deref, Index};
@@ -40,7 +43,13 @@ pub(crate) type InteractionSet = Vec<InteractionEdge>;
 pub(crate) struct ParcelStamp {
     pub(crate) sync: Arc<Mutex<ResourceSync>>,
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
+    pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
+
+
+    /// Set when this stamp is registered for scheme/task-graph hazard tracking.
+    /// TODO: delete this when task graph is eliminated
+    scheme_registered: Arc<AtomicBool>,
 }
 
 impl ParcelStamp {
@@ -48,12 +57,128 @@ impl ParcelStamp {
         Self {
             sync: Arc::new(Mutex::new(ResourceSync::default())),
             interaction_set: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
+            scheme_registered: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn clone_shared_cells(&self) -> Self {
+        Self {
+            sync: Arc::clone(&self.sync),
+            interaction_set: Arc::clone(&self.interaction_set),
+            pending: Arc::clone(&self.pending),
+            home_device: self.home_device.clone(),
+            scheme_registered: Arc::clone(&self.scheme_registered),
+        }
+    }
+
+    //TODO: delete this when taskgraph is removed
+    pub(crate) fn mark_scheme_registered(&self) {
+        self.scheme_registered.store(true, Ordering::Relaxed);
+    }
+
+    //TODO: delete this when taskgraph is removed
+    pub(crate) fn is_scheme_registered(&self) -> bool {
+        self.scheme_registered.load(Ordering::Relaxed)
     }
 
     pub(crate) fn merged_references(&self) -> ReferenceTable {
         self.sync.lock().unwrap().merged()
+    }
+
+    pub(crate) fn push_pending(&self, promise: TimelinePromise) {
+        self.pending.lock().unwrap().push(promise);
+    }
+
+    /// Submission-order gate: block until every pending promise is resolved or abandoned,
+    /// folding resolved values into [`ResourceSync::last_reads`]. This is not a GPU-completion wait.
+    ///
+    /// # Threading contract (strict — do not violate)
+    ///
+    /// This function **blocks the calling thread** until all pending easement promises
+    /// on this stamp are settled. It is therefore a hard requirement that the thread
+    /// resolving those promises (`PromiseResolver::resolve`, typically TID_PRESENT) is
+    /// **never** the same thread that calls `submit()` (which calls this function).
+    /// Violating this invariant causes an unrecoverable deadlock: submit waits for
+    /// present-consume, while present-consume is stuck behind submit completing.
+    ///
+    /// The expected call topology is:
+    ///   - Render/submit thread: `scheme.submit()` → `drain_pending_for_submit_gate`
+    ///   - TID_PRESENT: `grant.consume()` → `resolver.resolve(present_tv)`
+    ///
+    /// Do not fold the two roles onto one thread, even in fallback or teardown paths.
+    pub(crate) fn drain_pending_for_submit_gate(&self, ctx: ContextHandle) {
+        loop {
+            let snapshot: Vec<TimelinePromise> = self.pending.lock().unwrap().clone();
+            if snapshot.is_empty() {
+                return;
+            }
+            for promise in &snapshot {
+                if matches!(promise.poll(), PromiseState::Pending) {
+                    promise.block();
+                }
+            }
+            let mut pending = self.pending.lock().unwrap();
+            let mut sync = self.sync.lock().unwrap();
+            pending.retain(|promise| match promise.poll() {
+                PromiseState::Pending => true,
+                PromiseState::Resolved(tv) => {
+                    sync.record_read(ctx, tv);
+                    false
+                }
+                PromiseState::Abandoned => false,
+            });
+            if pending.is_empty() {
+                return;
+            }
+        }
+    }
+
+    fn lazy_gc_pending(&self, ctx: ContextHandle) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            return false;
+        }
+        let mut sync = self.sync.lock().unwrap();
+        let mut any_pending = false;
+        pending.retain(|promise| match promise.poll() {
+            PromiseState::Pending => {
+                any_pending = true;
+                true
+            }
+            PromiseState::Resolved(tv) => {
+                sync.record_read(ctx, tv);
+                false
+            }
+            PromiseState::Abandoned => false,
+        });
+        any_pending
+    }
+
+    /// Reuse-gate state for this stamp on `ctx`, including outstanding timeline promises.
+    pub(crate) fn settle_on_context(&self, ctx: &Context) -> Settle {
+        let ctx_handle = ctx.backend_handle();
+        if self.lazy_gc_pending(ctx_handle) {
+            return Settle::Pending;
+        }
+        let merged = self.sync.lock().unwrap().merged();
+        if merged.is_empty() {
+            return Settle::Ready;
+        }
+        let backend = ctx.device().inner.backend.lock().unwrap();
+        let mut waiting = None;
+        for (&c, &tv) in &merged {
+            let progress = backend.gpu_progress(c);
+            if progress < tv {
+                waiting = Some(waiting.map_or(tv, |w: TimelineValue| w.max(tv)));
+            }
+        }
+        drop(backend);
+        match waiting {
+            Some(tv) => Settle::Waiting(tv),
+            None => Settle::Ready,
+        }
     }
 }
 
@@ -74,7 +199,7 @@ enum ParcelBacking {
         offset: u64,
         len: u64,
     },
-    Texture(Texture),
+    Texture(TextureBacking),
 }
 
 /// A bindable unit of GPU property: whole buffer, buffer range, or texture.
@@ -108,11 +233,7 @@ impl Clone for Parcel {
                 },
                 ParcelBacking::Texture(t) => ParcelBacking::Texture(t.clone()),
             },
-            stamp: ParcelStamp {
-                sync: Arc::clone(&self.stamp.sync),
-                interaction_set: Arc::clone(&self.stamp.interaction_set),
-                home_device: self.stamp.home_device.clone(),
-            },
+            stamp: self.stamp.clone_shared_cells(),
             bookkeeping: None,
         }
     }
@@ -148,12 +269,25 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn from_texture(tex: Texture, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
+    pub(crate) fn from_texture(tex: TextureBacking, home_device: Weak<DeviceInner>) -> Self {
         Self {
             backing: ParcelBacking::Texture(tex),
             stamp: ParcelStamp::new(home_device),
-            bookkeeping: Some(bookkeeping),
+            bookkeeping: None,
         }
+    }
+
+    /// Clone this parcel's stamp cells onto a new texture backing (non-owning views).
+    pub(crate) fn clone_stamp_with_texture(&self, tex: TextureBacking) -> Self {
+        Self {
+            backing: ParcelBacking::Texture(tex),
+            stamp: self.stamp.clone_shared_cells(),
+            bookkeeping: None,
+        }
+    }
+
+    pub(crate) fn is_scheme_registered(&self) -> bool {
+        self.stamp.is_scheme_registered()
     }
 
     /// Zoning / telemetry label (buffer vs texture).
@@ -210,18 +344,19 @@ impl Parcel {
         self.stamp.merged_references().get(&ctx).copied()
     }
 
+    /// Reuse-gate state for this parcel on `ctx`, including outstanding timeline promises.
+    pub fn settle(&self, ctx: &Context) -> Settle {
+        self.stamp.settle_on_context(ctx)
+    }
+
     /// True when no in-flight GPU work on `ctx` still references this parcel.
     pub fn is_settled(&self, ctx: &Context) -> bool {
-        ctx.parcel_ready(&self.last_referenced())
+        matches!(self.settle(ctx), Settle::Ready)
     }
 
     /// Shared stamp cell updated by [`crate::TaskGraph`] at submit.
     pub(crate) fn stamp_handle(&self) -> Arc<ParcelStamp> {
-        Arc::new(ParcelStamp {
-            sync: Arc::clone(&self.stamp.sync),
-            interaction_set: Arc::clone(&self.stamp.interaction_set),
-            home_device: self.stamp.home_device.clone(),
-        })
+        Arc::new(self.stamp.clone_shared_cells())
     }
 
     pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
@@ -263,6 +398,16 @@ impl Parcel {
         }
     }
 
+    /// Whether this texture parcel owns its GPU resource (see [`TextureBacking::is_owned`]).
+    ///
+    /// Must not clone the backing: an owning clone's drop would destroy the live texture.
+    pub(crate) fn texture_is_owned(&self) -> bool {
+        match &self.backing {
+            ParcelBacking::Texture(t) => t.is_owned(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn buffer_handle(&self) -> Option<BufferHandle> {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => Some(b.gpu_buffer_handle()),
@@ -288,9 +433,10 @@ impl Parcel {
         }
     }
 
-    pub(crate) fn grant_texture_keepalive(&self) -> Result<Texture, anyhow::Error> {
+    pub(crate) fn grant_texture_keepalive(&self) -> Result<TextureBacking, anyhow::Error> {
         match &self.backing {
-            ParcelBacking::Texture(t) => Ok(t.clone()),
+            // Never clone an owning backing: Drop on the clone would destroy the live GPU texture.
+            ParcelBacking::Texture(t) => Ok(t.borrow()),
             _ => anyhow::bail!("grant_read_texture requires texture parcel"),
         }
     }
@@ -342,7 +488,9 @@ impl Parcel {
         match &self.backing {
             ParcelBacking::WholeBuffer(b) => b.read_to_cpu(device, output),
             ParcelBacking::BufferRange { view, .. } => view.read_to_cpu(device, output),
-            ParcelBacking::Texture(t) => t.read_to_cpu(output),
+            ParcelBacking::Texture(_) => anyhow::bail!(
+                "texture parcels are not host-readable; copy to a CPU_READABLE buffer parcel via a scheme first"
+            ),
         }
     }
 }
@@ -580,6 +728,257 @@ impl Buffer {
             BufferStorage::Partitioned { parent, .. } => parent.gpu_buffer_handle(),
         }
     }
+
+    /// Creation flags for the backing allocation (e.g. [`crate::types::BufferFlags::CPU_READABLE`]).
+    pub fn flags(&self) -> BufferFlags {
+        match &self.storage {
+            BufferStorage::Single(b) => b.flags(),
+            BufferStorage::Partitioned { parent, .. } => parent.flags(),
+        }
+    }
+}
+
+/// An acquired GPU texture — one bindable parcel.
+///
+/// Release by dropping or [`crate::retained_pool::RetainedPool::release_texture`].
+pub struct Texture {
+    parcel: Parcel,
+    bookkeeping: Option<BookkeepingGuard>,
+    home_device: Weak<DeviceInner>,
+}
+
+impl Clone for Texture {
+    fn clone(&self) -> Self {
+        Self {
+            parcel: self.parcel.clone(),
+            bookkeeping: None,
+            home_device: self.home_device.clone(),
+        }
+    }
+}
+
+impl Texture {
+    pub(crate) fn from_backing(
+        backing: TextureBacking,
+        bookkeeping: BookkeepingGuard,
+        home_device: Weak<DeviceInner>,
+    ) -> Self {
+        Self {
+            parcel: Parcel::from_texture(backing, home_device.clone()),
+            bookkeeping: Some(bookkeeping),
+            home_device,
+        }
+    }
+
+    pub(crate) fn from_parcel(
+        parcel: Parcel,
+        bookkeeping: BookkeepingGuard,
+        home_device: Weak<DeviceInner>,
+    ) -> Self {
+        Self {
+            parcel,
+            bookkeeping: Some(bookkeeping),
+            home_device,
+        }
+    }
+
+    pub(crate) fn from_returned_parcel(parcel: Parcel, home_device: Weak<DeviceInner>) -> Self {
+        Self {
+            parcel,
+            bookkeeping: None,
+            home_device,
+        }
+    }
+
+    pub(crate) fn from_borrowed_backing(backing: TextureBacking, home_device: Weak<DeviceInner>) -> Self {
+        Self {
+            parcel: Parcel::from_texture(backing, home_device.clone()),
+            bookkeeping: None,
+            home_device,
+        }
+    }
+
+    /// The bindable parcel (same as `&*self`).
+    pub fn whole(&self) -> &Parcel {
+        &self.parcel
+    }
+
+    pub fn width(&self) -> u32 {
+        self.parcel.texture_descriptor().expect("texture parcel").0
+    }
+
+    pub fn height(&self) -> u32 {
+        self.parcel.texture_descriptor().expect("texture parcel").1
+    }
+
+    pub fn format(&self) -> crate::types::TextureFormat {
+        self.parcel.texture_descriptor().expect("texture parcel").2
+    }
+
+    pub fn access(&self) -> crate::types::TextureKind {
+        self.parcel.texture_descriptor().expect("texture parcel").3
+    }
+
+    pub fn flags(&self) -> crate::types::TextureFlags {
+        self.parcel.texture_descriptor().expect("texture parcel").4
+    }
+
+    /// Buffer footprint for copying this texture into a destination buffer parcel.
+    ///
+    /// Requires [`TextureFlags::COPY_SRC`]. Swapchain drawables and other non-copyable
+    /// textures do not satisfy that requirement and this method panics.
+    pub fn copy_layout(&self) -> crate::backend::TextureCopyFootprint {
+        if !self.flags().contains(TextureFlags::COPY_SRC) {
+            panic!(
+                "Texture::copy_layout requires TextureFlags::COPY_SRC; \
+                 swapchain drawables and other non-copyable textures cannot be copied from"
+            );
+        }
+        let home = self
+            .home_device
+            .upgrade()
+            .expect("Texture::copy_layout: home device dropped");
+        let backend = home.backend.lock().unwrap();
+        backend
+            .query_texture_copy_footprint(home.handle, self.width(), self.height(), self.format())
+            .unwrap_or_else(|e| panic!("Texture::copy_layout backend query failed: {e}"))
+    }
+
+    pub fn gpu_handle(&self) -> crate::backend::TextureHandle {
+        self.parcel.texture_handle().expect("texture parcel")
+    }
+
+    pub fn resource_index(&self, access: ResourceAccess) -> Option<u32> {
+        self.parcel.resource_index(access)
+    }
+
+    pub fn handle(&self, access: ResourceAccess) -> Option<ResourceHandle> {
+        self.parcel.handle(access)
+    }
+
+    pub fn byte_size(&self) -> u64 {
+        self.parcel.byte_size()
+    }
+
+    pub fn is_owned(&self) -> bool {
+        self.parcel.texture_is_owned()
+    }
+
+    pub fn kind(&self) -> ParcelType {
+        ParcelType::Texture
+    }
+
+    pub fn last_referenced(&self) -> ReferenceTable {
+        self.parcel.last_referenced()
+    }
+
+    pub fn is_settled(&self, ctx: &Context) -> bool {
+        self.parcel.is_settled(ctx)
+    }
+
+    pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
+        self.parcel.mark_referenced(ctx, epoch);
+    }
+
+    pub fn set_debug_name(&self, name: &str) {
+        self.parcel
+            .grant_texture_keepalive()
+            .expect("texture parcel")
+            .set_debug_name(name);
+    }
+
+    /// Non-owning view sharing this texture's parcel stamp.
+    pub fn borrow(&self) -> Self {
+        let backing = self
+            .parcel
+            .grant_texture_keepalive()
+            .expect("texture parcel")
+            .borrow();
+        Self {
+            parcel: self.parcel.clone_stamp_with_texture(backing),
+            bookkeeping: None,
+            home_device: self.home_device.clone(),
+        }
+    }
+
+    /// Wrap an externally-owned GPU texture (e.g. swapchain drawable).
+    pub(crate) fn borrowed(
+        device: &crate::device::Device,
+        backend: Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
+        handle: crate::backend::TextureHandle,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Self {
+        Self::from_borrowed_backing(
+            TextureBacking::borrowed(backend, handle, width, height, format),
+            Arc::downgrade(&device.inner),
+        )
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TaskGraph::write_texture_region() for batched, non-blocking uploads. \
+                This method submits synchronously and stalls the GPU."
+    )]
+    #[allow(deprecated)]
+    pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> anyhow::Result<()> {
+        self.parcel
+            .grant_texture_keepalive()?
+            .write_region(x, y, width, height, data)
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TaskGraph::write_texture() for batched, non-blocking uploads. \
+                This method submits synchronously and stalls the GPU."
+    )]
+    #[allow(deprecated)]
+    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
+        self.parcel.grant_texture_keepalive()?.write(data)
+    }
+
+    #[deprecated(
+        note = "Copy to a CPU_READABLE buffer parcel via a scheme, submit, wait the timeline, then read the buffer"
+    )]
+    #[allow(deprecated)]
+    pub fn read_to_cpu(&self, output: &mut [u8]) -> anyhow::Result<()> {
+        if self.parcel.is_scheme_registered() {
+            anyhow::bail!(
+                "texture is tracked by a scheme; copy to a CPU_READABLE buffer parcel via a scheme instead of Texture::read_to_cpu"
+            );
+        }
+        self.parcel.grant_texture_keepalive()?.read_to_cpu(output)
+    }
+
+    pub(crate) fn release_bookkeeping(&mut self) {
+        self.bookkeeping = None;
+        self.parcel.release_bookkeeping();
+    }
+
+    pub(crate) fn home_device(&self) -> &Weak<DeviceInner> {
+        &self.home_device
+    }
+
+    pub(crate) fn into_lease_parcel(mut self) -> Parcel {
+        if let Some(guard) = self.bookkeeping.take() {
+            self.parcel.attach_bookkeeping(guard);
+        }
+        self.parcel
+    }
+
+    pub(crate) fn into_parcel(mut self) -> Parcel {
+        self.release_bookkeeping();
+        self.parcel
+    }
+}
+
+impl Deref for Texture {
+    type Target = Parcel;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parcel
+    }
 }
 
 impl Deref for Buffer {
@@ -737,5 +1136,97 @@ impl Drop for BookkeepingGuard {
         if let Some(pool) = self.pool.upgrade() {
             pool.subtract(self.kind, self.bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::device::Device;
+    use crate::retained_pool::RetainedPool;
+    use crate::timeline::{PromiseState, Settle, TimelinePromise};
+    use std::sync::Arc;
+
+    fn mock_device() -> Arc<Device> {
+        Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    fn mock_parcel(_device: &Arc<Device>, pool: &mut RetainedPool) -> Parcel {
+        let buffer = pool
+            .acquire_record([field("x", Init::zeros::<u32>(4))])
+            .expect("buffer");
+        buffer.whole().clone()
+    }
+
+    #[test]
+    fn settle_ready_when_never_referenced() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = mock_parcel(&device, &mut pool);
+        assert_eq!(parcel.settle(&ctx), Settle::Ready);
+        assert!(parcel.is_settled(&ctx));
+    }
+
+    #[test]
+    fn settle_pending_with_unresolved_promise() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = mock_parcel(&device, &mut pool);
+        let (promise, _resolver) = TimelinePromise::new();
+        parcel.stamp_handle().push_pending(promise);
+        assert_eq!(parcel.settle(&ctx), Settle::Pending);
+        assert!(!parcel.is_settled(&ctx));
+    }
+
+    #[test]
+    fn settle_waiting_when_epoch_unreached() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = mock_parcel(&device, &mut pool);
+        parcel.mark_referenced(ctx.backend_handle(), 50);
+        assert_eq!(parcel.settle(&ctx), Settle::Waiting(50));
+        assert!(!parcel.is_settled(&ctx));
+    }
+
+    #[test]
+    fn settle_lazy_gc_folds_resolved_promise_into_last_reads() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let ctx_handle = ctx.backend_handle();
+        let parcel = mock_parcel(&device, &mut pool);
+        let stamp = parcel.stamp_handle();
+        let (promise, resolver) = TimelinePromise::new();
+        stamp.push_pending(promise);
+        resolver.resolve(25);
+        assert_eq!(parcel.settle(&ctx), Settle::Waiting(25));
+        assert!(stamp.pending.lock().unwrap().is_empty());
+        assert_eq!(
+            stamp.sync.lock().unwrap().last_reads.get(&ctx_handle),
+            Some(&25)
+        );
+    }
+
+    #[test]
+    fn settle_lazy_gc_drops_abandoned_promise() {
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let ctx = device.create_context().unwrap();
+        let parcel = mock_parcel(&device, &mut pool);
+        let stamp = parcel.stamp_handle();
+        let (promise, resolver) = TimelinePromise::new();
+        stamp.push_pending(promise);
+        drop(resolver);
+        assert_eq!(promise_state_after_abandon(&stamp), PromiseState::Abandoned);
+        assert_eq!(parcel.settle(&ctx), Settle::Ready);
+        assert!(stamp.pending.lock().unwrap().is_empty());
+    }
+
+    fn promise_state_after_abandon(stamp: &Arc<ParcelStamp>) -> PromiseState {
+        stamp.pending.lock().unwrap()[0].poll()
     }
 }

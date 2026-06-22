@@ -6,6 +6,7 @@
 //! serialized against worker schemes by queue order. Callers do not use
 //! `TaskGraph::clear_buffer` or `TaskGraph::write_buffer` directly.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
+#![allow(deprecated)]
 
 #[path = "common/submission.rs"]
 mod submission;
@@ -41,6 +42,54 @@ fn make_device() -> Device {
         .expect("Failed to request adapter")
         .request_device(&DeviceDescriptor::default())
         .expect("Failed to create device")
+}
+
+fn test_alloc_texture(
+    device: &Device,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    access: TextureKind,
+    flags: TextureFlags,
+) -> goldy::Texture {
+    RetainedPool::new(Arc::new(device.clone()))
+        .acquire_texture(width, height, format, access, flags, Some(data))
+        .expect("acquire_texture")
+}
+
+/// Read a scheme-tracked texture via copy to a host buffer parcel.
+fn read_texture_via_scheme_copy(ctx: &goldy::Context, texture: &goldy::Texture) -> Vec<u8> {
+    let layout = texture.copy_layout();
+    let mut pool = RetainedPool::new(Arc::new(ctx.device().clone()));
+    let host_buf = pool
+        .acquire_buffer(
+            layout.staging_bytes,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::CPU_READABLE,
+            None,
+        )
+        .expect("host buffer");
+    let mut scheme = Scheme::new(ctx);
+    scheme
+        .copy_texture(texture, &host_buf)
+        .expect("copy_texture");
+    let frame = scheme.submit().expect("submit");
+    frame.wait(ctx).expect("wait");
+    let mut padded = vec![0u8; layout.staging_bytes as usize];
+    host_buf
+        .read_to_cpu(ctx.device(), &mut padded)
+        .expect("read host buffer");
+    let row_bytes = layout.tight_row_bytes() as usize;
+    let pitch = layout.row_pitch as usize;
+    let mut output = vec![0u8; layout.logical_bytes as usize];
+    for row in 0..layout.height as usize {
+        let src_offset = layout.footprint_offset as usize + row * pitch;
+        let dst_offset = row * row_bytes;
+        output[dst_offset..dst_offset + row_bytes].copy_from_slice(&padded[src_offset..src_offset + row_bytes]);
+    }
+    output
 }
 
 fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
@@ -1640,11 +1689,8 @@ fn scheme_compute_write_to_texture() {
     assert_eq!(output[3], 255, "A channel");
 }
 
-/// Verify that a raw [`goldy::Texture`] (not a `Parcel`-wrapped texture from [`RetainedPool`])
-/// can be bound via [`goldy::scheme::SchemeNodeBuilder::with_parcel`].
-///
-/// `SchemeBindable for Texture` registers the barrier binding without a `ParcelStamp`
-/// (matching the classic `TaskGraph::NodeBuilder::with_texture` behaviour).
+/// Verify that a [`goldy::Texture`] from [`RetainedPool`] can be bound via
+/// [`goldy::scheme::SchemeNodeBuilder::with_parcel`] using its parcel stamp.
 #[test]
 fn scheme_with_parcel_raw_texture() {
     let device = make_device();
@@ -1659,8 +1705,7 @@ fn scheme_with_parcel_raw_texture() {
     let wg_y = height.div_ceil(8);
 
     let zeros = vec![0u8; (width * height * 4) as usize];
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
+    let texture = test_alloc_texture(
         &device,
         &zeros,
         width,
@@ -1668,8 +1713,8 @@ fn scheme_with_parcel_raw_texture() {
         TextureFormat::Rgba8Unorm,
         TextureKind::Direct,
         TextureFlags::COPY_SRC,
-    )
-    .expect("texture");
+    );
+
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -1679,8 +1724,7 @@ fn scheme_with_parcel_raw_texture() {
     let frame = scheme.submit().expect("submit");
     frame.wait(&ctx).expect("wait");
 
-    let mut output = vec![0u8; texture.byte_size()];
-    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+    let output = read_texture_via_scheme_copy(&ctx, &texture);
 
     assert_eq!(output[0], 255, "R channel");
     assert_eq!(output[1], 0, "G channel");
@@ -1690,6 +1734,43 @@ fn scheme_with_parcel_raw_texture() {
     assert!(
         nonzero > 0,
         "texture readback all zeros — barrier not recorded correctly"
+    );
+}
+
+#[test]
+fn scheme_tracked_texture_read_to_cpu_rejected() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let width = 8u32;
+    let height = 8u32;
+    let zeros = vec![0u8; (width * height * 4) as usize];
+    let texture = test_alloc_texture(
+        &device,
+        &zeros,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    );
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_tex_raw", &pipeline)
+        .with_parcel(&texture, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let frame = scheme.submit().expect("submit");
+    frame.wait(&ctx).expect("wait");
+
+    let mut output = vec![0u8; texture.byte_size() as usize];
+    let err = texture.read_to_cpu(&mut output).unwrap_err();
+    assert!(
+        err.to_string().contains("tracked by a scheme"),
+        "unexpected error: {err}"
     );
 }
 
@@ -2970,18 +3051,8 @@ fn scheme_commit_write_texture_round_trip() {
             [r, g, 128u8, 255u8]
         })
         .collect();
+    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC);
 
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; (W * H * 4) as usize],
-        W,
-        H,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::COPY_SRC,
-    )
-    .expect("texture");
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -2990,7 +3061,7 @@ fn scheme_commit_write_texture_round_trip() {
     let frame = scheme.submit().expect("submit");
     frame.wait(&ctx).expect("wait");
 
-    let mut output = vec![0u8; texture.byte_size()];
+    let mut output = vec![0u8; texture.byte_size() as usize];
     texture.read_to_cpu(&mut output).expect("read_to_cpu");
 
     assert_eq!(
@@ -3003,18 +3074,8 @@ fn scheme_commit_write_texture_round_trip() {
 fn scheme_commit_write_texture_wrong_size_returns_error() {
     let device = make_device();
     let ctx = submission_context(&device);
+    let texture = test_alloc_texture(&device, &vec![0u8; 8 * 8 * 4], 8, 8, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
 
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; 8 * 8 * 4],
-        8,
-        8,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::empty(),
-    )
-    .expect("texture");
 
     let mut scheme = Scheme::new(&ctx);
     // Too few bytes — must error.
@@ -3029,18 +3090,8 @@ fn scheme_commit_write_texture_wrong_size_returns_error() {
 fn scheme_commit_write_texture_marks_scheme_dirty() {
     let device = make_device();
     let ctx = submission_context(&device);
+    let texture = test_alloc_texture(&device, &vec![0u8; 4 * 4 * 4], 4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
 
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; 4 * 4 * 4],
-        4,
-        4,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::empty(),
-    )
-    .expect("texture");
 
     let mut scheme = Scheme::new(&ctx);
     assert!(scheme.is_dirty(), "new scheme starts dirty");
@@ -3067,17 +3118,8 @@ fn scheme_commit_write_texture_region_round_trip() {
     const W: u32 = 8;
     const H: u32 = 8;
     // Initialize with zeros.
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; (W * H * 4) as usize],
-        W,
-        H,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::COPY_SRC,
-    )
-    .expect("texture");
+    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC);
+
 
     // Write a 4×4 region at (2, 2) with a solid color.
     const RX: u32 = 2;
@@ -3093,7 +3135,7 @@ fn scheme_commit_write_texture_region_round_trip() {
     let frame = scheme.submit().expect("submit");
     frame.wait(&ctx).expect("wait");
 
-    let mut output = vec![0u8; texture.byte_size()];
+    let mut output = vec![0u8; texture.byte_size() as usize];
     texture.read_to_cpu(&mut output).expect("read_to_cpu");
 
     for y in 0..H as usize {
@@ -3120,18 +3162,8 @@ fn scheme_commit_write_texture_region_round_trip() {
 fn scheme_commit_write_texture_region_oob_returns_error() {
     let device = make_device();
     let ctx = submission_context(&device);
+    let texture = test_alloc_texture(&device, &vec![0u8; 8 * 8 * 4], 8, 8, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
 
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; 8 * 8 * 4],
-        8,
-        8,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::empty(),
-    )
-    .expect("texture");
 
     let mut scheme = Scheme::new(&ctx);
     // Region extends beyond texture width.
@@ -3149,17 +3181,8 @@ fn scheme_commit_write_texture_region_multiple_non_overlapping() {
 
     const W: u32 = 8;
     const H: u32 = 8;
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; (W * H * 4) as usize],
-        W,
-        H,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::COPY_SRC,
-    )
-    .expect("texture");
+    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC);
+
 
     // Top-left 4×4 → red (255,0,0,255). Bottom-right 4×4 → blue (0,0,255,255).
     let red: Vec<u8> = vec![255u8, 0, 0, 255].repeat(16);
@@ -3175,7 +3198,7 @@ fn scheme_commit_write_texture_region_multiple_non_overlapping() {
     let frame = scheme.submit().expect("submit");
     frame.wait(&ctx).expect("wait");
 
-    let mut output = vec![0u8; texture.byte_size()];
+    let mut output = vec![0u8; texture.byte_size() as usize];
     texture.read_to_cpu(&mut output).expect("read_to_cpu");
 
     for y in 0..H as usize {
@@ -3227,17 +3250,8 @@ fn scheme_copy_buffer_to_texture_parcel_full_texture() {
     staging.write(0, &pixels).expect("staging.write");
 
     // Destination texture (COPY_DST for buffer→texture copy; COPY_SRC for read_to_cpu readback).
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; (W * H * 4) as usize],
-        W,
-        H,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
-    )
-    .expect("texture");
+    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC | TextureFlags::COPY_DST);
+
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -3246,7 +3260,7 @@ fn scheme_copy_buffer_to_texture_parcel_full_texture() {
     let frame = scheme.submit().expect("submit");
     frame.wait(&ctx).expect("wait");
 
-    let mut output = vec![0u8; texture.byte_size()];
+    let mut output = vec![0u8; texture.byte_size() as usize];
     texture.read_to_cpu(&mut output).expect("read_to_cpu");
 
     assert_eq!(
@@ -3264,18 +3278,8 @@ fn scheme_copy_buffer_to_texture_parcel_oob_returns_error() {
     let staging = pool
         .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
         .expect("staging");
+    let texture = test_alloc_texture(&device, &vec![0u8; 8 * 8 * 4], 8, 8, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
 
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; 8 * 8 * 4],
-        8,
-        8,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::empty(),
-    )
-    .expect("texture");
 
     let mut scheme = Scheme::new(&ctx);
     // x + width exceeds texture width.
@@ -3303,18 +3307,8 @@ fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src() {
             None,
         )
         .expect("tex_parcel");
+    let dst_texture = test_alloc_texture(&device, &vec![0u8; 4 * 4 * 4], 4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
 
-    #[allow(deprecated)]
-    let dst_texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; 4 * 4 * 4],
-        4,
-        4,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::empty(),
-    )
-    .expect("dst_texture");
 
     let mut scheme = Scheme::new(&ctx);
     let result = scheme.copy_buffer_to_texture_parcel(&tex_parcel, 0, &dst_texture, 0, 0, 4, 4);
@@ -3339,18 +3333,8 @@ fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
         .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
         .expect("staging");
     staging.write(0, &pixels).expect("staging.write");
+    let texture = test_alloc_texture(&device, &vec![0u8; byte_size as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC | TextureFlags::COPY_DST);
 
-    #[allow(deprecated)]
-    let texture = goldy::Texture::with_data(
-        &device,
-        &vec![0u8; byte_size as usize],
-        W,
-        H,
-        TextureFormat::Rgba8Unorm,
-        TextureKind::Direct,
-        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
-    )
-    .expect("texture");
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -3371,4 +3355,613 @@ fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
         1,
         "second submit must be a retention hit"
     );
+}
+
+// ─── Cross-scheme retention (shared-parcel topology) ─────────────────────────
+
+const CROSS_RETENTION_ELEMS: usize = 64;
+
+struct CrossRetentionBuffers {
+    input: goldy::Buffer,
+    shared: goldy::Buffer,
+}
+
+fn cross_retention_buffers(device: &Device) -> CrossRetentionBuffers {
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let input = pool
+        .acquire_buffer_with_data(&(0..CROSS_RETENTION_ELEMS as u32).collect::<Vec<_>>(), BufferKind::Scattered)
+        .expect("input");
+    let shared = pool
+        .acquire_buffer_with_data(&vec![0u32; CROSS_RETENTION_ELEMS], BufferKind::Scattered)
+        .expect("shared");
+    CrossRetentionBuffers { input, shared }
+}
+
+fn cross_retention_copy_pipeline(device: &Device) -> ComputePipeline {
+    let shader = ShaderModule::from_slang(device, COPY_SHADER).expect("shader");
+    ComputePipeline::new(device, &shader).expect("pipeline")
+}
+
+fn cross_retention_buffer_writer(
+    ctx: &goldy::Context,
+    pipeline: &ComputePipeline,
+    buffers: &CrossRetentionBuffers,
+) -> Scheme {
+    let mut worker = Scheme::new(ctx);
+    worker
+        .node("copy", pipeline)
+        .with_parcel(&buffers.input, NodeAccess::Read)
+        .with_parcel(&buffers.shared, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    worker
+}
+
+fn cross_retention_buffer_reader(ctx: &goldy::Context, shared: &goldy::Buffer) -> (Scheme, ReadGrant<GrantBuffer>) {
+    let mut reader = Scheme::new(ctx);
+    let grant = reader.grant_read(shared).expect("grant_read");
+    (reader, grant)
+}
+
+fn cross_retention_run_worker_then_reader(
+    worker: &mut Scheme,
+    reader: &mut Scheme,
+    grant: &ReadGrant<GrantBuffer>,
+    _ctx: &goldy::Context,
+) {
+    worker.submit().expect("worker submit");
+    let frame = reader.submit().expect("reader submit");
+    let _loan = grant.consume(&frame).expect("grant consume");
+}
+
+/// A *topology-visible* foreign reader: a scheme that reads the shared parcel with a
+/// real GPU transfer node (`copy_buffer_parcel`) into its own destination buffer.
+///
+/// Unlike [`Scheme::grant_read`] (which takes a transient host-visible lease and is
+/// deliberately invisible to cross-submit topology), `copy_buffer_parcel` emits a
+/// `CopyBuffer` node whose `Read` of the shared parcel participates in the net-access
+/// graph. The worker's subsequent `Write` to the same parcel is therefore a WAR hazard
+/// against this foreign read, which the worker must resolve with a baked prologue
+/// barrier — forcing exactly one topology-driven re-record.
+fn cross_retention_copy_reader(ctx: &goldy::Context, shared: &goldy::Buffer) -> (Scheme, goldy::Buffer) {
+    let mut pool = RetainedPool::new(Arc::new(ctx.device().clone()));
+    let dst = pool
+        .acquire_buffer_with_data(&vec![0u32; CROSS_RETENTION_ELEMS], BufferKind::Scattered)
+        .expect("copy reader dst");
+    let mut reader = Scheme::new(ctx);
+    let byte_size = (CROSS_RETENTION_ELEMS * 4) as u64;
+    reader
+        .copy_buffer_parcel(shared, 0, &dst, 0, byte_size)
+        .expect("copy_buffer_parcel");
+    (reader, dst)
+}
+
+fn cross_retention_run_worker_then_copy_reader(worker: &mut Scheme, reader: &mut Scheme) {
+    worker.submit().expect("worker submit");
+    reader.submit().expect("copy reader submit");
+}
+
+/// Steady state for a worker observed by a *topology-visible* foreign reader/writer:
+/// one bootstrap record plus exactly one topology/prologue refresh, then resubmits.
+fn assert_worker_cross_reader_steady_state(worker: &Scheme, frames: u32) {
+    let _ = frames;
+    assert_eq!(
+        worker.replay_stats().records,
+        2,
+        "bootstrap record + one topology/prologue refresh after foreign reader appears"
+    );
+    assert_eq!(
+        worker.replay_stats().topology_records,
+        1,
+        "foreign reader on shared parcel must dirty worker topology exactly once"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        worker.replay_stats().resubmit_hits,
+        frames.saturating_sub(2),
+        "steady-state frames after bootstrap should resubmit"
+    );
+}
+
+/// Steady state for a worker observed only by *topology-invisible* `grant_read` leases:
+/// a single bootstrap record, zero topology refreshes, resubmits forever after.
+fn assert_worker_grant_invisible(worker: &Scheme, frames: u32) {
+    let _ = frames;
+    assert_eq!(
+        worker.replay_stats().records,
+        1,
+        "grant_read uses a transient lease and is topology-invisible; worker records once"
+    );
+    assert_eq!(
+        worker.replay_stats().topology_records,
+        0,
+        "grant_read must not register a topology-visible interaction on the shared parcel"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        worker.replay_stats().resubmit_hits,
+        frames.saturating_sub(1),
+        "every frame after the bootstrap record resubmits"
+    );
+}
+
+/// `grant_read` is topology-invisible: a foreign scheme grant-reading the shared parcel
+/// every frame never dirties the writer's topology. Cross-submit ordering is handled by
+/// the *reader's* own lease/wait, not by a baked prologue barrier in the worker's CB, so
+/// the worker records exactly once and resubmits thereafter.
+#[test]
+fn cross_scheme_grant_read_reader_is_topology_invisible() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        cross_retention_run_worker_then_reader(&mut worker, &mut reader, &grant, &ctx);
+    }
+
+    assert_worker_grant_invisible(&worker, FRAMES);
+}
+
+/// A topology-visible foreign reader (`copy_buffer_parcel` of the shared parcel) forces
+/// exactly one worker topology record, then the worker resubmits (mirrors the ekrano
+/// worker + `copy_texture` readback path that produces `records == 2`).
+#[test]
+fn cross_scheme_copy_reader_forces_one_topology_record() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
+    }
+
+    assert_worker_cross_reader_steady_state(&worker, FRAMES);
+}
+
+/// Write + grant-read in one scheme: no foreign topology edge, so one record only.
+#[test]
+fn single_scheme_write_then_readback_records_once() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut scheme = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let grant = scheme.grant_read(&buffers.shared).expect("grant_read");
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        let frame = scheme.submit().expect("submit");
+        let _loan = grant.consume(&frame).expect("grant consume");
+    }
+
+    assert_eq!(
+        scheme.replay_stats().records,
+        1,
+        "intra-scheme write→read should record once"
+    );
+    assert_eq!(
+        scheme.replay_stats().topology_records,
+        0,
+        "no foreign scheme touched the parcel"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        FRAMES - 1,
+        "subsequent frames should resubmit"
+    );
+}
+
+/// `grant_read` steady state stays at one record for many frames (no thrash, no drift).
+#[test]
+fn cross_scheme_grant_reader_steady_state_stays_at_one() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 8;
+    for _ in 0..FRAMES {
+        cross_retention_run_worker_then_reader(&mut worker, &mut reader, &grant, &ctx);
+    }
+
+    assert_worker_grant_invisible(&worker, FRAMES);
+}
+
+/// After the one-time topology refresh (topology-visible copy reader), additional frames
+/// must not re-record.
+#[test]
+fn cross_scheme_copy_reader_steady_state_does_not_thrash() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 8;
+    for _ in 0..FRAMES {
+        cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
+    }
+
+    assert_worker_cross_reader_steady_state(&worker, FRAMES);
+}
+
+/// A foreign writer on the shared parcel causes the same one-time topology record.
+#[test]
+fn cross_scheme_foreign_writer_forces_one_topology_record() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let mut foreign_writer = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        worker.submit().expect("worker submit");
+        foreign_writer.submit().expect("foreign writer submit");
+    }
+
+    assert_worker_cross_reader_steady_state(&worker, FRAMES);
+}
+
+/// Submit order changes *when* the worker first observes the foreign read edge, which
+/// changes the raw record counter — but never the steady state.
+///
+/// - reader-first: the foreign read of `shared` is already registered when the worker
+///   takes its first record, so the prologue is baked at bootstrap → `records == 1`,
+///   `topology_records == 0` (no later change).
+/// - worker-first: the worker bootstraps with no foreign edge, then the reader appears
+///   on frame 2 → one topology refresh → `records == 2`, `topology_records == 1`.
+///
+/// What is order-*independent* is the steady state: after warmup the worker stops
+/// re-recording and resubmits its retained command buffer.
+#[test]
+fn cross_scheme_submit_order_steady_state_is_stable() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+
+    let run = |reader_first: bool| -> Scheme {
+        let buffers = cross_retention_buffers(&device);
+        let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+        let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
+        const FRAMES: u32 = 4;
+        for _ in 0..FRAMES {
+            if reader_first {
+                reader.submit().expect("copy reader submit");
+                worker.submit().expect("worker submit");
+            } else {
+                cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
+            }
+        }
+        worker
+    };
+
+    for reader_first in [true, false] {
+        let mut worker = run(reader_first);
+        let warmup_records = worker.replay_stats().records;
+        assert!(
+            warmup_records <= 2,
+            "warmup costs at most one topology refresh (got {warmup_records} for reader_first={reader_first})"
+        );
+        // Additional worker-only frames must not add records — the steady state is stable
+        // regardless of the order in which the edge was first observed.
+        for _ in 0..3 {
+            worker.submit().expect("steady-state submit");
+        }
+        assert_eq!(
+            worker.replay_stats().records,
+            warmup_records,
+            "worker must not re-record in steady state (reader_first={reader_first})"
+        );
+        assert_eq!(
+            worker.replay_stats().topology_records,
+            warmup_records - 1,
+            "topology refreshes = records beyond the bootstrap (reader_first={reader_first})"
+        );
+    }
+}
+
+/// Two topology-visible foreign readers on the same parcel still cost the worker only one
+/// topology record (the interaction set gains *the parcel*, not per-reader edges).
+#[test]
+fn cross_scheme_two_foreign_copy_readers_record_once_then_stable() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader_a, _dst_a) = cross_retention_copy_reader(&ctx, &buffers.shared);
+    let (mut reader_b, _dst_b) = cross_retention_copy_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        worker.submit().expect("worker submit");
+        reader_a.submit().expect("reader_a submit");
+        reader_b.submit().expect("reader_b submit");
+    }
+
+    assert_worker_cross_reader_steady_state(&worker, FRAMES);
+}
+
+/// Dropping a topology-visible foreign reader does *not* re-dirty the worker.
+///
+/// Once the worker has baked the cross-submit WAR prologue (after the reader first
+/// appeared), tearing the reader down leaves that prologue in place. A retained
+/// command buffer carrying an extra (now-unobserved) barrier is still correct — an
+/// over-conservative execution/memory dependency is harmless — so the worker keeps
+/// resubmitting without a fresh record. Scheme teardown is therefore a no-op for peer
+/// retention, which is the cheap and safe choice (no thrash on transient observers).
+#[test]
+fn cross_scheme_copy_reader_disappearing_does_not_re_dirty() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
+
+    for _ in 0..3 {
+        cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
+    }
+    assert_eq!(worker.replay_stats().records, 2, "reader appearance: bootstrap + one refresh");
+
+    drop(reader);
+
+    for _ in 0..3 {
+        worker.submit().expect("worker-only submit");
+    }
+
+    assert_eq!(
+        worker.replay_stats().records,
+        2,
+        "reader removal must NOT trigger another record; baked barriers stay valid"
+    );
+    assert_eq!(
+        worker.replay_stats().topology_records,
+        1,
+        "only the appearance produced a topology record"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        worker.replay_stats().resubmit_hits,
+        4,
+        "frame 3 of the loop plus three worker-only frames are all resubmits"
+    );
+}
+
+/// Disjoint parcels: a topology-visible foreign reader on an unrelated parcel must not
+/// perturb worker retention.
+#[test]
+fn cross_scheme_disjoint_parcels_never_cross_dirty() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let worker_buffers = cross_retention_buffers(&device);
+    let reader_buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &worker_buffers);
+    let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &reader_buffers.shared);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
+    }
+
+    assert_eq!(
+        worker.replay_stats().records,
+        1,
+        "unrelated foreign reader must not dirty worker"
+    );
+    assert_eq!(worker.replay_stats().topology_records, 0);
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(worker.replay_stats().resubmit_hits, FRAMES - 1);
+}
+
+/// Grant→copy boundary: a foreign scheme that only `grant_read`s the shared parcel keeps
+/// the worker invisible (records == 1); once a *copy* reader of the same parcel appears,
+/// the worker takes exactly one topology record (records == 2). This pins the precise
+/// semantic boundary between the transient-lease path and the transfer-node path.
+#[test]
+fn cross_scheme_grant_then_copy_reader_boundary() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut grant_reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
+
+    // Phase 1: only a grant_read observer — worker stays at one record.
+    for _ in 0..3 {
+        cross_retention_run_worker_then_reader(&mut worker, &mut grant_reader, &grant, &ctx);
+    }
+    assert_eq!(worker.replay_stats().records, 1, "grant_read phase is invisible");
+    assert_eq!(worker.replay_stats().topology_records, 0);
+
+    // Phase 2: a copy reader of the same parcel appears — one topology record.
+    let (mut copy_reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
+    for _ in 0..3 {
+        worker.submit().expect("worker submit");
+        copy_reader.submit().expect("copy reader submit");
+        let frame = grant_reader.submit().expect("grant reader submit");
+        let _loan = grant.consume(&frame).expect("grant consume");
+    }
+    assert_eq!(
+        worker.replay_stats().records,
+        2,
+        "copy reader appearance dirties worker exactly once; grant reader stays invisible"
+    );
+    assert_eq!(worker.replay_stats().topology_records, 1);
+}
+
+/// The transient grant lease returns correct, current data every frame even though it
+/// never re-records the worker — proving the topology-invisible path is also *correct*,
+/// not merely cheap.
+///
+/// This is the key challenge to the grant semantics: a `grant_read` does not force the
+/// writer to bake a prologue barrier, so one might worry the reader could observe stale
+/// data. It does not: cross-submit ordering for the lease is enforced on the *reader's*
+/// submission (a wait on the worker's last write of the parcel), so each frame's loan
+/// reflects the worker's latest output while the worker stays at a single record.
+#[test]
+fn cross_scheme_grant_read_observes_worker_writes_without_re_record() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, grant) = cross_retention_buffer_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        worker.submit().expect("worker submit");
+        let frame = reader.submit().expect("reader submit");
+        let values = read_grant_u32(&grant, &frame, CROSS_RETENTION_ELEMS);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(v, i as u32, "grant lease must observe the worker's copy output at shared[{i}]");
+        }
+    }
+
+    assert_worker_grant_invisible(&worker, FRAMES);
+}
+
+/// Retained worker output stays correct after the topology refresh frame.
+#[test]
+fn cross_scheme_retained_worker_after_foreign_reader_reads_correct_values() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let pipeline = cross_retention_copy_pipeline(&device);
+    let buffers = cross_retention_buffers(&device);
+
+    let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
+    let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
+    }
+    assert_worker_cross_reader_steady_state(&worker, FRAMES);
+
+    let values = read_uploaded_parcel_u32(&ctx, &buffers.shared, CROSS_RETENTION_ELEMS);
+    for (i, &val) in values.iter().enumerate() {
+        assert_eq!(val, i as u32, "shared[{i}] must match worker copy source");
+    }
+}
+
+// ─── Cross-scheme texture readback (segfault repro / regression) ─────────────
+
+const CROSS_RETENTION_TEX_W: u32 = 16;
+const CROSS_RETENTION_TEX_H: u32 = 16;
+
+fn cross_retention_texture(device: &Device) -> goldy::Texture {
+    RetainedPool::new(Arc::new(device.clone()))
+        .acquire_texture(
+            CROSS_RETENTION_TEX_W,
+            CROSS_RETENTION_TEX_H,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::COPY_SRC,
+            None,
+        )
+        .expect("texture")
+}
+
+fn cross_retention_texture_writer(
+    ctx: &goldy::Context,
+    pipeline: &ComputePipeline,
+    texture: &goldy::Texture,
+) -> Scheme {
+    let mut worker = Scheme::new(ctx);
+    worker
+        .node("write_tex", pipeline)
+        .with_parcel(texture, NodeAccess::Write)
+        .dispatch(CROSS_RETENTION_TEX_W.div_ceil(8), CROSS_RETENTION_TEX_H.div_ceil(8), 1);
+    worker
+}
+
+/// A retained reader scheme that copies the shared texture to a CPU-readable buffer via
+/// [`Scheme::copy_texture`]. The `copy_texture` node reads the texture (topology-visible),
+/// so it forces exactly one worker topology refresh — and exercises the storage-image
+/// transfer-layout path that previously segfaulted.
+fn cross_retention_texture_reader(ctx: &goldy::Context, texture: &goldy::Texture) -> (Scheme, goldy::Buffer) {
+    let layout = texture.copy_layout();
+    let mut pool = RetainedPool::new(Arc::new(ctx.device().clone()));
+    let host_buf = pool
+        .acquire_buffer(
+            layout.staging_bytes,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::CPU_READABLE,
+            None,
+        )
+        .expect("host buffer");
+    let mut reader = Scheme::new(ctx);
+    reader.copy_texture(texture, &host_buf).expect("copy_texture");
+    (reader, host_buf)
+}
+
+/// Cross-scheme texture readback under retention: a worker writes a `Direct` (storage)
+/// texture every frame and a separate reader scheme copies it to a CPU buffer via
+/// [`Scheme::copy_texture`], retained across frames.
+///
+/// History: this scenario previously aborted the test process with
+/// `STATUS_ACCESS_VIOLATION`. The proximate cause was the texture upload/transition path
+/// driving a storage image (no `SAMPLED` usage) into `SHADER_READ_ONLY_OPTIMAL`
+/// (VUID-VkImageMemoryBarrier2-oldLayout-01211), leaving the image in a layout the
+/// driver could not legally consume on the retained resubmit. Storage textures now
+/// settle to `GENERAL` (see `texture.rs::settled_shader_read_layout`). This test guards
+/// against a regression of that crash and pins the cross-scheme record behavior for the
+/// texture-copy reader (mirrors ekrano `render_to_buffer`).
+#[test]
+fn cross_scheme_texture_readback_retained_loop_records_twice() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+    let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("texture shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("texture pipeline");
+    let texture = cross_retention_texture(&device);
+
+    let mut worker = cross_retention_texture_writer(&ctx, &pipeline, &texture);
+    let (mut reader, host_buf) = cross_retention_texture_reader(&ctx, &texture);
+
+    const FRAMES: u32 = 4;
+    for _ in 0..FRAMES {
+        worker.submit().expect("worker submit");
+        let frame = reader.submit().expect("reader submit");
+        frame.wait(&ctx).expect("wait readback");
+    }
+
+    // Sanity: the readback buffer observed the worker's texture writes (non-zero).
+    let mut padded = vec![0u8; texture.copy_layout().staging_bytes as usize];
+    host_buf.read_to_cpu(ctx.device(), &mut padded).expect("read host buffer");
+    assert!(padded.iter().any(|&b| b != 0), "texture readback must observe writes");
+
+    // The copy_texture readback reads the texture, a WAR against the worker's write, so
+    // the worker takes exactly one topology refresh: bootstrap + one re-record.
+    assert_eq!(
+        worker.replay_stats().records,
+        2,
+        "texture writer + copy_texture readback: bootstrap record + one topology refresh"
+    );
+    assert_eq!(worker.replay_stats().topology_records, 1);
 }

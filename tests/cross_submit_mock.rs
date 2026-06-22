@@ -255,7 +255,7 @@ fn same_context_raw_emits_barrier_not_wait() {
 }
 
 #[test]
-fn war_same_context_emits_barrier_on_write_after_read() {
+fn war_same_context_emits_wait_on_write_after_read() {
     let device = mock_device();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
@@ -274,12 +274,56 @@ fn war_same_context_emits_barrier_on_write_after_read() {
     clear_mock(&device);
     let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
     writer.submit().expect("write after read");
-    assert_eq!(
-        barrier_buffers(&device).len(),
-        1,
-        "WAR: writer after reader must emit a same-context prologue barrier"
+    assert!(
+        barrier_buffers(&device).is_empty(),
+        "WAR: same-context write-after-read must not use a baked prologue barrier"
     );
-    assert!(recorded_waits(&device).iter().all(|w| w.is_empty()));
+    assert_eq!(
+        recorded_waits(&device).last(),
+        Some(&vec![goldy::timeline::Epoch {
+            context: ctx.test_backend_handle(),
+            value: 1
+        }]),
+        "WAR: writer after reader must wait on the reader's timeline epoch"
+    );
+}
+
+#[test]
+fn war_retained_resubmit_emits_live_wait() {
+    let device = mock_device();
+    let ctx = mock_ctx(&device);
+    let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
+    let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
+    let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
+    let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
+
+    let mut pool = RetainedPool::new(device.clone());
+    let parcel = pool
+        .acquire_buffer_with_data(&[0u32; 4], BufferKind::Scattered)
+        .expect("parcel");
+
+    let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
+    writer.submit().expect("writer record");
+    assert_eq!(writer.replay_stats().records, 1);
+
+    let mut reader = read_scheme(&ctx, &parcel, &read_pipe);
+    reader.submit().expect("reader establishes last_reads");
+
+    if writer.is_topology_dirty() {
+        writer.submit().expect("writer settle after foreign read");
+        assert!(!writer.is_topology_dirty());
+    }
+
+    clear_mock(&device);
+    writer.submit().expect("writer retained resubmit");
+    assert_eq!(retained_resubmits(&device), 1);
+    let waits = recorded_waits(&device).last().cloned().unwrap_or_default();
+    assert_eq!(waits.len(), 1, "retained WAR resubmit must restate a live queue wait");
+    assert_eq!(waits[0].context, ctx.test_backend_handle());
+    assert_eq!(
+        waits[0].value, 2,
+        "retained WAR resubmit must wait on the reader epoch"
+    );
 }
 
 fn recorded_graph_syncs(device: &Device) -> Vec<bool> {

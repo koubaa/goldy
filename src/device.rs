@@ -606,7 +606,7 @@ impl Device {
         Ok(buf)
     }
 
-    fn finish_texture_alloc(&self, mut tex: crate::texture::Texture) -> anyhow::Result<crate::texture::Texture> {
+    fn finish_texture_alloc(&self, mut tex: crate::texture::TextureBacking) -> anyhow::Result<crate::texture::TextureBacking> {
         tex.set_deed(self.parcel_deed());
         Ok(tex)
     }
@@ -693,7 +693,7 @@ impl Device {
     /// accounting deed and honor the installed allocator's budget and telemetry.
     ///
     /// [`VramAllocator`]: crate::vram_allocator::VramAllocator
-    /// [`VramAllocator::alloc_texture`]: crate::vram_allocator::VramAllocator::alloc_texture
+    /// [`VramAllocatorAlloc::alloc_texture`]: crate::vram_allocator::VramAllocatorAlloc::alloc_texture
     pub(crate) fn alloc_texture(
         &self,
         width: u32,
@@ -701,7 +701,7 @@ impl Device {
         format: TextureFormat,
         access: TextureKind,
         flags: TextureFlags,
-    ) -> anyhow::Result<crate::texture::Texture> {
+    ) -> anyhow::Result<crate::texture::TextureBacking> {
         let tex = self
             .inner
             .vram_allocator

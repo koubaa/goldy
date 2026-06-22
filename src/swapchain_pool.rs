@@ -113,7 +113,7 @@ impl SwapchainPool {
             let uav_index = tex
                 .resource_index(ResourceAccess::Write)
                 .ok_or_else(|| anyhow::anyhow!("swapchain texture has no UAV resource index"))?;
-            (tex.handle, uav_index)
+            (tex.gpu_handle(), uav_index)
         };
         Ok((slot_id, frame, uav_index, handle))
     }

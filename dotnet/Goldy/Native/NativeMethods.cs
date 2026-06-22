@@ -225,7 +225,7 @@ internal static partial class NativeMethods
     internal static partial nint SchemeGrantRead(nint scheme, nint parcel);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_grant_read_texture")]
-    internal static partial nint SchemeGrantReadTexture(nint scheme, nint parcel);
+    internal static partial nint SchemeGrantReadTexture(nint scheme, nint texture);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_lease_render_target")]
     internal static partial nint SchemeLeaseRenderTarget(
@@ -235,7 +235,7 @@ internal static partial class NativeMethods
     internal static partial void SchemeRenderTargetLeaseDestroy(nint lease);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_copy_to_texture")]
-    internal static partial GoldyResult SchemeCopyToTexture(nint scheme, nint srcLease, nint dstParcel);
+    internal static partial GoldyResult SchemeCopyToTexture(nint scheme, nint srcLease, nint dstTexture);
 
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_copy_to_present")]
     internal static partial GoldyResult SchemeCopyToPresent(nint scheme, nint srcLease, nint dstLease);
@@ -369,6 +369,12 @@ internal static partial class NativeMethods
         TextureFlags flags,
         nint data,
         nuint dataSize);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_texture_destroy")]
+    internal static partial void TextureDestroy(nint texture);
+
+    [LibraryImport(LibName, EntryPoint = "goldy_texture_byte_size")]
+    internal static partial ulong TextureByteSize(nint texture);
 
     [LibraryImport(LibName, EntryPoint = "goldy_parcel_destroy")]
     internal static partial void ParcelDestroy(nint parcel);

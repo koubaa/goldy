@@ -241,12 +241,6 @@ fn absorb_node_net_access(net: &mut HashMap<ResourceKey, NetAccess>, node: &supe
     }
 }
 
-fn producer_slot_from_read(read_kinds: UsageKindFlags) -> SlotUsageSet {
-    let mut src = SlotUsageSet::default();
-    src.merge(NodeAccess::Read, read_kinds);
-    src
-}
-
 fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsage) {
     match key {
         ResourceKey::Buffer(h) | ResourceKey::BufferRange { parent: h, .. } => {
@@ -367,19 +361,10 @@ pub fn compute_cross_submit_sync_into(
                 }
             }
             for (&ctx, &tv) in &sync.last_reads {
-                if ctx == submitting_ctx {
-                    let usage = BarrierUsage {
-                        src: producer_slot_from_read(access.read_kinds | UsageKindFlags::COMPUTE),
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Write, access.write_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(prologue, *key, usage);
-                } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
+                // Same-context WAR is loop-carried (e.g. present easement read, then next
+                // frame compute write). Prologue barriers are baked into retained CBs and
+                // stripped on resubmit; a live queue wait survives `submit_sync_waits_only`.
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
             }
         }
     }
@@ -769,6 +754,42 @@ mod tests {
     }
 
     #[test]
+    fn war_same_context_write_after_read_records_wait_not_prologue_from_reads() {
+        let ctx = 1;
+        let key = ResourceKey::Texture(4);
+        let mut sync = ResourceSync::default();
+        sync.record_write(ctx, 44, WRITE_KINDS_COMPUTE_TRANSFER);
+        sync.record_read(ctx, 45);
+        let mut ledger = LedgerSnapshot::new();
+        ledger.insert(key, LedgerEntry { sync });
+
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "write_tex",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(4),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: 1,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+
+        assert_eq!(sync.waits.len(), 1, "same-context WAR must emit a live wait");
+        assert_eq!(sync.waits[0].value, 45);
+        assert_eq!(
+            sync.prologue.textures.len(),
+            1,
+            "loop-carried WAW against own last_write still needs a baked prologue barrier"
+        );
+    }
+
+    #[test]
     fn raw_same_context_emits_buffer_barrier_no_waits() {
         let ctx = 1;
         let key = buf_key(10);
@@ -889,15 +910,21 @@ mod tests {
     }
 
     #[test]
-    fn war_same_context_emits_barrier() {
+    fn war_same_context_emits_wait() {
         let ctx = 1;
         let key = buf_key(10);
         let ledger = ledger_with_read(ctx, key, 3);
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
-        assert!(sync.waits.is_empty());
-        assert_eq!(sync.prologue.buffers.len(), 1);
+        assert!(sync.prologue.is_empty());
+        assert_eq!(
+            sync.waits,
+            vec![Epoch {
+                context: ctx,
+                value: 3
+            }]
+        );
     }
 
     #[test]

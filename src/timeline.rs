@@ -17,6 +17,8 @@
 
 use crate::backend::ContextHandle;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub type TimelineValue = u64;
 
@@ -130,9 +132,170 @@ pub fn epochs_from(table: &ReferenceTable) -> Vec<Epoch> {
         .collect()
 }
 
+const PROMISE_PENDING: u64 = 0;
+const PROMISE_ABANDONED: u64 = u64::MAX;
+
+/// Pattern-match primitive for a within-context timeline promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromiseState {
+    /// The resolver has not yet resolved or abandoned this promise.
+    Pending,
+    /// The easement's expiry timeline value on the owning context.
+    Resolved(TimelineValue),
+    /// The resolver was dropped without resolving — vacuously satisfied.
+    Abandoned,
+}
+
+struct PromiseCell {
+    state: AtomicU64,
+    park: Mutex<()>,
+    wake: Condvar,
+}
+
+impl PromiseCell {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU64::new(PROMISE_PENDING),
+            park: Mutex::new(()),
+            wake: Condvar::new(),
+        })
+    }
+
+    fn load_state(&self) -> PromiseState {
+        match self.state.load(Ordering::Acquire) {
+            PROMISE_PENDING => PromiseState::Pending,
+            PROMISE_ABANDONED => PromiseState::Abandoned,
+            tv => PromiseState::Resolved(tv),
+        }
+    }
+
+    fn resolve(&self, tv: TimelineValue) {
+        debug_assert!(tv != PROMISE_PENDING && tv != PROMISE_ABANDONED);
+        if self
+            .state
+            .compare_exchange(PROMISE_PENDING, tv, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // Lock then immediately drop before notifying. This closes the lost-wakeup
+            // window: block()'s inner poll and its condvar wait are both done while
+            // holding `park`. Either the inner poll sees the new state (and returns
+            // before sleeping), or we acquire `park` only after the waiter is already
+            // parked — in which case notify_all() will wake it.
+            drop(self.park.lock().unwrap());
+            self.wake.notify_all();
+        }
+    }
+
+    fn abandon(&self) {
+        if self
+            .state
+            .compare_exchange(PROMISE_PENDING, PROMISE_ABANDONED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            drop(self.park.lock().unwrap());
+            self.wake.notify_all();
+        }
+    }
+}
+
+/// Read-end of a within-context timeline promise.
+///
+/// Cheap to clone; registered on parcel stamps for easements whose expiry value is
+/// not yet known at submit time (e.g. async present completion).
+#[derive(Clone)]
+pub struct TimelinePromise {
+    cell: Arc<PromiseCell>,
+}
+
+impl TimelinePromise {
+    /// Non-blocking poll — callers must pattern-match on [`PromiseState`].
+    pub fn poll(&self) -> PromiseState {
+        self.cell.load_state()
+    }
+
+    /// Opt-in block until the promise is [`PromiseState::Resolved`] or [`PromiseState::Abandoned`].
+    pub fn block(&self) -> PromiseState {
+        loop {
+            match self.poll() {
+                PromiseState::Pending => {
+                    let guard = self.cell.park.lock().unwrap();
+                    match self.poll() {
+                        PromiseState::Pending => {
+                            let _guard = self.cell.wake.wait(guard).unwrap();
+                        }
+                        other => return other,
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// Create a new unresolved promise pair.
+    pub fn new() -> (Self, PromiseResolver) {
+        let cell = PromiseCell::new();
+        (
+            Self {
+                cell: Arc::clone(&cell),
+            },
+            PromiseResolver { cell },
+        )
+    }
+}
+
+impl std::fmt::Debug for TimelinePromise {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelinePromise")
+            .field("state", &self.poll())
+            .finish()
+    }
+}
+
+/// Write-end of a within-context timeline promise.
+///
+/// Dropping without [`Self::resolve`] transitions the promise to [`PromiseState::Abandoned`].
+pub struct PromiseResolver {
+    cell: Arc<PromiseCell>,
+}
+
+impl PromiseResolver {
+    /// Resolve the promise with the easement-expiry timeline value (resolve-once).
+    pub fn resolve(self, tv: TimelineValue) {
+        self.cell.resolve(tv);
+    }
+}
+
+impl Drop for PromiseResolver {
+    fn drop(&mut self) {
+        self.cell.abandon();
+    }
+}
+
+impl std::fmt::Debug for PromiseResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromiseResolver")
+            .field("state", &self.cell.load_state())
+            .finish()
+    }
+}
+
+/// Reuse-gate result for a parcel, including outstanding timeline promises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle {
+    /// All resolved epochs are retired and no live pending promises remain.
+    Ready,
+    /// A resolved epoch on this context has not yet been retired by the GPU.
+    Waiting(TimelineValue),
+    /// At least one promise is still unresolved — the expiry value is unknown.
+    Pending,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn record_write_tracks_kinds_per_context() {
@@ -179,5 +342,65 @@ mod tests {
         sync.record_any(1, 4);
         assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_COMPUTE_TRANSFER));
         assert_eq!(sync.last_reads.get(&1), Some(&4));
+    }
+
+    #[test]
+    fn promise_new_is_pending() {
+        let (promise, _resolver) = TimelinePromise::new();
+        assert_eq!(promise.poll(), PromiseState::Pending);
+    }
+
+    #[test]
+    fn promise_resolve_becomes_resolved() {
+        let (promise, resolver) = TimelinePromise::new();
+        resolver.resolve(42);
+        assert_eq!(promise.poll(), PromiseState::Resolved(42));
+    }
+
+    #[test]
+    fn promise_drop_resolver_abandons() {
+        let (promise, resolver) = TimelinePromise::new();
+        drop(resolver);
+        assert_eq!(promise.poll(), PromiseState::Abandoned);
+    }
+
+    #[test]
+    fn promise_resolve_is_once() {
+        let (promise, resolver) = TimelinePromise::new();
+        resolver.resolve(10);
+        assert_eq!(promise.poll(), PromiseState::Resolved(10));
+    }
+
+    #[test]
+    fn promise_block_returns_resolved() {
+        let (promise, resolver) = TimelinePromise::new();
+        let reader = Arc::new(promise);
+        let clone = Arc::clone(&reader);
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            resolver.resolve(99);
+        });
+        assert_eq!(clone.block(), PromiseState::Resolved(99));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn promise_block_returns_abandoned() {
+        let (promise, resolver) = TimelinePromise::new();
+        let reader = Arc::new(promise);
+        let clone = Arc::clone(&reader);
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            drop(resolver);
+        });
+        assert_eq!(clone.block(), PromiseState::Abandoned);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn promise_block_never_returns_pending() {
+        let (promise, resolver) = TimelinePromise::new();
+        resolver.resolve(7);
+        assert_ne!(promise.block(), PromiseState::Pending);
     }
 }

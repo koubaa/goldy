@@ -6,7 +6,8 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_unit_byte_size, goldy_buffer_unit_read_to_cpu, goldy_compute_pipeline_create,
     goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy, goldy_device_destroy,
-    goldy_instance_destroy, goldy_parcel_destroy, goldy_read_grant_consume, goldy_read_grant_destroy,
+    goldy_instance_destroy, goldy_read_grant_consume, goldy_read_grant_destroy,
+    goldy_texture_destroy,
     goldy_record_builder_build, goldy_record_builder_create, goldy_record_builder_emplace,
     goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_retained_pool_acquire_texture,
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
@@ -268,7 +269,7 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
         goldy_compute_pipeline_destroy(compute_pipeline);
         goldy_shader_destroy(render_shader);
         goldy_shader_destroy(compute_shader);
-        goldy_parcel_destroy(readback);
+        goldy_texture_destroy(readback);
         goldy_buffer_destroy(cells);
         goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);

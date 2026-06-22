@@ -580,7 +580,7 @@ pub(super) fn resize(
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -973,7 +973,7 @@ pub(super) fn create(
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -1117,7 +1117,7 @@ pub(super) fn create_reserved_with_capacity(
             tile_byte_size: tiles::BUFFER_TILE_BYTES,
             reserved_tiles,
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -1499,7 +1499,7 @@ pub(super) fn create_view(
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -2289,7 +2289,7 @@ pub(super) fn alloc_readback_buffer(
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
             is_grant_readback: true,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
     Ok(handle)
@@ -2299,7 +2299,7 @@ pub(super) fn alloc_readback_buffer(
 pub(super) fn alloc_texture_readback_staging(
     state: &mut Dx12State,
     device_handle: DeviceHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
 ) -> Result<BufferHandle> {
     use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
@@ -2368,7 +2368,7 @@ pub(super) fn alloc_texture_readback_staging(
             tile_byte_size: 0,
             reserved_tiles: Vec::new(),
             is_grant_readback: true,
-            grant_texture_readback: Some(layout),
+            texture_copy_footprint: Some(layout),
         },
     );
     Ok(handle)
@@ -2378,7 +2378,7 @@ pub(super) fn alloc_texture_readback_staging(
 pub(super) fn read_texture_readback_staging(
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
     output: &mut [u8],
 ) -> Result<()> {
     let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;

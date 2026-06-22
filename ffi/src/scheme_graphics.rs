@@ -2,12 +2,12 @@
 
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
 use crate::pipeline::GoldyRenderPipeline;
-use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel};
+use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
 use crate::scheme::{GoldyPresentGrant, GoldyReadGrant, GoldyScheme, GoldySchemeSubmission, ReadGrantInner};
 use crate::types::{GoldyColor, GoldyDepthFormat, GoldyIndexFormat, GoldyNodeAccess, GoldyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget};
 use goldy::task_graph::{NodeAccess, RenderPassRecord};
-use goldy::{Grant, ParcelType};
+use goldy::Grant;
 use std::ffi::CStr;
 
 /// Opaque handle to a scheme-held render-target lease.
@@ -367,9 +367,9 @@ pub unsafe extern "C" fn goldy_scheme_render_pass_finish(scheme: *mut GoldySchem
 pub unsafe extern "C" fn goldy_scheme_copy_to_texture(
     scheme: *mut GoldyScheme,
     src_lease: *const GoldySchemeRenderTargetLease,
-    dst_parcel: *const GoldyParcel,
+    dst_texture: *const GoldyTexture,
 ) -> GoldyResult {
-    if scheme.is_null() || src_lease.is_null() || dst_parcel.is_null() {
+    if scheme.is_null() || src_lease.is_null() || dst_texture.is_null() {
         return GoldyResult::NullPointer;
     }
     if (*scheme).has_active_recorder() {
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn goldy_scheme_copy_to_texture(
     }
     match (*scheme)
         .inner
-        .copy_to_texture(&(*src_lease).lease, &(*dst_parcel).inner)
+        .copy_to_texture(&(*src_lease).lease, &*(*dst_texture).inner)
     {
         Ok(()) => GoldyResult::Ok,
         Err(e) => {
@@ -477,21 +477,17 @@ pub unsafe extern "C" fn goldy_present_grant_consume(
 #[no_mangle]
 pub unsafe extern "C" fn goldy_scheme_grant_read_texture(
     scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
+    texture: *const GoldyTexture,
 ) -> *mut GoldyReadGrant {
-    if scheme.is_null() || parcel.is_null() {
-        set_last_error("Scheme or parcel pointer is null");
+    if scheme.is_null() || texture.is_null() {
+        set_last_error("Scheme or texture pointer is null");
         return std::ptr::null_mut();
     }
     if (*scheme).has_active_recorder() {
         set_last_error("Cannot grant_read_texture while recording a node");
         return std::ptr::null_mut();
     }
-    if (*parcel).inner.kind() != ParcelType::Texture {
-        set_last_error("grant_read_texture requires texture parcel");
-        return std::ptr::null_mut();
-    }
-    match (*scheme).inner.grant_read_texture(&(*parcel).inner) {
+    match (*scheme).inner.grant_read_texture(&*(*texture).inner) {
         Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
             inner: ReadGrantInner::Texture(grant),
         })),

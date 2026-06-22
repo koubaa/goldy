@@ -8,7 +8,7 @@
 use crate::buffer::{BufferPool, StructuredBufferElement};
 use crate::context::Context;
 use crate::device::Device;
-use crate::parcel::{BookkeepingGuard, Buffer, BytesByKind, Init, Parcel, PoolBookkeeping, RecordField};
+use crate::parcel::{BookkeepingGuard, Buffer, BytesByKind, Init, PoolBookkeeping, RecordField, Texture};
 use crate::timeline::ReferenceTable;
 use crate::types::{BufferKind, TextureFlags, TextureFormat, TextureKind};
 use crate::vram_allocator::ParcelType;
@@ -18,28 +18,28 @@ use std::sync::Arc;
 /// A resource relinquished from the retained pool, stamped for handoff to the transient pool.
 pub enum RetainedHold {
     Buffer(Buffer),
-    Texture(Parcel),
+    Texture(Texture),
 }
 
 impl RetainedHold {
     pub fn byte_size(&self) -> u64 {
         match self {
             RetainedHold::Buffer(b) => b.byte_size(),
-            RetainedHold::Texture(p) => p.byte_size(),
+            RetainedHold::Texture(t) => t.byte_size(),
         }
     }
 
     pub fn last_referenced(&self) -> ReferenceTable {
         match self {
             RetainedHold::Buffer(b) => b.last_referenced(),
-            RetainedHold::Texture(p) => p.last_referenced(),
+            RetainedHold::Texture(t) => t.last_referenced(),
         }
     }
 
     pub fn texture_descriptor(&self) -> Option<(u32, u32, TextureFormat, TextureKind, TextureFlags)> {
         match self {
             RetainedHold::Buffer(_) => None,
-            RetainedHold::Texture(p) => p.texture_descriptor(),
+            RetainedHold::Texture(t) => t.whole().texture_descriptor(),
         }
     }
 }
@@ -75,9 +75,9 @@ impl RetainedPool {
         access: TextureKind,
         flags: TextureFlags,
         init: Option<&[u8]>,
-    ) -> Result<Parcel> {
+    ) -> Result<Texture> {
         let tex = if let Some(data) = init {
-            crate::texture::Texture::with_data(&self.device, data, width, height, format, access, flags)?
+            crate::texture::TextureBacking::with_data(&self.device, data, width, height, format, access, flags)?
         } else {
             self.device
                 .alloc_texture(width, height, format, access, flags)
@@ -199,8 +199,8 @@ impl RetainedPool {
     }
 
     /// Release a held texture parcel into the context transient pool for epoch-gated reuse.
-    pub fn release_texture(&mut self, ctx: &Context, parcel: Parcel) {
-        let stamped = self.transfer_out_texture(ctx, parcel);
+    pub fn release_texture(&mut self, ctx: &Context, texture: Texture) {
+        let stamped = self.transfer_out_texture(ctx, texture);
         ctx.with_transient_pool(|pool| pool.adopt(stamped));
     }
 
@@ -210,17 +210,17 @@ impl RetainedPool {
         ctx.with_transient_pool(|pool| pool.adopt(stamped));
     }
 
-    pub(crate) fn transfer_out_texture(&mut self, ctx: &Context, mut parcel: Parcel) -> StampedParcel {
-        if let Some(home) = parcel.home_device().upgrade() {
+    pub(crate) fn transfer_out_texture(&mut self, ctx: &Context, mut texture: Texture) -> StampedParcel {
+        if let Some(home) = texture.home_device().upgrade() {
             debug_assert!(
                 Arc::ptr_eq(&home, &ctx.device().inner),
-                "transfer_out: parcel home_device must match submitting context's device"
+                "transfer_out: texture home_device must match submitting context's device"
             );
         }
-        let ready_after = parcel.last_referenced();
-        parcel.release_bookkeeping();
+        let ready_after = texture.last_referenced();
+        texture.release_bookkeeping();
         StampedParcel {
-            hold: RetainedHold::Texture(parcel),
+            hold: RetainedHold::Texture(texture),
             ready_after,
         }
     }
@@ -249,12 +249,12 @@ impl RetainedPool {
         Arc::downgrade(&self.device.inner)
     }
 
-    fn wrap_texture(&self, tex: crate::texture::Texture) -> Result<Parcel> {
+    fn wrap_texture(&self, tex: crate::texture::TextureBacking) -> Result<Texture> {
         let bytes = tex.byte_size() as u64;
         let kind = ParcelType::Texture;
         self.bookkeeping.add(kind, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.bookkeeping), kind, bytes);
-        Ok(Parcel::from_texture(tex, guard, self.home_device()))
+        Ok(Texture::from_backing(tex, guard, self.home_device()))
     }
 
     fn wrap_buffer(&self, buf: crate::buffer::Allocation) -> Result<Buffer> {

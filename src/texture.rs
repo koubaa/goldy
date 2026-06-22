@@ -1,8 +1,7 @@
-//! GPU texture management.
+//! Internal GPU texture backing for [`crate::Texture`] parcels.
 //!
-//! Textures are GPU images that can be sampled in shaders.
-//! Unlike render targets, textures are typically created from CPU data
-//! (images, procedural data) and then sampled during rendering.
+//! Public callers acquire [`crate::Texture`] (a parcel wrapper) from
+//! [`crate::RetainedPool::acquire_texture`] or [`crate::TexturePool::acquire`].
 
 use crate::backend::{GpuBackend, TextureHandle};
 use crate::device::Device;
@@ -11,12 +10,9 @@ use crate::vram_allocator::{ParcelDeed, ParcelType};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-/// A GPU texture that can be sampled in shaders.
-///
-/// Textures hold image data on the GPU and can be bound to shaders
-/// for sampling operations (e.g., applying textures to 3D models).
+/// Low-level GPU texture allocation (internal to Goldy).
 #[derive(Clone)]
-pub struct Texture {
+pub(crate) struct TextureBacking {
     _device: Option<Device>,
     backend: Arc<Mutex<Box<dyn GpuBackend>>>,
     pub(crate) handle: TextureHandle,
@@ -30,7 +26,7 @@ pub struct Texture {
     deed: Option<ParcelDeed>,
 }
 
-impl Texture {
+impl TextureBacking {
     /// Attach the accounting deed (called from [`Device::alloc_texture`] only).
     pub(crate) fn set_deed(&mut self, deed: ParcelDeed) {
         self.deed = Some(deed);
@@ -111,7 +107,7 @@ impl Texture {
     /// Returns an error if:
     /// - GPU resource allocation fails
     /// - Data size doesn't match expected size
-    pub fn with_data(
+    pub(crate) fn with_data(
         device: &Device,
         data: &[u8],
         width: u32,
@@ -249,6 +245,9 @@ impl Texture {
     /// - Output buffer is too small
     /// - Texture was not created with COPY_SRC
     /// - GPU readback fails
+    #[deprecated(
+        note = "Copy to a CPU_READABLE buffer parcel via a scheme, submit, wait the timeline, then read the buffer"
+    )]
     pub fn read_to_cpu(&self, output: &mut [u8]) -> Result<()> {
         let expected_size = self.byte_size();
         if output.len() < expected_size {
@@ -377,7 +376,7 @@ impl Texture {
     }
 }
 
-impl Drop for Texture {
+impl Drop for TextureBacking {
     fn drop(&mut self) {
         if !self.owned {
             return;
@@ -411,7 +410,7 @@ mod tests {
     #[test]
     fn test_texture_creation() {
         let device = create_test_device();
-        let texture = Texture::new(
+        let texture = TextureBacking::new(
             &device,
             256,
             256,
@@ -439,7 +438,7 @@ mod tests {
             255, 255, 255, 255, // White
         ];
 
-        let texture = Texture::with_data(
+        let texture = TextureBacking::with_data(
             &device,
             &data,
             2,
@@ -461,7 +460,7 @@ mod tests {
         // Data is too small for a 2x2 RGBA texture
         let data = vec![255, 0, 0, 255]; // Only 1 pixel
 
-        let result = Texture::with_data(
+        let result = TextureBacking::with_data(
             &device,
             &data,
             2,
@@ -477,7 +476,7 @@ mod tests {
     #[test]
     fn test_texture_write() {
         let device = create_test_device();
-        let texture = Texture::new(
+        let texture = TextureBacking::new(
             &device,
             2,
             2,
@@ -494,7 +493,7 @@ mod tests {
     #[test]
     fn test_texture_write_size_mismatch() {
         let device = create_test_device();
-        let texture = Texture::new(
+        let texture = TextureBacking::new(
             &device,
             2,
             2,
@@ -514,7 +513,7 @@ mod tests {
     fn test_texture_r8_unorm() {
         let device = create_test_device();
         let data = vec![128u8; 64 * 64]; // 1 byte per pixel
-        let texture = Texture::with_data(
+        let texture = TextureBacking::with_data(
             &device,
             &data,
             64,
@@ -535,7 +534,7 @@ mod tests {
     fn test_texture_rg8_unorm() {
         let device = create_test_device();
         let data = vec![0u8; 32 * 32 * 2]; // 2 bytes per pixel
-        let texture = Texture::with_data(
+        let texture = TextureBacking::with_data(
             &device,
             &data,
             32,
@@ -556,7 +555,7 @@ mod tests {
     fn test_texture_r8_data_size_validation() {
         let device = create_test_device();
         let data = vec![0u8; 100]; // Wrong size for 64x64 R8
-        let result = Texture::with_data(
+        let result = TextureBacking::with_data(
             &device,
             &data,
             64,

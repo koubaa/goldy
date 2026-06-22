@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::buffer::Allocation;
-use crate::texture::Texture;
+use crate::texture::TextureBacking;
 use crate::vram_allocator::{bytesize, ParcelType};
 
 /// Request about to be handed to the backend allocator.
@@ -43,7 +43,7 @@ impl AllocCommit {
         }
     }
 
-    pub fn from_texture(tex: &Texture) -> Self {
+    pub(crate) fn from_texture(tex: &TextureBacking) -> Self {
         let byte_size = tex.byte_size() as u64;
         Self {
             reserved: byte_size,

@@ -451,12 +451,13 @@ pub enum RenderCommand {
     },
 }
 
-/// Layout of a grant-readback staging buffer for a 2D texture copy.
+/// Linear buffer layout for copying a 2D texture subresource into a buffer.
 ///
 /// `logical_bytes` is the tight linear size clients observe (`width * height * bpp`).
-/// `staging_bytes` and `row_pitch` describe the GPU/readback layout (may include padding).
+/// `staging_bytes`, `row_pitch`, and `footprint_offset` describe how rows are laid out in
+/// the destination buffer (DX12 may pad rows to alignment; Vulkan/Metal use tight rows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextureReadbackLayout {
+pub struct TextureCopyFootprint {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
@@ -467,7 +468,7 @@ pub struct TextureReadbackLayout {
     pub footprint_offset: u64,
 }
 
-impl TextureReadbackLayout {
+impl TextureCopyFootprint {
     pub fn tight_row_bytes(&self) -> u32 {
         self.width.saturating_mul(self.format.bytes_per_pixel())
     }
@@ -646,7 +647,7 @@ pub enum GpuCommand {
     CopyTextureToReadback {
         src: TextureHandle,
         dst: BufferHandle,
-        layout: TextureReadbackLayout,
+        layout: TextureCopyFootprint,
     },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
@@ -777,24 +778,24 @@ pub trait GpuBackend: Send + Sync {
     /// Release a grant-readback staging buffer.
     fn free_readback_buffer(&mut self, buffer: BufferHandle);
     /// Query copy/readback layout for a 2D texture grant (uncompressed formats only in v1).
-    fn query_texture_readback_layout(
+    fn query_texture_copy_footprint(
         &self,
         device: DeviceHandle,
         width: u32,
         height: u32,
         format: TextureFormat,
-    ) -> Result<TextureReadbackLayout>;
+    ) -> Result<TextureCopyFootprint>;
     /// Allocate a persistently mapped READBACK staging buffer for a texture grant.
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
-        layout: TextureReadbackLayout,
+        layout: TextureCopyFootprint,
     ) -> Result<BufferHandle>;
     /// Read tight linear bytes from a texture grant staging buffer.
     fn read_texture_readback_staging(
         &self,
         buffer: BufferHandle,
-        layout: TextureReadbackLayout,
+        layout: TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()>;
 

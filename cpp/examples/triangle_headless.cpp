@@ -85,7 +85,7 @@ int main() {
 
         constexpr uint32_t kWidth = 64;
         constexpr uint32_t kHeight = 64;
-        goldy::Parcel readback = pool.acquire_texture(
+        goldy::Texture readback = pool.acquire_texture(
             kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM,
             GOLDY_TEXTURE_KIND_DIRECT, copy_readback_flags());
 

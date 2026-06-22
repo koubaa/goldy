@@ -774,7 +774,7 @@ pub(crate) struct BufferState {
     pub sparse_pages: Vec<Option<(vk::DeviceMemory, vk::DeviceSize)>>,
     /// Grant-read staging buffer (host-visible, persistently mapped; no bindless slot).
     pub is_grant_readback: bool,
-    pub grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
+    pub texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 
 /// Shader module state with cached compiled stages.
@@ -879,6 +879,12 @@ pub(crate) struct TextureState {
     pub sampled_bindless_index: Option<u32>,
     /// Current image layout (for subregion writes / transitions)
     pub current_layout: AtomicI32,
+    /// `true` when the image was created with `STORAGE` usage (`TextureKind::Direct` /
+    /// `DirectInterpolated`) and *not* sampled-only. Storage images that lack
+    /// `SAMPLED` usage must never be transitioned to `SHADER_READ_ONLY_OPTIMAL`
+    /// (VUID-VkImageMemoryBarrier2-oldLayout-01211); their settled read layout is
+    /// `GENERAL`. Pure-sampled (`Interpolated`) images settle to `SHADER_READ_ONLY_OPTIMAL`.
+    pub is_storage_image: bool,
     /// Sub-allocated from a transient heap; `memory` is shared with the heap.
     pub transient_heap_suballoc: bool,
     /// Human-readable name from [`Texture::set_debug_name`], for layout diagnostics.
@@ -886,28 +892,26 @@ pub(crate) struct TextureState {
 }
 
 impl TextureState {
+    /// The layout this image should rest in after a transfer write makes it
+    /// available to shaders. Storage images (created without `SAMPLED` usage in the
+    /// pure case) must use `GENERAL`; transitioning them to `SHADER_READ_ONLY_OPTIMAL`
+    /// violates VUID-VkImageMemoryBarrier2-oldLayout-01211. Sampled-only images
+    /// (`Interpolated`) use `SHADER_READ_ONLY_OPTIMAL`. `DirectInterpolated` is a
+    /// storage image whose sampled descriptor is also registered as `GENERAL`, so it
+    /// settles to `GENERAL` as well.
+    pub fn settled_shader_read_layout(&self) -> vk::ImageLayout {
+        if self.is_storage_image {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        }
+    }
+
     pub fn image_layout(&self) -> vk::ImageLayout {
         vk::ImageLayout::from_raw(self.current_layout.load(Ordering::Relaxed))
     }
 
     pub fn set_image_layout(&self, layout: vk::ImageLayout) {
-        let old = self.image_layout();
-        if layout != old && layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
-            let name = self
-                .debug_name
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| "<unnamed>".to_owned());
-            tracing::warn!(
-                target: "goldy::layout",
-                name = %name,
-                ?old,
-                new = ?layout,
-                image = ?self.image,
-                "texture layout transition"
-            );
-        }
         self.current_layout.store(layout.as_raw(), Ordering::Relaxed);
     }
 }

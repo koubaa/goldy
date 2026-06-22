@@ -1301,12 +1301,12 @@ pub(super) fn present(
         // PRESENT_SRC_KHR. Compute submissions are owned by the runtime and may
         // be split/fused independently of this WSI copy.
 
-        let (scratch_image, copy_cb) = {
+        let (scratch_image, _scratch_texture_handle, copy_cb) = {
             let s = state.surfaces.get(&surface_handle).unwrap();
             let scratch = s.scratch_texture_slots[present_slot]
                 .as_ref()
                 .expect("scratch texture slot not initialized before present");
-            (scratch.image, s.frame_sync[present_slot].copy_command_buffer)
+            (scratch.image, scratch.texture_handle, s.frame_sync[present_slot].copy_command_buffer)
         };
         let swapchain_image = {
             let s = state.surfaces.get(&surface_handle).unwrap();
@@ -1617,17 +1617,16 @@ pub(super) fn present(
     // Handle suboptimal or out of date
     match result {
         Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-            let timeline_value = {
-                let surface_state = state
+            // Prefer the copy timeline (scheme path); fall back to the compute timeline
+            // (render-pass path). Both are consumed (taken) so a second call for the same
+            // slot returns None, surfacing accidental double-present as a hard error.
+            let easement_tv = copy_tv.or_else(|| {
+                state
                     .surfaces
                     .get_mut(&surface_handle)
-                    .context("Invalid surface handle")?;
-                surface_state.frame_sync[present_slot]
-                    .frame_timeline_value
-                    .take()
-                    .context("present: frame timeline value missing (internal error)")?
-            };
-            Ok(timeline_value)
+                    .and_then(|s| s.frame_sync[present_slot].frame_timeline_value.take())
+            });
+            easement_tv.context("present: easement timeline value missing (internal error)")
         }
         Err(e) => Err(anyhow::anyhow!("Failed to present: {:?}", e)),
     }
@@ -2198,6 +2197,7 @@ fn ensure_scratch_texture_slot(
                 });
             let dep = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
             ld.device.cmd_pipeline_barrier2(cb, &dep);
+
             ld.device.end_command_buffer(cb).context("end scratch init CB")?;
 
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
@@ -2339,6 +2339,8 @@ fn register_surface_texture(
             bindless_index: Some(bindless_index),
             sampled_bindless_index: None,
             current_layout: std::sync::atomic::AtomicI32::new(vk::ImageLayout::GENERAL.as_raw()),
+            // Swapchain images are storage images (GENERAL); never SHADER_READ_ONLY.
+            is_storage_image: true,
             transient_heap_suballoc: false,
             debug_name: std::sync::Mutex::new(None),
         },

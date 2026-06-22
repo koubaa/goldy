@@ -1109,25 +1109,44 @@ pub(super) fn submit(
                                 })
                             })
                             .collect();
-                        // Textures: we don't track per-image Vulkan layout in TextureState,
-                        // so use a global memory barrier per texture entry. No layout
-                        // transition needed — just execution + memory dependency.
-                        let tex_mem: Vec<vk::MemoryBarrier2> = tex_entries
+                        // Textures: emit per-image ImageMemoryBarrier2 with layout
+                        // tracking. Storage images are created UNDEFINED and must
+                        // transition to GENERAL on first use; GENERAL→GENERAL on
+                        // subsequent frames carries only the execution/memory
+                        // dependency (same effect as the old global MemoryBarrier2
+                        // but formally correct and handles cold-start).
+                        let tex_img: Vec<vk::ImageMemoryBarrier2> = tex_entries
                             .iter()
-                            .map(|(_, usage)| {
-                                vk::MemoryBarrier2::default()
-                                    .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                    .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
-                                    .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                            .filter_map(|(h, usage)| {
+                                state.textures.get(h).map(|ts| {
+                                    let old_layout = ts.image_layout();
+                                    ts.set_image_layout(vk::ImageLayout::GENERAL);
+                                    vk::ImageMemoryBarrier2::default()
+                                        .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
+                                        .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                                        .old_layout(old_layout)
+                                        .new_layout(vk::ImageLayout::GENERAL)
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .image(ts.image)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                                            base_mip_level: 0,
+                                            level_count: 1,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        })
+                                })
                             })
                             .collect();
-                        let dep_info = if tex_mem.is_empty() {
+                        let dep_info = if tex_img.is_empty() {
                             vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
                         } else {
                             vk::DependencyInfo::default()
                                 .buffer_memory_barriers(&buf_barriers)
-                                .memory_barriers(&tex_mem)
+                                .image_memory_barriers(&tex_img)
                         };
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
@@ -2087,25 +2106,44 @@ fn submit_graph_impl(
                                 })
                             })
                             .collect();
-                        // Textures: we don't track per-image Vulkan layout in TextureState,
-                        // so use a global memory barrier per texture entry. No layout
-                        // transition needed — just execution + memory dependency.
-                        let tex_mem: Vec<vk::MemoryBarrier2> = tex_entries
+                        // Textures: emit per-image ImageMemoryBarrier2 with layout
+                        // tracking. Storage images are created UNDEFINED and must
+                        // transition to GENERAL on first use; GENERAL→GENERAL on
+                        // subsequent frames carries only the execution/memory
+                        // dependency (same effect as the old global MemoryBarrier2
+                        // but formally correct and handles cold-start).
+                        let tex_img: Vec<vk::ImageMemoryBarrier2> = tex_entries
                             .iter()
-                            .map(|(_, usage)| {
-                                vk::MemoryBarrier2::default()
-                                    .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                    .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
-                                    .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                            .filter_map(|(h, usage)| {
+                                state.textures.get(h).map(|ts| {
+                                    let old_layout = ts.image_layout();
+                                    ts.set_image_layout(vk::ImageLayout::GENERAL);
+                                    vk::ImageMemoryBarrier2::default()
+                                        .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
+                                        .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                                        .old_layout(old_layout)
+                                        .new_layout(vk::ImageLayout::GENERAL)
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .image(ts.image)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                                            base_mip_level: 0,
+                                            level_count: 1,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        })
+                                })
                             })
                             .collect();
-                        let dep_info = if tex_mem.is_empty() {
+                        let dep_info = if tex_img.is_empty() {
                             vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
                         } else {
                             vk::DependencyInfo::default()
                                 .buffer_memory_barriers(&buf_barriers)
-                                .memory_barriers(&tex_mem)
+                                .image_memory_barriers(&tex_img)
                         };
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }

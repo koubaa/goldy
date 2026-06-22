@@ -561,20 +561,20 @@ impl GpuBackend for VulkanBackend {
         buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer);
     }
 
-    fn query_texture_readback_layout(
+    fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,
         width: u32,
         height: u32,
         format: crate::types::TextureFormat,
-    ) -> Result<crate::backend::TextureReadbackLayout> {
-        Ok(buffer::query_texture_readback_layout(width, height, format))
+    ) -> Result<crate::backend::TextureCopyFootprint> {
+        Ok(buffer::query_texture_copy_footprint(width, height, format))
     }
 
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
     ) -> Result<BufferHandle> {
         buffer::alloc_texture_readback_staging(
             &self.state.instance,
@@ -589,7 +589,7 @@ impl GpuBackend for VulkanBackend {
     fn read_texture_readback_staging(
         &self,
         buffer: BufferHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)

@@ -1092,7 +1092,7 @@ pub(crate) struct BufferState {
     pub view_byte_offset: Option<u64>,
     /// Grant-read staging buffer (shared storage, CPU-readable; no shader binding).
     pub is_grant_readback: bool,
-    pub grant_texture_readback: Option<crate::backend::TextureReadbackLayout>,
+    pub texture_copy_footprint: Option<crate::backend::TextureCopyFootprint>,
 }
 
 /// Shader module state with cached compiled stages.
