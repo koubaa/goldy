@@ -268,6 +268,7 @@ pub(super) fn create(
             dsv_offset,
             current_frame: 0,
             current_image_index: None,
+            last_presented_image_index: None,
             frame_sync,
             current_texture_handle: None,
             compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
@@ -329,7 +330,7 @@ pub(super) fn acquire(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
     ctx: super::ContextHandle,
-) -> Result<SwapchainImageHandle> {
+) -> Result<(SwapchainImageHandle, u32)> {
     if state
         .surfaces
         .get(&surface_handle)
@@ -340,14 +341,14 @@ pub(super) fn acquire(
     }
 
     // Extract values needed before the pre-acquire blocking waits.
-    let (cf, device_handle, waitable, prev_fence) = {
+    let (present_slot, device_handle, waitable, prev_fence) = {
         let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
-        let cf = surface.current_frame;
+        let present_slot = surface.current_frame;
         (
-            cf,
+            present_slot,
             surface.device_handle,
             surface.frame_latency_waitable,
-            surface.frame_sync[cf].fence_value,
+            surface.frame_sync[present_slot].fence_value,
         )
     };
 
@@ -373,7 +374,7 @@ pub(super) fn acquire(
             wait_for_fence(&logical_device.fence, prev_fence)?;
         }
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.frame_sync[cf].fence_value = 0;
+            surf.frame_sync[present_slot].fence_value = 0;
         }
     }
 
@@ -389,10 +390,16 @@ pub(super) fn acquire(
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
 
-    surface.frame_sync[cf].render_pass_submitted = false;
+    surface.frame_sync[present_slot].render_pass_submitted = false;
     surface.pending_frame_compute.clear();
 
     let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
+    if surface.last_presented_image_index == Some(image_index) {
+        tracing::warn!(
+            "dx12::surface::acquire ACQUIRE RACE: image={} matches last presented index",
+            image_index
+        );
+    }
     surface.current_image_index = Some(image_index);
 
     let width = surface.width;
@@ -410,6 +417,7 @@ pub(super) fn acquire(
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
         surface.current_texture_handle = Some(tex_handle);
         surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
+        surface.current_frame = (present_slot + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -420,7 +428,7 @@ pub(super) fn acquire(
             .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
-    Ok(image_index as SwapchainImageHandle)
+    Ok((image_index as SwapchainImageHandle, present_slot as u32))
 }
 
 pub(super) fn record_gpu_work(
@@ -466,7 +474,7 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
 }
 
 pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, _submit_tv: u64) -> Result<u64> {
-    present(state, frame.surface, frame.image, frame.context)?;
+    present(state, frame)?;
     let device_handle = state
         .surfaces
         .get(&frame.surface)
@@ -495,23 +503,21 @@ pub(super) fn frame_texture(state: &Dx12State, surface_handle: SurfaceHandle) ->
 pub(super) fn render(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
-    _image: SwapchainImageHandle,
+    image: SwapchainImageHandle,
+    present_slot: u32,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
 
-    let image_index = surface
-        .current_image_index
-        .context("No image acquired - call surface_acquire first")?;
-
+    let image_index = image as usize;
+    let present_slot = present_slot as usize;
     let device_handle = surface.device_handle;
     let logical_device = state
         .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
 
-    let current_frame = surface.current_frame;
-    let frame = &surface.frame_sync[current_frame];
+    let frame = &surface.frame_sync[present_slot];
     let cmd = &frame.command_list;
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let width = surface.width;
@@ -686,8 +692,8 @@ pub(super) fn render(
     // Update fence value for next operation
 
     if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-        surf.frame_sync[current_frame].fence_value = fence_value;
-        surf.frame_sync[current_frame].render_pass_submitted = true;
+        surf.frame_sync[present_slot].fence_value = fence_value;
+        surf.frame_sync[present_slot].render_pass_submitted = true;
     }
 
     Ok(())
@@ -697,40 +703,43 @@ pub(super) fn render(
 ///
 /// Graphics path: waits for the last graphics submit then presents.
 /// Compute-only path: copies the scratch UAV texture to the swapchain back buffer, then presents.
-pub(super) fn present(
-    state: &mut Dx12State,
-    surface_handle: SurfaceHandle,
-    _image: SwapchainImageHandle,
-    ctx: super::ContextHandle,
-) -> Result<()> {
-    let (device_handle, _image_index, current_frame, scratch_handle, backbuffer, render_pass_submitted) = {
+pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<()> {
+    let surface_handle = frame.surface;
+    let image_index = frame.image as usize;
+    let present_slot = frame.present_slot as usize;
+    let ctx = frame.context;
+
+    // Clear the texture sentinel so the next acquire does not warn.
+    if let Some(s) = state.surfaces.get_mut(&surface_handle) {
+        s.current_texture_handle = None;
+    }
+
+    let (device_handle, scratch_handle, backbuffer, render_pass_submitted) = {
         let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
-        let image_index = surface
-            .current_image_index
-            .context("No image to present - call surface_acquire first")? as usize;
-        let scratch_handle = surface.current_texture_handle.context("No acquired surface texture")?;
-        let expected = surface.compute_scratch_textures.get(image_index).copied().flatten();
-        if expected != Some(scratch_handle) {
-            anyhow::bail!("DX12 surface present: scratch texture handle mismatch");
-        }
-        let render_pass_submitted = surface.frame_sync[surface.current_frame].render_pass_submitted;
+        let scratch_handle = surface
+            .compute_scratch_textures
+            .get(image_index)
+            .copied()
+            .flatten()
+            .context("No scratch texture for swapchain image")?;
+        let render_pass_submitted = surface.frame_sync[present_slot].render_pass_submitted;
         (
             surface.device_handle,
-            image_index,
-            surface.current_frame,
             scratch_handle,
             surface.render_targets[image_index].clone(),
             render_pass_submitted,
         )
     };
 
-    if let Some(s) = state.surfaces.get_mut(&surface_handle) {
-        s.current_texture_handle = None;
-    }
-
     if render_pass_submitted {
-        // fence_value was stored in frame_sync[current_frame].fence_value by
+        // fence_value was stored in frame_sync[present_slot].fence_value by
         // surface::render; acquire() waits for it on the next cycle through this slot.
+        tracing::warn!(
+            "dx12::surface::present SKIP-COPY: present_slot={} image={} render_pass_submitted=true \
+             (presents backbuffer without scratch copy)",
+            present_slot,
+            image_index
+        );
     } else {
         let _tz = crate::tracy_zone!("dx12.present.copy_to_backbuffer");
         let logical_device = state
@@ -746,8 +755,8 @@ pub(super) fn present(
 
         let (cmd7, cmd_alloc) = {
             let surface = state.surfaces.get(&surface_handle).unwrap();
-            let frame = &surface.frame_sync[current_frame];
-            (frame.command_list.clone(), frame.command_allocator.clone())
+            let frame_sync = &surface.frame_sync[present_slot];
+            (frame_sync.command_list.clone(), frame_sync.command_allocator.clone())
         };
 
         unsafe { cmd_alloc.Reset() }.context("Failed to reset command allocator for present copy")?;
@@ -822,7 +831,7 @@ pub(super) fn present(
 
         // Record the fence so acquire() can wait for it before reusing this slot.
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.frame_sync[current_frame].fence_value = fence_value;
+            surf.frame_sync[present_slot].fence_value = fence_value;
         }
 
         if let Some(tex) = state.textures.get_mut(&scratch_handle) {
@@ -839,15 +848,13 @@ pub(super) fn present(
         if hr.is_err() {
             anyhow::bail!("Present failed with HRESULT: {:?}", hr);
         }
+        surface.last_presented_image_index = Some(image_index as u32);
     }
 
-    // Advance frame
     let (return_fence, return_image) = {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
-        let fence_val = surface.frame_sync[current_frame].fence_value;
-        let img = surface.current_image_index.unwrap_or(_image_index as u32);
-        surface.current_image_index = None;
-        surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        let fence_val = surface.frame_sync[present_slot].fence_value;
+        let img = frame.image as u32;
         (fence_val, img)
     };
 
@@ -976,6 +983,9 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
         surface.rtv_offsets.push(rtv_offset);
     }
 
+    // Diagnostic: magenta-clear new swapchain buffers so uninitialized flashes are visible.
+    clear_swapchain_backbuffers_diagnostic(state, surface_handle, device_handle)?;
+
     // Recreate depth buffer if the surface had one
     if let Some(df) = depth_format {
         let logical_device = state
@@ -1052,12 +1062,13 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
     surface.current_frame = 0;
     surface.current_image_index = None;
+    surface.last_presented_image_index = None;
     surface.current_texture_handle = None;
     surface.compute_scratch_textures = vec![None; MAX_FRAMES_IN_FLIGHT];
     surface.pending_acquire_count = 0;
     surface.pending_swapchain_returns.clear();
 
-    tracing::debug!("Resized surface to {}x{}", width, height);
+    tracing::warn!("dx12::surface::resize complete: {}x{}", width, height);
     Ok(())
 }
 
@@ -1092,6 +1103,10 @@ fn ensure_compute_scratch_texture(
         surface.compute_scratch_textures[idx] = None;
     }
 
+    tracing::warn!(
+        "dx12::surface: (re)creating scratch[{}] {}x{} {:?}",
+        idx, width, height, format
+    );
     let h = texture::create(
         state,
         device_handle,
@@ -1101,9 +1116,104 @@ fn ensure_compute_scratch_texture(
         TextureKind::Direct,
         TextureFlags::empty(),
     )?;
+    texture::clear_storage_uav_diagnostic_magenta(state, device_handle, h)?;
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
     surface.compute_scratch_textures[idx] = Some(h);
     Ok(h)
+}
+
+/// Magenta-clear all swapchain backbuffers after `ResizeBuffers`.
+///
+/// If the resize flash stays **green**, the culprit is outside our scratch/out_image path
+/// (typically an uninitialized flip-model backbuffer). If it turns **magenta**, one of
+/// our intermediates is being shown before the worker overwrites it.
+fn clear_swapchain_backbuffers_diagnostic(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+    device_handle: DeviceHandle,
+) -> Result<()> {
+    const MAGENTA: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("clear_swapchain_backbuffers_diagnostic: invalid device")?;
+
+    let (render_targets, rtv_offsets, _width, _height) = {
+        let surface = state
+            .surfaces
+            .get(&surface_handle)
+            .context("clear_swapchain_backbuffers_diagnostic: invalid surface")?;
+        (
+            surface.render_targets.clone(),
+            surface.rtv_offsets.clone(),
+            surface.width,
+            surface.height,
+        )
+    };
+
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("clear_swapchain_backbuffers_diagnostic: Reset allocator")?;
+    let init_cmd: ID3D12GraphicsCommandList = unsafe {
+        logical_device.device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &logical_device.command_allocator,
+            None,
+        )
+    }
+    .context("clear_swapchain_backbuffers_diagnostic: CreateCommandList")?;
+    let init_cmd7: ID3D12GraphicsCommandList7 = init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&init_cmd) };
+
+    for (rt, rtv_offset) in render_targets.iter().zip(rtv_offsets.iter()) {
+        let rtv_handle = unsafe {
+            let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (*rtv_offset * logical_device.rtv_descriptor_size) as usize;
+            handle
+        };
+
+        let mut to_rt = vec![barriers::texture_barrier_full(
+            rt,
+            D3D12_BARRIER_SYNC_NONE,
+            D3D12_BARRIER_SYNC_RENDER_TARGET,
+            D3D12_BARRIER_ACCESS_NO_ACCESS,
+            D3D12_BARRIER_ACCESS_RENDER_TARGET,
+            D3D12_BARRIER_LAYOUT_UNDEFINED,
+            D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+        )];
+        unsafe { barriers::barrier_textures(&init_cmd7, &to_rt) };
+        unsafe { barriers::drop_texture_barriers(&mut to_rt) };
+
+        unsafe {
+            cmd_gfx.ClearRenderTargetView(rtv_handle, &MAGENTA, None);
+        }
+
+        let mut to_present = vec![barriers::texture_barrier_full(
+            rt,
+            D3D12_BARRIER_SYNC_RENDER_TARGET,
+            D3D12_BARRIER_SYNC_NONE,
+            D3D12_BARRIER_ACCESS_RENDER_TARGET,
+            D3D12_BARRIER_ACCESS_NO_ACCESS,
+            D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+            D3D12_BARRIER_LAYOUT_PRESENT,
+        )];
+        unsafe { barriers::barrier_textures(&init_cmd7, &to_present) };
+        unsafe { barriers::drop_texture_barriers(&mut to_present) };
+    }
+
+    unsafe { init_cmd.Close() }.context("clear_swapchain_backbuffers_diagnostic: Close")?;
+
+    let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast clear command list")?;
+    unsafe {
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
+    }
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("clear_swapchain_backbuffers_diagnostic: Signal")?;
+    wait_for_fence(&logical_device.fence, fence_value)
 }
 
 /// Get surface dimensions.

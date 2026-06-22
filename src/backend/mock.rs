@@ -1111,6 +1111,7 @@ impl GpuBackend for MockBackend {
                 image,
                 context: ctx,
                 frame_slot: image as u32,
+                present_slot: image as u32,
             },
             tex_handle,
         ))

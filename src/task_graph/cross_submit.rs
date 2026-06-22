@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::backend::{BufferHandle, ContextHandle, TextureHandle};
+use crate::backend::{BufferHandle, ContextHandle, SubmitSync, TextureHandle};
 use crate::parcel::{InteractionEdge, InteractionRole, ParcelStamp};
 use crate::task_graph::ir::{
     BarrierSet, BarrierUsage, GraphIR, NodeAccess, NodeKind, ResourceBinding, SlotUsageSet, UsageKindFlags,
@@ -205,13 +205,23 @@ pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> 
 }
 
 /// Union each resource's access across the nodes in `waves` (one submit partition).
-pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> HashMap<ResourceKey, NetAccess> {
-    let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
+pub fn net_access_for_waves_into(
+    out: &mut HashMap<ResourceKey, NetAccess>,
+    ir: &GraphIR,
+    waves: &[super::ir::Wave],
+) {
+    out.clear();
     for wave in waves {
         for &node_idx in &wave.node_indices {
-            absorb_node_net_access(&mut net, &ir.nodes[node_idx]);
+            absorb_node_net_access(out, &ir.nodes[node_idx]);
         }
     }
+}
+
+/// Union each resource's access across the nodes in `waves` (one submit partition).
+pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> HashMap<ResourceKey, NetAccess> {
+    let mut net = HashMap::new();
+    net_access_for_waves_into(&mut net, ir, waves);
     net
 }
 
@@ -287,13 +297,18 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
 }
 
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
-pub fn compute_cross_submit_sync(
+pub fn compute_cross_submit_sync_into(
+    prologue: &mut BarrierSet,
+    waits: &mut Vec<Epoch>,
+    wait_map: &mut HashMap<ContextHandle, u64>,
     net: &HashMap<ResourceKey, NetAccess>,
     ledger: &LedgerSnapshot,
-    submitting_ctx: crate::backend::ContextHandle,
-) -> CrossSubmitSync {
-    let mut result = CrossSubmitSync::default();
-    let mut wait_map: HashMap<crate::backend::ContextHandle, u64> = HashMap::new();
+    submitting_ctx: ContextHandle,
+) {
+    prologue.buffers.clear();
+    prologue.textures.clear();
+    prologue.transient_ids.clear();
+    wait_map.clear();
 
     for (key, access) in net {
         let Some(entry) = find_ledger_entry(ledger, *key) else {
@@ -320,7 +335,7 @@ pub fn compute_cross_submit_sync(
                             d
                         },
                     };
-                    merge_barrier(&mut result.prologue, *key, usage);
+                    merge_barrier(prologue, *key, usage);
                 } else {
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
@@ -346,7 +361,7 @@ pub fn compute_cross_submit_sync(
                             d
                         },
                     };
-                    merge_barrier(&mut result.prologue, *key, usage);
+                    merge_barrier(prologue, *key, usage);
                 } else {
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
@@ -361,7 +376,7 @@ pub fn compute_cross_submit_sync(
                             d
                         },
                     };
-                    merge_barrier(&mut result.prologue, *key, usage);
+                    merge_barrier(prologue, *key, usage);
                 } else {
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
@@ -369,32 +384,62 @@ pub fn compute_cross_submit_sync(
         }
     }
 
-    result.waits = wait_map
-        .into_iter()
-        .map(|(context, value)| Epoch { context, value })
-        .collect();
-    result.waits.sort_by_key(|e| (e.context, e.value));
+    waits.clear();
+    waits.extend(
+        wait_map
+            .drain()
+            .map(|(context, value)| Epoch { context, value }),
+    );
+    waits.sort_by_key(|e| (e.context, e.value));
+}
+
+/// Derive cross-submission sync from this submission's net access and the resource ledger.
+#[allow(dead_code, reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch")]
+pub fn compute_cross_submit_sync(
+    net: &HashMap<ResourceKey, NetAccess>,
+    ledger: &LedgerSnapshot,
+    submitting_ctx: crate::backend::ContextHandle,
+) -> CrossSubmitSync {
+    let mut result = CrossSubmitSync::default();
+    let mut wait_map = HashMap::new();
+    compute_cross_submit_sync_into(
+        &mut result.prologue,
+        &mut result.waits,
+        &mut wait_map,
+        net,
+        ledger,
+        submitting_ctx,
+    );
     result
 }
 
 /// Build a ledger snapshot from registered stamp bindings.
-pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> LedgerSnapshot {
-    let mut ledger = LedgerSnapshot::new();
+pub fn build_ledger_snapshot_into(out: &mut LedgerSnapshot, stamps: &[(ResourceKey, Arc<ParcelStamp>)]) {
+    out.clear();
     for (key, stamp) in stamps {
-        ledger.entry(*key).or_insert_with(|| LedgerEntry {
+        out.entry(*key).or_insert_with(|| LedgerEntry {
             sync: stamp.sync.lock().unwrap().clone(),
         });
     }
+}
+
+/// Build a ledger snapshot from registered stamp bindings.
+#[allow(dead_code, reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch")]
+pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> LedgerSnapshot {
+    let mut ledger = LedgerSnapshot::new();
+    build_ledger_snapshot_into(&mut ledger, stamps);
     ledger
 }
 
 /// Collect unique resource keys from IR that have registered stamps.
-pub fn resource_stamps_from_ir(
+pub fn resource_stamps_from_ir_into(
+    out: &mut Vec<(ResourceKey, Arc<ParcelStamp>)>,
+    seen: &mut HashSet<ResourceKey>,
     ir: &GraphIR,
     resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
-) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
+) {
+    out.clear();
+    seen.clear();
     for node in &ir.nodes {
         for ResourceBinding { resource, .. } in &node.bindings {
             let Some(key) = ResourceKey::from_resource_id(*resource) else {
@@ -408,7 +453,85 @@ pub fn resource_stamps_from_ir(
             }
         }
     }
+}
+
+/// Collect unique resource keys from IR that have registered stamps.
+#[allow(dead_code, reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch")]
+pub fn resource_stamps_from_ir(
+    ir: &GraphIR,
+    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    resource_stamps_from_ir_into(&mut out, &mut seen, ir, resource_stamps);
     out
+}
+
+/// Reusable scratch for [`CrossSubmitScratch::plan`] — cleared and refilled per partition.
+///
+/// Retains container capacity across frames so steady-state cross-submit planning avoids
+/// repeated HashMap/Vec/HashSet allocations.
+pub(crate) struct CrossSubmitScratch {
+    net: HashMap<ResourceKey, NetAccess>,
+    registry: Vec<(ResourceKey, Arc<ParcelStamp>)>,
+    seen: HashSet<ResourceKey>,
+    ledger: LedgerSnapshot,
+    wait_map: HashMap<ContextHandle, u64>,
+    submit_sync: SubmitSync,
+}
+
+impl Default for CrossSubmitScratch {
+    fn default() -> Self {
+        Self {
+            net: HashMap::with_capacity(32),
+            registry: Vec::with_capacity(32),
+            seen: HashSet::with_capacity(32),
+            ledger: HashMap::with_capacity(32),
+            wait_map: HashMap::with_capacity(4),
+            submit_sync: SubmitSync::default(),
+        }
+    }
+}
+
+impl CrossSubmitScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn clear(&mut self) {
+        self.net.clear();
+        self.registry.clear();
+        self.seen.clear();
+        self.ledger.clear();
+        self.wait_map.clear();
+        self.submit_sync.prologue.buffers.clear();
+        self.submit_sync.prologue.textures.clear();
+        self.submit_sync.prologue.transient_ids.clear();
+        self.submit_sync.waits.clear();
+    }
+
+    /// Plan cross-submit sync for one partition, reusing internal buffers.
+    pub fn plan(
+        &mut self,
+        ir: &GraphIR,
+        resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+        submitting_ctx: ContextHandle,
+        waves: &[super::ir::Wave],
+    ) -> &SubmitSync {
+        self.clear();
+        net_access_for_waves_into(&mut self.net, ir, waves);
+        resource_stamps_from_ir_into(&mut self.registry, &mut self.seen, ir, resource_stamps);
+        build_ledger_snapshot_into(&mut self.ledger, &self.registry);
+        compute_cross_submit_sync_into(
+            &mut self.submit_sync.prologue,
+            &mut self.submit_sync.waits,
+            &mut self.wait_map,
+            &self.net,
+            &self.ledger,
+            submitting_ctx,
+        );
+        &self.submit_sync
+    }
 }
 
 /// After a successful submit, record this submission's access on each touched stamp.

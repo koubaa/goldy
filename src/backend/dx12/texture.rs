@@ -105,6 +105,96 @@ pub(super) fn init_storage_texture_uav_layout(
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
 }
 
+/// Diagnostic sentinel for resize-flicker localization (see `surface::resize`).
+const DIAGNOSTIC_MAGENTA_RGBA: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
+
+/// Solid-magenta UAV fill for newly allocated storage textures.
+///
+/// If an uninitialized intermediate is shown before the worker writes it, the flash
+/// becomes magenta instead of driver-default green.
+pub(super) fn clear_storage_uav_diagnostic_magenta(
+    state: &mut Dx12State,
+    device_handle: DeviceHandle,
+    texture_handle: TextureHandle,
+) -> Result<()> {
+    let (resource, uav_offset) = {
+        let tex = state
+            .textures
+            .get(&texture_handle)
+            .context("clear_storage_uav_diagnostic_magenta: texture not found")?;
+        anyhow::ensure!(
+            tex.device_handle == device_handle,
+            "clear_storage_uav_diagnostic_magenta: texture device mismatch"
+        );
+        anyhow::ensure!(
+            tex.is_storage,
+            "clear_storage_uav_diagnostic_magenta: texture is not storage"
+        );
+        let uav = tex
+            .bindless_offset
+            .context("clear_storage_uav_diagnostic_magenta: storage texture missing UAV")?;
+        (tex.resource.clone(), uav)
+    };
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("clear_storage_uav_diagnostic_magenta: invalid device")?;
+
+    let uav_cpu = unsafe {
+        let mut handle = logical_device.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as usize;
+        handle
+    };
+    let uav_gpu = unsafe {
+        let mut handle = logical_device.cbv_srv_uav_heap.GetGPUDescriptorHandleForHeapStart();
+        handle.ptr += (uav_offset * logical_device.cbv_srv_uav_descriptor_size) as u64;
+        handle
+    };
+
+    unsafe { logical_device.command_allocator.Reset() }
+        .context("clear_storage_uav_diagnostic_magenta: Reset allocator")?;
+    let init_cmd: ID3D12GraphicsCommandList = unsafe {
+        logical_device.device.CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &logical_device.command_allocator,
+            None,
+        )
+    }
+    .context("clear_storage_uav_diagnostic_magenta: CreateCommandList")?;
+    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&init_cmd) };
+
+    // Called immediately after `create` → `init_storage_texture_uav_layout`, so the
+    // resource is already in DIRECT_QUEUE_UNORDERED_ACCESS; no barrier needed.
+    unsafe {
+        cmd_gfx.ClearUnorderedAccessViewFloat(
+            uav_gpu,
+            uav_cpu,
+            &resource,
+            &DIAGNOSTIC_MAGENTA_RGBA,
+            &[],
+        )
+    };
+    unsafe { init_cmd.Close() }.context("clear_storage_uav_diagnostic_magenta: Close")?;
+
+    let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast clear command list")?;
+    unsafe {
+        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
+    }
+    let fence_value = logical_device
+        .timeline_next
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("clear_storage_uav_diagnostic_magenta: Signal")?;
+    wait_for_fence(&logical_device.fence, fence_value)?;
+
+    if let Some(tex) = state.textures.get_mut(&texture_handle) {
+        tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+    }
+    Ok(())
+}
+
 /// Create a texture.
 pub(super) fn create(
     state: &mut Dx12State,

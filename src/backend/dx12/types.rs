@@ -1078,6 +1078,8 @@ pub(crate) struct SurfaceState {
     pub current_frame: usize,
     /// Currently acquired swapchain image index
     pub current_image_index: Option<u32>,
+    /// Swapchain image index last passed to `Present()` (diagnostic: stale-index acquire).
+    pub last_presented_image_index: Option<u32>,
     /// Per-frame synchronization resources
     pub frame_sync: Vec<FrameSync>,
     /// Transient texture handle for the currently acquired back buffer,

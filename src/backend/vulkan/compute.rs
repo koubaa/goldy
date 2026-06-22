@@ -1797,12 +1797,12 @@ fn submit_graph_impl(
         let mut sc = sc_arc.lock().unwrap();
         let cb = acquire_cmd_buffer(ld, &mut sc)?;
         // Use ONE_TIME_SUBMIT for normal submits (driver hint for optimization).
-        // When retaining, omit the flag so the CB stays executable after GPU completion
-        // and can be resubmitted on the next frame.
+        // Retained CBs use SIMULTANEOUS_USE so a still-pending CB may be resubmitted
+        // without a CPU wait (VUID-vkQueueSubmit2-commandBuffer-03875).
         let flags = if retain_key.is_none() {
             vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT
         } else {
-            vk::CommandBufferUsageFlags::empty()
+            vk::CommandBufferUsageFlags::SIMULTANEOUS_USE
         };
         let begin_info = vk::CommandBufferBeginInfo::default().flags(flags);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
@@ -2664,9 +2664,9 @@ fn submit_graph_impl(
 
 /// Record, submit, and retain a dispatch command buffer keyed by `key`.
 ///
-/// The CB is recorded without `ONE_TIME_SUBMIT` (driver keeps it executable after GPU
-/// completion) and stored in `SubmissionContext::retained_compute_cbs` rather than
-/// `timeline_cmd_buffers`, so it survives the normal reap cycle.
+/// The CB is recorded with `SIMULTANEOUS_USE` so a still-pending retained CB may be
+/// resubmitted without a CPU wait (VUID-vkQueueSubmit2-commandBuffer-03875).
+/// Stored in `SubmissionContext::retained_compute_cbs` rather than `timeline_cmd_buffers`.
 /// On subsequent frames call [`try_resubmit_retained`] to re-execute without re-recording.
 /// If commands contain any WriteBuffer/WriteTexture nodes the call falls back to a normal
 /// (non-retained) submit via [`submit_graph`].

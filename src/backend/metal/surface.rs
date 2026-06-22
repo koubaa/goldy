@@ -36,7 +36,7 @@
 //! slot `(N-1) % 3` — the slots never alias across concurrent frames.
 
 use super::super::{
-    ContextHandle, DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
+    DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
 };
 use super::compute;
 use super::render_commands::{create_render_pass, record};
@@ -136,7 +136,8 @@ pub(super) fn create(
             depth_texture,
             current_frame: 0,
             layer: layer as *mut std::ffi::c_void,
-            current_drawable: None,
+            drawable_slots: std::array::from_fn(|_| None),
+            drawable_texture_handles: std::array::from_fn(|_| None),
             current_texture_handle: None,
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
@@ -155,15 +156,30 @@ pub(super) fn create(
 
 /// Destroy a surface.
 pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
-    let (device_handle, slots) = match state.surfaces.get(&surface) {
-        Some(s) => (Some(s.device_handle), Some(s.bindless_storage_slots)),
-        None => (None, None),
-    };
+    let (device_handle, slots, drawable_texture_handles, drawable_slots, current_texture_handle) =
+        match state.surfaces.get(&surface) {
+            Some(s) => (
+                Some(s.device_handle),
+                Some(s.bindless_storage_slots),
+                s.drawable_texture_handles,
+                s.drawable_slots,
+                s.current_texture_handle,
+            ),
+            None => (None, None, [None; MAX_FRAMES_IN_FLIGHT], [None; MAX_FRAMES_IN_FLIGHT], None),
+        };
 
-    if let Some(surface_state) = state.surfaces.get(&surface) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
+    for slot in 0..MAX_FRAMES_IN_FLIGHT {
+        if let Some(tex_handle) = drawable_texture_handles[slot] {
             unregister_surface_texture(state, tex_handle);
         }
+        if let Some(d) = drawable_slots[slot] {
+            unsafe {
+                let (): () = msg_send![d as id, release];
+            }
+        }
+    }
+    if let Some(tex_handle) = current_texture_handle {
+        unregister_surface_texture(state, tex_handle);
     }
 
     // Release all persistent bindless storage-image slots back to the device
@@ -198,22 +214,8 @@ pub(super) fn acquire(
     state: &mut MetalState,
     surface: SurfaceHandle,
     ctx: super::ContextHandle,
-) -> Result<SwapchainImageHandle> {
+) -> Result<(SwapchainImageHandle, u32)> {
     let _tz = crate::tracy_zone!("mtl.surface.acquire");
-    // Clean up any previously acquired drawable that wasn't presented
-    if let Some(surface_state) = state.surfaces.get(&surface) {
-        if let Some(tex_handle) = surface_state.current_texture_handle {
-            tracing::warn!("Previous drawable was not presented; cleaning up");
-            unregister_surface_texture(state, tex_handle);
-        }
-    }
-    if let Some(ss) = state.surfaces.get_mut(&surface) {
-        if let Some(d) = ss.current_drawable.take() {
-            unsafe {
-                let (): () = msg_send![d as id, release];
-            }
-        }
-    }
 
     let (device_handle, width, height, format, frame_slot, bindless_slot) = {
         let ss = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
@@ -233,6 +235,24 @@ pub(super) fn acquire(
         )
     };
 
+    // Clean up any previously acquired drawable in this slot that wasn't presented.
+    if let Some(tex_handle) = state
+        .surfaces
+        .get(&surface)
+        .and_then(|s| s.drawable_texture_handles[frame_slot])
+    {
+        tracing::warn!("Previous drawable in slot {frame_slot} was not presented; cleaning up");
+        unregister_surface_texture(state, tex_handle);
+    }
+    if let Some(ss) = state.surfaces.get_mut(&surface) {
+        if let Some(d) = ss.drawable_slots[frame_slot].take() {
+            unsafe {
+                let (): () = msg_send![d as id, release];
+            }
+        }
+        ss.drawable_texture_handles[frame_slot] = None;
+    }
+
     let layer = state.surfaces.get(&surface).unwrap().layer as id;
     let drawable: id = {
         let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
@@ -249,7 +269,10 @@ pub(super) fn acquire(
     unsafe {
         let () = msg_send![drawable, retain];
     }
-    state.surfaces.get_mut(&surface).unwrap().current_drawable = Some(drawable as *mut std::ffi::c_void);
+    {
+        let ss = state.surfaces.get_mut(&surface).unwrap();
+        ss.drawable_slots[frame_slot] = Some(drawable as *mut std::ffi::c_void);
+    }
 
     let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
@@ -259,6 +282,7 @@ pub(super) fn acquire(
     let image_index = {
         let ss = state.surfaces.get_mut(&surface).expect("surface registered above");
         let image_index = frame_slot as u32;
+        ss.drawable_texture_handles[frame_slot] = Some(tex_handle);
         ss.current_texture_handle = Some(tex_handle);
         ss.last_acquired_image_index = Some(image_index);
         ss.pending_acquire_count = ss.pending_acquire_count.saturating_add(1);
@@ -287,7 +311,7 @@ pub(super) fn acquire(
         }
     }
 
-    Ok(image_index as u64)
+    Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -300,12 +324,14 @@ pub(super) fn render(
     state: &mut MetalState,
     surface: SurfaceHandle,
     _image: SwapchainImageHandle,
+    present_slot: u32,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
+    let present_slot = present_slot as usize;
 
     let drawable_ptr = surface_state
-        .current_drawable
+        .drawable_slots[present_slot]
         .context("No drawable acquired — call surface_acquire first")?;
     let drawable = drawable_ptr as id;
 
@@ -425,16 +451,17 @@ pub(super) fn render(
 /// unregistered. This is the sole place where `presentDrawable:` is called.
 pub(super) fn present(
     state: &mut MetalState,
-    surface: SurfaceHandle,
-    _image: SwapchainImageHandle,
-    ctx: ContextHandle,
+    frame: crate::backend::FrameToken,
 ) -> Result<crate::timeline::TimelineValue> {
     let _tz = crate::tracy_zone!("mtl.surface.present");
+    let surface = frame.surface;
+    let present_slot = frame.present_slot as usize;
+    let ctx = frame.context;
     let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
 
     let device_handle = surface_state.device_handle;
 
-    let drawable_ptr = match surface_state.current_drawable {
+    let drawable_ptr = match surface_state.drawable_slots[present_slot] {
         Some(d) => d,
         None => {
             if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -452,7 +479,7 @@ pub(super) fn present(
                 .unwrap_or(retired));
         }
     };
-    let tex_handle = surface_state.current_texture_handle;
+    let tex_handle = surface_state.drawable_texture_handles[present_slot];
 
     let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
@@ -521,13 +548,16 @@ pub(super) fn present(
         unregister_surface_texture(state, th);
     }
 
-    // Clear the drawable state
+    // Clear the drawable state for this slot.
     let surface_state = state
         .surfaces
         .get_mut(&surface)
         .expect("surface must be registered before presenting a frame");
-    surface_state.current_drawable = None;
-    surface_state.current_texture_handle = None;
+    surface_state.drawable_slots[present_slot] = None;
+    surface_state.drawable_texture_handles[present_slot] = None;
+    if surface_state.current_texture_handle == tex_handle {
+        surface_state.current_texture_handle = None;
+    }
     surface_state.last_acquired_image_index = None;
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -580,7 +610,7 @@ pub(super) fn present_frame(
     frame: FrameToken,
     _submit_tv: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
-    present(state, frame.surface, frame.image, frame.context)
+    present(state, frame)
 }
 
 /// Set the present mode on the CAMetalLayer.

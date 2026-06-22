@@ -803,7 +803,7 @@ impl GpuBackend for Dx12Backend {
         surface_handle: SurfaceHandle,
         ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
+        let (image, present_slot) = surface::acquire(&mut self.state, surface_handle, ctx)?;
         let tex = surface::frame_texture(&self.state, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
@@ -812,13 +812,20 @@ impl GpuBackend for Dx12Backend {
                 image,
                 context: ctx,
                 frame_slot: image as u32,
+                present_slot,
             },
             tex,
         ))
     }
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        surface::render(&mut self.state, frame.surface, frame.image, commands)
+        surface::render(
+            &mut self.state,
+            frame.surface,
+            frame.image,
+            frame.present_slot,
+            commands,
+        )
     }
 
     fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {

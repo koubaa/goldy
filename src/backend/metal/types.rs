@@ -558,6 +558,11 @@ impl TimelineWaiter {
         cvar.notify_all();
     }
 
+    /// Highest timeline value confirmed complete by completion handlers on this context.
+    pub fn completed_value(&self) -> u64 {
+        *self.inner.0.lock().unwrap()
+    }
+
     /// Block until the signaled value reaches at least `target`, or timeout.
     /// Returns `Ok(true)` if reached, `Ok(false)` on timeout.
     pub fn wait_until(&self, target: u64, timeout: std::time::Duration) -> bool {
@@ -1209,9 +1214,11 @@ pub(crate) struct SurfaceState {
     pub current_frame: usize,
     /// The CAMetalLayer (stored as raw pointer for objc interop)
     pub layer: *mut std::ffi::c_void,
-    /// The currently acquired CAMetalDrawable (set during acquire, cleared on present)
-    pub current_drawable: Option<*mut std::ffi::c_void>,
-    /// Texture handle for the current frame's drawable (registered for bindless access).
+    /// Per-slot acquired CAMetalDrawables (set during acquire, cleared on present).
+    pub drawable_slots: [Option<*mut std::ffi::c_void>; MAX_FRAMES_IN_FLIGHT],
+    /// Texture handle for each slot's drawable (registered for bindless access).
+    pub drawable_texture_handles: [Option<TextureHandle>; MAX_FRAMES_IN_FLIGHT],
+    /// Texture handle for the most recently acquired frame (for `frame_texture()`).
     pub current_texture_handle: Option<TextureHandle>,
     /// Triple-buffered storage-image LOCAL indices reserved at surface create.
     /// Each frame uses `bindless_storage_slots[current_frame]` so the CPU never

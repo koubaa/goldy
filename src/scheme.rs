@@ -28,7 +28,7 @@ use crate::task_graph::{
 use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{
-    BackendType, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
+    Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
     TextureFormat, TextureKind,
 };
 use crate::validation_env;
@@ -506,22 +506,6 @@ pub struct Scheme {
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     /// Retention key stored at record time. `None` when the backend cannot retain `ir`.
     retention_key: Option<u64>,
-    /// Timeline value from the most recent successful [`Self::submit`].
-    ///
-    /// On Vulkan, retained partitions are resubmitted as live `VkCommandBuffer` objects
-    /// (VUID-vkQueueSubmit2-commandBuffer-03875 forbids submitting a CB that is still
-    /// pending).  Before resubmitting on the clean path we wait on this value to ensure all
-    /// prior partitions have retired.
-    ///
-    /// On Metal, `try_resubmit_retained` always re-encodes a fresh `MTLCommandBuffer` from
-    /// the cached `GraphCommand` list, so there is no pending CB to wait for and the wait is
-    /// skipped at runtime.
-    ///
-    /// This is still conservative: a lowered scheme may become multiple queue submissions
-    /// (A1, A2, A3) and another scheme's B1 need only wait for the slice it depends on —
-    /// not A3.  A per-slice retirement gate belongs in the IR lowering path; until then,
-    /// whole-scheme `last_submitted_tv` is the correctness stopgap.
-    last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
     next_grant_id: u32,
     /// Process-unique identity for cross-scheme [`Submission`] / [`ReadGrant`] pairing.
@@ -545,7 +529,6 @@ impl Scheme {
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             retention_key: None,
-            last_submitted_tv: None,
             stats: ReplayStats::default(),
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
@@ -568,6 +551,12 @@ impl Scheme {
     /// Submission outcome counters.
     pub fn replay_stats(&self) -> ReplayStats {
         self.stats
+    }
+
+    /// Per-partition timeline values from the most recent successful submit (diagnostics/tests).
+    #[doc(hidden)]
+    pub fn partition_last_tvs(&self) -> &[Option<TimelineValue>] {
+        self.submit_state.partition_last_tvs()
     }
 
     /// Register stamp targets collected during compute-node recording.
@@ -1001,24 +990,19 @@ impl Scheme {
     /// retained submissions.
     ///
     /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`Grant::consume`] via [`PresentGrant`].
+    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    ///
+    /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
+    /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
+    /// CPU wait here.
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
-        // Vulkan/DX12 retained partitions reuse a live command buffer — wait until the prior
-        // submission retires before resubmitting to satisfy VUID-vkQueueSubmit2-commandBuffer-03875.
-        // Skip on Metal (fresh MTLCommandBuffer each resubmit). Use a runtime backend check:
-        // the `metal` Cargo feature is enabled on all default builds, so a compile-time
-        // `#[cfg(not(feature = "metal"))]` gate would omit this wait on Vulkan too.
-        if let Some(prev_tv) = self.last_submitted_tv {
-            if self.ctx.device().backend_type() != BackendType::Metal {
-                let _tz = crate::tracy_zone!("scheme.submit.wait_prev");
-                self.ctx.wait_until(prev_tv)?;
-            }
-        }
-
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         let structurally_dirty = self.dirty;
-        if structurally_dirty || topo_dirty {
-            self.submit_state.invalidate_retention();
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.dirty_check");
+            if structurally_dirty || topo_dirty {
+                self.submit_state.invalidate_retention();
+            }
         }
 
         let mut present_slots = Vec::with_capacity(self.present_grants.len());
@@ -1040,8 +1024,9 @@ impl Scheme {
 
         let submit_result = {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
+            let ir_clean = !structurally_dirty && !topo_dirty;
             self.submit_state
-                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots)
+                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots, ir_clean)
         };
 
         let (tv, part_result) = match submit_result {
@@ -1097,8 +1082,30 @@ impl Scheme {
             }
         }
 
+        if structurally_dirty || topo_dirty {
+            tracing::debug!(
+                target: "goldy::scheme",
+                scheme_id = self.scheme_id,
+                structurally_dirty,
+                topo_dirty,
+                partition_records = part_result.records,
+                partition_resubmits = part_result.resubmit_hits,
+                scheme_recorded = recorded,
+                "submit dirty"
+            );
+        } else {
+            tracing::debug!(
+                target: "goldy::scheme",
+                scheme_id = self.scheme_id,
+                partition_records = part_result.records,
+                partition_resubmits = part_result.resubmit_hits,
+                scheme_recorded = recorded,
+                all_partitions_from_cache = part_result.all_from_cache(),
+                "submit clean (not dirty)"
+            );
+        }
+
         let submission = self.finish_submit_frame(tv, surface_frames)?;
-        self.last_submitted_tv = Some(submission.timeline_value());
         Ok(submission)
     }
 
@@ -2214,6 +2221,30 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             scheme.replay_stats().resubmit_hits,
             2,
             "subsequent clean submits resubmit"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "metal"))]
+    fn clean_resubmit_performs_no_cpu_wait() {
+        use crate::backend::GpuBackend;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut scheme = clean_scheme(&device, &mut pool);
+
+        scheme.submit().unwrap();
+        scheme.submit().unwrap();
+
+        let backend = device.inner.backend.lock().unwrap();
+        assert_eq!(
+            backend.test_wait_until_count(),
+            0,
+            "clean scheme resubmits must not call wait_until on the submit path"
+        );
+        assert!(
+            !scheme.partition_last_tvs().is_empty(),
+            "per-partition timelines are tracked after submit"
         );
     }
 
