@@ -2357,6 +2357,7 @@ fn register_surface_texture(
             sampled_bindless_index: None,
             current_layout: std::sync::atomic::AtomicI32::new(vk::ImageLayout::GENERAL.as_raw()),
             transient_heap_suballoc: false,
+            debug_name: std::sync::Mutex::new(None),
         },
     );
 

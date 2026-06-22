@@ -314,6 +314,16 @@ impl Texture {
         self.owned
     }
 
+    /// Attach a human-readable name to this texture for GPU debuggers and
+    /// validation layer messages.
+    ///
+    /// On Vulkan the name is forwarded to `vkSetDebugUtilsObjectNameEXT`
+    /// (active only when validation layers are enabled).  On other backends the
+    /// call is a no-op, so callers do not need to add any feature guards.
+    pub fn set_debug_name(&self, name: &str) {
+        self.backend.lock().unwrap().set_texture_debug_name(self.handle, name);
+    }
+
     /// Create a non-owning view of this texture.
     ///
     /// The returned `Texture` shares the same GPU resource and handle but does

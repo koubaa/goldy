@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
 #[allow(clippy::too_many_arguments)]
@@ -251,6 +252,7 @@ pub(super) fn create(
             sampled_bindless_index,
             current_layout: std::sync::atomic::AtomicI32::new(initial_layout.as_raw()),
             transient_heap_suballoc: false,
+            debug_name: Mutex::new(None),
         },
     );
 
@@ -1352,4 +1354,28 @@ pub(super) fn bindless_sampled_index(
     texture_handle: TextureHandle,
 ) -> Option<u32> {
     textures.get(&texture_handle).and_then(|t| t.sampled_bindless_index)
+}
+
+/// Set a human-readable debug name on the underlying `VkImage` via
+/// `vkSetDebugUtilsObjectNameEXT`.  Only called when validation layers are
+/// active; the caller must guard with `state.enable_validation`.
+pub(super) fn set_debug_name(
+    instance: &ash::Instance,
+    devices: &HashMap<super::DeviceHandle, super::types::SharedLogicalDevice>,
+    textures: &HashMap<TextureHandle, TextureState>,
+    handle: TextureHandle,
+    name: &str,
+) {
+    let Some(ts) = textures.get(&handle) else { return };
+    *ts.debug_name.lock().unwrap() = Some(name.to_owned());
+    let Some(ld) = devices.get(&ts.device_handle) else { return };
+    let debug_utils = ash::ext::debug_utils::Device::new(instance, &ld.device);
+    let Ok(name_cstr) = std::ffi::CString::new(name) else { return };
+    // `object_handle` sets both the raw handle and `object_type` from the vk::Image type.
+    let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
+        .object_handle(ts.image)
+        .object_name(&name_cstr);
+    unsafe {
+        let _ = debug_utils.set_debug_utils_object_name(&name_info);
+    }
 }

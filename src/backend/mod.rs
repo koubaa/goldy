@@ -977,6 +977,15 @@ pub trait GpuBackend: Send + Sync {
         data: &[u8],
     ) -> Result<()>;
     fn destroy_texture(&mut self, texture: TextureHandle);
+    /// Attach a human-readable debug name to a texture resource.
+    ///
+    /// The name is forwarded to the graphics API's debug-naming facility
+    /// (e.g. `vkSetDebugUtilsObjectNameEXT` on Vulkan) so that validation
+    /// messages and GPU debuggers show the name instead of a raw handle.
+    ///
+    /// Backends that do not support debug naming provide a default no-op
+    /// implementation, so callers do not need to feature-gate the call.
+    fn set_texture_debug_name(&mut self, _handle: TextureHandle, _name: &str) {}
     /// Read texture contents to CPU memory.
     /// The texture must have been created with TextureFlags::COPY_SRC.
     fn read_texture_to_cpu(&mut self, texture: TextureHandle, output: &mut [u8]) -> Result<()>;
