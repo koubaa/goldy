@@ -11,6 +11,7 @@
 // Allow isize casts needed for FFI with raw-window-handle and ash
 #![allow(clippy::unnecessary_cast)]
 
+mod api_log;
 mod buffer;
 mod compute;
 mod context;
@@ -157,18 +158,22 @@ impl VulkanBackend {
 
         // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
         let enable_validation = vulkan_instance_validation_enabled();
-        let validation_layers: Vec<*const c_char> = if enable_validation {
+        let mut enabled_layers: Vec<*const c_char> = Vec::new();
+        if enable_validation {
             tracing::info!("Vulkan validation layers ENABLED");
             extensions.push(ash::ext::debug_utils::NAME.as_ptr());
-            vec![c"VK_LAYER_KHRONOS_validation".as_ptr()]
-        } else {
-            vec![]
-        };
+            enabled_layers.push(c"VK_LAYER_KHRONOS_validation".as_ptr());
+        }
+
+        // GOLDY_API_LOG → VK_LAYER_LUNARG_api_dump (JSON file); see api_log.rs.
+        if let Some(layer) = api_log::configure_and_layer(&entry) {
+            enabled_layers.push(layer);
+        }
 
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extensions)
-            .enabled_layer_names(&validation_layers);
+            .enabled_layer_names(&enabled_layers);
 
         let instance = {
             let _guard = VK_INSTANCE_LOCK.lock().unwrap();
