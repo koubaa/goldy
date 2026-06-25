@@ -177,7 +177,7 @@ pub(super) fn create(
     // (textures and buffers share the same CBV/SRV/UAV heap)
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let srv_offset = logical_device
-        .ledger
+        .descriptors
         .lock()
         .unwrap()
         .resource_registry
@@ -212,7 +212,7 @@ pub(super) fn create(
     // bindless_offset must point to UAV for goldy_direct_spatial.
     let bindless_offset = if is_storage {
         let uav_offset = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -246,7 +246,7 @@ pub(super) fn create(
     let sampled_bindless_offset = if is_dual_access {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         let srv2_offset = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -1111,7 +1111,7 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
     if let Some(tex) = state.textures.remove(&texture_handle) {
         if let Some(dev) = state.devices.get(&tex.device_handle) {
             if tex.transient_placed {
-                dev.ledger.lock().unwrap().reclaim_texture_slots(texture_handle);
+                dev.descriptors.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;
             }
             let last_fence = dev

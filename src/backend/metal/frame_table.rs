@@ -145,7 +145,7 @@ impl MetalFrameTable {
 
 /// Reserve user bindless storage slots and create frame-table buffers at device init.
 pub(super) fn init_device(ld: &LogicalDevice) {
-    ld.ledger
+    ld.descriptors
         .lock()
         .unwrap()
         .resource_registry

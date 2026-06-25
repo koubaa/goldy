@@ -585,14 +585,14 @@ impl DeletionQueue {
     }
 }
 
-/// Device-shared descriptor-heap ledger.
+/// Device-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
 /// `ResourceRegistry` (descriptor slot allocator), the per-context
 /// `slot_last_seen` reference table, and the `pending_slot_reclamations`
 /// list.  Wrapped in `Arc<Mutex<>>` on `LogicalDevice` so that future phases
 /// can lock it independently of the global backend mutex.
-pub(crate) struct DeviceLedger {
+pub(crate) struct DescriptorRegistry {
     /// Registry tracking resource offsets in descriptor heaps.
     pub resource_registry: ResourceRegistry,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
@@ -602,7 +602,7 @@ pub(crate) struct DeviceLedger {
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
 }
 
-impl DeviceLedger {
+impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
@@ -670,7 +670,7 @@ impl DeviceLedger {
     /// Return pending slots to the free list once every referencing context has retired.
     ///
     /// Takes the per-state `context_fences` index (not the full context map) so this
-    /// method can be called while holding the ledger lock without risking a lock-ordering
+    /// method can be called while holding the descriptors lock without risking a lock-ordering
     /// deadlock with per-context `Mutex<Dx12SubmissionContext>`.
     pub(crate) fn drain_ready_slot_reclamations(
         &mut self,
@@ -764,10 +764,10 @@ pub(crate) struct LogicalDevice {
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: Mutex<DeletionQueue>,
-    /// Descriptor-heap ledger: `ResourceRegistry` + slot reference-tracking.
+    /// Descriptor registry: `ResourceRegistry` + slot reference-tracking.
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
-    pub ledger: Arc<Mutex<DeviceLedger>>,
+    pub descriptors: Arc<Mutex<DescriptorRegistry>>,
     /// Cached PSO blobs (graphics + compute) and disk-dirty flag.
     /// `RwLock` because reads dominate after warmup; `Arc` for Phase 5 cloning.
     pub pso_cache: Arc<RwLock<PsoCache>>,
@@ -786,10 +786,10 @@ impl LogicalDevice {
         if batch.is_empty() {
             return;
         }
-        let ledger_arc = Arc::clone(&self.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = Arc::clone(&self.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in batch {
-            destroy_pending_deletion(self, &mut ledger, resource);
+            destroy_pending_deletion(self, &mut registry, resource);
         }
     }
 
@@ -804,15 +804,15 @@ impl LogicalDevice {
         if batch.is_empty() {
             return;
         }
-        let ledger_arc = Arc::clone(&self.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = Arc::clone(&self.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in batch {
-            destroy_pending_deletion(self, &mut ledger, resource);
+            destroy_pending_deletion(self, &mut registry, resource);
         }
     }
 }
 
-pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLedger, resource: PendingDeletion) {
+pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, registry: &mut DescriptorRegistry, resource: PendingDeletion) {
     match resource {
         PendingDeletion::Buffer {
             buffer_handle,
@@ -821,7 +821,7 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
             coherent_readback,
             reserved_tiles,
         } => {
-            ledger.reclaim_buffer_slots(buffer_handle);
+            registry.reclaim_buffer_slots(buffer_handle);
             if let Some(tiles) = reserved_tiles {
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
@@ -837,7 +837,7 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
             drop(coherent_readback);
         }
         PendingDeletion::BufferView { buffer_handle } => {
-            ledger.reclaim_buffer_slots(buffer_handle);
+            registry.reclaim_buffer_slots(buffer_handle);
         }
         PendingDeletion::ReplacedBufferGpu {
             resource,
@@ -872,7 +872,7 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
             texture_handle,
             resource,
         } => {
-            ledger.reclaim_texture_slots(texture_handle);
+            registry.reclaim_texture_slots(texture_handle);
             drop(resource);
         }
         PendingDeletion::StandaloneResource(resource) => {
@@ -1115,9 +1115,9 @@ pub(super) struct Dx12State {
     /// Fence handles for every live context, keyed by context ID.
     ///
     /// Maintained in sync with `contexts` (inserted on create, removed on destroy).
-    /// Used by [`DeviceLedger::drain_ready_slot_reclamations`] and [`device_retired`] so
+    /// Used by [`DescriptorRegistry::drain_ready_slot_reclamations`] and [`device_retired`] so
     /// those paths can query fence completion without acquiring any per-context lock,
-    /// avoiding a ledger-lock → context-lock ordering hazard.
+    /// avoiding a descriptors-lock → context-lock ordering hazard.
     pub context_fences: HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,

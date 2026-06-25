@@ -794,10 +794,10 @@ pub(super) fn acquire(
             .context("Surface's device is invalid")?;
         let drained = logical_device.deletion_queue.lock().unwrap().drain_up_to(completed);
         if !drained.is_empty() {
-            let ledger_arc = std::sync::Arc::clone(&logical_device.ledger);
-            let mut ledger = ledger_arc.lock().unwrap();
+            let descriptors_arc = std::sync::Arc::clone(&logical_device.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
             for r in drained {
-                types::destroy_pending_deletion(logical_device, &mut ledger, r);
+                types::destroy_pending_deletion(logical_device, &mut registry, r);
             }
         }
     }
@@ -2292,7 +2292,7 @@ fn register_surface_texture(
     // Register as a storage image in the bindless descriptor set
     let is_storage_image = true;
     let bindless_index = logical_device
-        .ledger
+        .descriptors
         .lock()
         .unwrap()
         .resource_registry
@@ -2366,7 +2366,7 @@ fn unregister_swapchain_texture_with_device(
     tex_handle: TextureHandle,
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
-        logical_device.ledger.lock().unwrap().reclaim_texture_slots(tex_handle);
+        logical_device.descriptors.lock().unwrap().reclaim_texture_slots(tex_handle);
         unsafe {
             logical_device.device.destroy_image_view(tex_state.view, None);
         }
@@ -2383,7 +2383,7 @@ fn unregister_swapchain_texture(
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
         if let Some(device) = devices.get(&tex_state.device_handle) {
-            device.ledger.lock().unwrap().reclaim_texture_slots(tex_handle);
+            device.descriptors.lock().unwrap().reclaim_texture_slots(tex_handle);
             unsafe {
                 device.device.destroy_image_view(tex_state.view, None);
             }

@@ -15,7 +15,7 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let sampler_offset = logical_device
-        .ledger
+        .descriptors
         .lock()
         .unwrap()
         .resource_registry
@@ -64,7 +64,7 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
 pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
     if let Some(sampler) = state.samplers.remove(&sampler_handle) {
         if let Some(ld) = state.devices.get(&sampler.device_handle) {
-            ld.ledger.lock().unwrap().reclaim_sampler_slots(sampler_handle);
+            ld.descriptors.lock().unwrap().reclaim_sampler_slots(sampler_handle);
         }
     }
 }

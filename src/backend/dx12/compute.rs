@@ -1602,7 +1602,7 @@ fn execute_signal_and_finish(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
@@ -1688,12 +1688,12 @@ fn execute_signal_and_finish(
         })
         .unwrap_or_default();
     if let Some(dev) = state.devices.get(&device_handle) {
-        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in ctx_del_batch {
-            types::destroy_pending_deletion(dev, &mut ledger, resource);
+            types::destroy_pending_deletion(dev, &mut registry, resource);
         }
-        ledger.drain_ready_slot_reclamations(&state.context_fences);
+        registry.drain_ready_slot_reclamations(&state.context_fences);
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -2391,7 +2391,7 @@ pub(super) fn try_resubmit_retained(
     }
 
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
@@ -2418,12 +2418,12 @@ pub(super) fn try_resubmit_retained(
         })
         .unwrap_or_default();
     if let Some(dev) = state.devices.get(&device_handle) {
-        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in retained_del_batch {
-            types::destroy_pending_deletion(dev, &mut ledger, resource);
+            types::destroy_pending_deletion(dev, &mut registry, resource);
         }
-        ledger.drain_ready_slot_reclamations(&state.context_fences);
+        registry.drain_ready_slot_reclamations(&state.context_fences);
     }
 
     Ok(Some(fence_value))

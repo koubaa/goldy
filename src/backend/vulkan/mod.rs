@@ -36,7 +36,7 @@ use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Process-global lock serialising `vkCreateInstance` and `vkDestroyInstance`.
 ///
@@ -1188,14 +1188,14 @@ impl GpuBackend for VulkanBackend {
             };
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
-                let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-                let mut ledger = ledger_arc.lock().unwrap();
+                let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+                let mut registry = descriptors_arc.lock().unwrap();
                 for r in drained {
-                    types::destroy_pending_deletion(ld, &mut ledger, r);
+                    types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
                     types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
-                ledger.drain_ready_slot_reclamations(&completed_values);
+                registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
         Ok(())
@@ -1227,14 +1227,14 @@ impl GpuBackend for VulkanBackend {
                 compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
                     let drained = ld.deletion_queue.lock().unwrap().drain_up_to(value.min(retired));
-                    let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-                    let mut ledger = ledger_arc.lock().unwrap();
+                    let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+                    let mut registry = descriptors_arc.lock().unwrap();
                     for r in drained {
-                        types::destroy_pending_deletion(ld, &mut ledger, r);
+                        types::destroy_pending_deletion(ld, &mut registry, r);
                     }
                     let completed_values =
                         types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
-                    ledger.drain_ready_slot_reclamations(&completed_values);
+                    registry.drain_ready_slot_reclamations(&completed_values);
                 }
                 Ok(true)
             }
@@ -1327,7 +1327,7 @@ impl GpuBackend for VulkanBackend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| ld.descriptors.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 
@@ -1350,15 +1350,15 @@ impl GpuBackend for VulkanBackend {
             .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
-                let mut ledger = ledger_arc.lock().unwrap();
+                let mut registry = descriptors_arc.lock().unwrap();
                 for r in ctx_batch {
-                    types::destroy_pending_deletion(ld, &mut ledger, r);
+                    types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
                     types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
-                ledger.drain_ready_slot_reclamations(&completed_values);
+                registry.drain_ready_slot_reclamations(&completed_values);
             }
             // Device-level queue: user-destroyed resources without context attribution.
             ld.process_deletion_queue_up_to(completed);

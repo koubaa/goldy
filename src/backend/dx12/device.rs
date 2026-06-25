@@ -416,7 +416,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             compute_batch_dispatch_signature,
             zero_buffer,
             deletion_queue: std::sync::Mutex::new(super::types::DeletionQueue::new()),
-            ledger: std::sync::Arc::new(std::sync::Mutex::new(super::types::DeviceLedger::new())),
+            descriptors: std::sync::Arc::new(std::sync::Mutex::new(super::types::DescriptorRegistry::new())),
             pso_cache: std::sync::Arc::new(std::sync::RwLock::new(super::types::PsoCache::new(
                 graphics_pso_blobs,
                 compute_pso_blobs,

@@ -449,7 +449,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_descriptor_set_layout,
             bindless_descriptor_set,
             bindless_pipeline_layout,
-            ledger: Arc::new(Mutex::new(types::DeviceLedger::new())),
+            descriptors: Arc::new(Mutex::new(types::DescriptorRegistry::new())),
             deletion_queue: Mutex::new(types::DeletionQueue::new()),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),

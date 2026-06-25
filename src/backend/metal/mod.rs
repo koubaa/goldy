@@ -48,7 +48,7 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
-        device.ledger.lock().unwrap().resource_registry.drain_pending_slots();
+        device.descriptors.lock().unwrap().resource_registry.drain_pending_slots();
     }
 }
 
@@ -884,7 +884,7 @@ impl GpuBackend for MetalBackend {
         self.state
             .devices
             .get(&device)
-            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| ld.descriptors.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 

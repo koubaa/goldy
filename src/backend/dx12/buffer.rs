@@ -834,7 +834,7 @@ pub(super) fn create(
 
             // Register UAV to get the next available descriptor offset
             let uav_offset = logical_device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry
@@ -869,7 +869,7 @@ pub(super) fn create(
 
             // Also register and create SRV for read-only graphics access (StructuredBuffer)
             let srv_offset = logical_device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry
@@ -911,7 +911,7 @@ pub(super) fn create(
         } else {
             // For uniform buffers, create a CBV (ConstantBuffer pattern)
             let cbv_offset = logical_device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry
@@ -1043,7 +1043,7 @@ pub(super) fn create_reserved_with_capacity(
 
     let (bindless_offset, bindless_srv_offset) = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let uav_offset = ld.ledger.lock().unwrap().resource_registry.register_buffer_uav(handle);
+        let uav_offset = ld.descriptors.lock().unwrap().resource_registry.register_buffer_uav(handle);
         let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
             Format: DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
@@ -1067,7 +1067,7 @@ pub(super) fn create_reserved_with_capacity(
                 .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
         }
 
-        let srv_offset = ld.ledger.lock().unwrap().resource_registry.register_buffer_srv(handle);
+        let srv_offset = ld.descriptors.lock().unwrap().resource_registry.register_buffer_srv(handle);
         let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
             Format: DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
@@ -1256,7 +1256,7 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             }
 
             if buffer.transient_placed {
-                device.ledger.lock().unwrap().reclaim_buffer_slots(buffer_handle);
+                device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
                 return;
             }
             if buffer.coherent_readback_mapped.is_some() {
@@ -1395,7 +1395,7 @@ pub(super) fn create_view(
         } else {
             // UAV descriptor
             let uav_offset = logical_device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry
@@ -1429,7 +1429,7 @@ pub(super) fn create_view(
 
             // SRV descriptor
             let srv_offset = logical_device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry

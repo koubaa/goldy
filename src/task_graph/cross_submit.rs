@@ -1,8 +1,8 @@
 //! Cross-submission hazard analysis for independent [`Scheme`] / [`TaskGraph`] submits.
 //!
 //! Intra-submission barriers are computed by [`super::analysis`]; this module derives
-//! scoped memory barriers and cross-context queue-waits from the per-resource epoch
-//! ledger on [`crate::parcel::ParcelStamp`].
+//! scoped memory barriers and cross-context queue-waits from the runtime's ledger
+//! (spec §5): the standing per-parcel ownership record on [`crate::parcel::ParcelStamp`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};

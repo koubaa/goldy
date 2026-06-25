@@ -962,8 +962,8 @@ impl GpuBackend for Dx12Backend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(value.min(retired));
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-            ledger_arc
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            descriptors_arc
                 .lock()
                 .unwrap()
                 .drain_ready_slot_reclamations(&self.state.context_fences);
@@ -1002,8 +1002,8 @@ impl GpuBackend for Dx12Backend {
             let retired = context::device_retired(&self.state, device_handle);
             if let Some(dev) = self.state.devices.get(&device_handle) {
                 dev.process_deletion_queue_up_to(value.min(retired));
-                let ledger_arc = std::sync::Arc::clone(&dev.ledger);
-                ledger_arc
+                let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+                descriptors_arc
                     .lock()
                     .unwrap()
                     .drain_ready_slot_reclamations(&self.state.context_fences);
@@ -1231,7 +1231,7 @@ impl GpuBackend for Dx12Backend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| ld.descriptors.lock().unwrap().resource_registry.available_slots(category))
             .unwrap_or(0)
     }
 
@@ -1248,8 +1248,8 @@ impl GpuBackend for Dx12Backend {
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get(&device_handle) {
             ld.process_deletion_queue_up_to(retired);
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-            ledger_arc
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            descriptors_arc
                 .lock()
                 .unwrap()
                 .drain_ready_slot_reclamations(&self.state.context_fences);

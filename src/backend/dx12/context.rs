@@ -131,10 +131,10 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     let batch = sc.deletion_queue.drain_everything();
     if !batch.is_empty() {
         if let Some(ld) = state.devices.get(&device) {
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-            let mut ledger = ledger_arc.lock().unwrap();
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
             for resource in batch {
-                super::types::destroy_pending_deletion(ld, &mut ledger, resource);
+                super::types::destroy_pending_deletion(ld, &mut registry, resource);
             }
         }
     }

@@ -474,7 +474,7 @@ impl TextureCopyFootprint {
     }
 }
 
-/// Cross-submission synchronization derived from the resource epoch ledger.
+/// Cross-submission synchronization derived from the runtime's ledger (spec §5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubmitSync {
     /// Same-context scoped memory barrier prepended before command execution.

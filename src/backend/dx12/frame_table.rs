@@ -51,7 +51,7 @@ pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHan
 
     {
         let dev = state.devices.get(&device_handle).context("init frame table")?;
-        dev.ledger
+        dev.descriptors
             .lock()
             .unwrap()
             .resource_registry

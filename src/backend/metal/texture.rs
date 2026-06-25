@@ -146,7 +146,7 @@ pub(super) fn create(
     let is_storage_image = matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated);
     let (arg_buffer_index, encoding_index) = if is_storage_image {
         let local = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -154,7 +154,7 @@ pub(super) fn create(
         (local, ResourceRegistry::storage_image_global_index(local))
     } else {
         let local = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -165,7 +165,7 @@ pub(super) fn create(
     // For DirectInterpolated, additionally register in the sampled-texture pool.
     let sampled_arg_buffer_index = if matches!(access, TextureKind::DirectInterpolated) {
         let local = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -414,15 +414,15 @@ pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
         let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
         let slot_barrier = if gpu_idle { None } else { Some(barrier) };
         if let Some(device) = state.devices.get(&device_handle) {
-            let mut ledger = device.ledger.lock().unwrap();
-            ledger.resource_registry.unregister_texture(texture_handle);
+            let mut registry = device.descriptors.lock().unwrap();
+            registry.resource_registry.unregister_texture(texture_handle);
             if !texture.slot_owned_externally {
                 if texture.is_storage_image {
-                    ledger
+                    registry
                         .resource_registry
                         .release_storage_image_slot(texture.arg_buffer_index, slot_barrier);
                 } else {
-                    ledger
+                    registry
                         .resource_registry
                         .release_texture_slot(texture.arg_buffer_index, slot_barrier);
                 }

@@ -41,16 +41,16 @@ pub(crate) struct PendingSlotReclamation {
     pub requirements: Vec<(super::ContextHandle, u64)>,
 }
 
-/// Device-shared descriptor-heap ledger.
+/// Device-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
 /// `ResourceRegistry` (descriptor slot allocator), the per-context
 /// `slot_last_seen` reference table, and the `pending_slot_reclamations`
-/// list.  Wrapped in `Arc<Mutex<DeviceLedger>>` on `LogicalDevice` so that
-/// submit paths can hold the ledger lock independently of the global backend
+/// list.  Wrapped in `Arc<Mutex<DescriptorRegistry>>` on `LogicalDevice` so that
+/// submit paths can hold the descriptors lock independently of the global backend
 /// mutex (Phase 4), and can clone the `Arc` before dropping the global lock
 /// (Phase 5).
-pub(crate) struct DeviceLedger {
+pub(crate) struct DescriptorRegistry {
     /// Registry tracking resource indices in the global descriptor set.
     pub resource_registry: ResourceRegistry,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
@@ -60,7 +60,7 @@ pub(crate) struct DeviceLedger {
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
 }
 
-impl DeviceLedger {
+impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
@@ -129,7 +129,7 @@ impl DeviceLedger {
     ///
     /// Takes a pre-snapshotted map of `(context_handle → completed_timeline_value)` rather
     /// than querying semaphores directly, so this method is safe to call while holding the
-    /// ledger lock without creating a semaphore-query → ledger-lock ordering hazard.
+    /// descriptors lock without creating a semaphore-query → descriptors-lock ordering hazard.
     /// A missing entry means the context has been destroyed and is considered fully retired.
     pub(crate) fn drain_ready_slot_reclamations(&mut self, completed_values: &HashMap<super::ContextHandle, u64>) {
         let mut i = 0;
@@ -150,8 +150,8 @@ impl DeviceLedger {
 
 /// Snapshot the completed timeline value for every context belonging to `for_device`.
 ///
-/// Call this **before** locking the ledger so `drain_ready_slot_reclamations` has the
-/// retirement data it needs without touching live context state while the ledger is locked.
+/// Call this **before** locking the descriptors so `drain_ready_slot_reclamations` has the
+/// retirement data it needs without touching live context state while the descriptors lock is held.
 pub(super) fn snapshot_context_completed_values(
     device: &ash::Device,
     contexts: &HashMap<super::ContextHandle, SharedSubmissionContext>,
@@ -652,10 +652,10 @@ pub(crate) struct LogicalDevice {
     pub bindless_descriptor_set: Option<vk::DescriptorSet>,
     /// Pipeline layout for bindless rendering (includes the global set)
     pub bindless_pipeline_layout: Option<vk::PipelineLayout>,
-    /// Descriptor-heap ledger: `ResourceRegistry` + slot reference-tracking.
+    /// Descriptor registry: `ResourceRegistry` + slot reference-tracking.
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
-    pub ledger: Arc<Mutex<DeviceLedger>>,
+    pub descriptors: Arc<Mutex<DescriptorRegistry>>,
     /// Deferred deletion queue for resources that are still in-flight.
     /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a): callers that
     /// previously took `&mut LogicalDevice` now lock this field individually.
@@ -1140,15 +1140,15 @@ impl DeletionQueue {
 
 /// Deferred-delete one entry ([`SparseBufferTeardown`] needs [`LogicalDevice`] for the page pool).
 ///
-/// `ledger` must be the already-locked `DeviceLedger` from `ld.ledger`; passing it separately
-/// avoids holding the ledger lock while the caller re-locks it (double-lock hazard).
-pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLedger, resource: PendingDeletion) {
+/// `registry` must be the already-locked `DescriptorRegistry` from `ld.descriptors`; passing it separately
+/// avoids holding the descriptors lock while the caller re-locks it (double-lock hazard).
+pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, registry: &mut DescriptorRegistry, resource: PendingDeletion) {
     match &resource {
         PendingDeletion::Buffer { buffer_handle, .. } | PendingDeletion::BufferView { buffer_handle } => {
-            ledger.reclaim_buffer_slots(*buffer_handle);
+            registry.reclaim_buffer_slots(*buffer_handle);
         }
         PendingDeletion::Texture { texture_handle, .. } => {
-            ledger.reclaim_texture_slots(*texture_handle);
+            registry.reclaim_texture_slots(*texture_handle);
         }
         _ => {}
     }
@@ -1286,17 +1286,17 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
 impl LogicalDevice {
     /// Drop deferred resources whose timeline barrier is `<= completed`.
     ///
-    /// Locks the deletion queue and ledger internally; takes `&self` so this
+    /// Locks the deletion queue and descriptor registry internally; takes `&self` so this
     /// can be called through an `Arc<LogicalDevice>` (Phase 5a).
     pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
         let drained = self.deletion_queue.lock().unwrap().drain_up_to(completed);
         if drained.is_empty() {
             return;
         }
-        let ledger_arc = Arc::clone(&self.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = Arc::clone(&self.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for r in drained {
-            destroy_pending_deletion(self, &mut ledger, r);
+            destroy_pending_deletion(self, &mut registry, r);
         }
     }
 
@@ -1306,10 +1306,10 @@ impl LogicalDevice {
         if batch.is_empty() {
             return;
         }
-        let ledger_arc = Arc::clone(&self.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = Arc::clone(&self.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for r in batch {
-            destroy_pending_deletion(self, &mut ledger, r);
+            destroy_pending_deletion(self, &mut registry, r);
         }
     }
 }

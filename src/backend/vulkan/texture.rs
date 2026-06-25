@@ -136,7 +136,7 @@ pub(super) fn create(
     let bindless_index = {
         let logical_device = devices.get(&device_handle).unwrap();
         let index = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -195,7 +195,7 @@ pub(super) fn create(
         let logical_device = devices.get(&device_handle).unwrap();
         // Register in the sampled pool (is_storage_image = false).
         let index = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -1028,7 +1028,7 @@ pub(super) fn destroy(
         if let Some(logical_device) = devices.get(&texture.device_handle) {
             if texture.transient_heap_suballoc {
                 logical_device
-                    .ledger
+                    .descriptors
                     .lock()
                     .unwrap()
                     .reclaim_texture_slots(texture_handle);

@@ -113,7 +113,7 @@ pub(super) fn create(
     // slot that the GPU is concurrently reading (see module-level doc comment).
     let bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| {
         logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -197,7 +197,7 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
             let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             for &local in &slot_arr {
                 logical_device
-                    .ledger
+                    .descriptors
                     .lock()
                     .unwrap()
                     .resource_registry
@@ -750,7 +750,7 @@ fn register_surface_texture(
         let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
         logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -816,7 +816,7 @@ fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle)
     if let Some(tex_state) = state.textures.remove(&tex_handle) {
         if let Some(device) = state.devices.get(&tex_state.device_handle) {
             device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry
