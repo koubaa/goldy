@@ -3802,4 +3802,126 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         drop(submission);
         assert_eq!(stamp.settle_on_context(&ctx), Settle::Ready);
     }
+
+    /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
+    /// to one ledger cell (`ResourceSync`), and a present-path submit must record the copy
+    /// read on that cell so cross-frame WAR enforcement can key off `last_reads`.
+    #[test]
+    fn out_image_fine_write_and_present_copy_share_ledger_identity() {
+        use crate::task_graph::cross_submit::{
+            compute_cross_submit_sync, net_access_per_resource, ResourceKey,
+        };
+        use crate::task_graph::ResourceId;
+        use std::collections::HashMap;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_texture_shader(&device));
+        let ctx_handle = ctx.backend_handle();
+        let tex_handle = tex.gpu_handle();
+        let key = ResourceKey::Texture(tex_handle);
+        let expected_stamp = tex.whole().stamp_handle();
+
+        let mut scheme = Scheme::new(&ctx);
+        // Mirror ekrano scheme path: fine write then present copy on one Texture instance.
+        scheme
+            .node("fine_write", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.copy_texture_to_present(&tex, &lease);
+        let present = scheme.grant_present(&lease);
+
+        let fine_bindings: Vec<_> = scheme
+            .ir
+            .nodes
+            .iter()
+            .filter(|n| n.label == "fine_write")
+            .flat_map(|n| &n.bindings)
+            .filter(|b| matches!(b.resource, ResourceId::Texture(h) if h == tex_handle))
+            .collect();
+        scheme
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.label == "copy_texture_to_present")
+            .and_then(|n| {
+                n.bindings.iter().find(|b| {
+                    matches!(b.resource, ResourceId::Texture(h) if h == tex_handle)
+                        && b.access == NodeAccess::Read
+                })
+            })
+            .expect("present copy must read out_image");
+        assert_eq!(fine_bindings.len(), 1);
+        assert_eq!(fine_bindings[0].access, NodeAccess::Write);
+
+        let registered = scheme
+            .submit_state
+            .resource_stamps()
+            .get(&key)
+            .expect("out_image stamp registered before submit")
+            .clone();
+        // stamp_handle() returns a fresh Arc wrapper each call; the ledger cell is `sync`.
+        assert!(
+            Arc::ptr_eq(&registered.sync, &expected_stamp.sync),
+            "fine write and present copy must share one ResourceSync ledger cell"
+        );
+
+        let net = net_access_per_resource(&scheme.ir);
+        assert!(net[&key].reads && net[&key].writes, "scheme net access must include both sides");
+
+        let sub1 = scheme.submit().expect("submit frame 1");
+        let frame1_tv = sub1.timeline_value();
+        {
+            let sync = registered.sync.lock().unwrap();
+            let read_tv = sync
+                .last_reads
+                .get(&ctx_handle)
+                .copied()
+                .expect("present-copy read must be on the ledger after submit");
+            let write_tv = sync
+                .last_write
+                .get(&ctx_handle)
+                .copied()
+                .expect("fine-write must be on the ledger after submit");
+            assert!(
+                read_tv <= frame1_tv && write_tv <= frame1_tv,
+                "ledger epochs must not exceed submission high-water (read={read_tv}, write={write_tv}, submit={frame1_tv})"
+            );
+        }
+
+        present.consume(&sub1).expect("present frame 1");
+
+        // Frame 2 submit gate folds the resolved present epoch into last_reads.
+        let _sub2 = scheme.submit().expect("submit frame 2");
+        let present_read_tv = {
+            let sync = registered.sync.lock().unwrap();
+            *sync.last_reads.get(&ctx_handle).expect("last_reads after present fold")
+        };
+        assert!(
+            present_read_tv >= frame1_tv,
+            "folded present read epoch must be at least the frame-1 submit tv"
+        );
+
+        // Loop-carried WAR (present read frame N, fine write frame N+1) must plan a live wait.
+        let mut write_only = HashMap::new();
+        write_only.insert(
+            key,
+            net_access_per_resource(&scheme.ir)[&key], // reads+writes in IR; override for next-frame write admission
+        );
+        write_only.get_mut(&key).unwrap().reads = false;
+        let ledger = {
+            let sync = registered.sync.lock().unwrap().clone();
+            let mut ledger = crate::task_graph::cross_submit::LedgerSnapshot::new();
+            ledger.insert(key, crate::task_graph::cross_submit::LedgerEntry { sync });
+            ledger
+        };
+        let plan = compute_cross_submit_sync(&write_only, &ledger, ctx_handle);
+        assert!(
+            !plan.waits.is_empty(),
+            "next-frame private write must serialize against prior present read via ledger wait"
+        );
+        assert_eq!(plan.waits[0].value, present_read_tv);
+    }
 }
