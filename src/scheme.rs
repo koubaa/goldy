@@ -3924,4 +3924,63 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
         assert_eq!(plan.waits[0].value, present_read_tv);
     }
+
+    /// The actual submit path (not just `compute_cross_submit_sync` planning) must
+    /// emit a live queue-wait on frame 2 against the prior frame's present-read
+    /// epoch. Goldy `Scheme::submit` never touches ekrano's `FrameOrchestrator`;
+    /// this test isolates ledger enforcement from orchestrator slot stamping.
+    #[test]
+    fn present_war_ledger_live_wait_on_second_submit_path() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::{Epoch, PromiseState};
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_texture_shader(&device));
+        let ctx_handle = ctx.backend_handle();
+        let key = ResourceKey::Texture(tex.gpu_handle());
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("fine_write", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.copy_texture_to_present(&tex, &lease);
+        let present = scheme.grant_present(&lease);
+
+        let sub1 = scheme.submit().expect("submit frame 1");
+        let compute_tv = sub1.timeline_value();
+        present.consume(&sub1).expect("present frame 1");
+
+        let present_tv = {
+            let stamp = scheme
+                .submit_state
+                .resource_stamps()
+                .get(&key)
+                .expect("out_image stamp");
+            match stamp.pending.lock().unwrap()[0].poll() {
+                PromiseState::Resolved(tv) => tv,
+                other => panic!("present promise must be resolved after consume, got {other:?}"),
+            }
+        };
+        assert!(
+            present_tv >= compute_tv,
+            "present epoch must cover the frame-1 submit (present={present_tv}, compute={compute_tv})"
+        );
+
+        let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
+        let _sub2 = scheme.submit().expect("submit frame 2");
+        let frame2_waits: Vec<Epoch> = device.with_mock_backend(|b| {
+            b.recorded_waits[waits_before..]
+                .iter()
+                .flat_map(|w| w.iter().copied())
+                .collect()
+        });
+        assert!(
+            frame2_waits.iter().any(|e| e.context == ctx_handle && e.value >= present_tv),
+            "frame 2 submit must live-wait on prior present read via ledger (need wait>={present_tv}, got {frame2_waits:?})"
+        );
+    }
 }
