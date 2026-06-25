@@ -265,6 +265,11 @@ pub trait VramAllocator: Send + Sync {
     fn set_allocation_policy(&self, _policy: Arc<dyn AllocationPolicy>) -> Result<()> {
         anyhow::bail!("this VramAllocator does not support allocation policies")
     }
+
+    /// Like [`set_allocation_policy`] but succeeds when a policy is already installed.
+    fn ensure_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        self.set_allocation_policy(policy)
+    }
 }
 
 /// Crate-internal buffer and texture allocation hooks for [`Device::alloc_buffer`] /
@@ -354,6 +359,15 @@ impl DefaultVramAllocator {
             anyhow::bail!("allocation policy already installed");
         }
         *guard = policy;
+        Ok(())
+    }
+
+    /// Install `policy` only while the default [`NoPolicy`] is still active.
+    pub fn ensure_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        let mut guard = self.policy.write().unwrap();
+        if guard.is_noop() {
+            *guard = policy;
+        }
         Ok(())
     }
 
@@ -457,6 +471,10 @@ impl VramAllocator for DefaultVramAllocator {
 
     fn set_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
         self.set_policy(policy)
+    }
+
+    fn ensure_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
+        self.ensure_policy(policy)
     }
 
     fn name(&self) -> &'static str {

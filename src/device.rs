@@ -597,6 +597,14 @@ impl Device {
         self.inner.vram_allocator.set_allocation_policy(policy)
     }
 
+    /// Install an allocation policy if the device still has the default [`NoPolicy`].
+    pub fn ensure_allocation_policy(
+        &self,
+        policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
+    ) -> anyhow::Result<()> {
+        self.inner.vram_allocator.ensure_allocation_policy(policy)
+    }
+
     fn parcel_deed(&self) -> crate::vram_allocator::ParcelDeed {
         crate::vram_allocator::ParcelDeed::new(Arc::downgrade(&self.inner.vram_allocator))
     }
