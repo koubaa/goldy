@@ -270,7 +270,7 @@ impl VulkanBackend {
             next_sampler_handle: 1,
             slang_compiler,
             compute_fence_pool: Mutex::new(HashMap::new()),
-            device_lost: std::sync::atomic::AtomicBool::new(false),
+            device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             enable_validation,
             frame_tables: HashMap::new(),
         };
@@ -295,6 +295,67 @@ impl VulkanBackend {
 }
 
 // GpuBackend trait implementation - thin wrapper delegating to domain modules
+#[allow(clippy::manual_find)]
+impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
+    fn take_timeline_blocking_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device_handle = self.context_device(ctx);
+        let sem = self
+            .state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .lock()
+            .unwrap()
+            .timeline_semaphore;
+        let device = self.state.devices.get(&device_handle).unwrap().device.clone();
+        Ok(Some(Box::new(VulkanTimelineBlockingWait {
+            device,
+            semaphore: sem,
+            value,
+            device_lost: std::sync::Arc::clone(&self.state.device_lost),
+        })))
+    }
+
+    fn finish_timeline_wait(
+        &mut self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let device_handle = self.context_device(ctx);
+        let retired = context::device_retired(&self.state, device_handle);
+        {
+            let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
+            compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
+        }
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let drain_to = value.min(retired);
+            let drained = {
+                let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
+                ld.deletion_queue.lock().unwrap().drain_up_to(drain_to)
+            };
+            {
+                let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
+                let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+                let mut registry = descriptors_arc.lock().unwrap();
+                for r in drained {
+                    types::destroy_pending_deletion(ld, &mut registry, r);
+                }
+                let completed_values =
+                    types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
+                registry.drain_ready_slot_reclamations(&completed_values);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::manual_find)]
 impl GpuBackend for VulkanBackend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -1150,57 +1211,6 @@ impl GpuBackend for VulkanBackend {
             .unwrap_or(0)
     }
 
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        let device_handle = self.context_device(ctx);
-        let _tz = crate::tracy_zone!("vk.wait_until");
-        {
-            let _lookup = crate::tracy_zone!("vk.wait_until.lookup");
-            let sem = self
-                .state
-                .contexts
-                .get(&ctx)
-                .context("Invalid context handle")?
-                .lock()
-                .unwrap()
-                .timeline_semaphore;
-            let dev = &self.state.devices.get(&device_handle).unwrap().device;
-            let wait = vk::SemaphoreWaitInfo::default()
-                .semaphores(std::slice::from_ref(&sem))
-                .values(std::slice::from_ref(&value));
-            let _wait = crate::tracy_zone!("vk.wait_until.wait_semaphores");
-            if let Err(e) = unsafe { dev.wait_semaphores(&wait, u64::MAX) } {
-                if e == vk::Result::ERROR_DEVICE_LOST {
-                    self.state.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                return Err(anyhow::anyhow!("wait_semaphores: {:?}", e));
-            }
-        }
-        let retired = context::device_retired(&self.state, device_handle);
-        {
-            let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
-            compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
-        }
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            let drain_to = value.min(retired);
-            let drained = {
-                let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
-                ld.deletion_queue.lock().unwrap().drain_up_to(drain_to)
-            };
-            {
-                let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
-                let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-                let mut registry = descriptors_arc.lock().unwrap();
-                for r in drained {
-                    types::destroy_pending_deletion(ld, &mut registry, r);
-                }
-                let completed_values =
-                    types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
-                registry.drain_ready_slot_reclamations(&completed_values);
-            }
-        }
-        Ok(())
-    }
-
     fn wait_until_timeout(
         &mut self,
         ctx: ContextHandle,
@@ -1372,5 +1382,29 @@ impl GpuBackend for VulkanBackend {
             .get(&device_handle)
             .map(|d| d.deletion_queue.lock().unwrap().len())
             .unwrap_or(0)
+    }
+}
+
+struct VulkanTimelineBlockingWait {
+    device: ash::Device,
+    semaphore: vk::Semaphore,
+    value: crate::timeline::TimelineValue,
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::backend::TimelineBlockingWait for VulkanTimelineBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        let _wait = crate::tracy_zone!("vk.wait_until.wait_semaphores");
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&self.semaphore))
+            .values(std::slice::from_ref(&self.value));
+        if let Err(e) = unsafe { self.device.wait_semaphores(&wait, u64::MAX) } {
+            if e == vk::Result::ERROR_DEVICE_LOST {
+                self.device_lost
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            anyhow::bail!("wait_semaphores: {:?}", e);
+        }
+        Ok(())
     }
 }

@@ -701,8 +701,31 @@ pub enum GraphCommand {
 #[deprecated(since = "0.1.0", note = "renamed to GpuCommand")]
 pub type ComputeCommand = GpuCommand;
 
+/// Blocking GPU timeline wait, cloned out of the backend under the global lock so
+/// [`TimelineBlockingWait::block`] can run without holding it.
+pub(crate) trait TimelineBlockingWait: Send {
+    fn block(self: Box<Self>) -> Result<()>;
+}
+
+/// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
+/// to drop the global backend lock during blocking GPU waits.
+pub(crate) trait GpuBackendTimelineWait {
+    fn take_timeline_blocking_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn TimelineBlockingWait>>>;
+
+    fn finish_timeline_wait(
+        &mut self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()>;
+}
+
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
-pub trait GpuBackend: Send + Sync {
+#[allow(private_bounds)]
+pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
@@ -1090,7 +1113,12 @@ pub trait GpuBackend: Send + Sync {
     /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
 
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
+        if let Some(wait) = self.take_timeline_blocking_wait(ctx, value)? {
+            wait.block()?;
+        }
+        self.finish_timeline_wait(ctx, value)
+    }
 
     fn wait_until_timeout(
         &mut self,

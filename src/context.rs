@@ -153,16 +153,33 @@ impl Context {
 
     /// Block until the timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
+        self.wait_until_context(self.inner.handle, value)
+    }
+
+    fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("context.wait_until");
-        let mut backend = {
+        let backend_mutex = &self.inner.device.inner.backend;
+        let blocking = {
             let _lock = crate::tracy_zone!("context.wait_until.lock");
-            self.inner.device.inner.backend.lock().unwrap()
+            let backend = backend_mutex.lock().unwrap();
+            let _prepare = crate::tracy_zone!("context.wait_until.prepare");
+            backend
+                .take_timeline_blocking_wait(ctx, value)
+                .map_err(|e| self.classify(e))?
         };
-        let _backend = crate::tracy_zone!("context.wait_until.backend");
-        backend.wait_until(self.inner.handle, value).map_err(|e| {
-            drop(backend);
-            self.classify(e)
-        })
+        if let Some(wait) = blocking {
+            let _block = crate::tracy_zone!("context.wait_until.block");
+            wait.block().map_err(|e| self.classify(e))?;
+        }
+        {
+            let _lock = crate::tracy_zone!("context.wait_until.lock");
+            let mut backend = backend_mutex.lock().unwrap();
+            let _finish = crate::tracy_zone!("context.wait_until.finish");
+            backend.finish_timeline_wait(ctx, value).map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })
+        }
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
@@ -380,11 +397,7 @@ impl Context {
     /// Block until every context in `refs` has retired the stamped timeline values.
     pub fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
         for (&ctx_handle, &tv) in refs {
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.wait_until(ctx_handle, tv).map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+            self.wait_until_context(ctx_handle, tv)?;
         }
         Ok(())
     }

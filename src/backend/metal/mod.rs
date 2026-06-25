@@ -146,7 +146,7 @@ impl MetalBackend {
         Ok(Self {
             state: MetalState {
                 adapters,
-                device_lost: std::sync::atomic::AtomicBool::new(false),
+                device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
                 contexts: std::collections::HashMap::new(),
@@ -180,6 +180,78 @@ impl Drop for MetalBackend {
         for handle in device_handles {
             device::destroy(&mut self.state, handle);
         }
+    }
+}
+
+impl crate::backend::GpuBackendTimelineWait for MetalBackend {
+    fn take_timeline_blocking_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        use std::sync::atomic::Ordering;
+
+        if self.state.device_lost.load(Ordering::Relaxed) {
+            anyhow::bail!("Metal device lost");
+        }
+
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+
+        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            sc.in_flight_command_buffers
+                .iter()
+                .find(|(tv, _)| *tv >= value)
+                .map(|(_, cb)| cb.to_owned())
+        });
+
+        if let Some(cb) = cb_to_wait {
+            return Ok(Some(Box::new(MetalCommandBufferBlockingWait { cb })));
+        }
+
+        let waiter = self
+            .state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        Ok(Some(Box::new(MetalWaiterBlockingWait {
+            waiter,
+            value,
+            device_lost: std::sync::Arc::clone(&self.state.device_lost),
+        })))
+    }
+
+    fn finish_timeline_wait(
+        &mut self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let device = self.context_device(ctx);
+        let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
+        let retired = context::device_retired(&self.state, device);
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            drain_completed_cbs(&mut sc);
+            sc.deletion_queue.process_up_to(value);
+        }
+        if let Some(ld) = self.state.devices.get(&device) {
+            ld.process_deletion_queue_up_to(value.min(retired));
+        }
+        {
+            let _pz = crate::tracy_zone!("mtl.wait_until.drain_pending_slots");
+            drain_all_pending_slots(&mut self.state);
+        }
+        if self.state.device_lost.load(Ordering::Relaxed) {
+            anyhow::bail!("Metal device lost");
+        }
+        Ok(())
     }
 }
 
@@ -682,91 +754,6 @@ impl GpuBackend for MetalBackend {
             .unwrap_or(0)
     }
 
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        use std::sync::atomic::Ordering;
-        let device = self.context_device(ctx);
-        let _tz = crate::tracy_zone!("mtl.wait_until");
-
-        if self.state.device_lost.load(Ordering::Relaxed) {
-            anyhow::bail!("Metal device lost");
-        }
-
-        // Fast path: GPU has already passed this timeline value.
-        if self.gpu_progress(ctx) >= value {
-            let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
-            let retired = context::device_retired(&self.state, device);
-            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                drain_completed_cbs(&mut sc);
-                sc.deletion_queue.process_up_to(value);
-            }
-            if let Some(ld) = self.state.devices.get(&device) {
-                ld.process_deletion_queue_up_to(value.min(retired));
-            }
-            drain_all_pending_slots(&mut self.state);
-            return Ok(());
-        }
-
-        // Find the MTLCommandBuffer whose timeline value is >= `value` and call
-        // waitUntilCompleted() on it.  Since the command queue is serial, completing
-        // that CB guarantees all earlier CBs (and timeline values) are also done.
-        // This uses the Metal runtime's native Mach-semaphore wait rather than
-        // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
-        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
-            let sc = sc_arc.lock().unwrap();
-            sc.in_flight_command_buffers
-                .iter()
-                .find(|(tv, _)| *tv >= value)
-                .map(|(_, cb)| cb.to_owned())
-        });
-
-        if let Some(cb) = cb_to_wait {
-            let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
-            cb.wait_until_completed();
-        } else {
-            // No CB in the deque for this value (value already retired or this is a
-            // future value with no submit yet). Fall back to condvar.
-            let waiter = self
-                .state
-                .contexts
-                .get(&ctx)
-                .context("Invalid context handle")?
-                .lock()
-                .unwrap()
-                .timeline_waiter
-                .clone();
-            let timeout = std::time::Duration::from_secs(300);
-            let reached = {
-                let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
-                waiter.wait_until(value, timeout)
-            };
-            if !reached {
-                if self.state.device_lost.load(Ordering::Relaxed) {
-                    anyhow::bail!("Metal device lost");
-                }
-                anyhow::bail!("wait_until exceeded 300s");
-            }
-        }
-
-        {
-            let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
-            let retired = context::device_retired(&self.state, device);
-            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                drain_completed_cbs(&mut sc);
-                sc.deletion_queue.process_up_to(value);
-            }
-            if let Some(ld) = self.state.devices.get(&device) {
-                ld.process_deletion_queue_up_to(value.min(retired));
-            }
-        }
-        {
-            let _pz = crate::tracy_zone!("mtl.wait_until.drain_pending_slots");
-            drain_all_pending_slots(&mut self.state);
-        }
-        Ok(())
-    }
-
     fn wait_until_timeout(
         &mut self,
         ctx: ContextHandle,
@@ -996,6 +983,42 @@ impl GpuBackend for MetalBackend {
             .get(&ctx)
             .map(|sc_arc| sc_arc.lock().unwrap().in_flight_command_buffers.len())
             .unwrap_or(0)
+    }
+}
+
+struct MetalCommandBufferBlockingWait {
+    cb: mtl::CommandBuffer,
+}
+
+impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
+        self.cb.wait_until_completed();
+        Ok(())
+    }
+}
+
+struct MetalWaiterBlockingWait {
+    waiter: types::TimelineWaiter,
+    value: crate::timeline::TimelineValue,
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::backend::TimelineBlockingWait for MetalWaiterBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let timeout = std::time::Duration::from_secs(300);
+        let reached = {
+            let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
+            self.waiter.wait_until(self.value, timeout)
+        };
+        if !reached {
+            if self.device_lost.load(Ordering::Relaxed) {
+                anyhow::bail!("Metal device lost");
+            }
+            anyhow::bail!("wait_until exceeded 300s");
+        }
+        Ok(())
     }
 }
 

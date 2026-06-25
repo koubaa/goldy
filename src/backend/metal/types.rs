@@ -1266,7 +1266,7 @@ pub(super) struct MetalState {
     /// fast instead of burning the full timeout budget per frame, letting
     /// the app cascade errors quickly and exit cleanly rather than appearing
     /// frozen for tens of seconds while each frame times out.
-    pub device_lost: std::sync::atomic::AtomicBool,
+    pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub devices: std::collections::HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
     pub contexts: std::collections::HashMap<super::ContextHandle, SharedMetalSubmissionContext>,

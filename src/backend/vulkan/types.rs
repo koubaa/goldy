@@ -1362,7 +1362,7 @@ pub(super) struct VulkanState {
     pub compute_fence_pool: ComputeFencePool,
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
-    pub device_lost: std::sync::atomic::AtomicBool,
+    pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// `true` when `VK_EXT_debug_utils` was loaded (i.e. validation layers are
     /// active).  Guards `set_texture_debug_name` so we never call a null fp.
     pub enable_validation: bool,

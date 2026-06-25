@@ -375,6 +375,29 @@ impl Default for MockBackend {
     }
 }
 
+impl crate::backend::GpuBackendTimelineWait for MockBackend {
+    fn take_timeline_blocking_wait(
+        &self,
+        _ctx: ContextHandle,
+        _value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        Ok(None)
+    }
+
+    fn finish_timeline_wait(
+        &mut self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        self.wait_until_count += 1;
+        let cur = self.gpu_progress(ctx);
+        if value > cur {
+            self.context_state_mut(ctx).completed = value;
+        }
+        Ok(())
+    }
+}
+
 impl GpuBackend for MockBackend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -1368,15 +1391,6 @@ impl GpuBackend for MockBackend {
 
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32 {
         self.surface_pending_acquire.get(&surface).copied().unwrap_or(0)
-    }
-
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        self.wait_until_count += 1;
-        let cur = self.gpu_progress(ctx);
-        if value > cur {
-            self.context_state_mut(ctx).completed = value;
-        }
-        Ok(())
     }
 
     fn wait_until_timeout(

@@ -483,6 +483,63 @@ fn slot_access_from_push_constant_slot_kinds(
         .collect()
 }
 
+impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
+    fn take_timeline_blocking_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let fence = self
+            .state
+            .context_fences
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .1
+            .clone();
+        Ok(Some(Box::new(Dx12TimelineBlockingWait { fence, value })))
+    }
+
+    fn finish_timeline_wait(
+        &mut self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let device_handle = self.context_device(ctx);
+        let fence = self
+            .state
+            .context_fences
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .1
+            .clone();
+        // Detect TDR: device removal signals all fences with u64::MAX.
+        let completed = unsafe { fence.GetCompletedValue() };
+        if completed == u64::MAX {
+            self.state
+                .device_removed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(ld) = self.state.devices.get(&device_handle) {
+                let reason = unsafe { ld.device.GetDeviceRemovedReason() };
+                anyhow::bail!("GPU device removed (TDR): {:?}", reason);
+            }
+            anyhow::bail!("GPU device removed (TDR)");
+        }
+        let retired = context::device_retired(&self.state, device_handle);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            ld.process_deletion_queue_up_to(value.min(retired));
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            descriptors_arc
+                .lock()
+                .unwrap()
+                .drain_ready_slot_reclamations(&self.state.context_fences);
+        }
+        Ok(())
+    }
+}
+
 impl GpuBackend for Dx12Backend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -937,40 +994,6 @@ impl GpuBackend for Dx12Backend {
             .unwrap_or(0)
     }
 
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        let device_handle = self.context_device(ctx);
-        let fence = self
-            .state
-            .context_fences
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .1
-            .clone();
-        utils::wait_for_fence(&fence, value)?;
-        // Detect TDR: device removal signals all fences with u64::MAX.
-        let completed = unsafe { fence.GetCompletedValue() };
-        if completed == u64::MAX {
-            self.state
-                .device_removed
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Some(ld) = self.state.devices.get(&device_handle) {
-                let reason = unsafe { ld.device.GetDeviceRemovedReason() };
-                anyhow::bail!("GPU device removed (TDR): {:?}", reason);
-            }
-            anyhow::bail!("GPU device removed (TDR)");
-        }
-        let retired = context::device_retired(&self.state, device_handle);
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            ld.process_deletion_queue_up_to(value.min(retired));
-            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            descriptors_arc
-                .lock()
-                .unwrap()
-                .drain_ready_slot_reclamations(&self.state.context_fences);
-        }
-        Ok(())
-    }
-
     fn wait_until_timeout(
         &mut self,
         ctx: ContextHandle,
@@ -1263,5 +1286,16 @@ impl GpuBackend for Dx12Backend {
             .get(&device_handle)
             .map(|d| d.deletion_queue.lock().unwrap().pending_len())
             .unwrap_or(0)
+    }
+}
+
+struct Dx12TimelineBlockingWait {
+    fence: windows::Win32::Graphics::Direct3D12::ID3D12Fence,
+    value: crate::timeline::TimelineValue,
+}
+
+impl crate::backend::TimelineBlockingWait for Dx12TimelineBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        utils::wait_for_fence(&self.fence, self.value)
     }
 }
