@@ -592,6 +592,15 @@ impl GpuBackend for Dx12Backend {
         context::destroy(&mut self.state, ctx);
     }
 
+    fn clone_context_timeline_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
+        Some(std::sync::Arc::new(Dx12ContextTimelineReader {
+            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
+        }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -1292,6 +1301,26 @@ impl GpuBackend for Dx12Backend {
 struct Dx12TimelineBlockingWait {
     fence: windows::Win32::Graphics::Direct3D12::ID3D12Fence,
     value: crate::timeline::TimelineValue,
+}
+
+struct Dx12ContextTimelineReader {
+    sc: types::SharedSubmissionContext,
+}
+
+impl crate::backend::ContextTimelineReader for Dx12ContextTimelineReader {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        unsafe { self.sc.lock().unwrap().fence.GetCompletedValue() }
+    }
+
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
+        let sc = self.sc.lock().unwrap();
+        let progress = unsafe { sc.fence.GetCompletedValue() };
+        if progress < sc.last_submitted_seq {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
+    }
 }
 
 impl crate::backend::TimelineBlockingWait for Dx12TimelineBlockingWait {

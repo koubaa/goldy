@@ -302,6 +302,15 @@ impl GpuBackend for MetalBackend {
         context::destroy(&mut self.state, ctx);
     }
 
+    fn clone_context_timeline_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
+        Some(std::sync::Arc::new(MetalContextTimelineReader {
+            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
+        }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -995,6 +1004,27 @@ impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
         let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
         self.cb.wait_until_completed();
         Ok(())
+    }
+}
+
+struct MetalContextTimelineReader {
+    sc: types::SharedMetalSubmissionContext,
+}
+
+impl crate::backend::ContextTimelineReader for MetalContextTimelineReader {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        let sc = self.sc.lock().unwrap();
+        context::context_gpu_progress(&sc)
+    }
+
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
+        let sc = self.sc.lock().unwrap();
+        let progress = context::context_gpu_progress(&sc);
+        if progress < sc.last_submitted_seq {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
     }
 }
 

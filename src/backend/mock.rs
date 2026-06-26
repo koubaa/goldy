@@ -7,6 +7,7 @@ use super::*;
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Mock GPU backend for testing.
 ///
@@ -78,7 +79,7 @@ pub struct MockBackend {
     /// Minimum completed horizon preserved after a context is destroyed.
     device_retired_floor: HashMap<DeviceHandle, u64>,
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
-    contexts: HashMap<ContextHandle, MockContextState>,
+    contexts: HashMap<ContextHandle, Arc<Mutex<MockContextState>>>,
     next_context_id: ContextHandle,
 }
 
@@ -93,6 +94,25 @@ struct MockContextState {
     completed: u64,
     last_submitted_seq: u64,
     signal_queue: crate::signal::SignalQueue,
+}
+
+struct MockContextTimelineReader {
+    state: Arc<Mutex<MockContextState>>,
+}
+
+impl crate::backend::ContextTimelineReader for MockContextTimelineReader {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        self.state.lock().unwrap().completed
+    }
+
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
+        let state = self.state.lock().unwrap();
+        if state.completed < state.last_submitted_seq {
+            Some(state.completed.saturating_add(1))
+        } else {
+            None
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -226,12 +246,16 @@ impl MockBackend {
         }
     }
 
-    fn context_state(&self, ctx: ContextHandle) -> &MockContextState {
-        self.contexts.get(&ctx).expect("invalid context handle")
+    fn context_state(&self, ctx: ContextHandle) -> std::sync::MutexGuard<'_, MockContextState> {
+        self.contexts
+            .get(&ctx)
+            .expect("invalid context handle")
+            .lock()
+            .unwrap()
     }
 
-    fn context_state_mut(&mut self, ctx: ContextHandle) -> &mut MockContextState {
-        self.contexts.get_mut(&ctx).expect("invalid context handle")
+    fn context_state_mut(&mut self, ctx: ContextHandle) -> std::sync::MutexGuard<'_, MockContextState> {
+        self.context_state(ctx)
     }
 
     /// Max completed over live contexts on `device`, floored by `retired_floor`.
@@ -240,8 +264,8 @@ impl MockBackend {
         let max_ctx = self
             .contexts
             .values()
-            .filter(|c| c.device == device)
-            .map(|c| c.completed)
+            .filter(|c| c.lock().unwrap().device == device)
+            .map(|c| c.lock().unwrap().completed)
             .max()
             .unwrap_or(0);
         floor.max(max_ctx)
@@ -249,16 +273,17 @@ impl MockBackend {
 
     /// Device-scoped idle: advance every context on `device` to the scheduled horizon.
     fn complete_device_seq_on_all_contexts(&mut self, device: DeviceHandle, seq: u64) {
-        for ctx in self.contexts.values_mut() {
-            if ctx.device == device {
-                ctx.completed = seq;
-                ctx.last_submitted_seq = seq;
+        for ctx in self.contexts.values() {
+            let mut state = ctx.lock().unwrap();
+            if state.device == device {
+                state.completed = seq;
+                state.last_submitted_seq = seq;
             }
         }
     }
 
     fn complete_context_seq(&mut self, ctx: ContextHandle, seq: u64) {
-        let state = self.context_state_mut(ctx);
+        let mut state = self.context_state_mut(ctx);
         state.completed = seq;
         state.last_submitted_seq = seq;
     }
@@ -430,7 +455,7 @@ impl GpuBackend for MockBackend {
     }
 
     fn destroy_device(&mut self, device: DeviceHandle) {
-        self.contexts.retain(|_, c| c.device != device);
+        self.contexts.retain(|_, c| c.lock().unwrap().device != device);
         self.devices.remove(&device);
         self.device_timeline_next.remove(&device);
         self.device_retired_floor.remove(&device);
@@ -468,23 +493,33 @@ impl GpuBackend for MockBackend {
         self.next_context_id = self.next_context_id.saturating_add(1);
         self.contexts.insert(
             id,
-            MockContextState {
+            Arc::new(Mutex::new(MockContextState {
                 device,
                 completed: 0,
                 last_submitted_seq: 0,
                 signal_queue: crate::signal::SignalQueue::new(),
-            },
+            })),
         );
         Ok(id)
     }
 
     fn destroy_context(&mut self, ctx: ContextHandle) {
         if let Some(state) = self.contexts.remove(&ctx) {
+            let state = state.lock().unwrap();
             let floor = self.device_retired_floor.entry(state.device).or_insert(0);
             // Mirror Metal context destroy: horizon is max(signaled, last_submitted).
             let retired_horizon = state.completed.max(state.last_submitted_seq);
             *floor = (*floor).max(retired_horizon);
         }
+    }
+
+    fn clone_context_timeline_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<Arc<dyn crate::backend::ContextTimelineReader>> {
+        Some(Arc::new(MockContextTimelineReader {
+            state: Arc::clone(self.contexts.get(&ctx)?),
+        }))
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
@@ -1364,13 +1399,14 @@ impl GpuBackend for MockBackend {
         let ctx_ids: Vec<_> = self
             .contexts
             .iter()
-            .filter(|(_, c)| c.device == device)
+            .filter(|(_, c)| c.lock().unwrap().device == device)
             .map(|(id, _)| *id)
             .collect();
         for id in ctx_ids {
-            let ctx = self.contexts.get_mut(&id).unwrap();
-            if ctx.completed < value {
-                ctx.completed = value;
+            let ctx = self.contexts.get(&id).unwrap();
+            let mut state = ctx.lock().unwrap();
+            if state.completed < value {
+                state.completed = value;
             }
         }
         Ok(())
@@ -1442,7 +1478,7 @@ impl GpuBackend for MockBackend {
         *next += 1;
         let tv = *next;
         {
-            let state = self.context_state_mut(ctx);
+            let mut state = self.context_state_mut(ctx);
             state.completed = tv;
             state.last_submitted_seq = tv;
             state
@@ -2353,7 +2389,7 @@ mod tests {
         let device = backend.create_device(0).unwrap();
         let ctx = backend.create_context(device).unwrap();
         {
-            let state = backend.context_state_mut(ctx);
+            let mut state = backend.context_state_mut(ctx);
             state.completed = 7;
             state.last_submitted_seq = 10;
         }

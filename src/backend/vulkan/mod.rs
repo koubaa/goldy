@@ -410,6 +410,18 @@ impl GpuBackend for VulkanBackend {
         context::destroy(&mut self.state, ctx);
     }
 
+    fn clone_context_timeline_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        let device = {
+            let sc_guard = sc.lock().unwrap();
+            self.state.devices.get(&sc_guard.device)?.device.clone()
+        };
+        Some(std::sync::Arc::new(VulkanContextTimelineReader { device, sc }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -1382,6 +1394,29 @@ impl GpuBackend for VulkanBackend {
             .get(&device_handle)
             .map(|d| d.deletion_queue.lock().unwrap().len())
             .unwrap_or(0)
+    }
+}
+
+struct VulkanContextTimelineReader {
+    device: ash::Device,
+    sc: SharedSubmissionContext,
+}
+
+impl crate::backend::ContextTimelineReader for VulkanContextTimelineReader {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        let _tz = crate::tracy_zone!("vk.gpu_progress");
+        let sc = self.sc.lock().unwrap();
+        unsafe { self.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0)
+    }
+
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
+        let sc = self.sc.lock().unwrap();
+        let progress = unsafe { self.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0);
+        if progress < sc.last_submitted_seq {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
     }
 }
 

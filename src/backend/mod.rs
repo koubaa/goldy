@@ -707,6 +707,20 @@ pub(crate) trait TimelineBlockingWait: Send {
     fn block(self: Box<Self>) -> Result<()>;
 }
 
+/// Per-context GPU timeline queries cloned out of the backend so
+/// [`Context::gpu_progress`](crate::Context::gpu_progress) and
+/// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
+/// need the global backend lock.
+/// Per-context GPU timeline queries cloned out of the backend so
+/// [`Context::gpu_progress`](crate::Context::gpu_progress) and
+/// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
+/// need the global backend lock.
+#[doc(hidden)]
+pub trait ContextTimelineReader: Send + Sync {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue;
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
+}
+
 /// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
 /// to drop the global backend lock during blocking GPU waits.
 pub(crate) trait GpuBackendTimelineWait {
@@ -753,6 +767,16 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait {
     // Submission context (timeline / submit / reclaim API is keyed by context)
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle>;
     fn destroy_context(&mut self, ctx: ContextHandle);
+
+    /// Clone the per-context timeline reader out of backend state.
+    ///
+    /// Called once from [`Context::new`](crate::Context::new) so hot-path progress
+    /// queries avoid the global backend mutex.
+    #[doc(hidden)]
+    fn clone_context_timeline_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///

@@ -27,6 +27,7 @@ pub struct Context {
 pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
+    timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
     high_water_timeline: AtomicU64,
     /// Per-context transient resource heap (backing buffer + cached views/textures).
     ///
@@ -65,6 +66,9 @@ impl Drop for ContextInner {
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
         }
+        // Release the cloned submission-context handle before backend destroy.
+        // Backends expect sole ownership of the per-context Arc at teardown.
+        self.timeline_reader.take();
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         let mut backend = self.device.inner.backend.lock().unwrap();
@@ -74,16 +78,21 @@ impl Drop for ContextInner {
 
 impl Context {
     pub(crate) fn new(device: Device) -> Result<Self, GoldyError> {
-        let handle = {
+        let (handle, timeline_reader) = {
             let mut backend = device.inner.backend.lock().unwrap();
-            backend
+            let handle = backend
                 .create_context(device.inner.handle)
-                .map_err(GoldyError::Backend)?
+                .map_err(GoldyError::Backend)?;
+            let timeline_reader = backend
+                .clone_context_timeline_reader(handle)
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader").into()))?;
+            (handle, timeline_reader)
         };
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
                 handle,
+                timeline_reader: Some(timeline_reader),
                 high_water_timeline: AtomicU64::new(0),
                 placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
@@ -143,12 +152,12 @@ impl Context {
     /// Latest GPU completion counter on this context's timeline.
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("context.gpu_progress");
-        let backend = {
-            let _lock = crate::tracy_zone!("context.gpu_progress.lock");
-            self.inner.device.inner.backend.lock().unwrap()
-        };
         let _query = crate::tracy_zone!("context.gpu_progress.query");
-        backend.gpu_progress(self.inner.handle)
+        self.inner
+            .timeline_reader
+            .as_ref()
+            .expect("timeline reader")
+            .gpu_progress()
     }
 
     /// Block until the timeline reaches at least `value`.
@@ -197,8 +206,11 @@ impl Context {
 
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
     pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
-        let backend = self.inner.device.inner.backend.lock().unwrap();
-        backend.peek_oldest_in_flight(self.inner.handle)
+        self.inner
+            .timeline_reader
+            .as_ref()
+            .expect("timeline reader")
+            .peek_oldest_in_flight()
     }
 
     /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this context.
