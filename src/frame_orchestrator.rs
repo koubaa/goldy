@@ -55,6 +55,10 @@ pub struct FrameOrchestrator<T> {
     /// call.  `None` until the first retain-eligible submit.  Used when `max_depth == 1` to
     /// attempt zero-cost resubmission on subsequent frames.
     last_retention_key: Option<u64>,
+    /// When true, [`Self::begin_frame`] retires full ring slots for depth backpressure
+    /// without blocking on their stamped timelines. Callers must enforce per-parcel reuse
+    /// ordering elsewhere (ekrano remediation step 3b).
+    skip_ring_gpu_wait: bool,
 }
 
 impl<T> FrameOrchestrator<T> {
@@ -68,7 +72,18 @@ impl<T> FrameOrchestrator<T> {
             next_id: 1,
             open: None,
             last_retention_key: None,
+            skip_ring_gpu_wait: false,
         }
+    }
+
+    /// Skip the GPU wait in [`Self::begin_frame`] when the ring is at capacity.
+    ///
+    /// Depth backpressure and retirement still run; only the coarse
+    /// `wait_until(stamped_timeline)` is omitted so per-parcel reuse gates can
+    /// serialize at take time.
+    pub fn with_skip_ring_gpu_wait(mut self, skip: bool) -> Self {
+        self.skip_ring_gpu_wait = skip;
+        self
     }
 
     /// `true` when depth is 1 and command-buffer retention may be used.
@@ -402,7 +417,7 @@ impl<T> FrameOrchestrator<T> {
             if done || must_wait {
                 let slot = self.ring.pop_front().unwrap();
                 if let Some(tv) = slot.timeline {
-                    if progress < tv && must_wait {
+                    if progress < tv && must_wait && !self.skip_ring_gpu_wait {
                         let _wz = tracy_zone!("orchestrator.wait_gpu");
                         self.context.wait_until(tv)?;
                         progress = tv;
