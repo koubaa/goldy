@@ -169,7 +169,7 @@ impl ParcelStamp {
         for (&c, &tv) in &merged {
             let progress = device
                 .context_gpu_progress(c)
-                .unwrap_or_else(|| device.timeline_retired());
+                .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
             if progress < tv {
                 waiting = Some(waiting.map_or(tv, |w: TimelineValue| w.max(tv)));
             }

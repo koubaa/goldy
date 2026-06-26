@@ -28,9 +28,9 @@ pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
     timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
-    deletion_flush: Arc<dyn crate::backend::ContextDeferredDeletionFlush>,
-    reclamation_scope: Arc<dyn crate::backend::ContextReclamationScope>,
-    submit_session: Arc<dyn crate::backend::ContextSubmitSession>,
+    deletion_flush: Option<Arc<dyn crate::backend::ContextDeferredDeletionFlush>>,
+    reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
+    submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
     high_water_timeline: AtomicU64,
     /// Per-context transient resource heap (backing buffer + cached views/textures).
     ///
@@ -69,9 +69,12 @@ impl Drop for ContextInner {
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
         }
-        // Release the cloned submission-context handle before backend destroy.
+        // Release cloned per-context backend handles before destroy_context.
         // Backends expect sole ownership of the per-context Arc at teardown.
         self.timeline_reader.take();
+        self.deletion_flush.take();
+        self.reclamation_scope.take();
+        self.submit_session.take();
         self.device.unregister_context_timeline_reader(self.handle);
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
@@ -114,9 +117,9 @@ impl Context {
                 device,
                 handle,
                 timeline_reader: Some(timeline_reader),
-                deletion_flush,
-                reclamation_scope,
-                submit_session,
+                deletion_flush: Some(deletion_flush),
+                reclamation_scope: Some(reclamation_scope),
+                submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
                 placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
@@ -134,7 +137,11 @@ impl Context {
     }
 
     pub(crate) fn submit_session(&self) -> &dyn crate::backend::ContextSubmitSession {
-        self.inner.submit_session.as_ref()
+        self.inner
+            .submit_session
+            .as_ref()
+            .expect("submit session")
+            .as_ref()
     }
 
     /// Test-only access to the backend context id.
@@ -252,6 +259,7 @@ impl Context {
         {
             let _lock = crate::tracy_zone!("context.wait_until.lock");
             let mut backend = backend_mutex.lock().unwrap();
+            let _finish = crate::tracy_zone!("context.wait_until.finish");
             backend.finish_timeline_wait(ctx, value).map_err(|e| {
                 drop(backend);
                 self.classify(e)
@@ -319,9 +327,19 @@ impl Context {
         let retired = self.device().timeline_retired();
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_pre");
-            self.inner.deletion_flush.flush(retired);
+            self.inner
+                .deletion_flush
+                .as_ref()
+                .expect("deletion flush")
+                .flush(retired);
+        }
+        {
             let _tz = crate::tracy_zone!("context.boundary_crossed.reclaim");
-            self.inner.reclamation_scope.set_epoch(Some(epoch));
+            self.inner
+                .reclamation_scope
+                .as_ref()
+                .expect("reclamation scope")
+                .set_epoch(Some(epoch));
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_vram");
@@ -339,8 +357,16 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_post");
-            self.inner.reclamation_scope.set_epoch(None);
-            self.inner.deletion_flush.flush(retired);
+            self.inner
+                .reclamation_scope
+                .as_ref()
+                .expect("reclamation scope")
+                .set_epoch(None);
+            self.inner
+                .deletion_flush
+                .as_ref()
+                .expect("deletion flush")
+                .flush(retired);
         }
     }
 
@@ -443,7 +469,7 @@ impl Context {
         for &ctx in refs.keys() {
             let p = device
                 .context_gpu_progress(ctx)
-                .unwrap_or_else(|| device.timeline_retired());
+                .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
             progress.insert(ctx, p);
         }
         is_ready(refs, &progress)
@@ -461,13 +487,10 @@ impl Context {
         if crate::validation_env::retained_cb_reuse_disabled() {
             return Ok(None);
         }
-        let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        let result = backend
+        let result = self
+            .submit_session()
             .try_resubmit_retained(self.inner.handle, key, None)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+            .map_err(|e| self.classify(e))?;
         if let Some(tv) = result {
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         }

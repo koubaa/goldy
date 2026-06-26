@@ -92,8 +92,8 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     };
     state.context_fences.write().unwrap().remove(&ctx);
 
-    // We are the sole owner at this point (no Phase-5c clone is outstanding yet),
-    // so try_unwrap should always succeed.
+    // Cloned per-context handles (`ContextTimelineReader`, `ContextDeferredDeletionFlush`, …)
+    // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
     let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
         .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
     let mut sc = sc_mutex.into_inner().expect("context Mutex poisoned");

@@ -1543,14 +1543,18 @@ struct VulkanContextDeferredDeletionFlush {
 
 impl crate::backend::ContextDeferredDeletionFlush for VulkanContextDeferredDeletionFlush {
     fn flush(&self, device_retired: crate::timeline::TimelineValue) {
-        let _ = device_retired;
-        let completed = self
-            .context_readers
-            .lock()
-            .unwrap()
-            .get(&self.ctx)
-            .map(|r| r.gpu_progress())
-            .unwrap_or(0);
+        let (completed, completed_values) = {
+            let readers = self.context_readers.lock().unwrap();
+            let completed = readers
+                .get(&self.ctx)
+                .map(|r| r.gpu_progress())
+                .unwrap_or(0);
+            let completed_values = readers
+                .iter()
+                .map(|(&ctx, reader)| (ctx, reader.gpu_progress()))
+                .collect();
+            (completed, completed_values)
+        };
         let ctx_batch: Vec<_> = self
             .sc
             .lock()
@@ -1563,15 +1567,8 @@ impl crate::backend::ContextDeferredDeletionFlush for VulkanContextDeferredDelet
             for r in ctx_batch {
                 types::destroy_pending_deletion(&self.ld, &mut registry, r);
             }
-            let completed_values: std::collections::HashMap<ContextHandle, u64> = self
-                .context_readers
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(&ctx, reader)| (ctx, reader.gpu_progress()))
-                .collect();
             registry.drain_ready_slot_reclamations(&completed_values);
         }
-        self.ld.process_deletion_queue_up_to(completed);
+        self.ld.process_deletion_queue_up_to(device_retired);
     }
 }

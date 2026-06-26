@@ -644,6 +644,8 @@ impl GpuBackend for Dx12Backend {
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let device_handle = self.context_device(ctx);
         Some(std::sync::Arc::new(Dx12ContextDeferredDeletionFlush {
+            ctx,
+            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
             ld: std::sync::Arc::clone(self.state.devices.get(&device_handle)?),
             context_fences: std::sync::Arc::clone(&self.state.context_fences),
         }))
@@ -1398,12 +1400,15 @@ impl crate::backend::DeviceTimelineReader for Dx12DeviceTimelineReader {
     fn device_horizon(&self) -> crate::timeline::TimelineValue {
         use std::sync::atomic::Ordering;
         let floor = self.ld.retired_floor.load(Ordering::Relaxed);
+        // Device sync fence shares the per-context timeline value space (`timeline_next`).
         let device_sync = unsafe { self.ld.fence.GetCompletedValue() };
         floor.max(device_sync)
     }
 }
 
 struct Dx12ContextDeferredDeletionFlush {
+    ctx: ContextHandle,
+    sc: types::SharedSubmissionContext,
     ld: types::SharedLogicalDevice,
     context_fences: std::sync::Arc<
         std::sync::RwLock<
@@ -1414,12 +1419,28 @@ struct Dx12ContextDeferredDeletionFlush {
 
 impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletionFlush {
     fn flush(&self, device_retired: crate::timeline::TimelineValue) {
-        self.ld.process_deletion_queue_up_to(device_retired);
-        let fences = self.context_fences.read().unwrap();
-        self.ld
-            .descriptors
+        let completed = self
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&self.ctx)
+            .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+            .unwrap_or(0);
+        let ctx_batch: Vec<_> = self
+            .sc
             .lock()
             .unwrap()
-            .drain_ready_slot_reclamations(&*fences);
+            .deletion_queue
+            .drain_up_to_completed(completed);
+        let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
+        let fences = self.context_fences.read().unwrap();
+        {
+            let mut registry = descriptors_arc.lock().unwrap();
+            for r in ctx_batch {
+                types::destroy_pending_deletion(&self.ld, &mut registry, r);
+            }
+            registry.drain_ready_slot_reclamations(&*fences);
+        }
+        self.ld.process_deletion_queue_up_to(device_retired);
     }
 }

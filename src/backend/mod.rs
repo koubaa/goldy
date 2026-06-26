@@ -847,7 +847,7 @@ impl LockedSubmitSession {
 
 impl ContextSubmitSession for LockedSubmitSession {
     fn retains_present_partitions(&self) -> bool {
-        self.backend.lock().unwrap().retains_present_partitions()
+        !matches!(self.backend_type, crate::types::BackendType::Metal)
     }
 
     fn submit_standalone(
