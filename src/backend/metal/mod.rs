@@ -263,11 +263,9 @@ impl crate::backend::GpuBackendPresentSplit for MetalBackend {
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
         // Metal present runs entirely under the global backend lock in finish_present
-        // (see the comment in surface::present for why the split cannot be wired up
-        // until the compute submit paths also adopt queue_lock for their fetch_add+commit
-        // pair).  The no-op work object carries only the frame token; the lock-free
-        // window between run() and finish_present() in Frame::do_present_sync is
-        // intentionally empty for this backend.
+        // until Phase 5b-ii wires take_present_gpu_work. Compute and present both
+        // assign timeline values and commit under per-device queue_lock so the split
+        // can drop the global lock safely.
         Ok(Box::new(MetalNoOpPresentWork { frame }))
     }
 

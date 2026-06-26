@@ -454,11 +454,9 @@ pub(super) fn render(
 /// unregistered. This is the sole place where `presentDrawable:` is called.
 ///
 /// All work happens under the caller's global backend lock — this is an intentional
-/// conservative choice. The submit-value assignment and `commit()` must be jointly
-/// serialized with other command-buffer submits on this device to maintain the
-/// monotone (`signal_value`, CB) ordering that slot reclamation depends on. A
-/// future Phase-5 narrowing will move this under the per-device
-/// `queue_lock` once the compute submit paths are updated to match.
+/// conservative choice until Phase 5b-ii wires the present split. Timeline value
+/// assignment and `commit()` are serialized with compute submits via per-device
+/// `queue_lock` (see `compute::submit`).
 pub(super) fn present(
     state: &mut MetalState,
     frame: crate::backend::FrameToken,
@@ -495,13 +493,6 @@ pub(super) fn present(
 
     let (owned_command_buffer, signal_value) = {
         let _tz = crate::tracy_zone!("mtl.present.encode");
-        let signal_value = {
-            let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
-            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-            v
-        };
-
         let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
         let command_buffer = owned_command_buffer.as_ref();
 
@@ -515,42 +506,49 @@ pub(super) fn present(
                 sc.pending_swapchain_returns.clone(),
             )
         };
-        command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
 
         let return_image = state.surfaces.get(&surface).and_then(|s| s.last_acquired_image_index);
-        let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
-            waiter.signal(signal_value);
-            if let Some(idx) = return_image {
-                // Metal has no WSI timeline to poll: push SwapchainReturned here from the
-                // completion handler. Vulkan/DX12 defer this signal until poll_signals when
-                // gpu_progress crosses the copy/fence value.
-                signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
-                if let Ok(mut pending) = return_pending.lock() {
-                    pending.push((surface, idx));
+        let queue_lock = logical_device.queue_lock.clone();
+        let drawable = drawable_ptr as id;
+        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
+
+        let signal_value = {
+            let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
+            let _queue_guard = queue_lock.lock().unwrap();
+            let signal_value = {
+                let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+                ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
+                v
+            };
+            command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
+            let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+                waiter.signal(signal_value);
+                if let Some(idx) = return_image {
+                    // Metal has no WSI timeline to poll: push SwapchainReturned here from the
+                    // completion handler. Vulkan/DX12 defer this signal until poll_signals when
+                    // gpu_progress crosses the copy/fence value.
+                    signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    if let Ok(mut pending) = return_pending.lock() {
+                        pending.push((surface, idx));
+                    }
                 }
+            })
+            .copy();
+            command_buffer.add_completed_handler(&handler);
+            command_buffer.present_drawable(drawable_ref);
+            if super::api_log::enabled() {
+                super::api_log::log_present_drawable(signal_value);
             }
-        })
-        .copy();
-        command_buffer.add_completed_handler(&handler);
+            command_buffer.commit();
+            signal_value
+        };
 
         (owned_command_buffer, signal_value)
     };
 
-    let drawable = drawable_ptr as id;
-    {
-        let _tz = crate::tracy_zone!("mtl.present.present_drawable");
-        let command_buffer = owned_command_buffer.as_ref();
-        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
-        command_buffer.present_drawable(drawable_ref);
-        if super::api_log::enabled() {
-            super::api_log::log_present_drawable(signal_value);
-        }
-        command_buffer.commit();
-    }
-
     // Release the retained drawable.
     unsafe {
-        let (): () = msg_send![drawable, release];
+        let (): () = msg_send![drawable_ptr as id, release];
     }
 
     // Unregister the temporary surface texture.
