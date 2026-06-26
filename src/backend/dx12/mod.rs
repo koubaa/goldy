@@ -540,6 +540,24 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
     }
 }
 
+impl crate::backend::GpuBackendPresentSplit for Dx12Backend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
+        surface::prepare_present_work(&mut self.state, frame, submit_tv)
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: crate::backend::PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::finish_present(&mut self.state, finish, submit_tv)
+    }
+}
+
 impl GpuBackend for Dx12Backend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -1099,7 +1117,9 @@ impl GpuBackend for Dx12Backend {
         frame: FrameToken,
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        surface::present_frame(&mut self.state, frame, submit_tv)
+        let work = self.take_present_gpu_work(frame, submit_tv)?;
+        let finish = work.run()?;
+        self.finish_present(finish, submit_tv)
     }
 
     fn create_pipeline_with_depth(

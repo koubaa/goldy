@@ -423,6 +423,82 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
     }
 }
 
+impl crate::backend::GpuBackendPresentSplit for MockBackend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
+        let device = self
+            .surfaces
+            .get(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .device_handle;
+        if let Some(tex_handle) = self
+            .surfaces
+            .get_mut(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .current_texture_handle
+            .take()
+        {
+            self.textures.remove(&tex_handle);
+        }
+        Ok(Box::new(MockPresentGpuWork { frame, device }))
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: crate::backend::PresentFinishState,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let device = self
+            .surfaces
+            .get(&finish.frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .device_handle;
+        self.surface_present_count += 1;
+        let image_index = finish.frame.image as u32;
+        self.push_context_signal(
+            finish.frame.context,
+            crate::signal::Signal::SwapchainReturned { image_index },
+        );
+        if let Some(count) = self.surface_pending_acquire.get_mut(&finish.frame.surface) {
+            *count = count.saturating_sub(1);
+        }
+        let next = self.device_timeline_next.entry(device).or_insert(0);
+        *next += 1;
+        let tv = *next;
+        self.complete_context_seq(finish.frame.context, tv);
+        self.push_context_signal(
+            finish.frame.context,
+            crate::signal::Signal::BoundaryCrossed { epoch: tv },
+        );
+        Ok(tv)
+    }
+}
+
+struct MockPresentGpuWork {
+    frame: FrameToken,
+    device: DeviceHandle,
+}
+
+impl crate::backend::PresentGpuWork for MockPresentGpuWork {
+    fn run(self: Box<Self>) -> Result<crate::backend::PresentFinishState> {
+        Ok(crate::backend::PresentFinishState {
+            frame: self.frame,
+            return_fence: 0,
+            scratch_texture: None,
+            scratch_layout_updated: false,
+            present_timeline: 0,
+            copy_timeline: None,
+            frame_compute_timeline: None,
+            signal_timeline: None,
+            render_pass_submitted: false,
+            present_ok: true,
+        })
+    }
+}
+
 impl GpuBackend for MockBackend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -1591,35 +1667,11 @@ impl GpuBackend for MockBackend {
     fn present_frame(
         &mut self,
         frame: FrameToken,
-        _submit_tv: crate::timeline::TimelineValue,
+        submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        let device = self
-            .surfaces
-            .get(&frame.surface)
-            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
-            .device_handle;
-
-        let surf = self
-            .surfaces
-            .get_mut(&frame.surface)
-            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?;
-        if let Some(tex_handle) = surf.current_texture_handle.take() {
-            self.textures.remove(&tex_handle);
-        }
-        self.surface_present_count += 1;
-
-        let image_index = frame.image as u32;
-        self.push_context_signal(frame.context, crate::signal::Signal::SwapchainReturned { image_index });
-        if let Some(count) = self.surface_pending_acquire.get_mut(&frame.surface) {
-            *count = count.saturating_sub(1);
-        }
-
-        let next = self.device_timeline_next.entry(device).or_insert(0);
-        *next += 1;
-        let tv = *next;
-        self.complete_context_seq(frame.context, tv);
-        self.push_context_signal(frame.context, crate::signal::Signal::BoundaryCrossed { epoch: tv });
-        Ok(tv)
+        let work = self.take_present_gpu_work(frame, submit_tv)?;
+        let finish = work.run()?;
+        self.finish_present(finish, submit_tv)
     }
 
     // Compute pipeline management

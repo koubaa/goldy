@@ -18,6 +18,7 @@ mod context;
 mod device;
 mod frame_table;
 mod pipeline;
+mod present_split;
 mod render_commands;
 mod render_target;
 mod sampler;
@@ -353,6 +354,24 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
             }
         }
         Ok(())
+    }
+}
+
+impl crate::backend::GpuBackendPresentSplit for VulkanBackend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
+        present_split::prepare_present_work(&self.state, frame, submit_tv)
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: crate::backend::PresentFinishState,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        present_split::finish_present(&mut self.state, finish)
     }
 }
 
@@ -1330,7 +1349,9 @@ impl GpuBackend for VulkanBackend {
         frame: FrameToken,
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        surface::present_frame(&mut self.state, frame, submit_tv)
+        let work = self.take_present_gpu_work(frame, submit_tv)?;
+        let finish = work.run()?;
+        self.finish_present(finish, submit_tv)
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {

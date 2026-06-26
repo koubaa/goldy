@@ -711,14 +711,51 @@ pub(crate) trait TimelineBlockingWait: Send {
 /// [`Context::gpu_progress`](crate::Context::gpu_progress) and
 /// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
 /// need the global backend lock.
-/// Per-context GPU timeline queries cloned out of the backend so
-/// [`Context::gpu_progress`](crate::Context::gpu_progress) and
-/// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
-/// need the global backend lock.
 #[doc(hidden)]
 pub trait ContextTimelineReader: Send + Sync {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue;
     fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
+}
+
+/// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
+pub(crate) struct PresentFinishState {
+    pub frame: FrameToken,
+    /// Fence/timeline guarding swapchain image return (0 when immediate return).
+    pub return_fence: crate::timeline::TimelineValue,
+    pub scratch_texture: Option<TextureHandle>,
+    pub scratch_layout_updated: bool,
+    pub present_timeline: crate::timeline::TimelineValue,
+    /// Vulkan: timeline signalled by the present-copy submit (if any).
+    pub copy_timeline: Option<crate::timeline::TimelineValue>,
+    /// Vulkan: compute timeline stored on the surface slot (easement semantics).
+    pub frame_compute_timeline: Option<crate::timeline::TimelineValue>,
+    /// Vulkan: context `last_submitted_seq` update from the copy submit.
+    pub signal_timeline: Option<crate::timeline::TimelineValue>,
+    pub render_pass_submitted: bool,
+    /// Whether WSI `queue_present` / equivalent succeeded (modulo OUT_OF_DATE).
+    pub present_ok: bool,
+}
+
+/// GPU-side present work (copy + queue present) cloned out of the backend under the
+/// global lock so [`Frame::present`](crate::Frame::present) can drop it during execution.
+pub(crate) trait PresentGpuWork: Send {
+    fn run(self: Box<Self>) -> Result<PresentFinishState>;
+}
+
+/// Split present hooks used by [`Frame::present`](crate::Frame::present) to drop the
+/// global backend lock during copy + WSI present.
+pub(crate) trait GpuBackendPresentSplit {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn PresentGpuWork>>;
+
+    fn finish_present(
+        &mut self,
+        finish: PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue>;
 }
 
 /// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
@@ -739,7 +776,7 @@ pub(crate) trait GpuBackendTimelineWait {
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
-pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait {
+pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
