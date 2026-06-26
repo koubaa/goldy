@@ -450,8 +450,15 @@ pub(super) fn render(
 
 /// Present the acquired drawable.
 ///
-/// The drawable is presented and released; the per-frame texture handle is
+/// Presents the `CAMetalDrawable` and releases it; the per-frame texture handle is
 /// unregistered. This is the sole place where `presentDrawable:` is called.
+///
+/// All work happens under the caller's global backend lock — this is an intentional
+/// conservative choice. The submit-value assignment and `commit()` must be jointly
+/// serialized with other command-buffer submits on this device to maintain the
+/// monotone (`signal_value`, CB) ordering that slot reclamation depends on. A
+/// future Phase-5 narrowing will move this under the per-device
+/// `queue_lock` once the compute submit paths are updated to match.
 pub(super) fn present(
     state: &mut MetalState,
     frame: crate::backend::FrameToken,
@@ -541,12 +548,12 @@ pub(super) fn present(
         command_buffer.commit();
     }
 
-    // Release the retained drawable
+    // Release the retained drawable.
     unsafe {
         let (): () = msg_send![drawable, release];
     }
 
-    // Unregister the temporary surface texture
+    // Unregister the temporary surface texture.
     if let Some(th) = tex_handle {
         unregister_surface_texture(state, th);
     }

@@ -256,6 +256,51 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
     }
 }
 
+impl crate::backend::GpuBackendPresentSplit for MetalBackend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
+        // Metal present runs entirely under the global backend lock in finish_present
+        // (see the comment in surface::present for why the split cannot be wired up
+        // until the compute submit paths also adopt queue_lock for their fetch_add+commit
+        // pair).  The no-op work object carries only the frame token; the lock-free
+        // window between run() and finish_present() in Frame::do_present_sync is
+        // intentionally empty for this backend.
+        Ok(Box::new(MetalNoOpPresentWork { frame }))
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: crate::backend::PresentFinishState,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::present(&mut self.state, finish.frame)
+    }
+}
+
+struct MetalNoOpPresentWork {
+    frame: FrameToken,
+}
+
+impl crate::backend::PresentGpuWork for MetalNoOpPresentWork {
+    fn run(self: Box<Self>) -> Result<crate::backend::PresentFinishState> {
+        Ok(crate::backend::PresentFinishState {
+            frame: self.frame,
+            return_fence: 0,
+            scratch_texture: None,
+            scratch_layout_updated: false,
+            present_timeline: 0,
+            copy_timeline: None,
+            frame_compute_timeline: None,
+            signal_timeline: None,
+            render_pass_submitted: false,
+            present_ok: true,
+        })
+    }
+}
+
 impl GpuBackend for MetalBackend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
