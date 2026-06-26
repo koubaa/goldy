@@ -732,6 +732,62 @@ impl GpuBackend for MetalBackend {
         ))
     }
 
+    fn take_surface_acquire_work(
+        &mut self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+    ) -> Result<Option<Box<dyn crate::backend::SurfaceAcquireWork>>> {
+        Ok(Some(surface::take_surface_acquire_work(
+            &mut self.state,
+            surface,
+            ctx,
+        )?))
+    }
+
+    fn finish_surface_acquire(
+        &mut self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+        drawable: crate::backend::SurfaceAcquireDrawable,
+    ) -> Result<(FrameToken, TextureHandle)> {
+        let (image, present_slot) = surface::finish_surface_acquire_from_drawable(
+            &mut self.state,
+            surface,
+            ctx,
+            drawable,
+        )?;
+        let tex =
+            surface::frame_texture(&self.state, surface).context("begin_frame: surface frame texture unavailable")?;
+        Ok((
+            FrameToken {
+                surface,
+                image,
+                context: ctx,
+                frame_slot: image as u32,
+                present_slot,
+            },
+            tex,
+        ))
+    }
+
+    fn clone_context_poll_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextPollReader>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        let (signal_queue, pending_swapchain_returns) = {
+            let sc_guard = sc.lock().unwrap();
+            (
+                std::sync::Arc::clone(&sc_guard.signal_queue),
+                std::sync::Arc::clone(&sc_guard.pending_swapchain_returns),
+            )
+        };
+        Some(std::sync::Arc::new(MetalContextPollReader {
+            signal_queue,
+            pending_swapchain_returns,
+        }))
+    }
+
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         surface::render(
             &mut self.state,
@@ -796,21 +852,15 @@ impl GpuBackend for MetalBackend {
         ctx: ContextHandle,
         _progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::Signal> {
-        let device = self.context_device(ctx);
         let sc_arc = match self.state.contexts.get(&ctx) {
             Some(sc) => sc.clone(),
             None => return Vec::new(),
         };
         let sc = sc_arc.lock().unwrap();
-        let returns: Vec<(SurfaceHandle, u32)> = std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
+        let returns: Vec<types::PendingSwapchainReturn> =
+            std::mem::take(&mut *sc.pending_swapchain_returns.lock().unwrap());
         drop(sc);
-        for (surface_handle, _image_index) in returns {
-            if let Some(surf) = self.state.surfaces.get_mut(&surface_handle) {
-                if surf.device_handle == device {
-                    surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
-                }
-            }
-        }
+        apply_pending_swapchain_returns(&returns);
         let sc2 = sc_arc.lock().unwrap();
         crate::signal::drain_all_signals(&sc2.signal_queue)
     }
@@ -830,7 +880,7 @@ impl GpuBackend for MetalBackend {
         self.state
             .surfaces
             .get(&surface)
-            .map(|s| s.pending_acquire_count)
+            .map(|s| s.pending_acquire_count.load(std::sync::atomic::Ordering::Acquire))
             .unwrap_or(0)
     }
 
@@ -1109,6 +1159,26 @@ impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
 
 struct MetalContextTimelineReader {
     sc: types::SharedMetalSubmissionContext,
+}
+
+fn apply_pending_swapchain_returns(returns: &[types::PendingSwapchainReturn]) {
+    use std::sync::atomic::Ordering;
+    for r in returns {
+        r.pending_acquire_count.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct MetalContextPollReader {
+    signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
+    pending_swapchain_returns: std::sync::Arc<std::sync::Mutex<Vec<types::PendingSwapchainReturn>>>,
+}
+
+impl crate::backend::ContextPollReader for MetalContextPollReader {
+    fn poll_signals(&self, _progress: crate::timeline::TimelineValue) -> Vec<crate::signal::Signal> {
+        let returns = std::mem::take(&mut *self.pending_swapchain_returns.lock().unwrap());
+        apply_pending_swapchain_returns(&returns);
+        crate::signal::drain_all_signals(&self.signal_queue)
+    }
 }
 
 impl crate::backend::ContextTimelineReader for MetalContextTimelineReader {

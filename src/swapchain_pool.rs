@@ -4,6 +4,10 @@
 //! [`PresentLease`] handles acquired via [`SwapchainPool::lease`]. The scheme
 //! records the lease once; each [`crate::Scheme::submit`] acquires the next
 //! drawable and resolves it through the present partition retention path.
+//!
+//! When [`crate::validation_env::speculative_present_acquire_enabled`] is set,
+//! [`crate::PresentGrant::consume`] may stash the next drawable on the pool so
+//! the render thread's subsequent `submit` avoids a synchronous acquire.
 
 use crate::backend::TextureHandle;
 use crate::context::Context;
@@ -11,12 +15,17 @@ use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// Resolved present slot: slot id, acquired frame, UAV index, texture handle.
+pub(crate) type ResolvedPresentSlotData = (u32, SurfaceFrame, u32, TextureHandle);
 
 pub(crate) struct SwapchainPoolInner {
     surface: RwLock<Surface>,
     #[allow(dead_code)]
     depth: u32,
+    /// Drawable acquired speculatively by [`crate::PresentGrant::consume`] for the next submit.
+    speculative_acquire: Mutex<Option<ResolvedPresentSlotData>>,
 }
 
 /// Pool of OS swapchain drawables for present-on-scheme.
@@ -58,6 +67,7 @@ impl SwapchainPool {
             inner: Arc::new(SwapchainPoolInner {
                 surface: RwLock::new(surface),
                 depth: depth.max(1),
+                speculative_acquire: Mutex::new(None),
             }),
         })
     }
@@ -91,16 +101,18 @@ impl SwapchainPool {
 
     /// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
+        Self::drain_speculative_acquire(&self.inner);
         let mut surface = self.inner.surface.write().unwrap();
         surface.resize(width, height)
     }
 
     pub fn set_present_mode(&self, mode: crate::types::PresentMode) -> Result<()> {
+        Self::drain_speculative_acquire(&self.inner);
         let mut surface = self.inner.surface.write().unwrap();
         surface.set_present_mode(mode)
     }
 
-    pub(crate) fn acquire_slot(pool: &Arc<SwapchainPoolInner>) -> Result<(u32, SurfaceFrame, u32, TextureHandle)> {
+    pub(crate) fn acquire_slot(pool: &Arc<SwapchainPoolInner>) -> Result<ResolvedPresentSlotData> {
         // Read lock only: `begin()` may block on swapchain image availability without
         // preventing concurrent queries or stalling resize on a held write lock.
         let frame = {
@@ -116,5 +128,37 @@ impl SwapchainPool {
             (tex.gpu_handle(), uav_index)
         };
         Ok((slot_id, frame, uav_index, handle))
+    }
+
+    /// Take a speculatively acquired slot, or acquire synchronously.
+    pub(crate) fn resolve_present_slot(pool: &Arc<SwapchainPoolInner>) -> Result<ResolvedPresentSlotData> {
+        if let Some(slot) = pool.speculative_acquire.lock().unwrap().take() {
+            return Ok(slot);
+        }
+        Self::acquire_slot(pool)
+    }
+
+    /// Stash a drawable acquired during [`crate::PresentGrant::consume`] for the next submit.
+    pub(crate) fn stash_speculative_acquire(pool: &Arc<SwapchainPoolInner>, slot: ResolvedPresentSlotData) {
+        let mut guard = pool.speculative_acquire.lock().unwrap();
+        if let Some((_, old_frame, _, _)) = guard.take() {
+            tracing::warn!(
+                target: "goldy::swapchain_pool",
+                "discarding unconsumed speculative present acquire"
+            );
+            old_frame.cancel();
+        }
+        *guard = Some(slot);
+    }
+
+    fn drain_speculative_acquire(pool: &Arc<SwapchainPoolInner>) {
+        if let Some((_, frame, _, _)) = pool.speculative_acquire.lock().unwrap().take() {
+            frame.cancel();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_speculative_acquire(pool: &Arc<SwapchainPoolInner>) -> bool {
+        pool.speculative_acquire.lock().unwrap().is_some()
     }
 }

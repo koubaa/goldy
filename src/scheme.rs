@@ -258,10 +258,20 @@ pub trait Grant {
 }
 
 /// Marker returned by [`Scheme::grant_present`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PresentGrant {
     pub(crate) grant_id: u32,
     pub(crate) scheme_id: u64,
+    pub(crate) pool: std::sync::Arc<crate::swapchain_pool::SwapchainPoolInner>,
+}
+
+impl fmt::Debug for PresentGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PresentGrant")
+            .field("grant_id", &self.grant_id)
+            .field("scheme_id", &self.scheme_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PresentGrant {
@@ -303,6 +313,21 @@ impl Grant for PresentGrant {
         })?;
         if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
             resolver.resolve(present_tv);
+        }
+
+        if validation_env::speculative_present_acquire_enabled() {
+            let _tz = crate::tracy_zone!("scheme.grant_present.speculative_acquire");
+            let spec_result = crate::swapchain_pool::SwapchainPool::acquire_slot(&self.pool);
+            match spec_result {
+                Ok(slot) => crate::swapchain_pool::SwapchainPool::stash_speculative_acquire(&self.pool, slot),
+                Err(e) => {
+                    tracing::debug!(
+                        target: "goldy::scheme",
+                        error = %e,
+                        "speculative present acquire failed; submit will acquire synchronously"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1093,7 +1118,8 @@ impl Scheme {
             let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
             for grant in &self.present_grants {
                 let (slot_id, surface_frame, uav_index, handle) =
-                    SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
+                    crate::swapchain_pool::SwapchainPool::resolve_present_slot(&grant.pool)
+                        .map_err(|e| self.ctx.classify(e))?;
                 present_slots.push(ResolvedPresentSlot {
                     lease_id: grant.lease_id,
                     slot_id,
@@ -1322,6 +1348,7 @@ impl Scheme {
         PresentGrant {
             grant_id: present_idx,
             scheme_id: self.scheme_id,
+            pool: Arc::clone(&lease.pool),
         }
     }
 
@@ -3512,6 +3539,39 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         present.consume(&submission2).expect("present submission2");
 
         assert_eq!(mock_present_count(&device), 2, "two submits → two presents");
+    }
+
+    #[test]
+    fn speculative_present_acquire_stashes_for_next_submit() {
+        std::env::set_var("GOLDY_SPECULATIVE_PRESENT_ACQUIRE", "1");
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let pool = Arc::clone(&lease.pool);
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = scheme.grant_present(&lease);
+
+        let submission1 = scheme.submit().expect("submit 1");
+        assert!(
+            !SwapchainPool::has_speculative_acquire(&pool),
+            "first submit uses synchronous acquire"
+        );
+
+        present.consume(&submission1).expect("present 1");
+        assert!(
+            SwapchainPool::has_speculative_acquire(&pool),
+            "consume should stash drawable for next submit"
+        );
+
+        let submission2 = scheme.submit().expect("submit 2");
+        assert!(
+            !SwapchainPool::has_speculative_acquire(&pool),
+            "second submit should consume speculative stash"
+        );
+        present.consume(&submission2).expect("present 2");
+
+        let _ = std::env::remove_var("GOLDY_SPECULATIVE_PRESENT_ACQUIRE");
     }
 
     #[test]

@@ -119,12 +119,32 @@ impl Surface {
     /// Begin the next frame (acquire swapchain image and open the frame bracket).
     pub fn begin(&self) -> Result<Frame> {
         let _tz = tracy_zone!("surface.begin");
+        let backend_arc = Arc::clone(&self.backend);
+        let surface_handle = self.handle;
+        let ctx_handle = self.ctx_handle;
+
         let (token, texture_handle, w, h, format) = {
-            let mut backend = self.backend.lock().unwrap();
-            let (tok, th) = backend.begin_frame(self.handle, self.ctx_handle)?;
-            let (w, h) = backend.surface_size(self.handle);
-            let format = backend.surface_format(self.handle);
-            (tok, th, w, h, format)
+            let acquire_work = {
+                let mut backend = backend_arc.lock().unwrap();
+                backend.take_surface_acquire_work(surface_handle, ctx_handle)?
+            };
+            if let Some(work) = acquire_work {
+                let drawable = {
+                    let _gpu = tracy_zone!("surface.begin.nextDrawable");
+                    work.run()?
+                };
+                let mut backend = backend_arc.lock().unwrap();
+                let (tok, th) = backend.finish_surface_acquire(surface_handle, ctx_handle, drawable)?;
+                let (w, h) = backend.surface_size(surface_handle);
+                let format = backend.surface_format(surface_handle);
+                (tok, th, w, h, format)
+            } else {
+                let mut backend = backend_arc.lock().unwrap();
+                let (tok, th) = backend.begin_frame(surface_handle, ctx_handle)?;
+                let (w, h) = backend.surface_size(surface_handle);
+                let format = backend.surface_format(surface_handle);
+                (tok, th, w, h, format)
+            }
         };
 
         let texture = Some(Texture::borrowed(

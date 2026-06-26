@@ -730,6 +730,14 @@ pub trait ContextTimelineReader: Send + Sync {
     fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
 }
 
+/// Lock-free signal drain cloned at [`crate::Context::new`] so
+/// [`Context::poll_signals`](crate::Context::poll_signals) does not contend with
+/// `nextDrawable` / present on the global backend mutex.
+#[doc(hidden)]
+pub trait ContextPollReader: Send + Sync {
+    fn poll_signals(&self, progress: crate::timeline::TimelineValue) -> Vec<crate::signal::Signal>;
+}
+
 /// Device-scoped timeline horizon (retired floor + device sync primitive) cloned out of
 /// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can combine
 /// it with per-context readers without the global backend mutex.
@@ -789,6 +797,19 @@ pub(crate) struct PresentFinishState {
 /// global lock so [`Frame::present`](crate::Frame::present) can drop it during execution.
 pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
+}
+
+/// Result of a blocking swapchain acquire call run outside the global backend lock.
+pub(crate) struct SurfaceAcquireDrawable {
+    pub ptr: usize,
+    pub ok: bool,
+}
+
+/// Blocking swapchain acquire work (Metal `nextDrawable`) cloned out of the backend
+/// under a short lock so [`Surface::begin`](crate::Surface::begin) can drop the lock
+/// during the WSI wait.
+pub(crate) trait SurfaceAcquireWork: Send {
+    fn run(self: Box<Self>) -> Result<SurfaceAcquireDrawable>;
 }
 
 /// Lock-free submit surface cloned at [`crate::Context::new`].
@@ -971,6 +992,38 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// queries avoid the global backend mutex.
     #[doc(hidden)]
     fn clone_context_timeline_reader(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
+
+    /// Clone the per-context poll reader for lock-free [`Context::poll_signals`].
+    #[doc(hidden)]
+    fn clone_context_poll_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn ContextPollReader>> {
+        let _ = ctx;
+        None
+    }
+
+    /// Clone blocking acquire work so [`Surface::begin`] can drop the global lock before
+    /// `nextDrawable`. `None` uses the legacy [`Self::begin_frame`] path.
+    #[doc(hidden)]
+    fn take_surface_acquire_work(
+        &mut self,
+        _surface: SurfaceHandle,
+        _ctx: ContextHandle,
+    ) -> Result<Option<Box<dyn SurfaceAcquireWork>>> {
+        Ok(None)
+    }
+
+    /// Finish [`Self::take_surface_acquire_work`] after the blocking acquire completes.
+    #[doc(hidden)]
+    fn finish_surface_acquire(
+        &mut self,
+        _surface: SurfaceHandle,
+        _ctx: ContextHandle,
+        _drawable: SurfaceAcquireDrawable,
+    ) -> Result<(FrameToken, TextureHandle)> {
+        anyhow::bail!("surface acquire split not supported on this backend")
+    }
 
     /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
     #[doc(hidden)]

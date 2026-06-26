@@ -601,7 +601,7 @@ pub(crate) struct MetalSubmissionContext {
     /// Thread-scoped reclamation epoch from [`GpuBackend::set_reclamation_context`].
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// Swapchain returns posted from completion handlers; drained on `poll_signals`.
-    pub pending_swapchain_returns: Arc<Mutex<Vec<(super::SurfaceHandle, u32)>>>,
+    pub pending_swapchain_returns: Arc<Mutex<Vec<PendingSwapchainReturn>>>,
     /// Most recently committed timeline on this context (WriteBuffer fast-path gate).
     pub last_committed_timeline: Option<crate::timeline::TimelineValue>,
     /// Per-context staging belt for `WriteBuffer` uploads (bump-allocated shared chunks).
@@ -1201,6 +1201,12 @@ pub(crate) struct SamplerState_ {
 /// Maximum number of frames that can be in-flight at once.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
+/// Present-completion bookkeeping drained by [`ContextPollReader::poll_signals`].
+pub(crate) struct PendingSwapchainReturn {
+    pub image_index: u32,
+    pub pending_acquire_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
 /// Surface (CAMetalLayer) state for window presentation.
 pub(crate) struct SurfaceState {
     pub device_handle: DeviceHandle,
@@ -1229,8 +1235,11 @@ pub(crate) struct SurfaceState {
     pub present_mode: crate::types::PresentMode,
     /// Frame-scoped GPU commands ([`crate::backend::GpuBackend::record_gpu_work`]).
     pub frame_pending_gpu_commands: Vec<crate::backend::GpuCommand>,
-    pub pending_acquire_count: u32,
+    pub pending_acquire_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub last_acquired_image_index: Option<u32>,
+    /// Prepared acquire state between [`surface::take_surface_acquire_work`] and
+    /// [`surface::finish_surface_acquire_from_drawable`] (split `nextDrawable` path).
+    pub pending_acquire: Option<super::surface::MetalAcquirePending>,
 }
 
 // SAFETY: `SurfaceState` contains raw pointers to a `CALayer` and `CAMetalDrawable`.

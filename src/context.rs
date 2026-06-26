@@ -28,6 +28,7 @@ pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
     timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
+    poll_reader: Option<Arc<dyn crate::backend::ContextPollReader>>,
     deletion_flush: Option<Arc<dyn crate::backend::ContextDeferredDeletionFlush>>,
     reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
     submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
@@ -72,6 +73,7 @@ impl Drop for ContextInner {
         // Release cloned per-context backend handles before destroy_context.
         // Backends expect sole ownership of the per-context Arc at teardown.
         self.timeline_reader.take();
+        self.poll_reader.take();
         self.deletion_flush.take();
         self.reclamation_scope.take();
         self.submit_session.take();
@@ -98,6 +100,10 @@ impl Context {
                 .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader")))?
         };
         device.register_context_timeline_reader(handle, Arc::clone(&timeline_reader));
+        let poll_reader = {
+            let backend = device.inner.backend.lock().unwrap();
+            backend.clone_context_poll_reader(handle)
+        };
         let (deletion_flush, reclamation_scope) = {
             let backend = device.inner.backend.lock().unwrap();
             let deletion_flush = backend
@@ -115,6 +121,7 @@ impl Context {
                 device,
                 handle,
                 timeline_reader: Some(timeline_reader),
+                poll_reader,
                 deletion_flush: Some(deletion_flush),
                 reclamation_scope: Some(reclamation_scope),
                 submit_session: Some(submit_session),
@@ -279,6 +286,9 @@ impl Context {
     /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
     pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
         let progress = self.gpu_progress();
+        if let Some(reader) = self.inner.poll_reader.as_ref() {
+            return reader.poll_signals(progress);
+        }
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
         backend.poll_signals(self.inner.handle, progress)
     }

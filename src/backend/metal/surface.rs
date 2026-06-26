@@ -145,8 +145,9 @@ pub(super) fn create(
             bindless_storage_slots,
             present_mode: PresentMode::Auto,
             frame_pending_gpu_commands: Vec::new(),
-            pending_acquire_count: 0,
+            pending_acquire_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             last_acquired_image_index: None,
+            pending_acquire: None,
         },
     );
     tracing::info!(
@@ -214,17 +215,95 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
     state.surfaces.remove(&surface);
 }
 
-/// Acquire the next swapchain image.
-///
-/// Calls `nextDrawable` on the CAMetalLayer and registers the drawable's
-/// texture in the bindless descriptor set. The texture handle is available
-/// via `frame_texture()` until `present()` is called.
-pub(super) fn acquire(
+/// State prepared under the global backend lock before a blocking `nextDrawable`.
+pub(super) struct MetalAcquirePending {
+    pub surface: SurfaceHandle,
+    pub ctx: super::ContextHandle,
+    pub device_handle: DeviceHandle,
+    pub width: u32,
+    pub height: u32,
+    pub format: crate::types::TextureFormat,
+    pub frame_slot: usize,
+    pub bindless_slot: u32,
+}
+
+struct MetalSurfaceAcquireWork {
+    layer: Option<usize>,
+}
+
+impl Drop for MetalSurfaceAcquireWork {
+    fn drop(&mut self) {
+        if let Some(layer_ptr) = self.layer.take() {
+            unsafe {
+                let (): () = msg_send![layer_ptr as id, release];
+            }
+        }
+    }
+}
+
+impl crate::backend::SurfaceAcquireWork for MetalSurfaceAcquireWork {
+    fn run(mut self: Box<Self>) -> Result<crate::backend::SurfaceAcquireDrawable> {
+        let layer = self.layer.take().expect("acquire work run twice") as id;
+        let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
+        let drawable: id = unsafe { msg_send![layer, nextDrawable] };
+        unsafe {
+            let (): () = msg_send![layer, release];
+        }
+        if super::api_log::enabled() {
+            super::api_log::log_next_drawable(drawable != nil);
+        }
+        Ok(crate::backend::SurfaceAcquireDrawable {
+            ptr: drawable as usize,
+            ok: drawable != nil,
+        })
+    }
+}
+
+pub(super) fn take_surface_acquire_work(
     state: &mut MetalState,
     surface: SurfaceHandle,
     ctx: super::ContextHandle,
+) -> Result<Box<dyn crate::backend::SurfaceAcquireWork>> {
+    let (pending, layer_ptr) = prepare_acquire(state, surface, ctx)?;
+    state.surfaces.get_mut(&surface).unwrap().pending_acquire = Some(pending);
+    Ok(Box::new(MetalSurfaceAcquireWork {
+        layer: Some(layer_ptr),
+    }))
+}
+
+pub(super) fn finish_surface_acquire_from_drawable(
+    state: &mut MetalState,
+    surface: SurfaceHandle,
+    ctx: super::ContextHandle,
+    drawable: crate::backend::SurfaceAcquireDrawable,
 ) -> Result<(SwapchainImageHandle, u32)> {
-    let _tz = crate::tracy_zone!("mtl.surface.acquire");
+    let pending = state
+        .surfaces
+        .get_mut(&surface)
+        .and_then(|ss| ss.pending_acquire.take())
+        .context("finish_surface_acquire: missing pending acquire state")?;
+    if pending.surface != surface {
+        anyhow::bail!("finish_surface_acquire: pending acquire surface mismatch");
+    }
+    if pending.ctx != ctx {
+        anyhow::bail!("finish_surface_acquire: pending acquire context mismatch");
+    }
+    finish_acquire(state, pending, drawable)
+}
+
+pub(super) fn prepare_acquire(
+    state: &mut MetalState,
+    surface: SurfaceHandle,
+    ctx: super::ContextHandle,
+) -> Result<(MetalAcquirePending, usize)> {
+    let _tz = crate::tracy_zone!("mtl.surface.prepare_acquire");
+
+    if let Some(ss) = state.surfaces.get_mut(&surface) {
+        if ss.pending_acquire.is_some() {
+            tracing::warn!("clearing incomplete surface acquire for surface {surface}");
+            ss.pending_acquire = None;
+        }
+    }
 
     let (device_handle, width, height, format, frame_slot, bindless_slot) = {
         let ss = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
@@ -244,7 +323,6 @@ pub(super) fn acquire(
         )
     };
 
-    // Clean up any previously acquired drawable in this slot that wasn't presented.
     if let Some(tex_handle) = state
         .surfaces
         .get(&surface)
@@ -263,30 +341,59 @@ pub(super) fn acquire(
     }
 
     let layer = state.surfaces.get(&surface).unwrap().layer as id;
-    let drawable: id = {
-        let _dz = crate::tracy_zone!("mtl.surface.nextDrawable");
-        unsafe { msg_send![layer, nextDrawable] }
-    };
-
-    if super::api_log::enabled() {
-        super::api_log::log_next_drawable(drawable != nil);
+    unsafe {
+        let (): () = msg_send![layer, retain];
     }
 
-    if drawable == nil {
+    Ok((
+        MetalAcquirePending {
+            surface,
+            ctx,
+            device_handle,
+            width,
+            height,
+            format,
+            frame_slot,
+            bindless_slot,
+        },
+        layer as usize,
+    ))
+}
+
+pub(super) fn finish_acquire(
+    state: &mut MetalState,
+    pending: MetalAcquirePending,
+    drawable: crate::backend::SurfaceAcquireDrawable,
+) -> Result<(SwapchainImageHandle, u32)> {
+    let _tz = crate::tracy_zone!("mtl.surface.finish_acquire");
+    let MetalAcquirePending {
+        surface,
+        ctx,
+        device_handle,
+        width,
+        height,
+        format,
+        frame_slot,
+        bindless_slot,
+    } = pending;
+
+    let drawable_id = drawable.ptr as id;
+    if !drawable.ok || drawable_id == nil {
         anyhow::bail!("Failed to get next drawable from CAMetalLayer");
     }
     unsafe {
-        let () = msg_send![drawable, retain];
+        let () = msg_send![drawable_id, retain];
     }
     {
         let ss = state.surfaces.get_mut(&surface).unwrap();
-        ss.drawable_slots[frame_slot] = Some(drawable as *mut std::ffi::c_void);
+        ss.drawable_slots[frame_slot] = Some(drawable_id as *mut std::ffi::c_void);
     }
 
-    let texture_ptr: *mut Object = unsafe { msg_send![drawable, texture] };
+    let texture_ptr: *mut Object = unsafe { msg_send![drawable_id, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
-    let tex_handle = register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
+    let tex_handle =
+        register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
 
     let image_index = {
         let ss = state.surfaces.get_mut(&surface).expect("surface registered above");
@@ -294,7 +401,7 @@ pub(super) fn acquire(
         ss.drawable_texture_handles[frame_slot] = Some(tex_handle);
         ss.current_texture_handle = Some(tex_handle);
         ss.last_acquired_image_index = Some(image_index);
-        ss.pending_acquire_count = ss.pending_acquire_count.saturating_add(1);
+        ss.pending_acquire_count.fetch_add(1, std::sync::atomic::Ordering::Release);
         image_index
     };
 
@@ -306,8 +413,6 @@ pub(super) fn acquire(
             .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
-    // Drain per-context deletion queue on the context's own clock (hot path),
-    // then the device-level queue as the async GC safety net (see issue #190).
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
@@ -321,6 +426,32 @@ pub(super) fn acquire(
     }
 
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
+}
+
+/// Acquire the next swapchain image (legacy single-lock entry).
+///
+/// Prefer [`take_surface_acquire_work`] + [`finish_acquire`] so `nextDrawable` runs
+/// outside the global backend mutex.
+pub(super) fn acquire(
+    state: &mut MetalState,
+    surface: SurfaceHandle,
+    ctx: super::ContextHandle,
+) -> Result<(SwapchainImageHandle, u32)> {
+    let _tz = crate::tracy_zone!("mtl.surface.acquire");
+    let (pending, layer_ptr) = prepare_acquire(state, surface, ctx)?;
+    let layer = layer_ptr as id;
+    let drawable: id = unsafe { msg_send![layer, nextDrawable] };
+    unsafe {
+        let (): () = msg_send![layer, release];
+    }
+    finish_acquire(
+        state,
+        pending,
+        crate::backend::SurfaceAcquireDrawable {
+            ptr: drawable as usize,
+            ok: drawable != nil,
+        },
+    )
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -466,6 +597,7 @@ pub(super) fn prepare_present_work(
     let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
     let device_handle = surface_state.device_handle;
     let return_image = surface_state.last_acquired_image_index;
+    let pending_acquire_count = std::sync::Arc::clone(&surface_state.pending_acquire_count);
     let drawable_ptr = surface_state.drawable_slots[present_slot].take();
     let tex_handle = surface_state.drawable_texture_handles[present_slot].take();
     if surface_state.current_texture_handle == tex_handle {
@@ -510,7 +642,6 @@ pub(super) fn prepare_present_work(
 
     Ok(Box::new(MetalPresentGpuWork {
         frame,
-        surface,
         drawable_ptr: drawable_ptr as usize,
         tex_handle,
         logical_device,
@@ -520,6 +651,7 @@ pub(super) fn prepare_present_work(
         signal_queue_present,
         return_pending,
         return_image,
+        pending_acquire_count,
     }))
 }
 
@@ -595,7 +727,6 @@ impl PresentGpuWork for MetalSkipPresentGpuWork {
 
 struct MetalPresentGpuWork {
     frame: crate::backend::FrameToken,
-    surface: SurfaceHandle,
     /// Drawable retained until GPU present; stored as usize for `Send`.
     drawable_ptr: usize,
     tex_handle: Option<TextureHandle>,
@@ -604,8 +735,9 @@ struct MetalPresentGpuWork {
     timeline_event: mtl::SharedEvent,
     waiter: TimelineWaiter,
     signal_queue_present: Arc<crate::signal::SignalQueue>,
-    return_pending: Arc<std::sync::Mutex<Vec<(SurfaceHandle, u32)>>>,
+    return_pending: Arc<std::sync::Mutex<Vec<super::types::PendingSwapchainReturn>>>,
     return_image: Option<u32>,
+    pending_acquire_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl PresentGpuWork for MetalPresentGpuWork {
@@ -627,17 +759,20 @@ impl PresentGpuWork for MetalPresentGpuWork {
                 v
             };
             command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
-            let surface = self.surface;
             let return_image = self.return_image;
             let signal_queue_present = Arc::clone(&self.signal_queue_present);
             let return_pending = Arc::clone(&self.return_pending);
+            let pending_acquire_count = std::sync::Arc::clone(&self.pending_acquire_count);
             let waiter = self.waiter.clone();
             let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
                 waiter.signal(signal_value);
                 if let Some(idx) = return_image {
                     signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     if let Ok(mut pending) = return_pending.lock() {
-                        pending.push((surface, idx));
+                        pending.push(super::types::PendingSwapchainReturn {
+                            image_index: idx,
+                            pending_acquire_count: std::sync::Arc::clone(&pending_acquire_count),
+                        });
                     }
                 }
             })
@@ -775,7 +910,7 @@ pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32,
         let () = msg_send![layer, setDrawableSize: size];
     }
 
-    surface_state.pending_acquire_count = 0;
+    surface_state.pending_acquire_count.store(0, std::sync::atomic::Ordering::Release);
     if let Some(device_handle) = state.surfaces.get(&surface).map(|s| s.device_handle) {
         for sc_arc in state.contexts.values() {
             let sc = sc_arc.lock().unwrap();
