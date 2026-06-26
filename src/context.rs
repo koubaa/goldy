@@ -30,6 +30,7 @@ pub(crate) struct ContextInner {
     timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
     deletion_flush: Arc<dyn crate::backend::ContextDeferredDeletionFlush>,
     reclamation_scope: Arc<dyn crate::backend::ContextReclamationScope>,
+    submit_session: Arc<dyn crate::backend::ContextSubmitSession>,
     high_water_timeline: AtomicU64,
     /// Per-context transient resource heap (backing buffer + cached views/textures).
     ///
@@ -104,6 +105,10 @@ impl Context {
             let reclamation_scope = backend.clone_context_reclamation_scope(handle);
             (deletion_flush, reclamation_scope)
         };
+        let submit_session = crate::backend::LockedSubmitSession::new(
+            Arc::clone(&device.inner.backend),
+            handle,
+        );
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
@@ -111,6 +116,7 @@ impl Context {
                 timeline_reader: Some(timeline_reader),
                 deletion_flush,
                 reclamation_scope,
+                submit_session,
                 high_water_timeline: AtomicU64::new(0),
                 placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
@@ -125,6 +131,10 @@ impl Context {
 
     pub(crate) fn backend_handle(&self) -> ContextHandle {
         self.inner.handle
+    }
+
+    pub(crate) fn submit_session(&self) -> &dyn crate::backend::ContextSubmitSession {
+        self.inner.submit_session.as_ref()
     }
 
     /// Test-only access to the backend context id.
@@ -373,13 +383,9 @@ impl Context {
     /// Submit a compiled [`TaskGraph`] on this context's timeline.
     pub fn submit(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         if !graph.has_transient_resources() {
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
             let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), true)
-                .map_err(|e| {
-                    drop(backend);
-                    self.classify(e)
-                })?;
+                .submit_with_backend(self, self.submit_session(), None, &HashMap::new(), true)
+                .map_err(|e| self.classify(e))?;
             graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
@@ -397,13 +403,9 @@ impl Context {
     pub fn submit_pipelined(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         let _tz = crate::tracy_zone!("context.submit_pipelined");
         if !graph.has_transient_resources() {
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
             let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), false)
-                .map_err(|e| {
-                    drop(backend);
-                    self.classify(e)
-                })?;
+                .submit_with_backend(self, self.submit_session(), None, &HashMap::new(), false)
+                .map_err(|e| self.classify(e))?;
             graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
@@ -421,13 +423,9 @@ impl Context {
         if graph.has_transient_resources() {
             return self.submit_pipelined(graph);
         }
-        let mut backend = self.inner.device.inner.backend.lock().unwrap();
         let tv = graph
-            .submit_with_backend_and_retain(self, backend.as_mut())
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+            .submit_with_backend_and_retain(self, self.submit_session())
+            .map_err(|e| self.classify(e))?;
         graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
@@ -603,9 +601,12 @@ impl Context {
         // stamping creates a window where a concurrent submit sees last_timeline = None
         // and evicts in-flight transient textures synchronously, causing GPU UAF.
         // Lock order is always heap → backend; no other code path reverses this.
-        let mut backend = device.inner.backend.lock().unwrap();
-        let tv = graph.submit_ir_with_resolver(self, backend.as_mut(), &resolver, wait_for_transient_completion)?;
-        drop(backend);
+        let tv = graph.submit_ir_with_resolver(
+            self,
+            self.submit_session(),
+            &resolver,
+            wait_for_transient_completion,
+        )?;
 
         if let Some(heap) = heap_guard.as_mut() {
             heap.stamp_pending(tv);

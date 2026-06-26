@@ -1622,6 +1622,8 @@ fn execute_signal_and_finish(
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
         queue_wait_for_epochs(state, device_handle, sync)?;
+        let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe { logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]) };
         unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
             .context("Failed to signal context fence")?;
@@ -2379,7 +2381,7 @@ pub(super) fn try_resubmit_retained(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast retained command list")?;
 
-    let (ctx_fence, command_queue) = {
+    let (ctx_fence, command_queue, queue_lock) = {
         let ctx_fence = state
             .context_fences
             .read()
@@ -2389,11 +2391,16 @@ pub(super) fn try_resubmit_retained(
             .1
             .clone();
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        (ctx_fence, ld.command_queue.clone())
+        (
+            ctx_fence,
+            ld.command_queue.clone(),
+            std::sync::Arc::clone(&ld.queue_lock),
+        )
     };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
         queue_wait_for_epochs(state, device_handle, sync)?;
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
         }

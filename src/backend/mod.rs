@@ -783,6 +783,118 @@ pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
 }
 
+/// Lock-free submit surface cloned at [`crate::Context::new`].
+///
+/// Holds `Arc` handles to per-context submission state, device ledger, and resource
+/// tables so IR lowering + command recording + queue submit can run without the global
+/// backend mutex. Resource create/destroy still takes the global lock (write access).
+pub(crate) trait ContextSubmitSession: Send + Sync {
+    fn retains_present_partitions(&self) -> bool;
+    fn submit_standalone(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue>;
+    fn submit_graph(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue>;
+    fn submit_graph_and_retain(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue>;
+    fn try_resubmit_retained(
+        &self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>>;
+    fn evict_retained(&self, ctx: ContextHandle, key: u64);
+}
+
+/// Per-context submit session that acquires the global backend mutex only around
+/// individual backend submit calls (Phase 5a). Backends can later replace this
+/// with a lock-free session cloned from `Arc<RwLock<State>>` sub-handles.
+pub(crate) struct LockedSubmitSession {
+    backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+    ctx: ContextHandle,
+    backend_type: BackendType,
+}
+
+impl LockedSubmitSession {
+    pub fn new(
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+        ctx: ContextHandle,
+    ) -> std::sync::Arc<dyn ContextSubmitSession> {
+        let backend_type = backend.lock().unwrap().backend_type();
+        std::sync::Arc::new(Self {
+            backend,
+            ctx,
+            backend_type,
+        })
+    }
+
+    pub fn backend_type(&self) -> BackendType {
+        self.backend_type
+    }
+}
+
+impl ContextSubmitSession for LockedSubmitSession {
+    fn retains_present_partitions(&self) -> bool {
+        self.backend.lock().unwrap().retains_present_partitions()
+    }
+
+    fn submit_standalone(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.backend.lock().unwrap().submit_standalone(ctx, commands, sync)
+    }
+
+    fn submit_graph(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.backend.lock().unwrap().submit_graph(ctx, commands, sync)
+    }
+
+    fn submit_graph_and_retain(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.backend
+            .lock()
+            .unwrap()
+            .submit_graph_and_retain(ctx, commands, key, sync)
+    }
+
+    fn try_resubmit_retained(
+        &self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
+    }
+
+    fn evict_retained(&self, ctx: ContextHandle, key: u64) {
+        self.backend.lock().unwrap().evict_retained(ctx, key);
+    }
+}
+
 /// Split present hooks used by [`Frame::present`](crate::Frame::present) to drop the
 /// global backend lock during copy + WSI present.
 pub(crate) trait GpuBackendPresentSplit {

@@ -771,6 +771,12 @@ pub(crate) struct LogicalDevice {
     /// Cached PSO blobs (graphics + compute) and disk-dirty flag.
     /// `RwLock` because reads dominate after warmup; `Arc` for Phase 5 cloning.
     pub pso_cache: Arc<RwLock<PsoCache>>,
+    /// Serialises all `ExecuteCommandLists` + `Signal` pairs on this device's queue.
+    ///
+    /// D3D12 marks the command queue as externally synchronized for concurrent submits.
+    /// Phase 5 lock-free submit clones this `Arc` and holds it only across the GPU
+    /// enqueue, matching Vulkan's `queue_lock` and Metal's present/compute pairing.
+    pub queue_lock: Arc<Mutex<()>>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
