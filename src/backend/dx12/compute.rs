@@ -635,8 +635,8 @@ fn queue_wait_for_epochs(state: &Dx12State, consumer_device: DeviceHandle, sync:
         .get(&consumer_device)
         .context("queue_wait_for_epochs: invalid device")?;
     for epoch in &s.waits {
-        let (_, producer_fence) = state
-            .context_fences
+        let fences = state.context_fences.read().unwrap();
+        let (_, producer_fence) = fences
             .get(&epoch.context)
             .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
         unsafe {
@@ -667,6 +667,8 @@ fn acquire_allocator_slot(
 
     let ctx_fence = state
         .context_fences
+        .read()
+        .unwrap()
         .get(&ctx)
         .context("Invalid context handle")?
         .1
@@ -1611,6 +1613,8 @@ fn execute_signal_and_finish(
     let logical_device = state.devices.get(&device_handle).unwrap();
     let ctx_fence = state
         .context_fences
+        .read()
+        .unwrap()
         .get(&ctx)
         .context("Invalid context handle")?
         .1
@@ -1693,7 +1697,8 @@ fn execute_signal_and_finish(
         for resource in ctx_del_batch {
             types::destroy_pending_deletion(dev, &mut registry, resource);
         }
-        registry.drain_ready_slot_reclamations(&state.context_fences);
+        let fences = state.context_fences.read().unwrap();
+        registry.drain_ready_slot_reclamations(&*fences);
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1748,6 +1753,8 @@ pub(super) fn submit(
         let dev = state.devices.get(&device_handle).context("Invalid device handle")?;
         let ctx_fence = state
             .context_fences
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .1
@@ -2008,6 +2015,8 @@ pub(super) fn submit_graph(
         let dev = state.devices.get(&device_handle).context("Invalid device handle")?;
         let ctx_fence = state
             .context_fences
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .1
@@ -2373,6 +2382,8 @@ pub(super) fn try_resubmit_retained(
     let (ctx_fence, command_queue) = {
         let ctx_fence = state
             .context_fences
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .1
@@ -2423,7 +2434,8 @@ pub(super) fn try_resubmit_retained(
         for resource in retained_del_batch {
             types::destroy_pending_deletion(dev, &mut registry, resource);
         }
-        registry.drain_ready_slot_reclamations(&state.context_fences);
+        let fences = state.context_fences.read().unwrap();
+        registry.drain_ready_slot_reclamations(&*fences);
     }
 
     Ok(Some(fence_value))

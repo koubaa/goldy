@@ -1118,7 +1118,14 @@ pub(super) struct Dx12State {
     /// Used by [`DescriptorRegistry::drain_ready_slot_reclamations`] and [`device_retired`] so
     /// those paths can query fence completion without acquiring any per-context lock,
     /// avoiding a descriptors-lock → context-lock ordering hazard.
-    pub context_fences: HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+    ///
+    /// Shared via [`Arc<RwLock<>>`] so [`ContextDeferredDeletionFlush`] clones can drain slots
+    /// without the global backend mutex.
+    pub context_fences: std::sync::Arc<
+        std::sync::RwLock<
+            HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+        >,
+    >,
     pub buffers: HashMap<BufferHandle, BufferState>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: HashMap<ShaderHandle, ShaderState>,

@@ -732,6 +732,32 @@ pub trait DeviceTimelineReader: Send + Sync {
     fn device_horizon(&self) -> crate::timeline::TimelineValue;
 }
 
+/// Per-context deferred GPU deletion flush cloned out of the backend so
+/// [`Context::boundary_crossed`](crate::Context::boundary_crossed) does not need the global
+/// backend mutex for `flush_deferred_deletions`.
+#[doc(hidden)]
+pub trait ContextDeferredDeletionFlush: Send + Sync {
+    fn flush(&self, device_retired: crate::timeline::TimelineValue);
+}
+
+/// Per-context reclamation epoch scope (Metal heap routing during `boundary_crossed`).
+#[doc(hidden)]
+pub trait ContextReclamationScope: Send + Sync {
+    fn set_epoch(&self, epoch: Option<crate::timeline::TimelineValue>);
+}
+
+pub(crate) struct NoOpReclamationScope;
+
+impl ContextReclamationScope for NoOpReclamationScope {
+    fn set_epoch(&self, _epoch: Option<crate::timeline::TimelineValue>) {}
+}
+
+pub(crate) struct NoOpDeferredDeletionFlush;
+
+impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
+    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {}
+}
+
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
 pub(crate) struct PresentFinishState {
     pub frame: FrameToken,
@@ -829,6 +855,28 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         &self,
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
+
+    /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
+    #[doc(hidden)]
+    fn clone_context_deletion_flush(
+        &self,
+        ctx: ContextHandle,
+        context_readers: std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn ContextTimelineReader>>,
+            >,
+        >,
+    ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>>;
+
+    /// Clone the per-context reclamation scope for [`Context::boundary_crossed`].
+    #[doc(hidden)]
+    fn clone_context_reclamation_scope(
+        &self,
+        ctx: ContextHandle,
+    ) -> std::sync::Arc<dyn ContextReclamationScope> {
+        let _ = ctx;
+        std::sync::Arc::new(NoOpReclamationScope)
+    }
 
     /// Clone the device-scoped timeline horizon reader for lock-free retirement queries.
     #[doc(hidden)]

@@ -622,6 +622,19 @@ impl GpuBackend for MockBackend {
         }))
     }
 
+    fn clone_context_deletion_flush(
+        &self,
+        ctx: ContextHandle,
+        _context_readers: std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
+            >,
+        >,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
+        let _ = ctx;
+        Some(std::sync::Arc::new(crate::backend::NoOpDeferredDeletionFlush))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         self.context_state(ctx).device
     }

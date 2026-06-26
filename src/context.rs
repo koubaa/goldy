@@ -28,6 +28,8 @@ pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
     timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
+    deletion_flush: Arc<dyn crate::backend::ContextDeferredDeletionFlush>,
+    reclamation_scope: Arc<dyn crate::backend::ContextReclamationScope>,
     high_water_timeline: AtomicU64,
     /// Per-context transient resource heap (backing buffer + cached views/textures).
     ///
@@ -79,22 +81,36 @@ impl Drop for ContextInner {
 
 impl Context {
     pub(crate) fn new(device: Device) -> Result<Self, GoldyError> {
-        let (handle, timeline_reader) = {
+        let handle = {
             let mut backend = device.inner.backend.lock().unwrap();
-            let handle = backend
+            backend
                 .create_context(device.inner.handle)
-                .map_err(GoldyError::Backend)?;
-            let timeline_reader = backend
+                .map_err(GoldyError::Backend)?
+        };
+        let timeline_reader = {
+            let backend = device.inner.backend.lock().unwrap();
+            backend
                 .clone_context_timeline_reader(handle)
-                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader").into()))?;
-            (handle, timeline_reader)
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader").into()))?
         };
         device.register_context_timeline_reader(handle, Arc::clone(&timeline_reader));
+        let (deletion_flush, reclamation_scope) = {
+            let backend = device.inner.backend.lock().unwrap();
+            let deletion_flush = backend
+                .clone_context_deletion_flush(handle, Arc::clone(&device.inner.context_readers))
+                .ok_or_else(|| {
+                    GoldyError::Backend(anyhow::anyhow!("missing context deletion flush").into())
+                })?;
+            let reclamation_scope = backend.clone_context_reclamation_scope(handle);
+            (deletion_flush, reclamation_scope)
+        };
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
                 handle,
                 timeline_reader: Some(timeline_reader),
+                deletion_flush,
+                reclamation_scope,
                 high_water_timeline: AtomicU64::new(0),
                 placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
@@ -293,14 +309,12 @@ impl Context {
         let retired = self.device().timeline_retired();
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_pre");
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.flush_deferred_deletions(self.inner.handle);
+            self.inner.deletion_flush.flush(retired);
+            let _tz = crate::tracy_zone!("context.boundary_crossed.reclaim");
+            self.inner.reclamation_scope.set_epoch(Some(epoch));
         }
         {
-            let _tz = crate::tracy_zone!("context.boundary_crossed.reclaim");
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.set_reclamation_context(self.inner.handle, Some(epoch));
-            drop(backend);
+            let _tz = crate::tracy_zone!("context.boundary_crossed.drain_vram");
             self.device().vram_allocator().boundary_crossed(retired);
         }
         {
@@ -315,9 +329,8 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_post");
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.set_reclamation_context(self.inner.handle, None);
-            backend.flush_deferred_deletions(self.inner.handle);
+            self.inner.reclamation_scope.set_epoch(None);
+            self.inner.deletion_flush.flush(retired);
         }
     }
 

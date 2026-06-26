@@ -450,6 +450,29 @@ impl GpuBackend for VulkanBackend {
         }))
     }
 
+    fn clone_context_deletion_flush(
+        &self,
+        ctx: ContextHandle,
+        context_readers: std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
+            >,
+        >,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        let device_handle = {
+            let sc_guard = sc.lock().unwrap();
+            sc_guard.device
+        };
+        let ld = std::sync::Arc::clone(self.state.devices.get(&device_handle)?);
+        Some(std::sync::Arc::new(VulkanContextDeferredDeletionFlush {
+            ctx,
+            sc,
+            ld,
+            context_readers,
+        }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -1504,5 +1527,51 @@ impl crate::backend::DeviceTimelineReader for VulkanDeviceTimelineReader {
     fn device_horizon(&self) -> crate::timeline::TimelineValue {
         use std::sync::atomic::Ordering;
         self.ld.retired_floor.load(Ordering::Relaxed)
+    }
+}
+
+struct VulkanContextDeferredDeletionFlush {
+    ctx: ContextHandle,
+    sc: types::SharedSubmissionContext,
+    ld: types::SharedLogicalDevice,
+    context_readers: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
+        >,
+    >,
+}
+
+impl crate::backend::ContextDeferredDeletionFlush for VulkanContextDeferredDeletionFlush {
+    fn flush(&self, device_retired: crate::timeline::TimelineValue) {
+        let _ = device_retired;
+        let completed = self
+            .context_readers
+            .lock()
+            .unwrap()
+            .get(&self.ctx)
+            .map(|r| r.gpu_progress())
+            .unwrap_or(0);
+        let ctx_batch: Vec<_> = self
+            .sc
+            .lock()
+            .unwrap()
+            .deletion_queue
+            .drain_up_to(completed);
+        let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
+        {
+            let mut registry = descriptors_arc.lock().unwrap();
+            for r in ctx_batch {
+                types::destroy_pending_deletion(&self.ld, &mut registry, r);
+            }
+            let completed_values: std::collections::HashMap<ContextHandle, u64> = self
+                .context_readers
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(&ctx, reader)| (ctx, reader.gpu_progress()))
+                .collect();
+            registry.drain_ready_slot_reclamations(&completed_values);
+        }
+        self.ld.process_deletion_queue_up_to(completed);
     }
 }

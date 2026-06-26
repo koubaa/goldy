@@ -13,13 +13,14 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
         .map(|d| d.retired_floor.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(0);
     // Use context_fences for a lock-free scan over per-context fence completion values.
-    let max_ctx = state
-        .context_fences
+    let fences = state.context_fences.read().unwrap();
+    let max_ctx = fences
         .values()
         .filter(|(dev, _)| *dev == device)
         .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
         .max()
         .unwrap_or(0);
+    drop(fences);
     let device_sync = state
         .devices
         .get(&device)
@@ -63,7 +64,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 
     // Register the fence in the lock-free index before inserting the context so that
     // any concurrent drain_ready_slot_reclamations sees a consistent view.
-    state.context_fences.insert(id, (device, fence.clone()));
+    state.context_fences.write().unwrap().insert(id, (device, fence.clone()));
 
     state.contexts.insert(
         id,
@@ -89,7 +90,7 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     let Some(sc_arc) = state.contexts.remove(&ctx) else {
         return;
     };
-    state.context_fences.remove(&ctx);
+    state.context_fences.write().unwrap().remove(&ctx);
 
     // We are the sole owner at this point (no Phase-5c clone is outstanding yet),
     // so try_unwrap should always succeed.
