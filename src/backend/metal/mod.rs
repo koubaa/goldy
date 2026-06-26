@@ -260,42 +260,17 @@ impl crate::backend::GpuBackendPresentSplit for MetalBackend {
     fn take_present_gpu_work(
         &mut self,
         frame: FrameToken,
-        _submit_tv: crate::timeline::TimelineValue,
+        submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
-        // Metal present runs entirely under the global backend lock in finish_present
-        // until Phase 5b-ii wires take_present_gpu_work. Compute and present both
-        // assign timeline values and commit under per-device queue_lock so the split
-        // can drop the global lock safely.
-        Ok(Box::new(MetalNoOpPresentWork { frame }))
+        surface::prepare_present_work(&mut self.state, frame, submit_tv)
     }
 
     fn finish_present(
         &mut self,
         finish: crate::backend::PresentFinishState,
-        _submit_tv: crate::timeline::TimelineValue,
+        submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
-        surface::present(&mut self.state, finish.frame)
-    }
-}
-
-struct MetalNoOpPresentWork {
-    frame: FrameToken,
-}
-
-impl crate::backend::PresentGpuWork for MetalNoOpPresentWork {
-    fn run(self: Box<Self>) -> Result<crate::backend::PresentFinishState> {
-        Ok(crate::backend::PresentFinishState {
-            frame: self.frame,
-            return_fence: 0,
-            scratch_texture: None,
-            scratch_layout_updated: false,
-            present_timeline: 0,
-            copy_timeline: None,
-            frame_compute_timeline: None,
-            signal_timeline: None,
-            render_pass_submitted: false,
-            present_ok: true,
-        })
+        surface::finish_present(&mut self.state, finish, submit_tv)
     }
 }
 
