@@ -31,6 +31,7 @@ mod utils;
 use super::*;
 use crate::{goldy_event, goldy_span};
 use anyhow::{Context, Result};
+use ::metal as mtl;
 use types::MetalState;
 
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
