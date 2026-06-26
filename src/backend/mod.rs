@@ -705,6 +705,12 @@ pub type ComputeCommand = GpuCommand;
 /// [`TimelineBlockingWait::block`] can run without holding it.
 pub(crate) trait TimelineBlockingWait: Send {
     fn block(self: Box<Self>) -> Result<()>;
+
+    /// Like [`Self::block`] but returns `Ok(false)` on timeout instead of blocking forever.
+    fn block_timeout(self: Box<Self>, _timeout_ms: u32) -> Result<bool> {
+        self.block()?;
+        Ok(true)
+    }
 }
 
 /// Per-context GPU timeline queries cloned out of the backend so
@@ -715,6 +721,15 @@ pub(crate) trait TimelineBlockingWait: Send {
 pub trait ContextTimelineReader: Send + Sync {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue;
     fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
+}
+
+/// Device-scoped timeline horizon (retired floor + device sync primitive) cloned out of
+/// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can combine
+/// it with per-context readers without the global backend mutex.
+#[doc(hidden)]
+pub trait DeviceTimelineReader: Send + Sync {
+    /// Floor and device-level sync completion; excludes per-context fence/semaphore progress.
+    fn device_horizon(&self) -> crate::timeline::TimelineValue;
 }
 
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
@@ -814,6 +829,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         &self,
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
+
+    /// Clone the device-scoped timeline horizon reader for lock-free retirement queries.
+    #[doc(hidden)]
+    fn clone_device_timeline_reader(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<std::sync::Arc<dyn DeviceTimelineReader>>;
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///
@@ -1166,7 +1188,14 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;
+    ///
+    /// `progress` is the caller's lock-free [`Context::gpu_progress`](crate::Context::gpu_progress)
+    /// so this path does not re-query the timeline under the global backend mutex.
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal>;
 
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;

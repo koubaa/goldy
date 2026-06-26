@@ -69,6 +69,7 @@ impl Drop for ContextInner {
         // Release the cloned submission-context handle before backend destroy.
         // Backends expect sole ownership of the per-context Arc at teardown.
         self.timeline_reader.take();
+        self.device.unregister_context_timeline_reader(self.handle);
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         let mut backend = self.device.inner.backend.lock().unwrap();
@@ -88,6 +89,7 @@ impl Context {
                 .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader").into()))?;
             (handle, timeline_reader)
         };
+        device.register_context_timeline_reader(handle, Arc::clone(&timeline_reader));
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
@@ -167,18 +169,28 @@ impl Context {
 
     fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("context.wait_until");
-        let backend_mutex = &self.inner.device.inner.backend;
-        let blocking = {
-            let _lock = crate::tracy_zone!("context.wait_until.lock");
-            let backend = backend_mutex.lock().unwrap();
-            let _prepare = crate::tracy_zone!("context.wait_until.prepare");
-            backend
-                .take_timeline_blocking_wait(ctx, value)
-                .map_err(|e| self.classify(e))?
+        let already_complete = if ctx == self.inner.handle {
+            self.gpu_progress() >= value
+        } else {
+            self.inner
+                .device
+                .context_gpu_progress(ctx)
+                .is_some_and(|p| p >= value)
         };
-        if let Some(wait) = blocking {
-            let _block = crate::tracy_zone!("context.wait_until.block");
-            wait.block().map_err(|e| self.classify(e))?;
+        let backend_mutex = &self.inner.device.inner.backend;
+        if !already_complete {
+            let blocking = {
+                let _lock = crate::tracy_zone!("context.wait_until.lock");
+                let backend = backend_mutex.lock().unwrap();
+                let _prepare = crate::tracy_zone!("context.wait_until.prepare");
+                backend
+                    .take_timeline_blocking_wait(ctx, value)
+                    .map_err(|e| self.classify(e))?
+            };
+            if let Some(wait) = blocking {
+                let _block = crate::tracy_zone!("context.wait_until.block");
+                wait.block().map_err(|e| self.classify(e))?;
+            }
         }
         {
             let _lock = crate::tracy_zone!("context.wait_until.lock");
@@ -193,14 +205,31 @@ impl Context {
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
     pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<(), GoldyError> {
-        let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(GoldyError::SubmitTimeout),
-            Err(e) => {
-                drop(backend);
-                Err(self.classify(e))
+        let ctx = self.inner.handle;
+        let already_complete = self.gpu_progress() >= value;
+        let backend_mutex = &self.inner.device.inner.backend;
+        if !already_complete {
+            let blocking = {
+                let _lock = crate::tracy_zone!("context.wait_until.lock");
+                let backend = backend_mutex.lock().unwrap();
+                backend
+                    .take_timeline_blocking_wait(ctx, value)
+                    .map_err(|e| self.classify(e))?
+            };
+            if let Some(wait) = blocking {
+                let _block = crate::tracy_zone!("context.wait_until.block");
+                if !wait.block_timeout(timeout_ms).map_err(|e| self.classify(e))? {
+                    return Err(GoldyError::SubmitTimeout);
+                }
             }
+        }
+        {
+            let _lock = crate::tracy_zone!("context.wait_until.lock");
+            let mut backend = backend_mutex.lock().unwrap();
+            backend.finish_timeline_wait(ctx, value).map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })
         }
     }
 
@@ -224,8 +253,9 @@ impl Context {
 
     /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
     pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+        let progress = self.gpu_progress();
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        backend.poll_signals(self.inner.handle)
+        backend.poll_signals(self.inner.handle, progress)
     }
 
     /// Drain pending signals and service [`crate::signal::Signal::BoundaryCrossed`].
@@ -397,12 +427,14 @@ impl Context {
         if refs.is_empty() {
             return true;
         }
-        let backend = self.inner.device.inner.backend.lock().unwrap();
+        let device = &self.inner.device;
         let mut progress = HashMap::with_capacity(refs.len());
         for &ctx in refs.keys() {
-            progress.insert(ctx, backend.gpu_progress(ctx));
+            let p = device
+                .context_gpu_progress(ctx)
+                .unwrap_or_else(|| device.timeline_retired());
+            progress.insert(ctx, p);
         }
-        drop(backend);
         is_ready(refs, &progress)
     }
 

@@ -164,15 +164,16 @@ impl ParcelStamp {
         if merged.is_empty() {
             return Settle::Ready;
         }
-        let backend = ctx.device().inner.backend.lock().unwrap();
+        let device = ctx.device();
         let mut waiting = None;
         for (&c, &tv) in &merged {
-            let progress = backend.gpu_progress(c);
+            let progress = device
+                .context_gpu_progress(c)
+                .unwrap_or_else(|| device.timeline_retired());
             if progress < tv {
                 waiting = Some(waiting.map_or(tv, |w: TimelineValue| w.max(tv)));
             }
         }
-        drop(backend);
         match waiting {
             Some(tv) => Settle::Waiting(tv),
             None => Settle::Ready,

@@ -77,7 +77,7 @@ pub struct MockBackend {
     /// Device-global submission sequence (shared value space across contexts on one queue).
     device_timeline_next: HashMap<DeviceHandle, u64>,
     /// Minimum completed horizon preserved after a context is destroyed.
-    device_retired_floor: HashMap<DeviceHandle, u64>,
+    device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
     contexts: HashMap<ContextHandle, Arc<Mutex<MockContextState>>>,
     next_context_id: ContextHandle,
@@ -112,6 +112,16 @@ impl crate::backend::ContextTimelineReader for MockContextTimelineReader {
         } else {
             None
         }
+    }
+}
+
+struct MockDeviceTimelineReader {
+    floor: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl crate::backend::DeviceTimelineReader for MockDeviceTimelineReader {
+    fn device_horizon(&self) -> crate::timeline::TimelineValue {
+        self.floor.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -260,7 +270,11 @@ impl MockBackend {
 
     /// Max completed over live contexts on `device`, floored by `retired_floor`.
     fn device_retired(&self, device: DeviceHandle) -> u64 {
-        let floor = self.device_retired_floor.get(&device).copied().unwrap_or(0);
+        let floor = self
+            .device_retired_floor
+            .get(&device)
+            .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
         let max_ctx = self
             .contexts
             .values()
@@ -526,7 +540,8 @@ impl GpuBackend for MockBackend {
 
         self.devices.insert(handle, MockDevice { adapter_id });
         self.device_timeline_next.insert(handle, 0);
-        self.device_retired_floor.insert(handle, 0);
+        self.device_retired_floor
+            .insert(handle, Arc::new(std::sync::atomic::AtomicU64::new(0)));
         Ok(handle)
     }
 
@@ -582,10 +597,10 @@ impl GpuBackend for MockBackend {
     fn destroy_context(&mut self, ctx: ContextHandle) {
         if let Some(state) = self.contexts.remove(&ctx) {
             let state = state.lock().unwrap();
-            let floor = self.device_retired_floor.entry(state.device).or_insert(0);
-            // Mirror Metal context destroy: horizon is max(signaled, last_submitted).
             let retired_horizon = state.completed.max(state.last_submitted_seq);
-            *floor = (*floor).max(retired_horizon);
+            if let Some(floor) = self.device_retired_floor.get(&state.device) {
+                floor.fetch_max(retired_horizon, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -595,6 +610,15 @@ impl GpuBackend for MockBackend {
     ) -> Option<Arc<dyn crate::backend::ContextTimelineReader>> {
         Some(Arc::new(MockContextTimelineReader {
             state: Arc::clone(self.contexts.get(&ctx)?),
+        }))
+    }
+
+    fn clone_device_timeline_reader(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<Arc<dyn crate::backend::DeviceTimelineReader>> {
+        Some(Arc::new(MockDeviceTimelineReader {
+            floor: Arc::clone(self.device_retired_floor.get(&device)?),
         }))
     }
 
@@ -1488,7 +1512,11 @@ impl GpuBackend for MockBackend {
         Ok(())
     }
 
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        _progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal> {
         crate::signal::drain_all_signals(&self.context_state(ctx).signal_queue)
     }
 
@@ -2344,7 +2372,7 @@ mod tests {
         backend.present_frame(frame, 0).unwrap();
         assert_eq!(backend.pending_acquire_count(surface), 0);
 
-        let signals = backend.poll_signals(ctx);
+        let signals = backend.poll_signals(ctx, backend.gpu_progress(ctx));
         assert!(signals
             .iter()
             .any(|s| matches!(s, crate::signal::Signal::SwapchainAcquired { .. })));
@@ -2382,18 +2410,18 @@ mod tests {
         let surface = backend.create_surface(device, &MockWindow, &MockWindow, None).unwrap();
 
         let (frame, _tex) = backend.begin_frame(surface, ctx_a).unwrap();
-        assert!(backend.poll_signals(ctx_b).is_empty());
+        assert!(backend.poll_signals(ctx_b, backend.gpu_progress(ctx_b)).is_empty());
 
         let tv = backend.submit_frame(&frame).unwrap();
         assert_eq!(backend.gpu_progress(ctx_a), tv);
         assert_eq!(backend.gpu_progress(ctx_b), 0);
 
         backend.present_frame(frame, tv).unwrap();
-        let a_signals = backend.poll_signals(ctx_a);
+        let a_signals = backend.poll_signals(ctx_a, backend.gpu_progress(ctx_a));
         assert!(a_signals
             .iter()
             .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));
-        assert!(backend.poll_signals(ctx_b).is_empty());
+        assert!(backend.poll_signals(ctx_b, backend.gpu_progress(ctx_b)).is_empty());
     }
 
     #[test]
@@ -2429,7 +2457,7 @@ mod tests {
         backend.surface_resize(surface, 1024, 768).unwrap();
         assert_eq!(backend.pending_acquire_count(surface), 0);
 
-        let signals = backend.poll_signals(ctx);
+        let signals = backend.poll_signals(ctx, backend.gpu_progress(ctx));
         assert!(!signals
             .iter()
             .any(|s| matches!(s, crate::signal::Signal::SwapchainReturned { .. })));

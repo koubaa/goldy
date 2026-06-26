@@ -284,6 +284,13 @@ impl Adapter {
 
         drop(backend);
 
+        let device_timeline_reader = {
+            let backend = self.inner.backend.lock().unwrap();
+            backend
+                .clone_device_timeline_reader(handle)
+                .ok_or_else(|| anyhow::anyhow!("missing device timeline reader"))?
+        };
+
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;
 
@@ -301,6 +308,8 @@ impl Adapter {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 owns_backend_device: true,
+                device_timeline_reader,
+                context_readers: Arc::new(Mutex::new(HashMap::new())),
             }),
         })
     }
@@ -428,6 +437,10 @@ pub(crate) struct DeviceInner {
     /// When `false`, this [`Device`] is a logical alias (e.g. [`Device::with_vram_allocator`]);
     /// dropping it must not call [`GpuBackend::destroy_device`] on the shared handle.
     pub(crate) owns_backend_device: bool,
+    /// Device floor + sync primitive; per-context progress comes from [`Self::context_readers`].
+    pub(crate) device_timeline_reader: Arc<dyn backend::DeviceTimelineReader>,
+    /// Per-context timeline readers registered at [`crate::Context::new`], unregistered on drop.
+    pub(crate) context_readers: Arc<Mutex<HashMap<crate::backend::ContextHandle, Arc<dyn backend::ContextTimelineReader>>>>,
 }
 
 impl Clone for Device {
@@ -582,6 +595,8 @@ impl Device {
                 library_registry: Arc::clone(&self.inner.library_registry),
                 vram_allocator: allocator,
                 owns_backend_device: false,
+                device_timeline_reader: Arc::clone(&self.inner.device_timeline_reader),
+                context_readers: Arc::clone(&self.inner.context_readers),
             }),
         }
     }
@@ -762,11 +777,32 @@ impl Device {
     /// Epochs from any [`crate::context::Context::submit`] on this device share one value space; use this
     /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
     pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
+        let horizon = self.inner.device_timeline_reader.device_horizon();
+        let readers = self.inner.context_readers.lock().unwrap();
+        let max_ctx = readers.values().map(|r| r.gpu_progress()).max().unwrap_or(0);
+        horizon.max(max_ctx)
+    }
+
+    /// Lock-free GPU progress for a live context on this device (for ledger / parcel queries).
+    pub(crate) fn context_gpu_progress(&self, ctx: crate::backend::ContextHandle) -> Option<crate::timeline::TimelineValue> {
         self.inner
-            .backend
+            .context_readers
             .lock()
             .unwrap()
-            .device_timeline_retired(self.inner.handle)
+            .get(&ctx)
+            .map(|r| r.gpu_progress())
+    }
+
+    pub(crate) fn register_context_timeline_reader(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        reader: Arc<dyn backend::ContextTimelineReader>,
+    ) {
+        self.inner.context_readers.lock().unwrap().insert(ctx, reader);
+    }
+
+    pub(crate) fn unregister_context_timeline_reader(&self, ctx: crate::backend::ContextHandle) {
+        self.inner.context_readers.lock().unwrap().remove(&ctx);
     }
 
     /// Block until the device-global timeline has retired at least `value`.
@@ -1042,6 +1078,12 @@ impl Device {
             b.create_device(adapter.id())?
         };
 
+        let device_timeline_reader = {
+            let b = backend.lock().unwrap();
+            b.clone_device_timeline_reader(handle)
+                .expect("missing device timeline reader")
+        };
+
         let mut registry = ShaderLibraryRegistry::new();
         registry.register(ShaderLibrary::goldy_experimental())?;
 
@@ -1053,6 +1095,8 @@ impl Device {
                 library_registry: Arc::new(Mutex::new(registry)),
                 vram_allocator: Arc::new(crate::vram_allocator::DefaultVramAllocator::new()),
                 owns_backend_device: true,
+                device_timeline_reader,
+                context_readers: Arc::new(Mutex::new(HashMap::new())),
             }),
         })
     }

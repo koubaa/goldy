@@ -441,6 +441,15 @@ impl GpuBackend for VulkanBackend {
         Some(std::sync::Arc::new(VulkanContextTimelineReader { device, sc }))
     }
 
+    fn clone_device_timeline_reader(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
+        Some(std::sync::Arc::new(VulkanDeviceTimelineReader {
+            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
+        }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -1195,9 +1204,12 @@ impl GpuBackend for VulkanBackend {
         Ok(())
     }
 
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
-        let progress = self.gpu_progress(ctx);
         let signal_queue = self
             .state
             .contexts
@@ -1462,5 +1474,35 @@ impl crate::backend::TimelineBlockingWait for VulkanTimelineBlockingWait {
             anyhow::bail!("wait_semaphores: {:?}", e);
         }
         Ok(())
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        let _wait = crate::tracy_zone!("vk.wait_until.wait_semaphores");
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&self.semaphore))
+            .values(std::slice::from_ref(&self.value));
+        let timeout_ns = (timeout_ms as u64).saturating_mul(1_000_000);
+        match unsafe { self.device.wait_semaphores(&wait, timeout_ns) } {
+            Ok(()) => Ok(true),
+            Err(vk::Result::TIMEOUT) => Ok(false),
+            Err(e) => {
+                if e == vk::Result::ERROR_DEVICE_LOST {
+                    self.device_lost
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(anyhow::anyhow!("wait_semaphores: {:?}", e))
+            }
+        }
+    }
+}
+
+struct VulkanDeviceTimelineReader {
+    ld: types::SharedLogicalDevice,
+}
+
+impl crate::backend::DeviceTimelineReader for VulkanDeviceTimelineReader {
+    fn device_horizon(&self) -> crate::timeline::TimelineValue {
+        use std::sync::atomic::Ordering;
+        self.ld.retired_floor.load(Ordering::Relaxed)
     }
 }

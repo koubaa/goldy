@@ -619,6 +619,15 @@ impl GpuBackend for Dx12Backend {
         }))
     }
 
+    fn clone_device_timeline_reader(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
+        Some(std::sync::Arc::new(Dx12DeviceTimelineReader {
+            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
+        }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -974,9 +983,12 @@ impl GpuBackend for Dx12Backend {
         Ok(())
     }
 
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
-        let progress = self.gpu_progress(ctx);
         let signal_queue = self
             .state
             .contexts
@@ -1346,5 +1358,22 @@ impl crate::backend::ContextTimelineReader for Dx12ContextTimelineReader {
 impl crate::backend::TimelineBlockingWait for Dx12TimelineBlockingWait {
     fn block(self: Box<Self>) -> Result<()> {
         utils::wait_for_fence(&self.fence, self.value)
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        utils::wait_for_fence_timeout(&self.fence, self.value, timeout_ms)
+    }
+}
+
+struct Dx12DeviceTimelineReader {
+    ld: types::SharedLogicalDevice,
+}
+
+impl crate::backend::DeviceTimelineReader for Dx12DeviceTimelineReader {
+    fn device_horizon(&self) -> crate::timeline::TimelineValue {
+        use std::sync::atomic::Ordering;
+        let floor = self.ld.retired_floor.load(Ordering::Relaxed);
+        let device_sync = unsafe { self.ld.fence.GetCompletedValue() };
+        floor.max(device_sync)
     }
 }

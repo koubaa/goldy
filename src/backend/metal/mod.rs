@@ -357,6 +357,15 @@ impl GpuBackend for MetalBackend {
         }))
     }
 
+    fn clone_device_timeline_reader(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
+        Some(std::sync::Arc::new(MetalDeviceTimelineReader {
+            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
+        }))
+    }
+
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
         context::context_device(&self.state, ctx)
     }
@@ -770,7 +779,11 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        _progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal> {
         let device = self.context_device(ctx);
         let sc_arc = match self.state.contexts.get(&ctx) {
             Some(sc) => sc.clone(),
@@ -1051,6 +1064,20 @@ impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
         self.cb.wait_until_completed();
         Ok(())
     }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        use mtl::MTLCommandBufferStatus;
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
+        loop {
+            match self.cb.status() {
+                MTLCommandBufferStatus::Completed => return Ok(true),
+                MTLCommandBufferStatus::Error => anyhow::bail!("Metal command buffer failed"),
+                _ if std::time::Instant::now() >= deadline => return Ok(false),
+                _ => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+    }
 }
 
 struct MetalContextTimelineReader {
@@ -1095,6 +1122,33 @@ impl crate::backend::TimelineBlockingWait for MetalWaiterBlockingWait {
             anyhow::bail!("wait_until exceeded 300s");
         }
         Ok(())
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        use std::sync::atomic::Ordering;
+        let timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
+        let reached = {
+            let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
+            self.waiter.wait_until(self.value, timeout)
+        };
+        if !reached {
+            if self.device_lost.load(Ordering::Relaxed) {
+                anyhow::bail!("Metal device lost");
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
+struct MetalDeviceTimelineReader {
+    ld: types::SharedLogicalDevice,
+}
+
+impl crate::backend::DeviceTimelineReader for MetalDeviceTimelineReader {
+    fn device_horizon(&self) -> crate::timeline::TimelineValue {
+        use std::sync::atomic::Ordering;
+        self.ld.retired_floor.load(Ordering::Relaxed)
     }
 }
 
