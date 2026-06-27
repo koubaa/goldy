@@ -741,6 +741,11 @@ struct CmdCtx<'a> {
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
+///
+/// Some arms take `textures.write()` to update [`TextureState::last_layout`]. That is
+/// safe without per-context layout tracking: parcel exclusivity prevents two contexts
+/// from recording against the same texture concurrently (see the field doc on
+/// `last_layout`).
 #[allow(clippy::too_many_lines)]
 fn record_gpu_command(
     state: &mut Dx12State,
@@ -1371,9 +1376,6 @@ fn record_gpu_command(
                 if let Some(ts) = textures_write.entries.get_mut(src) {
                     ts.last_layout = src_post_state.1;
                 }
-            }
-            {
-                let mut textures_write = state.textures.write().unwrap();
                 if let Some(ts) = textures_write.entries.get_mut(dst) {
                     ts.last_layout = dst_post_state.1;
                 }

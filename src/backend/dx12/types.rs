@@ -1035,6 +1035,21 @@ pub(crate) struct TextureState {
     /// For `TextureKind::DirectInterpolated` textures, the SRV (sampled-texture) slot.
     pub sampled_bindless_offset: Option<u32>,
     /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
+    ///
+    /// Stored on the texture, not on the submission context: layout is device-global
+    /// state for the GPU resource. Recording updates this field (`textures.write()` in
+    /// [`super::compute::record_gpu_command`] and texture upload/copy helpers) so the
+    /// next barrier on this texture knows where to transition from.
+    ///
+    /// Concurrent recording does not require a per-context copy of this field. Parcels
+    /// and the record-gate enforce exclusive mutation claims — a scheme that writes a
+    /// texture must fully claim it before recording, and the ledger blocks a second
+    /// context from recording against the same resource until the first submit retires.
+    /// Disjoint textures therefore update disjoint map entries with no semantic conflict;
+    /// two contexts never legitimately race on the same `last_layout`.
+    ///
+    /// Phase 5b-iv may still see `textures.write()` block unrelated readers on other
+    /// entries (whole-map `RwLock` writer exclusion); that is a performance concern only.
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
     /// Whether this texture was created with UAV access (TextureKind::Direct).
     pub is_storage: bool,
