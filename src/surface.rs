@@ -666,12 +666,17 @@ impl Frame {
 
     /// Abandon this frame without presenting.
     ///
-    /// Marks the frame as already-presented so the `Drop` impl does not trigger
-    /// an implicit swapchain present. Use this to cancel a frame when submission
-    /// fails after the swapchain image was acquired but before work was submitted.
+    /// Releases the acquired drawable and decrements the surface
+    /// [`pending_acquire_count`](Surface::pending_acquire_count). Marks the frame
+    /// as already-presented so the `Drop` impl does not trigger an implicit
+    /// swapchain present.
     pub(crate) fn cancel(mut self) {
+        if !self.presented {
+            let mut backend = self.backend.lock().unwrap();
+            let _ = backend.cancel_frame(self.token);
+            self.texture = None;
+        }
         self.presented = true;
-        // Drop self — with `presented = true` the Drop impl is a no-op.
     }
 }
 

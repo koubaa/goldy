@@ -938,6 +938,10 @@ impl GpuBackend for VulkanBackend {
         ))
     }
 
+    fn cancel_frame(&mut self, frame: FrameToken) -> Result<()> {
+        surface::cancel_frame(&mut self.state, frame)
+    }
+
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         let timeline_sem = self
             .state

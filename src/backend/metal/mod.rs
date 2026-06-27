@@ -732,6 +732,10 @@ impl GpuBackend for MetalBackend {
         ))
     }
 
+    fn cancel_frame(&mut self, frame: FrameToken) -> Result<()> {
+        surface::cancel_frame(&mut self.state, frame)
+    }
+
     fn take_surface_acquire_work(
         &mut self,
         surface: SurfaceHandle,

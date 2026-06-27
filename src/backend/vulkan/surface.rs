@@ -878,6 +878,32 @@ pub(super) fn acquire(
     }
 }
 
+/// Abandon an acquired frame without presenting.
+pub(super) fn cancel_frame(state: &mut super::types::VulkanState, frame: crate::backend::FrameToken) -> Result<()> {
+    let _tz = crate::tracy_zone!("vk.surface.cancel_frame");
+    let surface_handle = frame.surface;
+    let surface_state = state
+        .surfaces
+        .get_mut(&surface_handle)
+        .context("Invalid surface handle")?;
+
+    if surface_state.current_image_index == Some(frame.image as u32) {
+        surface_state.current_image_index = None;
+    }
+    surface_state.current_texture_handle = None;
+
+    if surface_state.pending_acquire_count == 0 {
+        tracing::warn!(
+            surface_handle,
+            image = frame.image,
+            "cancel_frame: pending_acquire_count was already 0"
+        );
+    } else {
+        surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
+    }
+    Ok(())
+}
+
 /// Get the texture handle for the currently acquired surface frame.
 pub(super) fn frame_texture(
     surfaces: &HashMap<SurfaceHandle, SurfaceState>,

@@ -315,7 +315,7 @@ impl Grant for PresentGrant {
             resolver.resolve(present_tv);
         }
 
-        if validation_env::speculative_present_acquire_enabled() {
+        if self.pool.speculative_acquire || validation_env::speculative_present_acquire_enabled() {
             let _tz = crate::tracy_zone!("scheme.grant_present.speculative_acquire");
             let spec_result = crate::swapchain_pool::SwapchainPool::acquire_slot(&self.pool);
             match spec_result {
@@ -3543,10 +3543,19 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     #[test]
     fn speculative_present_acquire_stashes_for_next_submit() {
-        std::env::set_var("GOLDY_SPECULATIVE_PRESENT_ACQUIRE", "1");
         let device = mock_device();
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
+        let ctx = device.create_context().unwrap();
+        let pool = crate::swapchain_pool::SwapchainPool::new_with_options(
+            &ctx,
+            &MockWindow,
+            crate::swapchain_pool::SwapchainPoolOptions {
+                depth: 2,
+                speculative_acquire: true,
+                ..Default::default()
+            },
+        )
+        .expect("swapchain pool");
+        let lease = pool.lease();
         let pool = Arc::clone(&lease.pool);
 
         let mut scheme = Scheme::new(&ctx);
@@ -3570,8 +3579,31 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             "second submit should consume speculative stash"
         );
         present.consume(&submission2).expect("present 2");
+    }
 
-        let _ = std::env::remove_var("GOLDY_SPECULATIVE_PRESENT_ACQUIRE");
+    #[test]
+    fn dropped_frame_restores_pending_acquire_count() {
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        {
+            let _submission = scheme.submit().expect("submit");
+            // Drop without present — cancel_frame must restore acquire budget.
+        }
+
+        let surface = spool.pending_acquire_count();
+        assert_eq!(
+            surface,
+            0,
+            "cancelled frame must decrement pending_acquire_count"
+        );
+
+        // Depth-2 pool should allow another acquire immediately after cancel.
+        let _submission2 = scheme.submit().expect("submit after cancel");
     }
 
     #[test]

@@ -428,6 +428,47 @@ pub(super) fn finish_acquire(
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
 
+/// Abandon an acquired frame without presenting.
+pub(super) fn cancel_frame(state: &mut MetalState, frame: crate::backend::FrameToken) -> Result<()> {
+    let _tz = crate::tracy_zone!("mtl.surface.cancel_frame");
+    let surface = frame.surface;
+    let present_slot = frame.present_slot as usize;
+
+    let (drawable, tex_handle) = {
+        let ss = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+
+        let drawable = ss.drawable_slots[present_slot].take();
+        let tex_handle = ss.drawable_texture_handles[present_slot].take();
+        if ss.current_texture_handle == tex_handle {
+            ss.current_texture_handle = None;
+        }
+        ss.last_acquired_image_index = None;
+        ss.frame_pending_gpu_commands.clear();
+
+        let prev = ss
+            .pending_acquire_count
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if prev == 0 {
+            tracing::warn!(
+                surface,
+                present_slot,
+                "cancel_frame: pending_acquire_count was already 0"
+            );
+        }
+        (drawable, tex_handle)
+    };
+
+    if let Some(d) = drawable {
+        unsafe {
+            let (): () = msg_send![d as id, release];
+        }
+    }
+    if let Some(tex_handle) = tex_handle {
+        unregister_surface_texture(state, tex_handle);
+    }
+    Ok(())
+}
+
 /// Acquire the next swapchain image (legacy single-lock entry).
 ///
 /// Prefer [`take_surface_acquire_work`] + [`finish_acquire`] so `nextDrawable` runs

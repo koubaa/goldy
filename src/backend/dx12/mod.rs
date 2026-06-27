@@ -811,6 +811,10 @@ impl GpuBackend for Dx12Backend {
         ))
     }
 
+    fn cancel_frame(&mut self, frame: FrameToken) -> Result<()> {
+        surface::cancel_frame(&mut self.state, frame)
+    }
+
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         surface::render(
             &mut self.state,

@@ -124,7 +124,8 @@ pub(crate) fn retained_cb_reuse_disabled() -> bool {
 }
 
 /// When true, [`crate::PresentGrant::consume`] acquires the next swapchain drawable
-/// after present and stashes it for the following [`crate::Scheme::submit`].
+/// after present and stashes it for the following [`crate::Scheme::submit`], even
+/// when the pool was not created with [`crate::SwapchainPoolOptions::speculative_acquire`].
 ///
 /// Set `GOLDY_SPECULATIVE_PRESENT_ACQUIRE=1` (or `true` / `yes`).
 #[must_use]

@@ -5,9 +5,9 @@
 //! records the lease once; each [`crate::Scheme::submit`] acquires the next
 //! drawable and resolves it through the present partition retention path.
 //!
-//! When [`crate::validation_env::speculative_present_acquire_enabled`] is set,
-//! [`crate::PresentGrant::consume`] may stash the next drawable on the pool so
-//! the render thread's subsequent `submit` avoids a synchronous acquire.
+//! When [`SwapchainPoolOptions::speculative_acquire`] is set, [`crate::PresentGrant::consume`]
+//! may stash the next drawable on the pool so the render thread's subsequent
+//! `submit` avoids a synchronous acquire.
 
 use crate::backend::TextureHandle;
 use crate::context::Context;
@@ -22,10 +22,37 @@ pub(crate) type ResolvedPresentSlotData = (u32, SurfaceFrame, u32, TextureHandle
 
 pub(crate) struct SwapchainPoolInner {
     surface: RwLock<Surface>,
-    #[allow(dead_code)]
+    /// Client-stated max in-flight drawables (present pipeline depth).
     depth: u32,
+    /// When true, [`crate::PresentGrant::consume`] may acquire the next drawable
+    /// for the following submit.
+    pub(crate) speculative_acquire: bool,
+    /// Serializes depth checks and synchronous acquires (render + present threads).
+    acquire_mutex: Mutex<()>,
     /// Drawable acquired speculatively by [`crate::PresentGrant::consume`] for the next submit.
-    speculative_acquire: Mutex<Option<ResolvedPresentSlotData>>,
+    speculative_acquire_slot: Mutex<Option<ResolvedPresentSlotData>>,
+}
+
+/// Construction options for [`SwapchainPool`].
+#[derive(Clone, Debug)]
+pub struct SwapchainPoolOptions {
+    /// Max concurrent acquired drawables. Use `2` when [`Self::speculative_acquire`]
+    /// is enabled so one drawable can be in-flight for present while another is
+    /// stashed for the next submit.
+    pub depth: u32,
+    pub config: SurfaceConfig,
+    /// Acquire the next drawable on TID_PRESENT after present, for the following submit.
+    pub speculative_acquire: bool,
+}
+
+impl Default for SwapchainPoolOptions {
+    fn default() -> Self {
+        Self {
+            depth: 1,
+            config: SurfaceConfig::default(),
+            speculative_acquire: false,
+        }
+    }
 }
 
 /// Pool of OS swapchain drawables for present-on-scheme.
@@ -62,12 +89,30 @@ impl SwapchainPool {
     where
         W: HasWindowHandle + HasDisplayHandle,
     {
-        let surface = Surface::new_with_config(ctx, window, config)?;
+        Self::new_with_options(
+            ctx,
+            window,
+            SwapchainPoolOptions {
+                depth,
+                config,
+                ..SwapchainPoolOptions::default()
+            },
+        )
+    }
+
+    /// Create with explicit pool and surface options.
+    pub fn new_with_options<W>(ctx: &Context, window: &W, options: SwapchainPoolOptions) -> Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle,
+    {
+        let surface = Surface::new_with_config(ctx, window, options.config)?;
         Ok(Self {
             inner: Arc::new(SwapchainPoolInner {
                 surface: RwLock::new(surface),
-                depth: depth.max(1),
-                speculative_acquire: Mutex::new(None),
+                depth: options.depth.max(1),
+                speculative_acquire: options.speculative_acquire,
+                acquire_mutex: Mutex::new(()),
+                speculative_acquire_slot: Mutex::new(None),
             }),
         })
     }
@@ -99,6 +144,17 @@ impl SwapchainPool {
         surface.format()
     }
 
+    /// Client-stated present pipeline depth (max concurrent acquired drawables).
+    pub fn depth(&self) -> u32 {
+        self.inner.depth
+    }
+
+    /// How many swapchain drawables are in-flight (acquired or presented, not yet returned).
+    pub fn pending_acquire_count(&self) -> u32 {
+        let surface = self.inner.surface.read().unwrap();
+        surface.pending_acquire_count()
+    }
+
     /// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
         Self::drain_speculative_acquire(&self.inner);
@@ -113,8 +169,20 @@ impl SwapchainPool {
     }
 
     pub(crate) fn acquire_slot(pool: &Arc<SwapchainPoolInner>) -> Result<ResolvedPresentSlotData> {
+        let _guard = pool.acquire_mutex.lock().unwrap();
         // Read lock only: `begin()` may block on swapchain image availability without
         // preventing concurrent queries or stalling resize on a held write lock.
+        {
+            let surface = pool.surface.read().unwrap();
+            let in_flight = surface.pending_acquire_count();
+            if in_flight >= pool.depth {
+                anyhow::bail!(
+                    "swapchain pool at present depth {} ({} drawable(s) acquired, not yet returned)",
+                    pool.depth,
+                    in_flight
+                );
+            }
+        }
         let frame = {
             let surface = pool.surface.read().unwrap();
             surface.begin()?
@@ -132,7 +200,7 @@ impl SwapchainPool {
 
     /// Take a speculatively acquired slot, or acquire synchronously.
     pub(crate) fn resolve_present_slot(pool: &Arc<SwapchainPoolInner>) -> Result<ResolvedPresentSlotData> {
-        if let Some(slot) = pool.speculative_acquire.lock().unwrap().take() {
+        if let Some(slot) = pool.speculative_acquire_slot.lock().unwrap().take() {
             return Ok(slot);
         }
         Self::acquire_slot(pool)
@@ -140,7 +208,7 @@ impl SwapchainPool {
 
     /// Stash a drawable acquired during [`crate::PresentGrant::consume`] for the next submit.
     pub(crate) fn stash_speculative_acquire(pool: &Arc<SwapchainPoolInner>, slot: ResolvedPresentSlotData) {
-        let mut guard = pool.speculative_acquire.lock().unwrap();
+        let mut guard = pool.speculative_acquire_slot.lock().unwrap();
         if let Some((_, old_frame, _, _)) = guard.take() {
             tracing::warn!(
                 target: "goldy::swapchain_pool",
@@ -152,13 +220,13 @@ impl SwapchainPool {
     }
 
     fn drain_speculative_acquire(pool: &Arc<SwapchainPoolInner>) {
-        if let Some((_, frame, _, _)) = pool.speculative_acquire.lock().unwrap().take() {
+        if let Some((_, frame, _, _)) = pool.speculative_acquire_slot.lock().unwrap().take() {
             frame.cancel();
         }
     }
 
     #[cfg(test)]
     pub(crate) fn has_speculative_acquire(pool: &Arc<SwapchainPoolInner>) -> bool {
-        pool.speculative_acquire.lock().unwrap().is_some()
+        pool.speculative_acquire_slot.lock().unwrap().is_some()
     }
 }

@@ -1289,6 +1289,25 @@ impl GpuBackend for MockBackend {
         ))
     }
 
+    fn cancel_frame(&mut self, frame: FrameToken) -> Result<()> {
+        if self.surface_pending_acquire.get(&frame.surface).copied().unwrap_or(0) == 0 {
+            tracing::warn!(
+                surface = frame.surface,
+                image = frame.image,
+                "cancel_frame: pending_acquire_count was already 0"
+            );
+        } else if let Some(count) = self.surface_pending_acquire.get_mut(&frame.surface) {
+            *count = count.saturating_sub(1);
+        }
+        if let Some(surf) = self.surfaces.get_mut(&frame.surface) {
+            surf.pending_frame_compute.clear();
+            if surf.current_texture_handle.is_some() {
+                surf.current_texture_handle = None;
+            }
+        }
+        Ok(())
+    }
+
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         if !self.surfaces.contains_key(&frame.surface) {
             anyhow::bail!("Invalid surface handle");

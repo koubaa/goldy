@@ -424,6 +424,34 @@ pub(super) fn acquire(
     Ok((image_index as SwapchainImageHandle, present_slot as u32))
 }
 
+/// Abandon an acquired frame without presenting.
+pub(super) fn cancel_frame(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<()> {
+    let _tz = crate::tracy_zone!("dx12.surface.cancel_frame");
+    let surface_handle = frame.surface;
+    let surface = state
+        .surfaces
+        .get_mut(&surface_handle)
+        .context("Invalid surface handle")?;
+
+    if surface.current_image_index == Some(frame.image as u32) {
+        surface.current_image_index = None;
+    }
+    surface.current_texture_handle = None;
+    surface.pending_frame_compute.clear();
+    surface.frame_sync[frame.present_slot as usize].render_pass_submitted = false;
+
+    if surface.pending_acquire_count == 0 {
+        tracing::warn!(
+            surface_handle,
+            image = frame.image,
+            "cancel_frame: pending_acquire_count was already 0"
+        );
+    } else {
+        surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
+    }
+    Ok(())
+}
+
 pub(super) fn record_gpu_work(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,

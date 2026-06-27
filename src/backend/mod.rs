@@ -1542,6 +1542,17 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// submit/present and swapchain signals are routed through it.
     fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)>;
 
+    /// Abandon an acquired swapchain frame without presenting.
+    ///
+    /// Decrements [`Self::pending_acquire_count`] and releases backend resources
+    /// tied to the acquire (e.g. a retained Metal drawable). Call when submission
+    /// fails after acquire but before present, or when dropping a [`crate::surface::Frame`]
+    /// without presenting.
+    fn cancel_frame(&mut self, frame: FrameToken) -> Result<()> {
+        let _ = frame;
+        Ok(())
+    }
+
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()>;
 
     /// Record GPU work that must be ordered with the active surface frame (e.g. compute into the swapchain).
