@@ -1106,6 +1106,55 @@ pub(crate) struct SurfaceState {
     pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
 }
 
+/// Map plus monotonic handle allocator for a single resource kind.
+///
+/// Wrapped in [`Arc<RwLock<_>>`] on [`Dx12State`] so submit recording can take read
+/// guards without the global backend mutex (Phase 5b-iii).
+macro_rules! handle_table {
+    ($table:ident, $shared:ident, $handle:ty, $value:ty) => {
+        #[derive(Default)]
+        pub(crate) struct $table {
+            pub entries: HashMap<$handle, $value>,
+            pub next_handle: $handle,
+        }
+
+        impl $table {
+            pub fn new() -> Self {
+                Self {
+                    entries: HashMap::new(),
+                    next_handle: 1,
+                }
+            }
+
+            pub fn alloc_handle(&mut self) -> $handle {
+                let h = self.next_handle;
+                self.next_handle += 1;
+                h
+            }
+        }
+
+        pub(crate) type $shared = Arc<RwLock<$table>>;
+    };
+}
+
+handle_table!(BufferTable, SharedBufferTable, BufferHandle, BufferState);
+handle_table!(ShaderTable, SharedShaderTable, ShaderHandle, ShaderState);
+handle_table!(PipelineTable, SharedPipelineTable, PipelineHandle, PipelineState);
+handle_table!(
+    ComputePipelineTable,
+    SharedComputePipelineTable,
+    ComputePipelineHandle,
+    ComputePipelineState
+);
+handle_table!(
+    RenderTargetTable,
+    SharedRenderTargetTable,
+    RenderTargetHandle,
+    RenderTargetState
+);
+handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
+handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
+
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
 pub(super) struct Dx12State {
@@ -1132,22 +1181,15 @@ pub(super) struct Dx12State {
             HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
         >,
     >,
-    pub buffers: HashMap<BufferHandle, BufferState>,
-    pub next_buffer_handle: BufferHandle,
-    pub shaders: HashMap<ShaderHandle, ShaderState>,
-    pub next_shader_handle: ShaderHandle,
-    pub pipelines: HashMap<PipelineHandle, PipelineState>,
-    pub next_pipeline_handle: PipelineHandle,
-    pub compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
-    pub next_compute_pipeline_handle: ComputePipelineHandle,
-    pub render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
-    pub next_render_target_handle: RenderTargetHandle,
+    pub buffers: SharedBufferTable,
+    pub shaders: SharedShaderTable,
+    pub pipelines: SharedPipelineTable,
+    pub compute_pipelines: SharedComputePipelineTable,
+    pub render_targets: SharedRenderTargetTable,
     pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,
-    pub textures: HashMap<TextureHandle, TextureState>,
-    pub next_texture_handle: TextureHandle,
-    pub samplers: HashMap<SamplerHandle, SamplerState>,
-    pub next_sampler_handle: SamplerHandle,
+    pub textures: SharedTextureTable,
+    pub samplers: SharedSamplerTable,
     /// Next RTV descriptor offset (high-water mark; prefer free_rtv_offsets first)
     pub next_rtv_offset: u32,
     /// Recycled RTV descriptor slots available for reuse

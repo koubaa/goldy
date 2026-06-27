@@ -210,15 +210,21 @@ fn rewrite_root_buffer_descriptors(
 }
 
 fn patch_buffer_views_after_parent_resize(state: &mut Dx12State, parent_handle: BufferHandle) -> Result<()> {
-    let new_resource = state
-        .buffers
-        .get(&parent_handle)
-        .context("patch_buffer_views: parent missing")?
-        .resource
-        .clone();
+    let new_resource = {
+        let buffers_read = state.buffers.read().unwrap();
+        buffers_read
+            .entries
+            .get(&parent_handle)
+            .context("patch_buffer_views: parent missing")?
+            .resource
+            .clone()
+    };
 
     let view_handles: Vec<BufferHandle> = state
         .buffers
+        .read()
+        .unwrap()
+        .entries
         .iter()
         .filter(|(_, b)| b.is_view && b.parent_for_view == Some(parent_handle))
         .map(|(&h, _)| h)
@@ -226,7 +232,8 @@ fn patch_buffer_views_after_parent_resize(state: &mut Dx12State, parent_handle: 
 
     for vh in view_handles {
         let (device_handle, stride, byte_off, view_size, uav_off, srv_off) = {
-            let v = state.buffers.get(&vh).context("patch_buffer_views: view")?;
+            let buffers_read = state.buffers.read().unwrap();
+    let v = buffers_read.entries.get(&vh).context("patch_buffer_views: view")?;
             (
                 v.device_handle,
                 v.element_stride.unwrap_or(4),
@@ -307,7 +314,7 @@ fn patch_buffer_views_after_parent_resize(state: &mut Dx12State, parent_handle: 
 
         state
             .buffers
-            .get_mut(&vh)
+            .write().unwrap().entries.get_mut(&vh)
             .context("patch_buffer_views: view mut")?
             .resource = new_resource.clone();
     }
@@ -322,11 +329,14 @@ pub(super) fn resize(
     new_size: u64,
     preserve_contents: bool,
 ) -> Result<()> {
-    let old = state
-        .buffers
-        .get(&buffer_handle)
-        .cloned()
-        .context("resize_buffer: invalid buffer")?;
+    let old = {
+        let buffers_read = state.buffers.read().unwrap();
+        buffers_read
+            .entries
+            .get(&buffer_handle)
+            .cloned()
+            .context("resize_buffer: invalid buffer")?
+    };
 
     if old.device_handle != device_handle {
         anyhow::bail!("resize_buffer: buffer belongs to a different device");
@@ -556,7 +566,7 @@ pub(super) fn resize(
         .context("resize_buffer: device for descriptors")?;
     rewrite_root_buffer_descriptors(logical_device, &new_resource, new_size, &old)?;
 
-    state.buffers.insert(
+    state.buffers.write().unwrap().entries.insert(
         buffer_handle,
         BufferState {
             device_handle,
@@ -812,8 +822,7 @@ pub(super) fn create(
         )
     };
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
+    let handle = state.buffers.write().unwrap().alloc_handle();
 
     // Second pass: register in bindless heap
     // Scattered access -> UAV + SRV descriptors, Broadcast access -> CBV descriptors
@@ -949,7 +958,7 @@ pub(super) fn create(
         (None, None)
     };
 
-    state.buffers.insert(
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -1031,8 +1040,7 @@ pub(super) fn create_reserved_with_capacity(
         (resource, slots)
     };
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
+    let handle = state.buffers.write().unwrap().alloc_handle();
 
     let stride = element_stride.unwrap_or(4);
     debug_assert!(
@@ -1093,7 +1101,7 @@ pub(super) fn create_reserved_with_capacity(
         (Some(uav_offset), Some(srv_offset))
     };
 
-    state.buffers.insert(
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -1153,7 +1161,7 @@ pub(super) fn create_with_capacity(
 pub(super) fn capacity(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
     state
         .buffers
-        .get(&buffer_handle)
+        .read().unwrap().entries.get(&buffer_handle)
         .map(|b| b.allocation_size)
         .unwrap_or(0)
 }
@@ -1164,11 +1172,15 @@ pub(super) fn set_logical_size(
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
-    let old = state
-        .buffers
-        .get(&buffer_handle)
-        .cloned()
-        .context("set_logical_size: invalid buffer")?;
+    let old = {
+        let buffers_read = state.buffers.read().unwrap();
+        buffers_read
+            .entries
+            .get(&buffer_handle)
+            .cloned()
+            .context("set_logical_size: invalid buffer")?
+    };
+
     if old.device_handle != device_handle {
         anyhow::bail!("set_logical_size: buffer belongs to a different device");
     }
@@ -1203,7 +1215,8 @@ pub(super) fn set_logical_size(
             let mut pool_guard = ld.tile_heap_pool.lock().unwrap();
             let pool = pool_guard.as_mut().context("set_logical_size: tile heap pool")?;
             let queue = ld.command_queue.clone();
-            let buf = state.buffers.get_mut(&buffer_handle).expect("set_logical_size: buffer");
+            let mut buffers_write = state.buffers.write().unwrap();
+    let buf = buffers_write.entries.get_mut(&buffer_handle).expect("set_logical_size: buffer");
             if new_pages > old_pages {
                 let mut mappings = Vec::with_capacity((new_pages - old_pages) as usize);
                 for i in old_pages..new_pages {
@@ -1223,15 +1236,18 @@ pub(super) fn set_logical_size(
             }
         }
         let logical_device = state.devices.get(&device_handle).context("set_logical_size: device")?;
-        let buf = state.buffers.get(&buffer_handle).unwrap();
-        rewrite_root_buffer_descriptors(logical_device, &buf.resource, new_logical_size, buf)?;
-        state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+        {
+            let buffers_read = state.buffers.read().unwrap();
+            let buf = buffers_read.entries.get(&buffer_handle).unwrap();
+            rewrite_root_buffer_descriptors(logical_device, &buf.resource, new_logical_size, buf)?;
+        }
+        state.buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().size = new_logical_size;
         return Ok(());
     }
 
     let logical_device = state.devices.get(&device_handle).context("set_logical_size: device")?;
     rewrite_root_buffer_descriptors(logical_device, &old.resource, new_logical_size, &old)?;
-    state.buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+    state.buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().size = new_logical_size;
     Ok(())
 }
 
@@ -1239,7 +1255,7 @@ pub(super) fn set_logical_size(
 /// descriptor slots for deferred deletion after in-flight GPU work completes.
 /// For views, only the descriptor slots are deferred.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
-    if let Some(buffer) = state.buffers.remove(&buffer_handle) {
+    if let Some(buffer) = state.buffers.write().unwrap().entries.remove(&buffer_handle) {
         if let Some(device) = state.devices.get(&buffer.device_handle) {
             let last_fence = device
                 .timeline_next
@@ -1289,7 +1305,8 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
 /// Hint unused reserved tiles at/above `offset` (bytes).
 pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHandle, offset: u64) {
     let (device_handle, first_tile) = {
-        let Some(buf) = state.buffers.get(&buffer_handle) else {
+        let buffers_read = state.buffers.read().unwrap();
+        let Some(buf) = buffers_read.entries.get(&buffer_handle) else {
             return;
         };
         if !buf.is_reserved {
@@ -1313,7 +1330,8 @@ pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHand
         return;
     };
     let queue = &ld.command_queue;
-    let Some(buf_mut) = state.buffers.get_mut(&buffer_handle) else {
+    let mut buffers_write = state.buffers.write().unwrap();
+        let Some(buf_mut) = buffers_write.entries.get_mut(&buffer_handle) else {
         return;
     };
     let mut i = first_tile;
@@ -1349,23 +1367,33 @@ pub(super) fn create_view(
     size: u64,
     element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
-    let parent = state
-        .buffers
-        .get(&parent_handle)
-        .context("Invalid parent buffer handle")?;
+    let (device_handle, resource, parent_flags, parent_allocation_size) = {
+        let buffers_read = state.buffers.read().unwrap();
+        let parent = buffers_read
+            .entries
+            .get(&parent_handle)
+            .context("Invalid parent buffer handle")?;
 
-    if offset + size > parent.size {
-        anyhow::bail!(
-            "View [{}, {}) exceeds parent buffer size {}",
-            offset,
-            offset + size,
-            parent.size
-        );
-    }
+        if offset + size > parent.size {
+            anyhow::bail!(
+                "View [{}, {}) exceeds parent buffer size {}",
+                offset,
+                offset + size,
+                parent.size
+            );
+        }
 
-    if !parent.is_storage {
-        anyhow::bail!("Buffer views are only supported for storage (Scattered) buffers");
-    }
+        if !parent.is_storage {
+            anyhow::bail!("Buffer views are only supported for storage (Scattered) buffers");
+        }
+
+        (
+            parent.device_handle,
+            parent.resource.clone(),
+            parent.flags,
+            parent.allocation_size,
+        )
+    };
 
     let stride = element_stride.unwrap_or(4);
     if stride == 0 {
@@ -1378,14 +1406,10 @@ pub(super) fn create_view(
         anyhow::bail!("View offset {} is not aligned to element stride {}", offset, stride);
     }
 
-    let device_handle = parent.device_handle;
-    let resource = parent.resource.clone();
-    let parent_flags = parent.flags;
     let first_element = (offset / stride as u64) as u32;
     let num_elements = (size as u32) / stride;
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
+    let handle = state.buffers.write().unwrap().alloc_handle();
 
     let (bindless_offset, bindless_srv_offset) = {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -1475,13 +1499,13 @@ pub(super) fn create_view(
         }
     };
 
-    state.buffers.insert(
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
             resource,
             size,
-            allocation_size: parent.allocation_size,
+            allocation_size: parent_allocation_size,
             bindless_offset,
             bindless_srv_offset,
             is_storage: true,
@@ -1536,15 +1560,19 @@ pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
 /// upload resource is ready before command recording begins.
 pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferHandle, min_size: u64) -> Result<()> {
-    let buffer = state
-        .buffers
-        .get(&buffer_handle)
-        .context("ensure_upload_buffer: invalid handle")?;
-    if buffer.upload_buffer.is_some() {
-        return Ok(());
-    }
+    let (device_handle, needs_upload) = {
+        let buffers_read = state.buffers.read().unwrap();
+        let buffer = buffers_read
+            .entries
+            .get(&buffer_handle)
+            .context("ensure_upload_buffer: invalid handle")?;
+        if buffer.upload_buffer.is_some() {
+            return Ok(());
+        }
+        (buffer.device_handle, ())
+    };
+    let _ = needs_upload;
     let chunk_size = min_size.min(UPLOAD_CHUNK_SIZE);
-    let device_handle = buffer.device_handle;
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -1580,7 +1608,7 @@ pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferH
         )
     }
     .context("ensure_upload_buffer: create failed")?;
-    state.buffers.get_mut(&buffer_handle).unwrap().upload_buffer = Some(upload.context("Upload buffer is null")?);
+    state.buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().upload_buffer = Some(upload.context("Upload buffer is null")?);
     Ok(())
 }
 
@@ -1616,7 +1644,8 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
         return Ok(());
     }
 
-    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffers_read = state.buffers.read().unwrap();
+    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
 
     if offset + data.len() as u64 > buffer.size {
         anyhow::bail!("Write would exceed buffer bounds");
@@ -1667,14 +1696,19 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
 
     let device_handle = buffer.device_handle;
     let main_resource = buffer.resource.clone();
+    let needs_upload_buffer = buffer.upload_buffer.is_none();
+    drop(buffers_read);
 
     // Create or reuse the upload buffer (capped at chunk_size)
-    if buffer.upload_buffer.is_none() {
+    if needs_upload_buffer {
         ensure_upload_buffer(state, buffer_handle, chunk_size)?;
     }
 
     let upload_buf = state
         .buffers
+        .read()
+        .unwrap()
+        .entries
         .get(&buffer_handle)
         .unwrap()
         .upload_buffer
@@ -1781,12 +1815,12 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
 
 /// Get the size of a buffer in bytes.
 pub(super) fn size(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
-    state.buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
+    state.buffers.read().unwrap().entries.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
 pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
-    state.buffers.get(&buffer_handle).and_then(|b| b.bindless_offset)
+    state.buffers.read().unwrap().entries.get(&buffer_handle).and_then(|b| b.bindless_offset)
 }
 
 /// Resolve which SRV/UAV/CBV view a bindless heap index refers to.
@@ -1796,7 +1830,7 @@ pub(super) fn bindless_slot_kind_for_index(
     index: u32,
 ) -> Option<crate::types::BindlessSlotKind> {
     use crate::types::BindlessSlotKind;
-    for b in state.buffers.values() {
+    for b in state.buffers.read().unwrap().entries.values() {
         if b.device_handle != device_handle {
             continue;
         }
@@ -1819,7 +1853,7 @@ pub(super) fn bindless_slot_kind_for_index(
 pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
     state
         .buffers
-        .get(&buffer_handle)
+        .read().unwrap().entries.get(&buffer_handle)
         .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
 }
 
@@ -1834,7 +1868,8 @@ pub(super) fn emit_copy_coherent_readback_on_command_list(
     use windows::Win32::Graphics::Direct3D12::*;
 
     let (main_resource, readback, len) = {
-        let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffers_read = state.buffers.read().unwrap();
+    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
         if !buffer.flags.contains(BufferFlags::CPU_READABLE) || !buffer.is_storage {
             return Ok(());
         }
@@ -1947,16 +1982,31 @@ pub(super) fn read_to_cpu(
 ) -> Result<()> {
     use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
-    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let coherent_readback = {
+        let buffers_read = state.buffers.read().unwrap();
+        let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+
+        let len = output.len() as u64;
+        if len > buffer.size {
+            anyhow::bail!("Read would exceed buffer bounds");
+        }
+
+        buffer.is_storage
+            && buffer.flags.contains(BufferFlags::CPU_READABLE)
+            && buffer.coherent_readback.is_some()
+    };
+
+    if coherent_readback {
+        standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;
+        return read_coherent(&state.buffers.read().unwrap().entries, buffer_handle, 0, output);
+    }
+
+    let buffers_read = state.buffers.read().unwrap();
+    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let len = output.len() as u64;
     if len > buffer.size {
         anyhow::bail!("Read would exceed buffer bounds");
-    }
-
-    if buffer.is_storage && buffer.flags.contains(BufferFlags::CPU_READABLE) && buffer.coherent_readback.is_some() {
-        standalone_copy_coherent_readback(state, device_handle, buffer_handle)?;
-        return read_coherent(&state.buffers, buffer_handle, 0, output);
     }
 
     if buffer.is_storage {
@@ -2091,7 +2141,8 @@ pub(super) fn clear(
     offset: u64,
     size: u64,
 ) -> Result<()> {
-    let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffers_read = state.buffers.read().unwrap();
+    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
 
     let clear_size = super::super::shared::resolve_clear_size(buffer.size, offset, size);
 
@@ -2263,9 +2314,8 @@ pub(super) fn alloc_readback_buffer(
     unsafe { resource.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map grant readback buffer")?;
     let mapped_addr = mapped as usize;
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
-    state.buffers.insert(
+    let handle = state.buffers.write().unwrap().alloc_handle();
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -2342,9 +2392,8 @@ pub(super) fn alloc_texture_readback_staging(
         .context("Failed to map texture grant readback buffer")?;
     let mapped_addr = mapped as usize;
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
-    state.buffers.insert(
+    let handle = state.buffers.write().unwrap().alloc_handle();
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,

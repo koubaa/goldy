@@ -192,14 +192,14 @@ pub(super) fn create(
         }
     }
 
-    let handle = state.next_pipeline_handle;
-    state.next_pipeline_handle += 1;
+    let handle = state.pipelines.write().unwrap().alloc_handle();
 
-    let (cats, slot_kinds, strides) = state
-        .shaders
+    let shaders_read = state.shaders.read().unwrap();
+    let (cats, slot_kinds, strides) = shaders_read
+        .entries
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .or_else(|| shaders_read.entries.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
         .map(|r| {
             (
                 r.push_constant_categories.clone(),
@@ -209,7 +209,7 @@ pub(super) fn create(
         })
         .unwrap_or_default();
 
-    state.pipelines.insert(
+    state.pipelines.write().unwrap().entries.insert(
         handle,
         PipelineState {
             device_handle,
@@ -441,14 +441,14 @@ pub(super) fn create_with_depth(
         }
     }
 
-    let handle = state.next_pipeline_handle;
-    state.next_pipeline_handle += 1;
+    let handle = state.pipelines.write().unwrap().alloc_handle();
 
-    let (cats, slot_kinds, strides) = state
-        .shaders
+    let shaders_read = state.shaders.read().unwrap();
+    let (cats, slot_kinds, strides) = shaders_read
+        .entries
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| state.shaders.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .or_else(|| shaders_read.entries.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
         .map(|r| {
             (
                 r.push_constant_categories.clone(),
@@ -458,7 +458,7 @@ pub(super) fn create_with_depth(
         })
         .unwrap_or_default();
 
-    state.pipelines.insert(
+    state.pipelines.write().unwrap().entries.insert(
         handle,
         PipelineState {
             device_handle,
@@ -480,5 +480,5 @@ pub(super) fn create_with_depth(
 
 /// Destroy a pipeline.
 pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: PipelineHandle) {
-    state.pipelines.remove(&pipeline_handle);
+    state.pipelines.write().unwrap().entries.remove(&pipeline_handle);
 }

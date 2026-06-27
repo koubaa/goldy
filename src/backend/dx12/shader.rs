@@ -10,8 +10,7 @@ pub(super) fn create_with_checks(
 ) -> Result<ShaderHandle> {
     let _ = state.devices.get(&desc.device).context("Invalid device handle")?;
 
-    let handle = state.next_shader_handle;
-    state.next_shader_handle += 1;
+    let handle = state.shaders.write().unwrap().alloc_handle();
 
     let stored_paths: Vec<String> = desc.search_paths.iter().map(|s| s.to_string()).collect();
     let stored_defines: Vec<(String, String)> = desc
@@ -20,7 +19,7 @@ pub(super) fn create_with_checks(
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
 
-    state.shaders.insert(
+    state.shaders.write().unwrap().entries.insert(
         handle,
         ShaderState {
             device_handle: desc.device,
@@ -42,7 +41,7 @@ pub(super) fn create_with_checks(
 
 /// Destroy a shader.
 pub(super) fn destroy(state: &mut Dx12State, shader_handle: ShaderHandle) {
-    state.shaders.remove(&shader_handle);
+    state.shaders.write().unwrap().entries.remove(&shader_handle);
 }
 
 /// Compile a shader for a specific stage on demand.
@@ -52,18 +51,21 @@ pub(super) fn ensure_stage_compiled(
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,
 ) -> Result<Vec<u8>> {
-    let shader = state.shaders.get_mut(&shader_handle).context("Invalid shader handle")?;
-
-    // Check if already compiled for this stage
-    let cached_bytecode = match stage {
-        crate::slang::SlangStage::Vertex => shader.vertex_bytecode.clone(),
-        crate::slang::SlangStage::Fragment => shader.fragment_bytecode.clone(),
-        crate::slang::SlangStage::Compute => shader.compute_bytecode.clone(),
-        _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-    };
-
-    if let Some(bytecode) = cached_bytecode {
-        return Ok(bytecode);
+    {
+        let shaders_read = state.shaders.read().unwrap();
+        let shader = shaders_read
+            .entries
+            .get(&shader_handle)
+            .context("Invalid shader handle")?;
+        let cached_bytecode = match stage {
+            crate::slang::SlangStage::Vertex => shader.vertex_bytecode.clone(),
+            crate::slang::SlangStage::Fragment => shader.fragment_bytecode.clone(),
+            crate::slang::SlangStage::Compute => shader.compute_bytecode.clone(),
+            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
+        };
+        if let Some(bytecode) = cached_bytecode {
+            return Ok(bytecode);
+        }
     }
 
     // Get the entry point name based on stage
@@ -74,12 +76,20 @@ pub(super) fn ensure_stage_compiled(
         _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
     };
 
-    // Clone source and search paths to avoid borrow issues
-    let slang_source = shader.slang_source.clone();
-    let search_paths = shader.search_paths.clone();
-    let optimization_level = shader.optimization_level;
-    let extra_defines: Vec<(String, String)> = shader.defines.clone();
-    let layout_checks_snapshot = shader.layout_checks.clone();
+    let (slang_source, search_paths, optimization_level, extra_defines, layout_checks_snapshot) = {
+        let shaders_read = state.shaders.read().unwrap();
+        let shader = shaders_read
+            .entries
+            .get(&shader_handle)
+            .context("Invalid shader handle")?;
+        (
+            shader.slang_source.clone(),
+            shader.search_paths.clone(),
+            shader.optimization_level,
+            shader.defines.clone(),
+            shader.layout_checks.clone(),
+        )
+    };
 
     // Convert search_paths to &str references
     let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
@@ -132,37 +142,40 @@ pub(super) fn ensure_stage_compiled(
             tracing::info!("Dumped DXIL bytecode to {}", path.display());
         }
     }
-    // Cache the bytecode and reflection
-    let shader = state.shaders.get_mut(&shader_handle).unwrap();
-    match stage {
-        crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
-        crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
-        crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
-        _ => {} // Already validated above
-    }
 
-    if !layout_checks_snapshot.is_empty() {
-        shader.layout_checks.clear();
-    }
+    {
+        let mut shaders_write = state.shaders.write().unwrap();
+        let shader = shaders_write.entries.get_mut(&shader_handle).unwrap();
+        match stage {
+            crate::slang::SlangStage::Vertex => shader.vertex_bytecode = Some(bytecode.clone()),
+            crate::slang::SlangStage::Fragment => shader.fragment_bytecode = Some(bytecode.clone()),
+            crate::slang::SlangStage::Compute => shader.compute_bytecode = Some(bytecode.clone()),
+            _ => {} // Already validated above
+        }
 
-    // Store reflection data (merge with existing if any)
-    if let Some(ref mut existing) = shader.reflection {
-        for pb in &new_reflection.parameter_blocks {
-            if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
-                existing.parameter_blocks.push(pb.clone());
+        if !layout_checks_snapshot.is_empty() {
+            shader.layout_checks.clear();
+        }
+
+        // Store reflection data (merge with existing if any)
+        if let Some(ref mut existing) = shader.reflection {
+            for pb in &new_reflection.parameter_blocks {
+                if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                    existing.parameter_blocks.push(pb.clone());
+                }
             }
+            if existing.push_constant_categories.is_empty() {
+                existing.push_constant_categories = new_reflection.push_constant_categories;
+            }
+            if existing.push_constant_slot_kinds.is_empty() {
+                existing.push_constant_slot_kinds = new_reflection.push_constant_slot_kinds;
+            }
+            if existing.binding_element_strides.is_empty() {
+                existing.binding_element_strides = new_reflection.binding_element_strides;
+            }
+        } else {
+            shader.reflection = Some(new_reflection);
         }
-        if existing.push_constant_categories.is_empty() {
-            existing.push_constant_categories = new_reflection.push_constant_categories;
-        }
-        if existing.push_constant_slot_kinds.is_empty() {
-            existing.push_constant_slot_kinds = new_reflection.push_constant_slot_kinds;
-        }
-        if existing.binding_element_strides.is_empty() {
-            existing.binding_element_strides = new_reflection.binding_element_strides;
-        }
-    } else {
-        shader.reflection = Some(new_reflection);
     }
 
     Ok(bytecode)

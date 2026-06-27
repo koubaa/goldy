@@ -309,22 +309,15 @@ impl Dx12Backend {
             contexts: HashMap::new(),
             next_context_id: 1,
             context_fences: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
-            buffers: HashMap::new(),
-            next_buffer_handle: 1,
-            shaders: HashMap::new(),
-            next_shader_handle: 1,
-            pipelines: HashMap::new(),
-            next_pipeline_handle: 1,
-            compute_pipelines: HashMap::new(),
-            next_compute_pipeline_handle: 1,
-            render_targets: HashMap::new(),
-            next_render_target_handle: 1,
+            buffers: std::sync::Arc::new(std::sync::RwLock::new(types::BufferTable::new())),
+            shaders: std::sync::Arc::new(std::sync::RwLock::new(types::ShaderTable::new())),
+            pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::PipelineTable::new())),
+            compute_pipelines: std::sync::Arc::new(std::sync::RwLock::new(types::ComputePipelineTable::new())),
+            render_targets: std::sync::Arc::new(std::sync::RwLock::new(types::RenderTargetTable::new())),
             surfaces: HashMap::new(),
             next_surface_handle: 1,
-            textures: HashMap::new(),
-            next_texture_handle: 1,
-            samplers: HashMap::new(),
-            next_sampler_handle: 1,
+            textures: std::sync::Arc::new(std::sync::RwLock::new(types::TextureTable::new())),
+            samplers: std::sync::Arc::new(std::sync::RwLock::new(types::SamplerTable::new())),
             next_rtv_offset: 0,
             free_rtv_offsets: Vec::new(),
             next_dsv_offset: 0,
@@ -378,45 +371,57 @@ impl Dx12Backend {
             let buffer_handles: Vec<_> = self
                 .state
                 .buffers
+                .read()
+                .unwrap()
+                .entries
                 .iter()
                 .filter(|(_, b)| b.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
             for handle in buffer_handles {
-                self.state.buffers.remove(&handle);
+                self.state.buffers.write().unwrap().entries.remove(&handle);
             }
 
             let shader_handles: Vec<_> = self
                 .state
                 .shaders
+                .read()
+                .unwrap()
+                .entries
                 .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
             for handle in shader_handles {
-                self.state.shaders.remove(&handle);
+                self.state.shaders.write().unwrap().entries.remove(&handle);
             }
 
             let pipeline_handles: Vec<_> = self
                 .state
                 .pipelines
+                .read()
+                .unwrap()
+                .entries
                 .iter()
                 .filter(|(_, p)| p.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
             for handle in pipeline_handles {
-                self.state.pipelines.remove(&handle);
+                self.state.pipelines.write().unwrap().entries.remove(&handle);
             }
 
             let target_handles: Vec<_> = self
                 .state
                 .render_targets
+                .read()
+                .unwrap()
+                .entries
                 .iter()
                 .filter(|(_, t)| t.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
             for handle in target_handles {
-                self.state.render_targets.remove(&handle);
+                self.state.render_targets.write().unwrap().entries.remove(&handle);
             }
 
             let surface_handles: Vec<_> = self
@@ -433,23 +438,29 @@ impl Dx12Backend {
             let texture_handles: Vec<_> = self
                 .state
                 .textures
+                .read()
+                .unwrap()
+                .entries
                 .iter()
                 .filter(|(_, t)| t.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
             for handle in texture_handles {
-                self.state.textures.remove(&handle);
+                self.state.textures.write().unwrap().entries.remove(&handle);
             }
 
             let sampler_handles: Vec<_> = self
                 .state
                 .samplers
+                .read()
+                .unwrap()
+                .entries
                 .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
             for handle in sampler_handles {
-                self.state.samplers.remove(&handle);
+                self.state.samplers.write().unwrap().entries.remove(&handle);
             }
 
             tracing::info!("Destroyed DX12 device {}", device_handle);
@@ -768,7 +779,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
-        buffer::read_readback_buffer(&self.state.buffers, buffer, output)
+        buffer::read_readback_buffer(&self.state.buffers.read().unwrap().entries, buffer, output)
     }
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
@@ -799,7 +810,7 @@ impl GpuBackend for Dx12Backend {
         layout: crate::backend::TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()> {
-        buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
+        buffer::read_texture_readback_staging(&self.state.buffers.read().unwrap().entries, buffer, layout, output)
     }
 
     fn device_capabilities(&self, device: DeviceHandle) -> crate::device::DeviceCapabilities {
@@ -1268,7 +1279,7 @@ impl GpuBackend for Dx12Backend {
         let (cats, slot_kinds, strides) = self
             .state
             .shaders
-            .get(&compute_shader)
+            .read().unwrap().entries.get(&compute_shader)
             .and_then(|s| s.reflection.as_ref())
             .map(|r| {
                 (
@@ -1279,10 +1290,13 @@ impl GpuBackend for Dx12Backend {
             })
             .unwrap_or_default();
 
-        if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
-            ps.push_constant_categories = cats;
-            ps.push_constant_slot_kinds = slot_kinds;
-            ps.binding_element_strides = strides;
+        {
+            let mut compute_pipelines_write = self.state.compute_pipelines.write().unwrap();
+            if let Some(ps) = compute_pipelines_write.entries.get_mut(&handle) {
+                ps.push_constant_categories = cats;
+                ps.push_constant_slot_kinds = slot_kinds;
+                ps.binding_element_strides = strides;
+            }
         }
         Ok(handle)
     }
@@ -1295,14 +1309,16 @@ impl GpuBackend for Dx12Backend {
         &self,
         pipeline: ComputePipelineHandle,
     ) -> Vec<Option<crate::types::ResourceAccess>> {
-        let Some(ps) = self.state.compute_pipelines.get(&pipeline) else {
+        let compute_pipelines_read = self.state.compute_pipelines.read().unwrap();
+        let Some(ps) = compute_pipelines_read.entries.get(&pipeline) else {
             return Vec::new();
         };
         slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)
     }
 
     fn render_pipeline_slot_access(&self, pipeline: PipelineHandle) -> Vec<Option<crate::types::ResourceAccess>> {
-        let Some(ps) = self.state.pipelines.get(&pipeline) else {
+        let pipelines_read = self.state.pipelines.read().unwrap();
+        let Some(ps) = pipelines_read.entries.get(&pipeline) else {
             return Vec::new();
         };
         slot_access_from_push_constant_slot_kinds(&ps.push_constant_slot_kinds)

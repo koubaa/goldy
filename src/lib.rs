@@ -48,7 +48,6 @@ pub mod tracy;
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
 pub mod allocation_policy;
-#[cfg(test)]
 mod buffer_alloc_tests;
 #[cfg(test)]
 mod heap_tests;

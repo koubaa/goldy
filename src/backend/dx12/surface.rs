@@ -615,7 +615,7 @@ pub(super) fn render(
         super::frame_table::record_prologue(
             &state.contexts,
             &state.frame_tables,
-            &state.buffers,
+            &state.buffers.read().unwrap().entries,
             device_handle,
             cmd,
             &staging_data,
@@ -716,9 +716,8 @@ pub(super) fn prepare_present_work(
         .get(&device_handle)
         .context("Surface's device is invalid")?
         .clone();
-    let scratch_res = state
-        .textures
-        .get(&scratch_handle)
+    let textures_read = state.textures.read().unwrap();
+        let scratch_res = textures_read.entries.get(&scratch_handle)
         .context("Scratch texture not found")?
         .resource
         .clone();
@@ -763,7 +762,7 @@ pub(super) fn finish_present(
     if finish.scratch_layout_updated {
         if let Some(tex) = state
             .textures
-            .get_mut(&finish.scratch_texture.expect("scratch texture"))
+            .write().unwrap().entries.get_mut(&finish.scratch_texture.expect("scratch texture"))
         {
             tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
         }
@@ -1133,9 +1132,12 @@ fn ensure_compute_scratch_texture(
         let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let slot = surface.compute_scratch_textures.get(idx).copied().flatten();
         if let Some(h) = slot {
-            if let Some(tex) = state.textures.get(&h) {
-                if tex.width == width && tex.height == height && tex.format == format {
-                    return Ok(h);
+            {
+                let textures_read = state.textures.read().unwrap();
+                if let Some(tex) = textures_read.entries.get(&h) {
+                    if tex.width == width && tex.height == height && tex.format == format {
+                        return Ok(h);
+                    }
                 }
             }
             Some(h)

@@ -9,8 +9,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 /// Create a sampler.
 pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &SamplerDesc) -> Result<SamplerHandle> {
-    let handle = state.next_sampler_handle;
-    state.next_sampler_handle += 1;
+    let handle = state.samplers.write().unwrap().alloc_handle();
 
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
@@ -46,7 +45,7 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
         logical_device.device.CreateSampler(&sampler_desc, sampler_cpu_handle);
     }
 
-    state.samplers.insert(
+    state.samplers.write().unwrap().entries.insert(
         handle,
         SamplerState {
             device_handle,
@@ -62,7 +61,7 @@ pub(super) fn create(state: &mut Dx12State, device_handle: DeviceHandle, desc: &
 
 /// Destroy a sampler.
 pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
-    if let Some(sampler) = state.samplers.remove(&sampler_handle) {
+    if let Some(sampler) = state.samplers.write().unwrap().entries.remove(&sampler_handle) {
         if let Some(ld) = state.devices.get(&sampler.device_handle) {
             ld.descriptors.lock().unwrap().reclaim_sampler_slots(sampler_handle);
         }
@@ -71,5 +70,5 @@ pub(super) fn destroy(state: &mut Dx12State, sampler_handle: SamplerHandle) {
 
 /// Get the bindless index for a sampler.
 pub(super) fn bindless_index(state: &Dx12State, sampler_handle: SamplerHandle) -> Option<u32> {
-    state.samplers.get(&sampler_handle).and_then(|s| s.bindless_offset)
+    state.samplers.read().unwrap().entries.get(&sampler_handle).and_then(|s| s.bindless_offset)
 }

@@ -778,19 +778,21 @@ impl Device {
     /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
     pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
         let horizon = self.inner.device_timeline_reader.device_horizon();
-        let readers = self.inner.context_readers.lock().unwrap();
-        let max_ctx = readers.values().map(|r| r.gpu_progress()).max().unwrap_or(0);
+        let reader_clones: Vec<_> = {
+            let readers = self.inner.context_readers.lock().unwrap();
+            readers.values().cloned().collect()
+        };
+        let max_ctx = reader_clones.iter().map(|r| r.gpu_progress()).max().unwrap_or(0);
         horizon.max(max_ctx)
     }
 
     /// Lock-free GPU progress for a live context on this device (for ledger / parcel queries).
     pub(crate) fn context_gpu_progress(&self, ctx: crate::backend::ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        self.inner
-            .context_readers
-            .lock()
-            .unwrap()
-            .get(&ctx)
-            .map(|r| r.gpu_progress())
+        let reader = {
+            let readers = self.inner.context_readers.lock().unwrap();
+            readers.get(&ctx).cloned()
+        }?;
+        Some(reader.gpu_progress())
     }
 
     pub(crate) fn register_context_timeline_reader(
