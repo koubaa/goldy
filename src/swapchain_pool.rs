@@ -155,6 +155,18 @@ impl SwapchainPool {
         surface.pending_acquire_count()
     }
 
+    /// Block until [`Self::acquire_slot`] would succeed (`pending_acquire_count` `<` [`depth`](Self::depth)).
+    ///
+    /// On flip-model backends (DX12/Vulkan) present ack alone is insufficient: the drawable
+    /// stays counted until its return fence retires. Poll `ctx` so
+    /// [`Context::poll_signals_and_service`] can process deferred returns.
+    pub fn wait_for_acquire_capacity(&self, ctx: &crate::Context) {
+        while self.pending_acquire_count() >= self.depth() {
+            ctx.poll_signals_and_service();
+            std::thread::yield_now();
+        }
+    }
+
     /// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
         Self::drain_speculative_acquire(&self.inner);

@@ -896,6 +896,10 @@ impl GpuBackend for Dx12Backend {
         progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
+        // Present copy/signal uses the device sync fence; per-context `progress` alone
+        // can lag behind `return_fence` values stored in pending_swapchain_returns.
+        let swapchain_retire_progress =
+            progress.max(context::device_retired(&self.state, device_handle));
         let signal_queue = self
             .state
             .contexts
@@ -911,7 +915,7 @@ impl GpuBackend for Dx12Backend {
                 continue;
             }
             surface.pending_swapchain_returns.retain(|&(idx, tv)| {
-                if progress >= tv {
+                if swapchain_retire_progress >= tv {
                     signal_queue.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
                     false
