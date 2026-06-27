@@ -220,7 +220,7 @@ mod buffer_alloc_tests {
     #[test]
     fn dx12_reserved_buffer_resize_compute_smoke() {
         use crate::types::BufferResizeCost;
-        use crate::{BackendType, ComputePipeline, ShaderModule, TaskGraph};
+        use crate::{BackendType, ComputePipeline, NodeAccess, ShaderModule, TaskGraph};
         const SMOKY_SHADER: &str = r#"
     import goldy_exp;
 

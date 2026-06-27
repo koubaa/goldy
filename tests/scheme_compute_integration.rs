@@ -6,9 +6,14 @@
 //! serialized against worker schemes by queue order. Callers do not use
 //! `TaskGraph::clear_buffer` or `TaskGraph::write_buffer` directly.
 //!
+//! Uses [`shared_device::test_lock`] (same as `cross_submit_gpu.rs`) so DX12 debug builds
+//! can run under the default parallel `cargo test` harness without deadlocking on the
+//! process-wide D3D12 backend singleton.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 #![allow(deprecated)]
 
+#[path = "common/shared_device.rs"]
+mod shared_device;
 #[path = "common/submission.rs"]
 mod submission;
 #[path = "common/upload.rs"]
@@ -19,11 +24,34 @@ use goldy::{
     BufferKind, ComputePipeline, Device, Grant, GrantBuffer, NodeAccess, Parcel, ReadGrant, RetainedPool, Sampler,
     Scheme, ShaderModule, StructuredBufferElement, Submission,
 };
-use std::sync::Arc;
+#[cfg(all(feature = "dx12", target_os = "windows"))]
+use goldy::{DeviceDescriptor, Instance, RequestAdapterOptions};
+use shared_device::{shared_device, test_lock};
+use std::ops::Deref;
+use std::sync::{Arc, MutexGuard};
 use submission::submission_context;
 use upload::write_to_parcel;
 
-fn make_device() -> Device {
+/// Process-wide GPU device plus a per-test lock (see [`shared_device::test_lock`]).
+///
+/// DX12 debug builds share one backend singleton; parallel tests must not create
+/// independent instances without serializing (same pattern as `cross_submit_gpu.rs`).
+struct TestDevice {
+    _lock: MutexGuard<'static, ()>,
+    device: Device,
+}
+
+impl Deref for TestDevice {
+    type Target = Device;
+
+    fn deref(&self) -> &Device {
+        &self.device
+    }
+}
+
+fn make_device() -> TestDevice {
+    let lock = test_lock();
+
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     if std::env::var("GOLDY_DX12_ALLOW_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
         let instance = Instance::new().expect("Failed to create instance");
@@ -32,17 +60,18 @@ fn make_device() -> Device {
             force_fallback_adapter: true,
         }) {
             if let Ok(dev) = adapter.request_device(&DeviceDescriptor::default()) {
-                return dev;
+                return TestDevice {
+                    _lock: lock,
+                    device: dev,
+                };
             }
         }
     }
 
-    let instance = Instance::new().expect("Failed to create instance");
-    instance
-        .request_adapter(&RequestAdapterOptions::default())
-        .expect("adapter")
-        .request_device(&DeviceDescriptor::default())
-        .expect("device")
+    TestDevice {
+        _lock: lock,
+        device: (*shared_device()).clone(),
+    }
 }
 
 fn test_alloc_texture(
