@@ -15,8 +15,8 @@ mod submission;
 mod upload;
 
 use goldy::{
-    BackendType, BufferKind, ComputePipeline, Context, Device, Grant, NodeAccess, Parcel, ReadGrant,
-    RetainedPool, Scheme, ShaderModule, Submission,
+    BackendType, BufferKind, ComputePipeline, Context, Device, Grant, NodeAccess, Parcel, ReadGrant, RetainedPool,
+    Scheme, ShaderModule, Submission,
 };
 use shared_device::{shared_device, test_lock};
 use submission::submission_context;

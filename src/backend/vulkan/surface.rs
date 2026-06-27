@@ -1283,7 +1283,7 @@ pub(super) fn submit_frame(
     Ok(ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
 }
 
-#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
+#[allow(dead_code)]
 pub(super) fn present_frame(
     state: &mut super::types::VulkanState,
     frame: crate::backend::FrameToken,
@@ -1295,7 +1295,7 @@ pub(super) fn present_frame(
 }
 
 /// Present the rendered image to the screen (legacy entry — uses lock-split path).
-#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
+#[allow(dead_code)]
 pub(super) fn present(
     state: &mut super::types::VulkanState,
     frame: crate::backend::FrameToken,

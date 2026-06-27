@@ -266,9 +266,7 @@ pub(super) fn take_surface_acquire_work(
 ) -> Result<Box<dyn crate::backend::SurfaceAcquireWork>> {
     let (pending, layer_ptr) = prepare_acquire(state, surface, ctx)?;
     state.surfaces.get_mut(&surface).unwrap().pending_acquire = Some(pending);
-    Ok(Box::new(MetalSurfaceAcquireWork {
-        layer: Some(layer_ptr),
-    }))
+    Ok(Box::new(MetalSurfaceAcquireWork { layer: Some(layer_ptr) }))
 }
 
 pub(super) fn finish_surface_acquire_from_drawable(
@@ -392,8 +390,7 @@ pub(super) fn finish_acquire(
     let texture_ptr: *mut Object = unsafe { msg_send![drawable_id, texture] };
     let texture: &mtl::TextureRef = unsafe { &*(texture_ptr as *const mtl::TextureRef) };
 
-    let tex_handle =
-        register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
+    let tex_handle = register_surface_texture(state, device_handle, texture, width, height, format, bindless_slot)?;
 
     let image_index = {
         let ss = state.surfaces.get_mut(&surface).expect("surface registered above");
@@ -401,7 +398,8 @@ pub(super) fn finish_acquire(
         ss.drawable_texture_handles[frame_slot] = Some(tex_handle);
         ss.current_texture_handle = Some(tex_handle);
         ss.last_acquired_image_index = Some(image_index);
-        ss.pending_acquire_count.fetch_add(1, std::sync::atomic::Ordering::Release);
+        ss.pending_acquire_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         image_index
     };
 
@@ -951,7 +949,9 @@ pub(super) fn resize(state: &mut MetalState, surface: SurfaceHandle, width: u32,
         let () = msg_send![layer, setDrawableSize: size];
     }
 
-    surface_state.pending_acquire_count.store(0, std::sync::atomic::Ordering::Release);
+    surface_state
+        .pending_acquire_count
+        .store(0, std::sync::atomic::Ordering::Release);
     if let Some(device_handle) = state.surfaces.get(&surface).map(|s| s.device_handle) {
         for sc_arc in state.contexts.values() {
             let sc = sc_arc.lock().unwrap();

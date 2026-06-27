@@ -741,11 +741,7 @@ impl GpuBackend for MetalBackend {
         surface: SurfaceHandle,
         ctx: ContextHandle,
     ) -> Result<Option<Box<dyn crate::backend::SurfaceAcquireWork>>> {
-        Ok(Some(surface::take_surface_acquire_work(
-            &mut self.state,
-            surface,
-            ctx,
-        )?))
+        Ok(Some(surface::take_surface_acquire_work(&mut self.state, surface, ctx)?))
     }
 
     fn finish_surface_acquire(
@@ -754,12 +750,8 @@ impl GpuBackend for MetalBackend {
         ctx: ContextHandle,
         drawable: crate::backend::SurfaceAcquireDrawable,
     ) -> Result<(FrameToken, TextureHandle)> {
-        let (image, present_slot) = surface::finish_surface_acquire_from_drawable(
-            &mut self.state,
-            surface,
-            ctx,
-            drawable,
-        )?;
+        let (image, present_slot) =
+            surface::finish_surface_acquire_from_drawable(&mut self.state, surface, ctx, drawable)?;
         let tex =
             surface::frame_texture(&self.state, surface).context("begin_frame: surface frame texture unavailable")?;
         Ok((

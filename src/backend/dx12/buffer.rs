@@ -1626,7 +1626,7 @@ pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
 /// upload resource is ready before command recording begins.
 pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferHandle, min_size: u64) -> Result<()> {
-    let device_handle = {
+    let (device_handle, _) = {
         let buffers_read = state.buffers.read().unwrap();
         let buffer = buffers_read
             .entries
@@ -1635,7 +1635,7 @@ pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferH
         if buffer.upload_buffer.is_some() {
             return Ok(());
         }
-        buffer.device_handle
+        (buffer.device_handle, ())
     };
     let chunk_size = min_size.min(UPLOAD_CHUNK_SIZE);
     let logical_device = state

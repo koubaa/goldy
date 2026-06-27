@@ -1035,6 +1035,7 @@ pub(crate) struct PresentSubmitOptions<'a> {
 /// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
 /// bindings through `present_slots` and retains present-touching partitions per
 /// backing slot (immutable CB per swapchain image index).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     cache: &mut Option<CompiledCacheEntry>,
     context: &crate::Context,

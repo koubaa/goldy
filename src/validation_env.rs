@@ -123,7 +123,7 @@ pub(crate) fn retained_cb_reuse_disabled() -> bool {
     env_truthy("GOLDY_DISABLE_CB_REUSE") || crate::gpu_profiler::gpu_profile_enabled()
 }
 
-/// When true, [`crate::PresentGrant::consume`] acquires the next swapchain drawable
+/// When true, [`crate::Grant::consume`] on a [`crate::PresentGrant`] acquires the next swapchain drawable
 /// after present and stashes it for the following [`crate::Scheme::submit`], even
 /// when the pool was not created with [`crate::SwapchainPoolOptions::speculative_acquire`].
 ///

@@ -613,7 +613,7 @@ impl Device {
         self.inner.vram_allocator.set_allocation_policy(policy)
     }
 
-    /// Install an allocation policy if the device still has the default [`NoPolicy`](crate::NoPolicy).
+    /// Install an allocation policy if the device still has the default [`crate::NoPolicy`].
     pub fn ensure_allocation_policy(
         &self,
         policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,

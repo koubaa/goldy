@@ -898,8 +898,7 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         // Present copy/signal uses the device sync fence; per-context `progress` alone
         // can lag behind `return_fence` values stored in pending_swapchain_returns.
-        let swapchain_retire_progress =
-            progress.max(context::device_retired(&self.state, device_handle));
+        let swapchain_retire_progress = progress.max(context::device_retired(&self.state, device_handle));
         let signal_queue = self
             .state
             .contexts

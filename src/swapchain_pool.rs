@@ -5,8 +5,8 @@
 //! records the lease once; each [`crate::Scheme::submit`] acquires the next
 //! drawable and resolves it through the present partition retention path.
 //!
-//! When [`SwapchainPoolOptions::speculative_acquire`] is set, [`crate::PresentGrant::consume`]
-//! may stash the next drawable on the pool so the render thread's subsequent
+//! When [`SwapchainPoolOptions::speculative_acquire`] is set, [`crate::Grant::consume`] on a
+//! [`crate::PresentGrant`] may stash the next drawable on the pool so the render thread's subsequent
 //! `submit` avoids a synchronous acquire.
 
 use crate::backend::TextureHandle;
@@ -24,12 +24,12 @@ pub(crate) struct SwapchainPoolInner {
     surface: RwLock<Surface>,
     /// Client-stated max in-flight drawables (present pipeline depth).
     depth: u32,
-    /// When true, [`crate::PresentGrant::consume`] may acquire the next drawable
+    /// When true, [`crate::Grant::consume`] on a [`crate::PresentGrant`] may acquire the next drawable
     /// for the following submit.
     pub(crate) speculative_acquire: bool,
     /// Serializes depth checks and synchronous acquires (render + present threads).
     acquire_mutex: Mutex<()>,
-    /// Drawable acquired speculatively by [`crate::PresentGrant::consume`] for the next submit.
+    /// Drawable acquired speculatively by [`crate::Grant::consume`] on a [`crate::PresentGrant`] for the next submit.
     speculative_acquire_slot: Mutex<Option<ResolvedPresentSlotData>>,
 }
 
@@ -155,7 +155,7 @@ impl SwapchainPool {
         surface.pending_acquire_count()
     }
 
-    /// Block until [`Self::acquire_slot`] would succeed (`pending_acquire_count` `<` [`depth`](Self::depth)).
+    /// Block until an acquire slot would succeed (`pending_acquire_count` `<` [`depth`](Self::depth)).
     ///
     /// On flip-model backends (DX12/Vulkan) present ack alone is insufficient: the drawable
     /// stays counted until its return fence retires. Poll `ctx` so
@@ -218,7 +218,7 @@ impl SwapchainPool {
         Self::acquire_slot(pool)
     }
 
-    /// Stash a drawable acquired during [`crate::PresentGrant::consume`] for the next submit.
+    /// Stash a drawable acquired during [`crate::Grant::consume`] on a [`crate::PresentGrant`] for the next submit.
     pub(crate) fn stash_speculative_acquire(pool: &Arc<SwapchainPoolInner>, slot: ResolvedPresentSlotData) {
         let mut guard = pool.speculative_acquire_slot.lock().unwrap();
         if let Some((_, old_frame, _, _)) = guard.take() {

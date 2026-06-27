@@ -16,7 +16,7 @@ use crate::error::GoldyError;
 use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
-use crate::swapchain_pool::{PresentLease, SwapchainPool};
+use crate::swapchain_pool::PresentLease;
 use crate::task_graph::cross_submit::ResourceKey;
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
@@ -176,9 +176,9 @@ struct SubmissionData {
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
     staging_pools: Vec<Arc<GrantStagingPool>>,
-    /// Acquired swapchain frames for present grants; consumed by [`PresentGrant::consume`].
+    /// Acquired swapchain frames for present grants; consumed by [`Grant::consume`].
     present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
-    /// Resolvers for present easement timeline promises; resolved by [`PresentGrant::consume`].
+    /// Resolvers for present easement timeline promises; resolved by [`Grant::consume`].
     present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
 }
 
@@ -1097,7 +1097,7 @@ impl Scheme {
     /// retained submissions.
     ///
     /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    /// and stored on the returned [`Submission`] for [`Grant::consume`].
     ///
     /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
     /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
@@ -1841,15 +1841,17 @@ impl IntoDispatch for &Parcel {
 ///   `resource_identity` is `None` for barrier-free resources such as samplers, which only need
 ///   a bindless slot.
 /// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
-type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>;
-type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
+pub(crate) type SchemeBindableResolution = (
+    Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
+    Option<u32>,
+);
 
 pub(crate) trait SchemeBindable {
-    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult;
+    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindableResolution;
 }
 
 impl SchemeBindable for Parcel {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindableResolution {
         (
             Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
@@ -1858,7 +1860,7 @@ impl SchemeBindable for Parcel {
 }
 
 impl SchemeBindable for crate::Buffer {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindableResolution {
         let parcel = self.whole();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
@@ -1868,7 +1870,7 @@ impl SchemeBindable for crate::Buffer {
 }
 
 impl<T> SchemeBindable for Lease<T> {
-    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindableResolution {
         let parcel = &scheme.leases[self.id.0 as usize];
         // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
         // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
@@ -1883,7 +1885,7 @@ impl<T> SchemeBindable for Lease<T> {
 }
 
 impl SchemeBindable for crate::Sampler {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindableResolution {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
@@ -1891,7 +1893,7 @@ impl SchemeBindable for crate::Sampler {
 }
 
 impl SchemeBindable for crate::Texture {
-    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindableResolution {
         // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
         // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
         // fall back to the UAV bindless index — mirroring the TaskGraph path's behaviour in
@@ -2264,6 +2266,7 @@ mod tests {
     use crate::device::Device;
     use crate::retained_pool::RetainedPool;
     use crate::shader::ShaderModule;
+    use crate::SwapchainPool;
     use crate::task_graph::NodeAccess;
     use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
@@ -3596,11 +3599,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         }
 
         let surface = spool.pending_acquire_count();
-        assert_eq!(
-            surface,
-            0,
-            "cancelled frame must decrement pending_acquire_count"
-        );
+        assert_eq!(surface, 0, "cancelled frame must decrement pending_acquire_count");
 
         // Depth-2 pool should allow another acquire immediately after cancel.
         let _submission2 = scheme.submit().expect("submit after cancel");

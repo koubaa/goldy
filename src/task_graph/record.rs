@@ -346,7 +346,7 @@ impl ComputeNodeRecord {
     /// Declare a retained parcel as a graph dependency and shader binding slot atomically.
     ///
     /// This is the preferred entry-point for language-binding consumers. Descriptor access
-    /// (SRV vs UAV) is inferred from pipeline reflection captured at construction, matching
+    /// (SRV vs UAV) is inferred from pipeline reflection slot access, matching
     /// [`crate::scheme::SchemeNodeBuilder::with_parcel`]. Returns `None` when no bindless slot
     /// exists for the inferred descriptor access.
     pub fn with_parcel(&mut self, parcel: &crate::Parcel, node_access: NodeAccess) -> Option<&mut Self> {

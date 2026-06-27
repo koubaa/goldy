@@ -700,7 +700,7 @@ pub(super) fn render(
     Ok(())
 }
 
-#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
+#[allow(dead_code)]
 pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, submit_tv: u64) -> Result<u64> {
     let work = prepare_present_work(state, frame, submit_tv)?;
     let finish = work.run()?;
@@ -943,7 +943,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
 }
 
 /// Present a rendered surface (legacy single-lock entry — prefer split path).
-#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
+#[allow(dead_code)]
 pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<()> {
     present_frame(state, frame, 0)?;
     Ok(())
