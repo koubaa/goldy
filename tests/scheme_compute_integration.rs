@@ -16,8 +16,8 @@ mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
-    BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
-    RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
+    BufferKind, ComputePipeline, Device, Grant, GrantBuffer, NodeAccess, Parcel, ReadGrant, RetainedPool, Sampler,
+    Scheme, ShaderModule, StructuredBufferElement, Submission,
 };
 use std::sync::Arc;
 use submission::submission_context;

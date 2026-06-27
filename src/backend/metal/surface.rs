@@ -809,7 +809,6 @@ impl PresentGpuWork for MetalPresentGpuWork {
                     signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     if let Ok(mut pending) = return_pending.lock() {
                         pending.push(super::types::PendingSwapchainReturn {
-                            image_index: idx,
                             pending_acquire_count: std::sync::Arc::clone(&pending_acquire_count),
                         });
                     }

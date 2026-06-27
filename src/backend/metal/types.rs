@@ -1203,7 +1203,6 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Present-completion bookkeeping drained by [`ContextPollReader::poll_signals`].
 pub(crate) struct PendingSwapchainReturn {
-    pub image_index: u32,
     pub pending_acquire_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
