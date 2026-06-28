@@ -5,7 +5,7 @@
 //!   Perfetto-compatible Chrome trace JSON array (pretty-printed) to disk after each readback.
 //!
 //! While profiling is enabled, retained command-buffer resubmit is disabled (see
-//! `validation_env::retained_cb_reuse_disabled`): each submit re-records with a
+//! [`crate::validation_env::retained_cb_reuse_disabled`]): each submit re-records with a
 //! fresh timestamp query heap so resubmit never references a destroyed heap.
 
 use std::path::{Path, PathBuf};
