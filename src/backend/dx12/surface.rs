@@ -904,7 +904,15 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
             unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-            return_fence = execute_command_lists_and_signal_device(&self.logical_device, &[Some(cmd_list)])?;
+            let tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
+            super::pending_submit::enqueue_present_copy(
+                &self.logical_device,
+                vec![Some(cmd_list)],
+                tv,
+            )?;
+            self.logical_device.submission_worker.wait_submitted(tv)?;
+            self.logical_device.submission_worker.check_error()?;
+            return_fence = tv;
             scratch_layout_updated = true;
         }
 

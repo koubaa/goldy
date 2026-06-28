@@ -89,7 +89,38 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 }
 
 pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
-    // Remove from both maps first; the fence index must not outlive the context.
+    // Snapshot in-flight work before remove. Async pending submits hold `Arc<Mutex<sc>>`;
+    // flush the worker so those refs drop before `try_unwrap` below.
+    let drain = {
+        let contexts = state.contexts.read().unwrap();
+        let Some(sc_arc) = contexts.get(&ctx) else {
+            return;
+        };
+        let sc = sc_arc.lock().expect("context Mutex poisoned");
+        (sc.device, sc.last_submitted_seq, sc.fence.clone())
+    };
+    let (device, last_submitted_seq, ctx_fence) = drain;
+    if let Some(ld) = state.devices.get(&device) {
+        if let Err(e) = ld.submission_worker.flush() {
+            tracing::warn!("context {ctx} destroy: submission worker flush failed: {e:#}");
+        }
+        if last_submitted_seq > 0 {
+            if let Err(e) = ld.submission_worker.wait_submitted(last_submitted_seq) {
+                tracing::warn!("context {ctx} destroy: wait_submitted failed: {e:#}");
+            }
+            let submitted = ld
+                .submission_worker
+                .submitted_epoch()
+                .load(std::sync::atomic::Ordering::Acquire);
+            let fence_wait = last_submitted_seq.min(submitted);
+            if fence_wait > 0 {
+                let _ = super::utils::wait_for_fence(&ctx_fence, fence_wait);
+            }
+        }
+        let _ = ld.submission_worker.check_error();
+    }
+
+    // Remove from both maps; the fence index must not outlive the context.
     let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
         return;
     };
@@ -98,15 +129,13 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     // Cloned per-context handles (`ContextTimelineReader`, `ContextDeferredDeletionFlush`, …)
     // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
     let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
-        .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
+        .unwrap_or_else(|arc| {
+            panic!(
+                "context {ctx} Arc still has {} extra owners at destroy",
+                std::sync::Arc::strong_count(&arc).saturating_sub(1)
+            )
+        });
     let mut sc = sc_mutex.into_inner().expect("context Mutex poisoned");
-
-    let device = sc.device;
-
-    // Drain in-flight GPU work before releasing command allocators / retained CLs.
-    if sc.last_submitted_seq > 0 {
-        let _ = super::utils::wait_for_fence(&sc.fence, sc.last_submitted_seq);
-    }
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
     if let Some(ld) = state.devices.get(&device) {

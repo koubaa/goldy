@@ -698,6 +698,9 @@ pub(crate) struct LogicalDevice {
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
     pub vk_timestamp_period_ns: f32,
+
+    /// Async FIFO worker for `vkQueueSubmit2` (render thread enqueues, worker runs).
+    pub submission_worker: Arc<super::super::submission_worker::SubmissionWorker>,
 }
 
 /// A Vulkan command buffer retained for resubmission.
@@ -730,6 +733,48 @@ impl LogicalDevice {
     pub unsafe fn unmap_memory2(&self, memory: vk::DeviceMemory) -> ash::prelude::VkResult<()> {
         let info = vk::MemoryUnmapInfoKHR::default().memory(memory);
         (self.map_memory2.fp().unmap_memory2_khr)(self.device.handle(), &info).result()
+    }
+
+    /// Drain async submits, then wait on all queues under `queue_lock`.
+    ///
+    /// Required whenever the submission worker may be calling `vkQueueSubmit2` concurrently.
+    pub(crate) fn synchronized_device_wait_idle(&self) -> Result<(), vk::Result> {
+        let _ = self.submission_worker.flush();
+        let _ = self.submission_worker.check_error();
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.device.device_wait_idle() }
+    }
+
+    /// Drain async submits, then wait on the graphics/compute queue under `queue_lock`.
+    pub(crate) fn synchronized_queue_wait_idle(&self) -> Result<(), vk::Result> {
+        let _ = self.submission_worker.flush();
+        let _ = self.submission_worker.check_error();
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.device.queue_wait_idle(self.queue) }
+    }
+
+    /// Legacy `vkQueueSubmit` under worker drain + `queue_lock` (safe vs submission worker).
+    pub(crate) fn synchronized_queue_submit(
+        &self,
+        submit_infos: &[vk::SubmitInfo],
+        fence: vk::Fence,
+    ) -> Result<(), vk::Result> {
+        let _ = self.submission_worker.flush();
+        let _ = self.submission_worker.check_error();
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.device.queue_submit(self.queue, submit_infos, fence) }
+    }
+
+    /// Legacy `vkQueueSubmit2` under worker drain + `queue_lock` (safe vs submission worker).
+    pub(crate) fn synchronized_queue_submit2(
+        &self,
+        submit_infos: &[vk::SubmitInfo2],
+        fence: vk::Fence,
+    ) -> Result<(), vk::Result> {
+        let _ = self.submission_worker.flush();
+        let _ = self.submission_worker.check_error();
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.device.queue_submit2(self.queue, submit_infos, fence) }
     }
 }
 

@@ -95,6 +95,23 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
 }
 
 pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
+    let drain = {
+        let contexts = state.contexts.read().unwrap();
+        let Some(sc_arc) = contexts.get(&ctx) else {
+            return;
+        };
+        let sc = sc_arc.lock().unwrap();
+        (sc.device, sc.last_submitted_seq, sc.timeline_semaphore)
+    };
+    let (device, last_seq, timeline_semaphore) = drain;
+    if let Some(ld) = state.devices.get(&device) {
+        let _ = ld.submission_worker.flush();
+        if last_seq > 0 {
+            let _ = ld.submission_worker.wait_submitted(last_seq);
+        }
+        let _ = ld.submission_worker.check_error();
+    }
+
     let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
         return;
     };

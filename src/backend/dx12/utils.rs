@@ -198,6 +198,84 @@ pub(super) fn execute_command_lists_and_signal_device(
     Ok(fence_value)
 }
 
+/// Run `f` while holding the device command queue lock.
+///
+/// D3D12 marks the queue parameter of `Wait`/`ExecuteCommandLists`/`Signal` as externally
+/// synchronized; all queue operations must share this lock across threads.
+pub(super) fn with_queue_lock<F, R>(logical_device: &LogicalDevice, f: F) -> Result<R>
+where
+    F: FnOnce() -> Result<R>,
+{
+    let _guard = logical_device.queue_lock.lock().unwrap();
+    f()
+}
+
+/// GPU-side queue waits, execute, and context-fence signal under a single queue lock.
+/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+pub(super) fn execute_preallocated_context_submit(
+    logical_device: &LogicalDevice,
+    ctx_fence: &ID3D12Fence,
+    command_lists: &[Option<ID3D12CommandList>],
+    queue_waits: &[(ID3D12Fence, u64)],
+    tv: u64,
+) -> Result<()> {
+    with_queue_lock(logical_device, || {
+        if !queue_waits.is_empty() {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.queue_wait");
+            for (fence, value) in queue_waits {
+                unsafe {
+                    logical_device
+                        .command_queue
+                        .Wait(fence, *value)
+                        .context("cross-submit GPU queue Wait")?;
+                }
+            }
+        }
+        {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
+            unsafe {
+                logical_device.command_queue.ExecuteCommandLists(command_lists);
+            }
+            unsafe {
+                logical_device.command_queue.Signal(ctx_fence, tv)
+            }
+            .context("Failed to signal context fence")?;
+        }
+        Ok(())
+    })
+}
+
+/// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
+/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+pub(super) fn signal_preallocated_context(
+    logical_device: &LogicalDevice,
+    ctx_fence: &ID3D12Fence,
+    command_lists: &[Option<ID3D12CommandList>],
+    tv: u64,
+) -> Result<()> {
+    execute_preallocated_context_submit(logical_device, ctx_fence, command_lists, &[], tv)
+}
+
+/// Execute command lists and signal the device fence under [`LogicalDevice::queue_lock`].
+/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+pub(super) fn signal_preallocated_device(
+    logical_device: &LogicalDevice,
+    command_lists: &[Option<ID3D12CommandList>],
+    tv: u64,
+) -> Result<()> {
+    with_queue_lock(logical_device, || {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
+        unsafe {
+            logical_device.command_queue.ExecuteCommandLists(command_lists);
+        }
+        unsafe {
+            logical_device.command_queue.Signal(&logical_device.fence, tv)
+        }
+        .context("Failed to signal device fence")?;
+        Ok(())
+    })
+}
+
 /// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
 pub(super) fn execute_command_lists_and_signal_context(
     logical_device: &LogicalDevice,
@@ -220,7 +298,11 @@ pub(super) fn execute_command_lists_and_signal_context(
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    if unsafe { fence.GetCompletedValue() } < value {
+    let completed = unsafe { fence.GetCompletedValue() };
+    if completed == u64::MAX {
+        anyhow::bail!("GPU device removed while waiting for fence value {value}");
+    }
+    if completed < value {
         let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
         unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;

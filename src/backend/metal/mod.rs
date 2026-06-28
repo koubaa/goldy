@@ -17,6 +17,7 @@ mod compute;
 mod context;
 mod device;
 mod frame_table;
+mod pending_submit;
 mod pipeline;
 mod render_commands;
 mod render_target;
@@ -85,6 +86,9 @@ pub(in crate::backend::metal) fn wait_device_idle(state: &MetalState, device: De
     if target == 0 {
         return Ok(());
     }
+    ld.submission_worker
+        .wait_submitted_if_scheduled(target, target)?;
+    ld.submission_worker.check_error()?;
     const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
     let reached = context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT);
     if !reached {
@@ -835,6 +839,15 @@ impl GpuBackend for MetalBackend {
     }
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
+        let ld = self
+            .state
+            .devices
+            .get(&device)
+            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+        let horizon = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed);
+        ld.submission_worker
+            .wait_submitted_if_scheduled(value, horizon)?;
+        ld.submission_worker.check_error()?;
         let timeout = std::time::Duration::from_secs(60);
         if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
             Ok(())

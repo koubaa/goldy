@@ -28,5 +28,8 @@ pub fn shared_device() -> Arc<Device> {
 
 /// Serialize tests that borrow [`shared_device`]. Hold the guard for the whole test.
 pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }

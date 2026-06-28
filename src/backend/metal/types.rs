@@ -685,6 +685,8 @@ pub(crate) struct LogicalDevice {
     /// serialising the queue-enqueue moment.  Cloned out of `LogicalDevice` before
     /// recording begins so the global backend lock can be dropped before commit.
     pub queue_lock: Arc<Mutex<()>>,
+    /// Async FIFO worker for `command_buffer.commit()` (render thread enqueues, worker runs).
+    pub submission_worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
 }
 
 impl LogicalDevice {

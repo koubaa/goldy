@@ -778,6 +778,8 @@ pub(crate) struct LogicalDevice {
     /// Phase 5 lock-free submit clones this `Arc` and holds it only across the GPU
     /// enqueue, matching Vulkan's `queue_lock` and Metal's present/compute pairing.
     pub queue_lock: Arc<Mutex<()>>,
+    /// Async FIFO worker for `ExecuteCommandLists` + `Signal` (render thread enqueues, worker runs).
+    pub submission_worker: std::sync::Arc<super::super::submission_worker::SubmissionWorker>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
@@ -850,7 +852,11 @@ pub(crate) fn destroy_pending_deletion(
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
             let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
+            let signaled = super::utils::with_queue_lock(ld, || {
+                unsafe { ld.command_queue.Signal(&ld.fence, fv) }
+                    .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
+            });
+            if signaled.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
             drop(resource);
@@ -882,7 +888,11 @@ pub(crate) fn destroy_pending_deletion(
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
             let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
+            let signaled = super::utils::with_queue_lock(ld, || {
+                unsafe { ld.command_queue.Signal(&ld.fence, fv) }
+                    .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
+            });
+            if signaled.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
             drop(resource);

@@ -37,6 +37,7 @@ mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod frame_table;
+mod pending_submit;
 mod pipeline;
 mod process_shared;
 mod pso_cache;
@@ -201,6 +202,7 @@ impl Dx12Backend {
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
+            let _ = logical_device.submission_worker.flush();
             let _ = self.wait_for_gpu(&logical_device);
             // Advance timeline_next past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
@@ -363,6 +365,12 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         if self.gpu_progress(ctx) >= value {
             return Ok(None);
         }
+        let device_handle = context::context_device(&self.state, ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            ld.submission_worker
+                .wait_submitted_if_scheduled(value, horizon)?;
+        }
         let fence = self
             .state
             .context_fences
@@ -377,6 +385,10 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let _ = ld.submission_worker.flush();
+            ld.submission_worker.check_error()?;
+        }
         let fence = self
             .state
             .context_fences
@@ -853,7 +865,12 @@ impl GpuBackend for Dx12Backend {
         if context::device_retired(&self.state, device) >= value {
             return Ok(());
         }
-        // Find the context that submitted value (or past it) and wait on its fence.
+        if let Some(ld) = self.state.devices.get(&device) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            ld.submission_worker
+                .wait_submitted_if_scheduled(value, horizon)?;
+            ld.submission_worker.check_error()?;
+        }
         let fence = self
             .state
             .contexts
@@ -942,6 +959,16 @@ impl GpuBackend for Dx12Backend {
         timeout_ms: u32,
     ) -> Result<bool> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            if !ld
+                .submission_worker
+                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
+            {
+                return Ok(false);
+            }
+            ld.submission_worker.check_error()?;
+        }
         let fence = self
             .state
             .context_fences

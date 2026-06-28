@@ -1427,6 +1427,29 @@ impl IrSubmitState {
         }
     }
 
+    /// Drop backend retained command lists referenced by the schedule cache.
+    ///
+    /// Call after waiting for in-flight submissions so re-execution cannot overlap
+    /// lease return or allocator reuse.
+    pub fn release_backend_retained_graphs(&mut self, ctx: &crate::Context) {
+        let Some(entry) = &self.schedule_cache else {
+            return;
+        };
+        let handle = ctx.backend_handle();
+        let session = ctx.submit_session();
+        let mut keys = std::collections::HashSet::new();
+        for key in entry.partition_retention_keys.iter().flatten() {
+            keys.insert(*key);
+        }
+        for slot_keys in entry.partition_slot_keys.iter().flatten() {
+            keys.extend(slot_keys.iter().copied());
+        }
+        for key in keys {
+            session.evict_retained(handle, key);
+        }
+        self.invalidate_retention();
+    }
+
     pub fn resource_stamps(&self) -> &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>> {
         &self.resource_stamps
     }

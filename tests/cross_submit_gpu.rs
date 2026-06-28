@@ -62,11 +62,11 @@ fn read_u32(grant: &ReadGrant<goldy::GrantBuffer>, submission: &Submission) -> u
 fn saxpy_style_chain_closed_form() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
     let pipe = ComputePipeline::new(&device, &shader).expect("pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("buf");
@@ -90,13 +90,13 @@ fn saxpy_style_chain_closed_form() {
 fn war_write_after_read_pipelined_overwrite() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer_with_data(&[7u32; 1], BufferKind::Scattered)
         .expect("buf");
@@ -156,11 +156,11 @@ fn assert_retained_resubmit_stats(device: &Device, reader: &Scheme, expected_res
 fn retained_reader_observes_independent_writer_across_resubmits() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("shader");
     let pipe = ComputePipeline::new(&device, &shader).expect("pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let src = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("src");
@@ -188,11 +188,11 @@ fn retained_reader_observes_independent_writer_across_resubmits() {
 fn retained_waw_overwrites_independent_upload() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let src = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("src");
@@ -255,13 +255,13 @@ fn retained_reader_cross_context_observes_independent_writer() {
 fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let parcel_p = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("parcel_p");
@@ -306,13 +306,13 @@ fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
 fn retained_reader_dirtied_once_by_new_writer_then_stable() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("parcel");
@@ -361,13 +361,13 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
 fn topology_re_record_produces_correct_barriers_and_data() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("write pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("parcel");
@@ -396,13 +396,13 @@ fn topology_re_record_produces_correct_barriers_and_data() {
 fn repeated_resubmit_of_b_never_dirties_a() {
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let inc_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let inc_pipe = ComputePipeline::new(&device, &inc_shader).expect("inc pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("read pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let parcel = pool
         .acquire_buffer_with_data(&[0u32; 1], BufferKind::Scattered)
         .expect("parcel");
@@ -452,13 +452,13 @@ fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard() {
 
     let _guard = test_lock();
     let device = shared_device();
-    let ctx = submission_context(&device);
     let inc_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let inc_pipe = ComputePipeline::new(&device, &inc_shader).expect("pipe");
     let read_pipe = ComputePipeline::new(&device, &read_shader).expect("pipe");
 
     let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let record = pool
         .acquire_record([field("a", Init::data(&[0u32; 1])), field("b", Init::data(&[0u32; 1]))])
         .expect("acquire_record");

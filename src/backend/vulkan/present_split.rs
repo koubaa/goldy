@@ -4,7 +4,6 @@ use super::types::{SharedLogicalDevice, VulkanState};
 use super::SurfaceHandle;
 use anyhow::{Context, Result};
 use ash::{khr, vk};
-use std::sync::atomic::Ordering;
 
 pub(super) fn prepare_present_work(
     state: &VulkanState,
@@ -294,62 +293,26 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        let copy_signal_timeline = if !self.render_pass_submitted {
-            let signal_timeline_value = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-            signal_timeline = Some(signal_timeline_value);
-            copy_timeline = Some(signal_timeline_value);
-            Some(signal_timeline_value)
-        } else {
-            None
-        };
+        if !self.render_pass_submitted {
+            let copy_tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
+            signal_timeline = Some(copy_tv);
+            copy_timeline = Some(copy_tv);
+            super::pending_submit::enqueue_vulkan_present_copy(
+                &self.logical_device,
+                self.copy_cb,
+                self.timeline_sem,
+                self.frame_compute_timeline_value,
+                self.image_available_sem,
+                self.render_finished_sem,
+                copy_tv,
+            )?;
+            self.logical_device.submission_worker.wait_submitted(copy_tv)?;
+            self.logical_device.submission_worker.check_error()?;
+        }
 
         let queue_lock = std::sync::Arc::clone(&self.logical_device.queue_lock);
-        // Hold queue_lock across copy submit and WSI present: both APIs mark the queue
-        // parameter as externally synchronized. TID_PRESENT may overlap TID_RENDER submits.
         let result = {
             let _queue_guard = queue_lock.lock().unwrap();
-            if let Some(signal_timeline_value) = copy_signal_timeline {
-                let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(self.copy_cb);
-                let wait_compute_done = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.timeline_sem)
-                    .value(self.frame_compute_timeline_value)
-                    .stage_mask(vk::PipelineStageFlags2::TRANSFER);
-                let wait_acq = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.image_available_sem)
-                    .value(0)
-                    .stage_mask(vk::PipelineStageFlags2::TRANSFER);
-                let waits = [wait_compute_done, wait_acq];
-                let sig_render_finished = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.render_finished_sem)
-                    .value(0)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-                let sig_timeline = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.timeline_sem)
-                    .value(signal_timeline_value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-                let signals = [sig_render_finished, sig_timeline];
-                let submit = vk::SubmitInfo2::default()
-                    .wait_semaphore_infos(&waits)
-                    .command_buffer_infos(std::slice::from_ref(&cmd_info))
-                    .signal_semaphore_infos(&signals);
-                let _sz = crate::tracy_zone!("vk.present.queue_submit2_copy");
-                if let Err(e) = unsafe {
-                    self.logical_device.device.queue_submit2(
-                        self.logical_device.queue,
-                        std::slice::from_ref(&submit),
-                        vk::Fence::null(),
-                    )
-                } {
-                    tracing::warn!(
-                        self.surface_handle,
-                        present_slot = self.present_slot,
-                        image_index = self.image_index,
-                        result = ?e,
-                        "present copy queue_submit2 failed"
-                    );
-                    anyhow::bail!("Failed to submit present copy work: {:?}", e);
-                }
-            }
             let _pz = crate::tracy_zone!("vk.present.queue_present");
             unsafe { swapchain_loader.queue_present(self.logical_device.queue, &present_info) }
         };

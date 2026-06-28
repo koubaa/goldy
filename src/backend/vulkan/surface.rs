@@ -476,11 +476,7 @@ fn wait_surface_gpu_idle(state: &super::types::VulkanState, surface_handle: Surf
     // waiting on `render_finished_semaphore` after the copy submit returns. Drain the
     // queue before destroying per-frame binary semaphores (VUID-vkDestroySemaphore).
     if let Some(ld) = state.devices.get(&device_handle) {
-        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        unsafe {
-            let _ = ld.device.queue_wait_idle(ld.queue);
-        }
+        let _ = ld.synchronized_queue_wait_idle();
     }
 }
 
@@ -1234,17 +1230,10 @@ pub(super) fn render(
         .signal_semaphore_infos(&signals);
 
     let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
-    let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
 
-    {
-        let _queue_guard = queue_lock.lock().unwrap();
-        unsafe {
-            logical_device
-                .device
-                .queue_submit2(logical_device.queue, std::slice::from_ref(&submit), in_flight_fence)
-        }
-    }
-    .context("Failed to submit render command buffer")?;
+    logical_device
+        .synchronized_queue_submit2(std::slice::from_ref(&submit), in_flight_fence)
+        .context("Failed to submit render command buffer")?;
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[present_slot];
@@ -1363,7 +1352,7 @@ pub(super) fn resize(
     }
 
     // Wait for all in-flight frames to complete before resizing
-    unsafe { logical_device.device.device_wait_idle() }?;
+    logical_device.synchronized_device_wait_idle()?;
 
     // Destroy old depth buffer (must be before swapchain recreation)
     if let Some(surface_state) = surfaces.get(&surface_handle) {
@@ -1832,7 +1821,6 @@ fn ensure_scratch_texture_slot(
     // can write immediately on the first frame that uses this slot.
     {
         let ld = state.devices.get(&device_handle).context("Device invalid")?;
-        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         unsafe {
             let alloc_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(ld.command_pool)
@@ -1871,16 +1859,10 @@ fn ensure_scratch_texture_slot(
 
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
             let submit = vk::SubmitInfo2::default().command_buffer_infos(std::slice::from_ref(&cb_info));
-            // Hold queue_lock across both submit and wait_idle: vkQueueWaitIdle
-            // is also externally synchronized on the queue (Vulkan spec).
-            let _queue_guard = queue_lock.lock().unwrap();
-            ld.device
-                .queue_submit2(ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
+            ld.synchronized_queue_submit2(std::slice::from_ref(&submit), vk::Fence::null())
                 .context("Failed to submit scratch texture init")?;
-            ld.device
-                .queue_wait_idle(ld.queue)
+            ld.synchronized_queue_wait_idle()
                 .context("queue_wait_idle after scratch init")?;
-            drop(_queue_guard);
             ld.device
                 .free_command_buffers(ld.command_pool, std::slice::from_ref(&cb));
         }

@@ -467,12 +467,10 @@ pub(super) fn write(
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
         logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .synchronized_queue_submit(&[submit_info], vk::Fence::null())
             .context("Failed to submit command buffer")?;
         logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
+            .synchronized_queue_wait_idle()
             .context("Failed to wait for queue")?;
 
         // Cleanup
@@ -694,12 +692,10 @@ pub(super) fn write_region(
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
         logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .synchronized_queue_submit(&[submit_info], vk::Fence::null())
             .context("Failed to submit command buffer")?;
         logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
+            .synchronized_queue_wait_idle()
             .context("Failed to wait for queue")?;
 
         // Cleanup
@@ -994,16 +990,11 @@ pub(super) fn read_to_cpu(
     }
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-    unsafe {
-        logical_device.device.queue_submit(
-            logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            vk::Fence::null(),
-        )
-    }
-    .context("Failed to submit command buffer")?;
+    logical_device
+        .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
+        .context("Failed to submit command buffer")?;
 
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
+    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
 
     unsafe {
         logical_device
@@ -1147,11 +1138,9 @@ pub(super) fn transition_image_layout(
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
-        let sub = logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null());
+        let sub = logical_device.synchronized_queue_submit(&[submit_info], vk::Fence::null());
         sub.context("Failed to submit layout transition")?;
-        let wait = logical_device.device.queue_wait_idle(logical_device.queue);
+        let wait = logical_device.synchronized_queue_wait_idle();
         wait.context("Failed to wait for layout transition")?;
 
         logical_device

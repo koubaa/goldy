@@ -11,6 +11,9 @@
 //! - **Lease N=1**: scheme-held texture leases retain across resubmit; backing returns to
 //!   the transient pool on scheme drop.
 //!
+//! Uses a process-wide [`Device`] (see [`shared_device`]) and [`test_lock`] so parallel
+//! `cargo test` does not create/destroy many WARP devices at once.
+//!
 //! Anti-pattern policy (reviewed June 2026): no `gpu_progress()`, no
 //! `clear()`+rebuild, no raw bindless indices (goldy#210), no untimed parcel
 //! mutation (goldy#211), parcels bound as parcels.
@@ -18,31 +21,24 @@
 
 #[path = "common/submission.rs"]
 mod submission;
+#[path = "common/shared_device.rs"]
+mod shared_device;
 #[path = "common/upload.rs"]
 mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape},
-    BufferKind, ComputePipeline, Context, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
-    ReadGrant, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
+    BufferKind, ComputePipeline, Context, Device, Grant, GrantBuffer, NodeAccess, Parcel,
+    ReadGrant, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
     TextureKind,
 };
-use std::sync::Arc;
+use shared_device::{shared_device, test_lock};
 use submission::submission_context;
 
 fn read_grant_u32(grant: &ReadGrant<GrantBuffer>, submission: &Submission, count: usize) -> Vec<u32> {
     let loan = grant.consume(submission).expect("grant consume");
     assert_eq!(loan.len(), count * 4, "grant readback size");
     bytemuck::cast_slice(&loan).to_vec()
-}
-
-fn make_device() -> Device {
-    let instance = Instance::new().expect("Failed to create instance");
-    instance
-        .request_adapter(&RequestAdapterOptions::default())
-        .expect("Failed to request adapter")
-        .request_device(&DeviceDescriptor::default())
-        .expect("Failed to create device")
 }
 
 /// Copy input → output. Both parcels are declared in the scheme.
@@ -65,14 +61,15 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
 /// registration does not churn the retained worker.
 #[test]
 fn upload_graph_feeds_retained_worker_without_rerecord() {
-    let device = make_device();
+    let _guard = test_lock();
+    let device = shared_device();
     eprintln!("retained_replay backend: {:?}", device.backend_type());
-    let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let input = pool
         .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
         .expect("input parcel");
@@ -116,13 +113,14 @@ fn upload_graph_feeds_retained_worker_without_rerecord() {
 /// Copy-only scheme: pre-initialized input, no upload — retention hit on submission 1.
 #[test]
 fn clean_scheme_resubmits_without_rerecord() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let input = pool
         .acquire_buffer_with_data(&[1u32; 8], BufferKind::Scattered)
         .expect("input parcel");
@@ -178,8 +176,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 /// Indirect-dispatch scheme records once, then resubmits without re-record.
 #[test]
 fn indirect_scheme_resubmits_without_rerecord() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let write_pipe = ComputePipeline::new(
         &device,
@@ -192,7 +190,8 @@ fn indirect_scheme_resubmits_without_rerecord() {
     )
     .expect("create work pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let shape = pool
         .acquire_buffer_sized::<DispatchShape>(1, BufferKind::Scattered, BufferFlags::empty())
         .expect("shape buffer");
@@ -242,13 +241,14 @@ void cs_main(Scattered<uint> sel, ThreadId id) {
 
 #[test]
 fn selector_advances_across_identical_submissions() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let shader = ShaderModule::from_slang(&device, SELECTOR_SHADER).expect("compile selector shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let selector = pool
         .acquire_buffer_with_data(&[0u32], BufferKind::Scattered)
         .expect("selector parcel");
@@ -285,13 +285,14 @@ fn selector_advances_across_identical_submissions() {
 /// state. Both copy-shaders must produce correct results across interleaved submissions.
 #[test]
 fn two_schemes_on_one_context_do_not_collide() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
 
     // Scheme A: copies [1u32; 8] → out_a
     let in_a = pool
@@ -357,7 +358,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 /// Scheme-held texture lease: recorded once, then pure retention hits on resubmit.
 #[test]
 fn lease_texture_scheme_resubmits_without_rerecord() {
-    let device = make_device();
+    let _guard = test_lock();
+    let device = shared_device();
     let ctx = submission_context(&device);
 
     let shader = ShaderModule::from_slang(&device, LEASE_TEXTURE_SHADER).expect("compile texture shader");
@@ -394,7 +396,8 @@ fn lease_texture_scheme_resubmits_without_rerecord() {
 /// Dropping a scheme returns leased texture backing to the context transient pool.
 #[test]
 fn lease_backing_pool_hygiene() {
-    let device = make_device();
+    let _guard = test_lock();
+    let device = shared_device();
     let ctx = submission_context(&device);
 
     let outstanding_before = ctx.transient_outstanding_bytes().texture;
@@ -457,8 +460,8 @@ void cs_main(Scattered<uint> buf, ThreadId id) {
 /// Grant readback with N-backing: submit K and K+1 without waiting; both frames read correctly.
 #[test]
 fn grant_read_concurrent_frames_distinct_backings() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let pipe = ComputePipeline::new(
         &device,
@@ -466,7 +469,8 @@ fn grant_read_concurrent_frames_distinct_backings() {
     )
     .expect("create pipeline");
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -514,8 +518,8 @@ void cs_main(DirectSpatial<float4> output, ThreadId id) {
 /// Texture grant readback with N-backing: submit K and K+1 without waiting; both frames read correctly.
 #[test]
 fn grant_read_texture_concurrent_frames_distinct_backings() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("compile texture shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -525,7 +529,8 @@ fn grant_read_texture_concurrent_frames_distinct_backings() {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let texture = pool
         .acquire_texture(
             width,
@@ -581,11 +586,12 @@ fn fill_42_scheme(ctx: &Context, pipe: &ComputePipeline, buf: &Parcel) -> Scheme
 /// Second `grant.consume` on the same submission must fail (staging cell is single-consume).
 #[test]
 fn grant_read_double_read_same_frame_errors() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -602,11 +608,12 @@ fn grant_read_double_read_same_frame_errors() {
 /// Cloned frames share one staging cell; only one read succeeds.
 #[test]
 fn grant_read_cloned_frame_double_read_errors() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -626,10 +633,11 @@ fn grant_read_cloned_frame_double_read_errors() {
 /// Grant with no producing dispatch copies uninitialized parcel bytes (zeros on fresh acquire).
 #[test]
 fn grant_read_without_producing_dispatch_reads_zeros() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -647,11 +655,12 @@ fn grant_read_without_producing_dispatch_reads_zeros() {
 /// Grant node before dispatch in IR still reads post-dispatch bytes — copy runs after all dispatches.
 #[test]
 fn grant_read_before_dispatch_node_still_reads_producer_output() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -673,11 +682,12 @@ fn grant_read_before_dispatch_node_still_reads_producer_output() {
 /// Dropping a frame without reading returns staging; a later submission can still be read.
 #[test]
 fn grant_read_drop_frame_without_read_then_submit_and_read() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");
@@ -711,8 +721,8 @@ fn grant_read_drop_frame_without_read_then_submit_and_read() {
 /// command list.
 #[test]
 fn grant_read_texture_sequential_resubmit_correct_data() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
 
     let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("compile texture shader");
     let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
@@ -722,7 +732,8 @@ fn grant_read_texture_sequential_resubmit_correct_data() {
     let wg_x = width.div_ceil(8);
     let wg_y = height.div_ceil(8);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let texture = pool
         .acquire_texture(
             width,
@@ -764,11 +775,12 @@ fn grant_read_texture_sequential_resubmit_correct_data() {
 /// Many consecutive submits with dropped unread frames must not exhaust staging (pool recycles on frame drop).
 #[test]
 fn grant_read_many_dropped_frames_without_read_then_read_succeeds() {
-    let device = make_device();
-    let ctx = submission_context(&device);
+    let _guard = test_lock();
+    let device = shared_device();
     let pipe = fill_42_pipeline(&device);
 
-    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let mut pool = RetainedPool::new(device.clone());
+    let ctx = submission_context(&device);
     let buf = pool
         .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("output parcel");

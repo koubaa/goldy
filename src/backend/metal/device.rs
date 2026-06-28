@@ -124,6 +124,9 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         retired_floor: AtomicU64::new(0),
         deletion_queue: Mutex::new(DeletionQueue::new()),
         queue_lock: Arc::new(Mutex::new(())),
+        submission_worker: Arc::new(crate::backend::submission_worker::SubmissionWorker::new(
+            crate::backend::submission_worker::SUBMISSION_QUEUE_CAPACITY,
+        )),
     });
 
     super::frame_table::init_device(ld.as_ref());
@@ -269,6 +272,7 @@ pub(super) fn create_argument_encoders(
 /// Destroy a logical device and clean up resources owned by it.
 pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
     if let Some(ld) = state.devices.remove(&device_handle) {
+        let _ = ld.submission_worker.flush();
         ld.deletion_queue.lock().unwrap().flush_all();
         state.buffers.retain(|_, b| b.device_handle != device_handle);
         state.shaders.retain(|_, s| s.device_handle != device_handle);

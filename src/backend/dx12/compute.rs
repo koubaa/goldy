@@ -9,6 +9,7 @@ use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlo
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
+use crate::backend::submission_worker::allocate_timeline_value;
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
 use anyhow::{Context, Result};
@@ -301,7 +302,7 @@ fn texture_barrier_state_for_usage(
 }
 
 #[derive(Debug)]
-struct Dx12GpuProfileResources {
+pub(super) struct Dx12GpuProfileResources {
     heap: ID3D12QueryHeap,
     readback: ID3D12Resource,
     query_count: u32,
@@ -409,7 +410,7 @@ fn dx12_decode_duration_ns(start: u64, end: u64, freq: u64) -> u64 {
     ((delta as f64 / freq as f64) * 1e9) as u64
 }
 
-fn dx12_finish_gpu_profile(
+pub(super) fn dx12_finish_gpu_profile(
     ctx_fence: &ID3D12Fence,
     command_queue: &ID3D12CommandQueue,
     fence_value: u64,
@@ -1683,21 +1684,9 @@ fn execute_signal_and_finish(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = scope.ld();
-    let ctx_fence = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
-    let fence_value = {
-        let _tz = tracy_zone!("dx12.execute_and_signal");
-        queue_wait_for_epochs(scope, sync)?;
-        super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
-    };
+    let fence_value = allocate_timeline_value(&logical_device.timeline_next);
 
-    scope.ld().descriptors.lock().unwrap().record_slot_usage(
+    logical_device.descriptors.lock().unwrap().record_slot_usage(
         ctx,
         fence_value,
         used_slots.iter().copied(),
@@ -1707,12 +1696,6 @@ fn execute_signal_and_finish(
         let mut sc = scope.sc.lock().unwrap();
         for resource in pending_deletions {
             sc.deletion_queue.queue(fence_value, resource);
-        }
-    }
-
-    if let Some(prof) = gpu_profile {
-        if let Err(e) = dx12_finish_gpu_profile(&ctx_fence, &logical_device.command_queue, fence_value, prof) {
-            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
         }
     }
 
@@ -1757,38 +1740,37 @@ fn execute_signal_and_finish(
         sc.last_submitted_seq = fence_value;
     }
 
-    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    let ctx_del_batch = scope
-        .sc
-        .lock()
+    let ctx_fence = scope
+        .context_fences
+        .read()
         .unwrap()
-        .deletion_queue
-        .drain_up_to_completed(ctx_completed);
-    {
-        let dev = scope.ld();
-        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for resource in ctx_del_batch {
-            types::destroy_pending_deletion(dev, &mut registry, resource);
-        }
-        let fences = scope.context_fences.read().unwrap();
-        registry.drain_ready_slot_reclamations(&fences);
-    }
+        .get(&ctx)
+        .context("Invalid context handle")?
+        .1
+        .clone();
 
-    scope.sc.lock().unwrap().staging_belt.finish(fence_value);
+    let staged_texture_entries = staged_texture_uploads
+        .into_iter()
+        .filter_map(|u| {
+            if let super::texture::TextureUploadSource::Pooled(entry) = u.source {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
 
-    if !staged_texture_uploads.is_empty() {
-        let entries = staged_texture_uploads
-            .into_iter()
-            .map(|u| u.staging_entry)
-            .collect::<Vec<_>>();
-        scope
-            .sc
-            .lock()
-            .unwrap()
-            .texture_staging_pool
-            .release(fence_value, entries);
-    }
+    super::pending_submit::enqueue_compute_submit(
+        logical_device,
+        scope.context_fences,
+        ctx_fence,
+        vec![Some(cmd_list)],
+        sync,
+        std::sync::Arc::clone(&scope.sc),
+        fence_value,
+        gpu_profile,
+        staged_texture_entries,
+    )?;
 
     Ok(fence_value)
 }
@@ -1917,6 +1899,7 @@ pub(super) fn submit_with_scope(
                 GpuCommand::CopyBufferToTexture {
                     src,
                     src_offset,
+                    src_row_pitch,
                     dst,
                     x,
                     y,
@@ -1930,6 +1913,7 @@ pub(super) fn submit_with_scope(
                         &mut pool,
                         *src,
                         *src_offset,
+                        *src_row_pitch,
                         *dst,
                         *x,
                         *y,
@@ -2176,6 +2160,7 @@ pub(super) fn submit_graph_with_scope(
                     GpuCommand::CopyBufferToTexture {
                         src,
                         src_offset,
+                        src_row_pitch,
                         dst,
                         x,
                         y,
@@ -2189,6 +2174,7 @@ pub(super) fn submit_graph_with_scope(
                             &mut pool,
                             *src,
                             *src_offset,
+                            *src_row_pitch,
                             *dst,
                             *x,
                             *y,
@@ -2406,8 +2392,10 @@ pub(super) fn try_resubmit_retained_with_scope(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
+    let _tz = tracy_zone!("dx12.resubmit_retained");
     let _device_handle = scope.device_handle;
     let retained = {
+        let _tz_lookup = tracy_zone!("dx12.resubmit_retained.lookup");
         let sc = scope.sc.lock().unwrap();
         sc.retained_graphs.get(&key).map(|r| {
             (
@@ -2425,20 +2413,19 @@ pub(super) fn try_resubmit_retained_with_scope(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast retained command list")?;
 
-    let ctx_fence = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
-    let logical_device = scope.ld();
-    let fence_value = {
-        let _tz = tracy_zone!("dx12.resubmit_retained");
-        queue_wait_for_epochs(scope, sync)?;
-        super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
+    let ctx_fence = {
+        let _tz_fence = tracy_zone!("dx12.resubmit_retained.ctx_fence");
+        scope
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .1
+            .clone()
     };
+    let logical_device = scope.ld();
+    let fence_value = allocate_timeline_value(&logical_device.timeline_next);
 
     logical_device
         .descriptors
@@ -2454,23 +2441,15 @@ pub(super) fn try_resubmit_retained_with_scope(
         sc.last_submitted_seq = fence_value;
     }
 
-    let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    let retained_del_batch = scope
-        .sc
-        .lock()
-        .unwrap()
-        .deletion_queue
-        .drain_up_to_completed(retired_ctx_completed);
-    {
-        let dev = scope.ld();
-        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for resource in retained_del_batch {
-            types::destroy_pending_deletion(dev, &mut registry, resource);
-        }
-        let fences = scope.context_fences.read().unwrap();
-        registry.drain_ready_slot_reclamations(&fences);
-    }
+    super::pending_submit::enqueue_retained_resubmit(
+        logical_device,
+        scope.context_fences,
+        ctx_fence,
+        vec![Some(cmd_list)],
+        sync,
+        std::sync::Arc::clone(&scope.sc),
+        fence_value,
+    )?;
 
     Ok(Some(fence_value))
 }
