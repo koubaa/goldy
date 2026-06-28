@@ -189,8 +189,12 @@ pub(super) fn execute_command_lists_and_signal_device(
     unsafe {
         logical_device.command_queue.ExecuteCommandLists(command_lists);
     }
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal device fence")?;
+    unsafe {
+        logical_device
+            .command_queue
+            .Signal(&logical_device.fence, fence_value)
+    }
+    .context("Failed to signal device fence")?;
     Ok(fence_value)
 }
 
@@ -206,7 +210,10 @@ pub(super) fn execute_command_lists_and_signal_context(
     unsafe {
         logical_device.command_queue.ExecuteCommandLists(command_lists);
     }
-    unsafe { logical_device.command_queue.Signal(ctx_fence, fence_value) }.context("Failed to signal context fence")?;
+    unsafe {
+        logical_device.command_queue.Signal(ctx_fence, fence_value)
+    }
+    .context("Failed to signal context fence")?;
     Ok(fence_value)
 }
 

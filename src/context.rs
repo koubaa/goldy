@@ -112,8 +112,10 @@ impl Context {
             let reclamation_scope = backend.clone_context_reclamation_scope(handle);
             (deletion_flush, reclamation_scope)
         };
-        let submit_session =
-            crate::backend::LockedSubmitSession::for_context(Arc::clone(&device.inner.backend), handle);
+        let submit_session = {
+            let mut backend = device.inner.backend.lock().unwrap();
+            crate::backend::clone_context_submit_session(&mut **backend, handle, Arc::clone(&device.inner.backend))
+        };
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,

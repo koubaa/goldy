@@ -10,7 +10,7 @@ use super::types::{
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSamplerTable, SharedShaderTable,
     SharedSubmissionContext, SharedTextureTable,
 };
-use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
+use super::{ContextHandle, DeviceHandle, GraphCommand, GpuCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
@@ -105,10 +105,7 @@ pub(crate) fn record_state_from_backend<'a>(
             .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
     );
     Ok(Dx12RecordState {
-        ld: state
-            .devices
-            .get(&device_handle)
-            .with_context(|| format!("Invalid device {device_handle}"))?,
+        ld: state.devices.get(&device_handle).with_context(|| format!("Invalid device {device_handle}"))?,
         devices: &state.devices,
         contexts: &state.contexts,
         frame_table,
@@ -247,9 +244,8 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
-        let scope = self.scope();
-        compute::evict_retained_with_scope(&scope, ctx, key);
-        compute::submit_graph_with_scope(&scope, ctx, commands, Some(key), sync)
+        compute::evict_retained_with_scope(&self.scope(), ctx, key);
+        compute::submit_graph_with_scope(&self.scope(), ctx, commands, Some(key), sync)
     }
 
     fn try_resubmit_retained(

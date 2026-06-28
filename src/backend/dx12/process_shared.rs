@@ -13,8 +13,8 @@ use std::sync::{Arc, Once, OnceLock};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug, ID3D12Debug1};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5, DXGI_ADAPTER_FLAG,
-    DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
+    CreateDXGIFactory2, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5,
+    DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
     DXGI_FEATURE_PRESENT_ALLOW_TEARING,
 };
 
@@ -30,7 +30,9 @@ static PROCESS: OnceLock<Arc<Dx12ProcessShared>> = OnceLock::new();
 
 pub(crate) fn process_shared() -> Result<Arc<Dx12ProcessShared>> {
     Ok(Arc::clone(PROCESS.get_or_init(|| {
-        Arc::new(init_process_shared().unwrap_or_else(|e| panic!("Failed to initialize DX12 process resources: {e:#}")))
+        Arc::new(
+            init_process_shared().unwrap_or_else(|e| panic!("Failed to initialize DX12 process resources: {e:#}")),
+        )
     })))
 }
 

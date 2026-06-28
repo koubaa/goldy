@@ -842,6 +842,32 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 }
 
+/// Crate-internal hook for cloning a per-context submit session at [`crate::Context::new`].
+///
+/// Kept off the public [`GpuBackend`] trait so the return type can stay on the
+/// crate-private [`ContextSubmitSession`] trait.
+pub(crate) trait GpuBackendSubmitSession {
+    fn clone_context_submit_session(
+        &self,
+        ctx: ContextHandle,
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+    ) -> std::sync::Arc<dyn ContextSubmitSession>;
+}
+
+/// Clone a submit session from a type-erased backend handle.
+pub(crate) fn clone_context_submit_session(
+    backend: &mut dyn GpuBackend,
+    ctx: ContextHandle,
+    backend_arc: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+) -> std::sync::Arc<dyn ContextSubmitSession> {
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
+    if let Some(dx12) = backend.as_any_mut().downcast_mut::<dx12::Dx12Backend>() {
+        return GpuBackendSubmitSession::clone_context_submit_session(dx12, ctx, backend_arc);
+    }
+    let _ = ctx;
+    LockedSubmitSession::with_backend_type(backend_arc, backend.backend_type())
+}
+
 /// Per-context submit session that acquires the global backend mutex only around
 /// individual backend submit calls (Phase 5a). Backends can later replace this
 /// with a lock-free session cloned from `Arc<RwLock<State>>` sub-handles.
@@ -851,11 +877,12 @@ pub(crate) struct LockedSubmitSession {
 }
 
 impl LockedSubmitSession {
-    pub fn for_context(
+    /// Build a session from a known backend type — use from [`clone_context_submit_session`]
+    /// while the global backend lock is already held (must not re-lock the backend mutex).
+    pub fn with_backend_type(
         backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
-        _ctx: ContextHandle,
+        backend_type: BackendType,
     ) -> std::sync::Arc<dyn ContextSubmitSession> {
-        let backend_type = backend.lock().unwrap().backend_type();
         std::sync::Arc::new(Self { backend, backend_type })
     }
 }
@@ -1759,12 +1786,8 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 
 /// Create the default backend wrapped in an `Arc<Mutex<...>>`.
 ///
-/// For DX12, returns a process-wide singleton so that all `Instance` objects
-/// share one backend — the existing per-instance `Mutex` then naturally
-/// serializes all D3D12 calls, preventing debug-layer access violations
-/// when parallel test threads create independent instances.
-///
-/// For other backends, creates a fresh instance each time.
+/// For DX12, each [`crate::Instance`] gets its own backend with independent mutable state;
+/// DXGI factory/adapters are shared process-wide. Other backends create a fresh instance.
 pub fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
     use std::sync::{Arc, Mutex};
 
