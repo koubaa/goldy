@@ -18,6 +18,8 @@
 //!   or **`GOLDY_VALIDATION=layout,api`**.
 //! - `GOLDY_DISABLE_CB_REUSE=1|true|yes` — re-record command buffers every submit instead of
 //!   resubmitting retained ones (scheme/task-graph and frame-orchestrator paths).
+//!   Also implied when [`crate::gpu_profiler::gpu_profile_enabled`] is true, because
+//!   timestamp queries reference a per-submit query heap that must not outlive resubmit.
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct ParsedValidation {
@@ -113,10 +115,12 @@ pub(crate) fn scheme_validation_enabled() -> bool {
 
 /// When true, skip retained command-buffer resubmit and re-record every submission instead.
 ///
-/// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`).
+/// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`), or enable [`crate::gpu_profiler::gpu_profile_enabled`].
+/// GPU timestamp profiling embeds per-submit query heaps in recorded command lists; resubmitting
+/// a retained list would reference a destroyed heap.
 #[must_use]
 pub(crate) fn retained_cb_reuse_disabled() -> bool {
-    env_truthy("GOLDY_DISABLE_CB_REUSE")
+    env_truthy("GOLDY_DISABLE_CB_REUSE") || crate::gpu_profiler::gpu_profile_enabled()
 }
 
 #[cfg(test)]
