@@ -1,6 +1,6 @@
 //! Sampler management logic.
 
-use super::types::{self, SamplerState};
+use super::types::{self, SamplerState, SharedSamplerTable};
 use super::utils::{address_mode_to_vk, compare_to_vk, filter_to_vk, mipmap_mode_to_vk};
 use super::{DeviceHandle, SamplerHandle};
 use crate::types::SamplerDesc;
@@ -11,8 +11,7 @@ use std::collections::HashMap;
 /// Create a sampler with the given description.
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    samplers: &mut HashMap<SamplerHandle, SamplerState>,
-    next_sampler_handle: &mut SamplerHandle,
+    samplers: &SharedSamplerTable,
     device_handle: DeviceHandle,
     desc: &SamplerDesc,
 ) -> Result<SamplerHandle> {
@@ -40,8 +39,7 @@ pub(super) fn create(
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
-    let handle = *next_sampler_handle;
-    *next_sampler_handle += 1;
+    let handle = samplers.write().unwrap().alloc_handle();
 
     let bindless_index = {
         let logical_device = devices.get(&device_handle).unwrap();
@@ -75,7 +73,7 @@ pub(super) fn create(
         Some(index)
     };
 
-    samplers.insert(
+    samplers.write().unwrap().entries.insert(
         handle,
         SamplerState {
             device_handle,
@@ -91,10 +89,10 @@ pub(super) fn create(
 /// Destroy a sampler, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    samplers: &mut HashMap<SamplerHandle, SamplerState>,
+    samplers: &SharedSamplerTable,
     sampler_handle: SamplerHandle,
 ) {
-    if let Some(sampler) = samplers.remove(&sampler_handle) {
+    if let Some(sampler) = samplers.write().unwrap().entries.remove(&sampler_handle) {
         if let Some(logical_device) = devices.get(&sampler.device_handle) {
             // Defer reclamation: sampler slot must not be reused until all
             // in-flight submissions that referenced it have retired.
@@ -113,9 +111,11 @@ pub(super) fn destroy(
 }
 
 /// Get the bindless descriptor index for a sampler, if any.
-pub(super) fn bindless_index(
-    samplers: &HashMap<SamplerHandle, SamplerState>,
-    sampler_handle: SamplerHandle,
-) -> Option<u32> {
-    samplers.get(&sampler_handle).and_then(|s| s.bindless_index)
+pub(super) fn bindless_index(samplers: &SharedSamplerTable, sampler_handle: SamplerHandle) -> Option<u32> {
+    samplers
+        .read()
+        .unwrap()
+        .entries
+        .get(&sampler_handle)
+        .and_then(|s| s.bindless_index)
 }

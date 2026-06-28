@@ -29,8 +29,7 @@ pub(super) fn prepare_present_work(
         .clone();
 
     let timeline_sem = state
-        .contexts
-        .get(&frame.context)
+        .contexts.read().unwrap().get(&frame.context)
         .context("Invalid context handle")?
         .lock()
         .unwrap()
@@ -80,7 +79,7 @@ pub(super) fn finish_present(state: &mut VulkanState, finish: crate::backend::Pr
     let image_index = finish.frame.image as u32;
 
     if let Some(signal_timeline) = finish.signal_timeline {
-        if let Some(sc_arc) = state.contexts.get(&ctx) {
+        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
             sc_arc.lock().unwrap().last_submitted_seq = signal_timeline;
         }
     }
@@ -111,7 +110,7 @@ pub(super) fn finish_present(state: &mut VulkanState, finish: crate::backend::Pr
         }
     } else if let Some(surface_state) = state.surfaces.get_mut(&surface_handle) {
         surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_sub(1);
-        if let Some(sc_arc) = state.contexts.get(&ctx) {
+        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
             sc_arc
                 .lock()
                 .unwrap()

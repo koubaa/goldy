@@ -842,6 +842,10 @@ pub(crate) fn clone_context_submit_session(
     if let Some(dx12) = backend.as_any_mut().downcast_mut::<dx12::Dx12Backend>() {
         return GpuBackendSubmitSession::clone_context_submit_session(dx12, ctx, backend_arc);
     }
+    #[cfg(feature = "vulkan")]
+    if let Some(vk) = backend.as_any_mut().downcast_mut::<vulkan::VulkanBackend>() {
+        return GpuBackendSubmitSession::clone_context_submit_session(vk, ctx, backend_arc);
+    }
     let _ = ctx;
     LockedSubmitSession::with_backend_type(backend_arc, backend.backend_type())
 }

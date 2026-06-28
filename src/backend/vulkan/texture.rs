@@ -1,6 +1,6 @@
 //! Texture management logic.
 
-use super::types::{self, TextureState};
+use super::types::{self, TextureState, SharedTextureTable};
 use super::utils::format_to_vk;
 use super::{DeviceHandle, TextureHandle};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
@@ -16,8 +16,7 @@ use std::sync::Mutex;
 pub(super) fn create(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    next_texture_handle: &mut TextureHandle,
+    textures: &SharedTextureTable,
     device_handle: DeviceHandle,
     width: u32,
     height: u32,
@@ -127,8 +126,7 @@ pub(super) fn create(
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
-    let handle = *next_texture_handle;
-    *next_texture_handle += 1;
+    let handle = textures.write().unwrap().alloc_handle();
 
     let is_storage_image = matches!(access, TextureKind::Direct | TextureKind::DirectInterpolated);
     let is_dual_access = matches!(access, TextureKind::DirectInterpolated);
@@ -236,7 +234,7 @@ pub(super) fn create(
     } else {
         vk::ImageLayout::UNDEFINED
     };
-    textures.insert(
+    textures.write().unwrap().entries.insert(
         handle,
         TextureState {
             device_handle,
@@ -267,13 +265,14 @@ pub(super) fn create(
 pub(super) fn write(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     texture_handle: TextureHandle,
     data: &[u8],
     width: u32,
     height: u32,
 ) -> Result<()> {
-    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
+    let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&texture_handle).context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let old_layout = texture.image_layout();
@@ -481,7 +480,7 @@ pub(super) fn write(
         logical_device.device.free_memory(staging_memory, None);
     }
 
-    if let Some(tex) = textures.get(&texture_handle) {
+    if let Some(tex) = textures.read().unwrap().entries.get(&texture_handle) {
         tex.set_image_layout(settled_layout);
     }
 
@@ -494,7 +493,7 @@ pub(super) fn write(
 pub(super) fn write_region(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     texture_handle: TextureHandle,
     x: u32,
     y: u32,
@@ -502,7 +501,8 @@ pub(super) fn write_region(
     height: u32,
     data: &[u8],
 ) -> Result<()> {
-    let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
+    let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&texture_handle).context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let image = texture.image;
@@ -704,7 +704,7 @@ pub(super) fn write_region(
         logical_device.device.free_memory(staging_memory, None);
     }
 
-    if let Some(tex) = textures.get(&texture_handle) {
+    if let Some(tex) = textures.read().unwrap().entries.get(&texture_handle) {
         tex.set_image_layout(settled_layout);
     }
 
@@ -723,14 +723,14 @@ pub(super) fn write_region(
 pub(super) fn record_copy_texture_to_readback(
     cmd: vk::CommandBuffer,
     logical_device: &types::SharedLogicalDevice,
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     staging_buffer: vk::Buffer,
     src: TextureHandle,
     layout: crate::backend::TextureCopyFootprint,
 ) -> Result<()> {
     let (image, old_layout) = {
-        let texture = textures
-            .get(&src)
+        let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&src)
             .context("CopyTextureToReadback: src texture not found")?;
         (texture.image, texture.image_layout())
     };
@@ -812,7 +812,7 @@ pub(super) fn record_copy_texture_to_readback(
         logical_device.device.cmd_pipeline_barrier2(cmd, &restore_dep);
     }
 
-    if let Some(tex) = textures.get(&src) {
+    if let Some(tex) = textures.read().unwrap().entries.get(&src) {
         tex.set_image_layout(old_layout);
     }
     Ok(())
@@ -824,12 +824,13 @@ pub(super) fn record_copy_texture_to_readback(
 pub(super) fn read_to_cpu(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     texture_handle: TextureHandle,
     output: &mut [u8],
 ) -> Result<()> {
     let (device_handle, width, height, format, image, old_layout, existing_sb, existing_sm) = {
-        let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
+        let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&texture_handle).context("Invalid texture handle")?;
         (
             texture.device_handle,
             texture.width,
@@ -888,7 +889,8 @@ pub(super) fn read_to_cpu(
             unsafe { logical_device.device.bind_buffer_memory(sb, sm, 0) }
                 .context("Failed to bind staging buffer memory")?;
 
-            let tex = textures.get_mut(&texture_handle).unwrap();
+            let mut textures_write = textures.write().unwrap();
+            let tex = textures_write.entries.get_mut(&texture_handle).unwrap();
             tex.staging_buffer = Some(sb);
             tex.staging_memory = Some(sm);
 
@@ -1011,7 +1013,7 @@ pub(super) fn read_to_cpu(
             .context("Failed to unmap staging buffer")?;
     }
 
-    if let Some(tex) = textures.get(&texture_handle) {
+    if let Some(tex) = textures.read().unwrap().entries.get(&texture_handle) {
         tex.set_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
     }
 
@@ -1021,10 +1023,10 @@ pub(super) fn read_to_cpu(
 /// Destroy a texture, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     texture_handle: TextureHandle,
 ) {
-    if let Some(texture) = textures.remove(&texture_handle) {
+    if let Some(texture) = textures.write().unwrap().entries.remove(&texture_handle) {
         if let Some(logical_device) = devices.get(&texture.device_handle) {
             if texture.transient_heap_suballoc {
                 logical_device
@@ -1174,7 +1176,7 @@ pub(super) struct ComputeTextureScratch {
 pub(super) fn allocate_compute_texture_staging(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     pool: &mut super::staging::TextureStagingPool,
     texture_handle: TextureHandle,
     data: &[u8],
@@ -1183,8 +1185,8 @@ pub(super) fn allocate_compute_texture_staging(
     width: u32,
     height: u32,
 ) -> Result<ComputeTextureScratch> {
-    let texture = textures
-        .get(&texture_handle)
+    let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&texture_handle)
         .context("allocate_compute_texture_staging: invalid texture")?;
 
     if x + width > texture.width || y + height > texture.height {
@@ -1235,8 +1237,8 @@ pub(super) fn allocate_compute_texture_staging(
 pub(super) fn allocate_copy_buffer_to_texture_staging(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &HashMap<TextureHandle, TextureState>,
-    buffers: &HashMap<crate::backend::BufferHandle, super::types::BufferState>,
+    textures: &SharedTextureTable,
+    buffers: &super::types::SharedBufferTable,
     pool: &mut super::staging::TextureStagingPool,
     src: crate::backend::BufferHandle,
     src_offset: u64,
@@ -1246,8 +1248,8 @@ pub(super) fn allocate_copy_buffer_to_texture_staging(
     width: u32,
     height: u32,
 ) -> Result<ComputeTextureScratch> {
-    let texture = textures
-        .get(&texture_handle)
+    let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&texture_handle)
         .context("allocate_copy_buffer_to_texture_staging: invalid texture")?;
     let bpp = texture.format.bytes_per_pixel();
     let flat_len = (width as usize)
@@ -1272,13 +1274,13 @@ pub(super) fn allocate_copy_buffer_to_texture_staging(
 /// Record buffer→image copy + layout transitions into an open command buffer.
 pub(super) fn record_compute_texture_upload(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     cmd: vk::CommandBuffer,
     scratch: &ComputeTextureScratch,
 ) -> Result<()> {
     let (device_handle, width, height, format, image, old_layout, settled_layout) = {
-        let texture = textures
-            .get(&scratch.texture_handle)
+        let textures_guard = textures.read().unwrap();
+    let texture = textures_guard.entries.get(&scratch.texture_handle)
             .context("record_compute_texture_upload: invalid texture")?;
         (
             texture.device_handle,
@@ -1382,7 +1384,7 @@ pub(super) fn record_compute_texture_upload(
     let dep_info2 = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_shader));
     unsafe { logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info2) };
 
-    if let Some(tex) = textures.get(&scratch.texture_handle) {
+    if let Some(tex) = textures.read().unwrap().entries.get(&scratch.texture_handle) {
         tex.set_image_layout(settled_layout);
     }
 
@@ -1392,18 +1394,18 @@ pub(super) fn record_compute_texture_upload(
 
 /// Get the bindless descriptor index for a texture, if any.
 pub(super) fn bindless_index(
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     texture_handle: TextureHandle,
 ) -> Option<u32> {
-    textures.get(&texture_handle).and_then(|t| t.bindless_index)
+    textures.read().unwrap().entries.get(&texture_handle).and_then(|t| t.bindless_index)
 }
 
 /// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
 pub(super) fn bindless_sampled_index(
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     texture_handle: TextureHandle,
 ) -> Option<u32> {
-    textures.get(&texture_handle).and_then(|t| t.sampled_bindless_index)
+    textures.read().unwrap().entries.get(&texture_handle).and_then(|t| t.sampled_bindless_index)
 }
 
 /// Set a human-readable debug name on the underlying `VkImage` via
@@ -1412,13 +1414,17 @@ pub(super) fn bindless_sampled_index(
 pub(super) fn set_debug_name(
     instance: &ash::Instance,
     devices: &HashMap<super::DeviceHandle, super::types::SharedLogicalDevice>,
-    textures: &HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     handle: TextureHandle,
     name: &str,
 ) {
-    let Some(ts) = textures.get(&handle) else { return };
-    *ts.debug_name.lock().unwrap() = Some(name.to_owned());
-    let Some(ld) = devices.get(&ts.device_handle) else {
+    let (device_handle, image) = {
+        let textures_read = textures.read().unwrap();
+        let Some(ts) = textures_read.entries.get(&handle) else { return };
+        *ts.debug_name.lock().unwrap() = Some(name.to_owned());
+        (ts.device_handle, ts.image)
+    };
+    let Some(ld) = devices.get(&device_handle) else {
         return;
     };
     let debug_utils = ash::ext::debug_utils::Device::new(instance, &ld.device);
@@ -1427,7 +1433,7 @@ pub(super) fn set_debug_name(
     };
     // `object_handle` sets both the raw handle and `object_type` from the vk::Image type.
     let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
-        .object_handle(ts.image)
+        .object_handle(image)
         .object_name(&name_cstr);
     unsafe {
         let _ = debug_utils.set_debug_utils_object_name(&name_info);

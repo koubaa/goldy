@@ -244,8 +244,9 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
-        compute::evict_retained_with_scope(&self.scope(), ctx, key);
-        compute::submit_graph_with_scope(&self.scope(), ctx, commands, Some(key), sync)
+        let scope = self.scope();
+        compute::evict_retained_with_scope(&scope, ctx, key);
+        compute::submit_graph_with_scope(&scope, ctx, commands, Some(key), sync)
     }
 
     fn try_resubmit_retained(

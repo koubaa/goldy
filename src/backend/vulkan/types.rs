@@ -19,7 +19,7 @@ use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Maximum number of descriptors per resource type in the global bindless set
 pub const MAX_BINDLESS_RESOURCES: u32 = 16384;
@@ -154,10 +154,12 @@ impl DescriptorRegistry {
 /// retirement data it needs without touching live context state while the descriptors lock is held.
 pub(super) fn snapshot_context_completed_values(
     device: &ash::Device,
-    contexts: &HashMap<super::ContextHandle, SharedSubmissionContext>,
+    contexts: &SharedContextMap,
     for_device: super::DeviceHandle,
 ) -> HashMap<super::ContextHandle, u64> {
     contexts
+        .read()
+        .unwrap()
         .iter()
         .filter_map(|(&id, sc_arc)| {
             let sc = sc_arc.lock().unwrap();
@@ -1333,6 +1335,67 @@ pub(super) type ComputeFencePoolEntry = (DeviceHandle, vk::Fence, Option<vk::Com
 /// Per-backend non-blocking compute fence pool keyed by submission token.
 pub(super) type ComputeFencePool = Mutex<HashMap<u64, ComputeFencePoolEntry>>;
 
+/// Cloned into lock-free submit sessions (Phase 5b-iv).
+pub(super) type SharedComputeFencePool = Arc<ComputeFencePool>;
+
+/// Per-context map — read/write independently of the global backend mutex (Phase 5b-iii).
+pub(crate) type SharedContextMap = Arc<RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
+
+/// Per-device frame-table GPU resources — cloned into submit sessions.
+pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
+
+/// Frame tables keyed by device — cloned into [`super::submit_session::VulkanSubmitSession`].
+pub(crate) type SharedFrameTableMap = Arc<RwLock<HashMap<DeviceHandle, SharedFrameTableDevice>>>;
+
+/// Map plus monotonic handle allocator for a single resource kind.
+///
+/// Wrapped in [`Arc<RwLock<_>>`] on [`VulkanState`] so submit recording can take read
+/// guards without the global backend mutex (Phase 5b-iii).
+macro_rules! handle_table {
+    ($table:ident, $shared:ident, $handle:ty, $value:ty) => {
+        #[derive(Default)]
+        pub(crate) struct $table {
+            pub entries: HashMap<$handle, $value>,
+            pub next_handle: $handle,
+        }
+
+        impl $table {
+            pub fn new() -> Self {
+                Self {
+                    entries: HashMap::new(),
+                    next_handle: 1,
+                }
+            }
+
+            pub fn alloc_handle(&mut self) -> $handle {
+                let h = self.next_handle;
+                self.next_handle += 1;
+                h
+            }
+        }
+
+        pub(crate) type $shared = Arc<RwLock<$table>>;
+    };
+}
+
+handle_table!(BufferTable, SharedBufferTable, BufferHandle, BufferState);
+handle_table!(ShaderTable, SharedShaderTable, ShaderHandle, ShaderState);
+handle_table!(PipelineTable, SharedPipelineTable, PipelineHandle, PipelineState);
+handle_table!(
+    ComputePipelineTable,
+    SharedComputePipelineTable,
+    ComputePipelineHandle,
+    ComputePipelineState
+);
+handle_table!(
+    RenderTargetTable,
+    SharedRenderTargetTable,
+    RenderTargetHandle,
+    RenderTargetState
+);
+handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
+handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
+
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
 pub(super) struct VulkanState {
@@ -1341,29 +1404,22 @@ pub(super) struct VulkanState {
     pub physical_devices: Vec<PhysicalDeviceInfo>,
     pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<super::ContextHandle, SharedSubmissionContext>,
+    pub contexts: SharedContextMap,
     pub next_context_id: super::ContextHandle,
-    pub buffers: HashMap<BufferHandle, BufferState>,
-    pub next_buffer_handle: BufferHandle,
-    pub shaders: HashMap<ShaderHandle, ShaderState>,
-    pub next_shader_handle: ShaderHandle,
-    pub pipelines: HashMap<PipelineHandle, PipelineState>,
-    pub next_pipeline_handle: PipelineHandle,
-    pub compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
-    pub next_compute_pipeline_handle: ComputePipelineHandle,
-    pub render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
-    pub next_render_target_handle: RenderTargetHandle,
+    pub buffers: SharedBufferTable,
+    pub shaders: SharedShaderTable,
+    pub pipelines: SharedPipelineTable,
+    pub compute_pipelines: SharedComputePipelineTable,
+    pub render_targets: SharedRenderTargetTable,
     pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,
-    pub textures: HashMap<TextureHandle, TextureState>,
-    pub next_texture_handle: TextureHandle,
-    pub samplers: HashMap<SamplerHandle, SamplerState>,
-    pub next_sampler_handle: SamplerHandle,
+    pub textures: SharedTextureTable,
+    pub samplers: SharedSamplerTable,
     /// Per-backend Slang compiler instance (avoids global state issues in tests)
     pub slang_compiler: crate::slang::SlangCompiler,
     /// Per-submission fences for non-blocking compute; token -> (device, `VkFence`, `Option<VkCommandBuffer>`).
     /// The command buffer is kept alive until the fence signals (Vulkan spec: must not free a pending CB).
-    pub compute_fence_pool: ComputeFencePool,
+    pub compute_fence_pool: SharedComputeFencePool,
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1371,5 +1427,5 @@ pub(super) struct VulkanState {
     /// active).  Guards `set_texture_debug_name` so we never call a null fp.
     pub enable_validation: bool,
     /// Per-device frame-table GPU resources (selector, device table, upload staging).
-    pub frame_tables: HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    pub frame_tables: SharedFrameTableMap,
 }

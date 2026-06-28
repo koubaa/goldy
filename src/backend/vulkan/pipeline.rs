@@ -1,6 +1,6 @@
 //! Graphics pipeline management logic.
 
-use super::types::{self, PipelineState};
+use super::types::{self, PipelineState, SharedPipelineTable};
 use super::utils::{compare_to_vk, depth_format_to_vk, format_to_vk, topology_to_vk, vertex_format_to_vk};
 use super::{DeviceHandle, PipelineHandle};
 use crate::types::CompareFunction;
@@ -11,8 +11,8 @@ use std::collections::HashMap;
 /// Shader modules plus raster state for Vulkan graphics pipeline creation.
 pub(super) struct VulkanGraphicsPipelineCreateBundle<'a> {
     pub devices: &'a HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    pub pipelines: &'a mut HashMap<PipelineHandle, PipelineState>,
-    pub next_pipeline_handle: &'a mut PipelineHandle,
+    pub pipelines: &'a SharedPipelineTable,
+    
     pub device_handle: DeviceHandle,
     pub vs_module: vk::ShaderModule,
     pub fs_module: vk::ShaderModule,
@@ -25,7 +25,6 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
     let VulkanGraphicsPipelineCreateBundle {
         devices,
         pipelines,
-        next_pipeline_handle,
         device_handle,
         vs_module,
         fs_module,
@@ -156,10 +155,9 @@ pub(super) fn create(bundle: VulkanGraphicsPipelineCreateBundle<'_>) -> Result<P
     }
     .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
 
-    let handle = *next_pipeline_handle;
-    *next_pipeline_handle += 1;
+    let handle = pipelines.write().unwrap().alloc_handle();
 
-    pipelines.insert(
+    pipelines.write().unwrap().entries.insert(
         handle,
         PipelineState {
             device_handle,
@@ -182,7 +180,6 @@ pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) 
     let VulkanGraphicsPipelineCreateBundle {
         devices,
         pipelines,
-        next_pipeline_handle,
         device_handle,
         vs_module,
         fs_module,
@@ -351,10 +348,9 @@ pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) 
     }
     .map_err(|e| anyhow::anyhow!("Failed to create pipeline: {:?}", e.1))?;
 
-    let handle = *next_pipeline_handle;
-    *next_pipeline_handle += 1;
+    let handle = pipelines.write().unwrap().alloc_handle();
 
-    pipelines.insert(
+    pipelines.write().unwrap().entries.insert(
         handle,
         PipelineState {
             device_handle,
@@ -375,10 +371,10 @@ pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) 
 /// Destroy a graphics pipeline and clean up GPU resources.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    pipelines: &mut HashMap<PipelineHandle, PipelineState>,
+    pipelines: &SharedPipelineTable,
     pipeline_handle: PipelineHandle,
 ) {
-    if let Some(pipeline) = pipelines.remove(&pipeline_handle) {
+    if let Some(pipeline) = pipelines.write().unwrap().entries.remove(&pipeline_handle) {
         if let Some(device) = devices.get(&pipeline.device_handle) {
             unsafe {
                 // Wait for all in-flight work to finish before freeing a pipeline

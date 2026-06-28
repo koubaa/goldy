@@ -45,7 +45,7 @@
 //! `swapchain_render_present_command_buffers`).  The scratch texture is not
 //! touched in that path.
 
-use super::types::{self, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT};
+use super::types::{self, SharedTextureTable, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type};
 use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
@@ -132,9 +132,8 @@ pub(super) fn create(
     instance: &Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     next_surface_handle: &mut SurfaceHandle,
-    next_texture_handle: &mut TextureHandle,
     device_handle: DeviceHandle,
     window: &dyn raw_window_handle::HasWindowHandle,
     display: &dyn raw_window_handle::HasDisplayHandle,
@@ -373,8 +372,7 @@ pub(super) fn create(
         let th = register_surface_texture(
             devices,
             textures,
-            next_texture_handle,
-            device_handle,
+                        device_handle,
             image,
             format.format,
             goldy_format,
@@ -492,7 +490,7 @@ pub(super) fn destroy(state: &mut super::types::VulkanState, surface_handle: Sur
         &state.instance,
         DestroyDeviceRef::Map(&state.devices),
         &mut state.surfaces,
-        &mut state.textures,
+        &state.textures,
         surface_handle,
     );
 }
@@ -506,7 +504,7 @@ pub(super) fn destroy_with_logical_device(
     logical_device: &types::LogicalDevice,
     _devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     surface_handle: SurfaceHandle,
     gpu_already_idle: bool,
 ) {
@@ -530,7 +528,7 @@ fn destroy_impl(
     instance: &Instance,
     device_ref: DestroyDeviceRef<'_>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     surface_handle: SurfaceHandle,
 ) {
     // Clear the per-frame alias first; the real registrations are in swapchain_texture_handles.
@@ -766,8 +764,7 @@ pub(super) fn acquire(
     {
         let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
         let ctxs: Vec<_> = state
-            .contexts
-            .iter()
+            .contexts.read().unwrap().iter()
             .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
             .collect();
@@ -840,7 +837,7 @@ pub(super) fn acquire(
                 surface_state.pending_acquire_count = surface_state.pending_acquire_count.saturating_add(1);
             }
 
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
+            if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
                 sc_arc
                     .lock()
                     .unwrap()
@@ -1126,7 +1123,18 @@ pub(super) fn render(
         let mut current_pipeline: Option<PipelineHandle> = None;
 
         // Execute render commands
-        super::render_commands::record(cmd, &lowered, logical_device, pipelines, buffers, &mut current_pipeline)?;
+        {
+            let pipelines_read = pipelines.read().unwrap();
+            let buffers_read = buffers.read().unwrap();
+            super::render_commands::record(
+                cmd,
+                &lowered,
+                logical_device,
+                &pipelines_read.entries,
+                &buffers_read.entries,
+                &mut current_pipeline,
+            )?;
+        }
 
         // End dynamic rendering
         unsafe { logical_device.device.cmd_end_rendering(cmd) };
@@ -1272,8 +1280,7 @@ pub(super) fn resize(
     instance: &Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     surfaces: &mut HashMap<SurfaceHandle, SurfaceState>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    next_texture_handle: &mut TextureHandle,
+    textures: &SharedTextureTable,
     surface_handle: SurfaceHandle,
     width: u32,
     height: u32,
@@ -1537,8 +1544,7 @@ pub(super) fn resize(
         let th = register_surface_texture(
             devices,
             textures,
-            next_texture_handle,
-            device_handle,
+                        device_handle,
             image,
             format,
             goldy_format,
@@ -1626,8 +1632,7 @@ pub(super) fn set_present_mode(
         &state.instance,
         &state.devices,
         &mut state.surfaces,
-        &mut state.textures,
-        &mut state.next_texture_handle,
+        &state.textures,
         surface_handle,
         w,
         h,
@@ -1728,7 +1733,7 @@ fn ensure_scratch_texture_slot(
         .get(&surface_handle)
         .and_then(|s| s.scratch_texture_slots.get(frame_slot))
     {
-        if let Some(ts) = state.textures.get(&slot.texture_handle) {
+        if let Some(ts) = state.textures.read().unwrap().entries.get(&slot.texture_handle) {
             if ts.width == width && ts.height == height {
                 return Ok(slot.texture_handle);
             }
@@ -1743,7 +1748,7 @@ fn ensure_scratch_texture_slot(
         .and_then(|s| s.scratch_texture_slots.get_mut(frame_slot))
         .and_then(|slot| slot.take())
     {
-        unregister_surface_texture(&state.devices, &mut state.textures, old.texture_handle);
+        unregister_surface_texture(&state.devices, &state.textures, old.texture_handle);
         let ld = state.devices.get(&device_handle).context("Device invalid")?;
         unsafe {
             ld.device.destroy_image(old.image, None);
@@ -1853,8 +1858,7 @@ fn ensure_scratch_texture_slot(
     // Register as a bindless storage-image texture.
     let texture_handle = register_surface_texture(
         &state.devices,
-        &mut state.textures,
-        &mut state.next_texture_handle,
+        &state.textures,
         device_handle,
         image,
         format,
@@ -1891,8 +1895,7 @@ fn ensure_scratch_texture_slot(
 #[allow(clippy::too_many_arguments)]
 fn register_surface_texture(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
-    next_texture_handle: &mut TextureHandle,
+    textures: &SharedTextureTable,
     device_handle: DeviceHandle,
     image: vk::Image,
     vk_format: vk::Format,
@@ -1900,8 +1903,7 @@ fn register_surface_texture(
     width: u32,
     height: u32,
 ) -> Result<TextureHandle> {
-    let handle = *next_texture_handle;
-    *next_texture_handle += 1;
+    let handle = textures.write().unwrap().alloc_handle();
 
     let logical_device = devices.get(&device_handle).context("Device no longer valid")?;
 
@@ -1956,7 +1958,7 @@ fn register_surface_texture(
         );
     }
 
-    textures.insert(
+    textures.write().unwrap().entries.insert(
         handle,
         TextureState {
             device_handle,
@@ -1994,10 +1996,10 @@ fn register_surface_texture(
 /// Does NOT destroy the VkImage — it is owned by the swapchain.
 fn unregister_swapchain_texture_with_device(
     logical_device: &types::LogicalDevice,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     tex_handle: TextureHandle,
 ) {
-    if let Some(tex_state) = textures.remove(&tex_handle) {
+    if let Some(tex_state) = textures.write().unwrap().entries.remove(&tex_handle) {
         logical_device
             .descriptors
             .lock()
@@ -2014,10 +2016,10 @@ fn unregister_swapchain_texture_with_device(
 /// Does NOT destroy the VkImage — it is owned by the swapchain.
 fn unregister_swapchain_texture(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     tex_handle: TextureHandle,
 ) {
-    if let Some(tex_state) = textures.remove(&tex_handle) {
+    if let Some(tex_state) = textures.write().unwrap().entries.remove(&tex_handle) {
         if let Some(device) = devices.get(&tex_state.device_handle) {
             device.descriptors.lock().unwrap().reclaim_texture_slots(tex_handle);
             unsafe {
@@ -2033,7 +2035,7 @@ fn unregister_swapchain_texture(
 #[inline(always)]
 fn unregister_surface_texture(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    textures: &mut HashMap<TextureHandle, TextureState>,
+    textures: &SharedTextureTable,
     tex_handle: TextureHandle,
 ) {
     unregister_swapchain_texture(devices, textures, tex_handle);

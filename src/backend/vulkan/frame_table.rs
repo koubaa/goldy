@@ -1,6 +1,6 @@
 //! Vulkan frame-table buffers and prologue (staging upload + device-local copy).
 
-use super::types::{self, BufferState, LogicalDevice, VulkanState};
+use super::types::{self, BufferState, LogicalDevice, SharedBufferTable, SharedContextMap, SharedFrameTableMap, SharedFrameTableDevice, SharedPipelineTable, VulkanState};
 use super::utils::find_memory_type;
 use super::BufferHandle;
 use crate::backend::GpuCommand;
@@ -46,8 +46,8 @@ pub(crate) fn init_device(
 
     let (staging, staging_memory, staging_mapped) = create_upload_table_buffer(instance, ld)?;
 
-    state.buffers.get_mut(&selector).unwrap().element_stride = Some(4);
-    state.buffers.get_mut(&device_table).unwrap().element_stride = Some(4);
+    state.buffers.write().unwrap().entries.get_mut(&selector).unwrap().element_stride = Some(4);
+    state.buffers.write().unwrap().entries.get_mut(&device_table).unwrap().element_stride = Some(4);
 
     {
         let dev = state.devices.get(&device_handle).context("init frame table")?;
@@ -58,9 +58,9 @@ pub(crate) fn init_device(
             .ensure_storage_start(FRAME_TABLE_USER_SLOT_BASE);
     }
 
-    state.frame_tables.insert(
+    state.frame_tables.write().unwrap().insert(
         device_handle,
-        FrameTableDevice {
+        std::sync::Arc::new(FrameTableDevice {
             selector,
             device_table,
             staging,
@@ -69,7 +69,7 @@ pub(crate) fn init_device(
             submission_counter: AtomicU32::new(0),
             pinned_rows: AtomicU32::new(0),
             last_sub_for_row: std::array::from_fn(|_| AtomicU32::new(0)),
-        },
+        }),
     );
 
     Ok(())
@@ -77,7 +77,7 @@ pub(crate) fn init_device(
 
 /// Destroy frame-table staging resources owned outside `state.buffers`.
 pub(crate) fn destroy_device(state: &mut VulkanState, device_handle: super::DeviceHandle, ld: &LogicalDevice) {
-    if let Some(ft) = state.frame_tables.remove(&device_handle) {
+    if let Some(ft) = state.frame_tables.write().unwrap().remove(&device_handle) {
         unsafe {
             ld.device.destroy_buffer(ft.staging, None);
             ld.device.free_memory(ft.staging_memory, None);
@@ -181,9 +181,8 @@ fn create_scattered_u32_buffer_at_slot(
         }
     }
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
-    state.buffers.insert(
+    let handle = state.buffers.write().unwrap().alloc_handle();
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -238,15 +237,16 @@ fn prologue_post_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer) {
 
 fn record_table_copies(
     ft: &FrameTableDevice,
-    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     row: u32,
     copy_u32s: usize,
     copy_selector: bool,
 ) -> Result<()> {
-    let device_table = buffers.get(&ft.device_table).context("device table")?;
-    let selector_state = buffers.get(&ft.selector).context("selector")?;
+    let buffers_read = buffers.read().unwrap();
+    let device_table = buffers_read.entries.get(&ft.device_table).context("device table")?;
+    let selector_state = buffers_read.entries.get(&ft.selector).context("selector")?;
     let row_bytes = (FRAME_TABLE_ROW_STRIDE as u64) * 4;
     let dest_offset = (row as u64) * row_bytes;
     let src_payload = crate::frame_table::staging_row_payload_byte_offset(row);
@@ -330,8 +330,8 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
 
 /// CPU staging write before a retained resubmit (row bump + table bytes; GPU copy is in the CB).
 fn write_staging_for_submission_on(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
+    contexts: &SharedContextMap,
+    frame_tables: &SharedFrameTableMap,
     device_handle: super::DeviceHandle,
     ft: &FrameTableDevice,
     data: &[u32],
@@ -358,15 +358,16 @@ fn write_staging_for_submission_on(
 
 /// CPU staging write + GPU copy prologue (split borrows for standalone render).
 pub(crate) fn record_prologue_for_tables(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
-    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    contexts: &SharedContextMap,
+    frame_tables: &SharedFrameTableMap,
+    buffers: &SharedBufferTable,
     device_handle: super::DeviceHandle,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     data: &[u32],
 ) -> Result<()> {
-    let ft = frame_tables
+    let frame_tables_read = frame_tables.read().unwrap();
+    let ft = frame_tables_read
         .get(&device_handle)
         .context("frame table not initialized")?;
     let row = write_staging_for_submission_on(contexts, frame_tables, device_handle, ft, data)?;
@@ -377,9 +378,9 @@ pub(crate) fn record_prologue_for_tables(
 
 /// CPU staging write + GPU copy prologue.
 pub(crate) fn record_prologue(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
-    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
+    contexts: &SharedContextMap,
+    frame_tables: &SharedFrameTableMap,
+    buffers: &SharedBufferTable,
     device_handle: super::DeviceHandle,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
@@ -390,33 +391,29 @@ pub(crate) fn record_prologue(
 
 /// Refresh the active row in the device-local table without advancing the selector.
 pub(crate) fn sync_table_row_to_device(
-    state: &VulkanState,
-    device_handle: super::DeviceHandle,
+    frame_table: &SharedFrameTableDevice,
+    buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     data: &[u32],
 ) -> Result<()> {
-    let ft = state
-        .frame_tables
-        .get(&device_handle)
-        .context("frame table not initialized")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = ft.staging_mapped as *mut u32;
-    let row = ft.submission_counter.load(Ordering::Relaxed).saturating_sub(1) % FRAME_TABLE_MAX_ROWS;
+    let staging_ptr = frame_table.staging_mapped as *mut u32;
+    let row = frame_table.submission_counter.load(Ordering::Relaxed).saturating_sub(1) % FRAME_TABLE_MAX_ROWS;
     unsafe {
         let payload_dst =
             staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
-    record_table_copies(ft, &state.buffers, ld, cmd, row, copy_u32s, false)
+    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, false)
 }
 
 /// Lower render commands and build staging for standalone render passes (not graph submit).
 pub(crate) fn prepare_render_commands(
-    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
-    pipelines: &std::collections::HashMap<super::PipelineHandle, super::types::PipelineState>,
+    buffers: &SharedBufferTable,
+    pipelines: &SharedPipelineTable,
     commands: &[crate::backend::RenderCommand],
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
     use crate::backend::RenderCommand;
@@ -427,10 +424,13 @@ pub(crate) fn prepare_render_commands(
             commands,
             |h| {
                 pipelines
+                    .read()
+                    .unwrap()
+                    .entries
                     .get(&h)
                     .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
             },
-            |h| buffers.get(&h).and_then(|b| b.element_stride),
+            |h| buffers.read().unwrap().entries.get(&h).and_then(|b| b.element_stride),
         )
     })?;
 
@@ -443,6 +443,9 @@ pub(crate) fn prepare_render_commands(
                     .iter()
                     .map(|h| {
                         buffers
+                            .read()
+                            .unwrap()
+                            .entries
                             .get(h)
                             .and_then(|b| b.bindless_index)
                             .with_context(|| format!("BindResources: buffer handle {h:?} has no bindless index"))
