@@ -69,8 +69,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         .write()
         .unwrap()
         .insert(id, (device, fence.clone()));
-
-    state.contexts.insert(
+    state.contexts.write().unwrap().insert(
         id,
         std::sync::Arc::new(std::sync::Mutex::new(Dx12SubmissionContext {
             device,
@@ -91,7 +90,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 
 pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     // Remove from both maps first; the fence index must not outlive the context.
-    let Some(sc_arc) = state.contexts.remove(&ctx) else {
+    let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
         return;
     };
     state.context_fences.write().unwrap().remove(&ctx);
@@ -119,7 +118,7 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 
     for old in sc.retained_graphs.drain().map(|(_, g)| g) {
         if let Some(row) = old.frame_table_row {
-            if let Some(ft) = state.frame_tables.get(&device) {
+            if let Some(ft) = state.frame_tables.read().unwrap().get(&device) {
                 super::frame_table::unpin_row(ft, row);
             }
         }
@@ -148,6 +147,8 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 pub(super) fn context_device(state: &Dx12State, ctx: ContextHandle) -> DeviceHandle {
     state
         .contexts
+        .read()
+        .unwrap()
         .get(&ctx)
         .expect("invalid context handle")
         .lock()

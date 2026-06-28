@@ -72,9 +72,9 @@ pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHan
             .ensure_cbv_start(FRAME_TABLE_USER_SLOT_BASE);
     }
 
-    state.frame_tables.insert(
+    state.frame_tables.write().unwrap().insert(
         device_handle,
-        FrameTableDevice {
+        std::sync::Arc::new(FrameTableDevice {
             selector,
             device_table,
             staging,
@@ -82,7 +82,7 @@ pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHan
             submission_counter: AtomicU32::new(0),
             pinned_rows: AtomicU32::new(0),
             last_sub_for_row: std::array::from_fn(|_| AtomicU32::new(0)),
-        },
+        }),
     );
 
     Ok(())
@@ -308,35 +308,22 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
 
 /// CPU staging write before a retained resubmit (row bump + table bytes; GPU copy is in the CB).
 pub(crate) fn write_staging_for_submission(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
+    contexts: &super::types::SharedContextMap,
+    frame_table: &FrameTableDevice,
     device_handle: super::DeviceHandle,
     data: &[u32],
 ) -> Result<u32> {
-    let sub = frame_tables
-        .get(&device_handle)
-        .context("frame table not initialized")?
-        .submission_counter
-        .fetch_add(1, Ordering::Relaxed);
+    let sub = frame_table.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
-    let row_pinned = frame_tables
-        .get(&device_handle)
-        .context("frame table not initialized")?
-        .pinned_rows
-        .load(Ordering::Acquire)
-        & (1 << row)
-        != 0;
+    let row_pinned = frame_table.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0;
     if row_pinned {
-        super::compute::evict_retained_pinning_row(contexts, frame_tables, device_handle, row);
+        super::compute::evict_retained_pinning_row(contexts, frame_table, device_handle, row);
     }
-    let ft = frame_tables
-        .get(&device_handle)
-        .context("frame table not initialized")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = ft.staging_mapped as *mut u32;
-    assert_row_available(ft, sub, row)?;
-    ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
+    let staging_ptr = frame_table.staging_mapped as *mut u32;
+    assert_row_available(frame_table, sub, row)?;
+    frame_table.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     // Staging selector word `row` always holds the value `row` (matches baked copy offset).
     unsafe {
         let payload_dst =
@@ -349,16 +336,13 @@ pub(crate) fn write_staging_for_submission(
 
 /// Refresh the active row in the device-local table without advancing the selector.
 pub(crate) fn sync_table_row_to_device(
-    state: &Dx12State,
-    device_handle: super::DeviceHandle,
+    record: &super::submit_session::Dx12RecordState<'_>,
+    _device_handle: super::DeviceHandle,
     cl: &ID3D12GraphicsCommandList7,
     data: &[u32],
 ) -> Result<()> {
-    let ft = state
-        .frame_tables
-        .get(&device_handle)
-        .context("frame table not initialized")?;
-    let buffers_read = state.buffers.read().unwrap();
+    let ft = &record.frame_table;
+    let buffers_read = record.buffers.read().unwrap();
     let device_table = buffers_read.entries.get(&ft.device_table).context("device table")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
@@ -412,20 +396,17 @@ pub(crate) fn sync_table_row_to_device(
 
 /// CPU staging write + GPU copy prologue.
 pub(crate) fn record_prologue(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, FrameTableDevice>,
+    contexts: &super::types::SharedContextMap,
+    frame_table: &FrameTableDevice,
     buffers: &std::collections::HashMap<BufferHandle, BufferState>,
     device_handle: super::DeviceHandle,
     cl: &ID3D12GraphicsCommandList7,
     data: &[u32],
 ) -> Result<()> {
-    let row = write_staging_for_submission(contexts, frame_tables, device_handle, data)?;
+    let row = write_staging_for_submission(contexts, frame_table, device_handle, data)?;
 
-    let ft = frame_tables
-        .get(&device_handle)
-        .context("frame table not initialized")?;
-    let device_table = buffers.get(&ft.device_table).context("device table")?;
-    let selector_state = buffers.get(&ft.selector).context("selector")?;
+    let device_table = buffers.get(&frame_table.device_table).context("device table")?;
+    let selector_state = buffers.get(&frame_table.selector).context("selector")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let row_bytes = (FRAME_TABLE_ROW_STRIDE as u64) * 4;
@@ -435,7 +416,7 @@ pub(crate) fn record_prologue(
 
     transition_buffer(
         cl,
-        &ft.staging,
+        &frame_table.staging,
         D3D12_RESOURCE_STATE_GENERIC_READ,
         D3D12_RESOURCE_STATE_COPY_SOURCE,
     );
@@ -456,11 +437,11 @@ pub(crate) fn record_prologue(
         cl.CopyBufferRegion(
             &device_table.resource,
             dest_offset,
-            &ft.staging,
+            &frame_table.staging,
             src_payload,
             (copy_u32s * 4) as u64,
         );
-        cl.CopyBufferRegion(&selector_state.resource, 0, &ft.staging, src_selector, 4);
+        cl.CopyBufferRegion(&selector_state.resource, 0, &frame_table.staging, src_selector, 4);
     }
 
     transition_buffer(
@@ -477,7 +458,7 @@ pub(crate) fn record_prologue(
     );
     transition_buffer(
         cl,
-        &ft.staging,
+        &frame_table.staging,
         D3D12_RESOURCE_STATE_COPY_SOURCE,
         D3D12_RESOURCE_STATE_GENERIC_READ,
     );
@@ -503,7 +484,7 @@ pub(crate) fn extract_staging_from_graph(commands: &[crate::backend::GraphComman
 
 /// Lower render commands and build staging for standalone render passes (not graph submit).
 pub(crate) fn prepare_render_commands(
-    state: &Dx12State,
+    record: &super::submit_session::Dx12RecordState<'_>,
     commands: &[crate::backend::RenderCommand],
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
     use crate::backend::RenderCommand;
@@ -513,7 +494,7 @@ pub(crate) fn prepare_render_commands(
         crate::backend::validate_render_pass_bind_resources(
             commands,
             |h| {
-                state
+                record
                     .pipelines
                     .read()
                     .unwrap()
@@ -522,7 +503,7 @@ pub(crate) fn prepare_render_commands(
                     .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
             },
             |h| {
-                state
+                record
                     .buffers
                     .read()
                     .unwrap()
@@ -541,7 +522,7 @@ pub(crate) fn prepare_render_commands(
                 let indices: Vec<u32> = buffers
                     .iter()
                     .map(|h| {
-                        state
+                        record
                             .buffers
                             .read()
                             .unwrap()
@@ -567,4 +548,14 @@ pub(crate) fn prepare_render_commands(
         .collect::<Result<Vec<_>>>()?;
     let has_bindings = staging.has_bindings();
     Ok((staging.data, lowered, has_bindings))
+}
+
+/// Lower render commands and build staging (backend state lookup).
+pub(crate) fn prepare_render_commands_state(
+    state: &Dx12State,
+    device_handle: super::DeviceHandle,
+    commands: &[crate::backend::RenderCommand],
+) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
+    let record = super::submit_session::record_state_from_backend(state, device_handle)?;
+    prepare_render_commands(&record, commands)
 }

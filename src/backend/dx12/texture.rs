@@ -2,7 +2,7 @@
 
 use super::barriers;
 use super::types::{Dx12State, PendingDeletion, TextureState};
-use super::utils::{format_to_dxgi, wait_for_fence};
+use super::utils::{execute_command_lists_and_signal_device, format_to_dxgi, wait_for_fence};
 use super::{BufferHandle, DeviceHandle, TextureHandle};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
@@ -91,15 +91,7 @@ pub(super) fn init_storage_texture_uav_layout(
     .context("Failed to close init barrier command list")?;
 
     let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast init command list")?;
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal fence for init barrier")?;
+    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
@@ -765,15 +757,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
     let logical_device = state.devices.get(&device_handle).unwrap();
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("flush_pending_copies: failed to signal fence")?;
+    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     // Release and reclaim the staging entries back to the pool immediately.
@@ -1075,15 +1059,7 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, 
     unsafe { command_list.Close() }.context("Failed to close command list")?;
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal fence")?;
+    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get(&device_handle) {

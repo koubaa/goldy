@@ -1,0 +1,263 @@
+//! Lock-free per-context submit session (Phase 5b-iv).
+//!
+//! Cloned at [`crate::Context::new`] under a brief global lock; recording + queue
+//! submit never touch the global backend mutex.
+
+use super::compute;
+use super::frame_table::FrameTableDevice;
+use super::types::{
+    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextMap, SharedFrameTableDevice,
+    SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSamplerTable, SharedShaderTable,
+    SharedSubmissionContext, SharedTextureTable,
+};
+use super::{ContextHandle, DeviceHandle, GraphCommand, GpuCommand, SubmitSync};
+use crate::timeline::TimelineValue;
+use anyhow::{Context as _, Result};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
+
+/// Resource tables + device handles used by compute and render command recording.
+pub(crate) struct Dx12RecordState<'a> {
+    pub ld: &'a SharedLogicalDevice,
+    pub devices: &'a HashMap<DeviceHandle, SharedLogicalDevice>,
+    pub contexts: &'a SharedContextMap,
+    pub frame_table: SharedFrameTableDevice,
+    pub buffers: &'a SharedBufferTable,
+    pub shaders: &'a SharedShaderTable,
+    pub pipelines: &'a SharedPipelineTable,
+    pub compute_pipelines: &'a SharedComputePipelineTable,
+    pub render_targets: &'a SharedRenderTargetTable,
+    pub textures: &'a SharedTextureTable,
+    #[allow(dead_code)]
+    pub samplers: &'a SharedSamplerTable,
+}
+
+/// Cloned handles for one partition submit — no global backend lock required.
+pub(crate) struct Dx12SubmitScope<'a> {
+    pub ctx: ContextHandle,
+    pub device_handle: DeviceHandle,
+    pub sc: super::types::SharedSubmissionContext,
+    pub record: Dx12RecordState<'a>,
+    pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    pub use_global_buffer_barriers: bool,
+}
+
+impl<'a> Dx12SubmitScope<'a> {
+    pub fn ld(&self) -> &'a SharedLogicalDevice {
+        self.record.ld
+    }
+
+    pub fn devices(&self) -> &'a HashMap<DeviceHandle, SharedLogicalDevice> {
+        self.record.devices
+    }
+
+    pub fn contexts(&self) -> &'a SharedContextMap {
+        self.record.contexts
+    }
+
+    pub fn frame_table(&self) -> &FrameTableDevice {
+        &self.record.frame_table
+    }
+
+    pub fn buffers(&self) -> &'a SharedBufferTable {
+        self.record.buffers
+    }
+
+    #[allow(dead_code)]
+    pub fn shaders(&self) -> &'a SharedShaderTable {
+        self.record.shaders
+    }
+
+    #[allow(dead_code)]
+    pub fn pipelines(&self) -> &'a SharedPipelineTable {
+        self.record.pipelines
+    }
+
+    pub fn compute_pipelines(&self) -> &'a SharedComputePipelineTable {
+        self.record.compute_pipelines
+    }
+
+    pub fn render_targets(&self) -> &'a SharedRenderTargetTable {
+        self.record.render_targets
+    }
+
+    pub fn textures(&self) -> &'a SharedTextureTable {
+        self.record.textures
+    }
+
+    #[allow(dead_code)]
+    pub fn samplers(&self) -> &'a SharedSamplerTable {
+        self.record.samplers
+    }
+}
+
+pub(crate) fn record_state_from_backend<'a>(
+    state: &'a Dx12State,
+    device_handle: DeviceHandle,
+) -> Result<Dx12RecordState<'a>> {
+    let frame_table = Arc::clone(
+        state
+            .frame_tables
+            .read()
+            .unwrap()
+            .get(&device_handle)
+            .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
+    );
+    Ok(Dx12RecordState {
+        ld: state.devices.get(&device_handle).with_context(|| format!("Invalid device {device_handle}"))?,
+        devices: &state.devices,
+        contexts: &state.contexts,
+        frame_table,
+        buffers: &state.buffers,
+        shaders: &state.shaders,
+        pipelines: &state.pipelines,
+        compute_pipelines: &state.compute_pipelines,
+        render_targets: &state.render_targets,
+        textures: &state.textures,
+        samplers: &state.samplers,
+    })
+}
+
+/// Per-context submit session cloned at context creation.
+pub(crate) struct Dx12SubmitSession {
+    ctx: ContextHandle,
+    device_handle: DeviceHandle,
+    sc: SharedSubmissionContext,
+    ld: SharedLogicalDevice,
+    devices: Arc<HashMap<DeviceHandle, SharedLogicalDevice>>,
+    contexts: SharedContextMap,
+    frame_table: SharedFrameTableDevice,
+    context_fences: Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    buffers: SharedBufferTable,
+    shaders: SharedShaderTable,
+    pipelines: SharedPipelineTable,
+    compute_pipelines: SharedComputePipelineTable,
+    render_targets: SharedRenderTargetTable,
+    textures: SharedTextureTable,
+    samplers: SharedSamplerTable,
+    use_global_buffer_barriers: bool,
+}
+
+impl Dx12SubmitSession {
+    pub fn clone_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<Arc<Self>> {
+        let sc = Arc::clone(
+            state
+                .contexts
+                .read()
+                .unwrap()
+                .get(&ctx)
+                .with_context(|| format!("Invalid context handle {ctx}"))?,
+        );
+        let device_handle = sc.lock().unwrap().device;
+        let ld = Arc::clone(
+            state
+                .devices
+                .get(&device_handle)
+                .with_context(|| format!("Invalid device handle {device_handle}"))?,
+        );
+        let frame_table = Arc::clone(
+            state
+                .frame_tables
+                .read()
+                .unwrap()
+                .get(&device_handle)
+                .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
+        );
+        let devices: HashMap<DeviceHandle, SharedLogicalDevice> = state
+            .devices
+            .iter()
+            .map(|(handle, device)| (*handle, Arc::clone(device)))
+            .collect();
+        let use_global_buffer_barriers = ld.adapter_id == super::WARP_ADAPTER_ID;
+        Ok(Arc::new(Self {
+            ctx,
+            device_handle,
+            sc,
+            ld,
+            devices: Arc::new(devices),
+            contexts: Arc::clone(&state.contexts),
+            frame_table,
+            context_fences: Arc::clone(&state.context_fences),
+            buffers: Arc::clone(&state.buffers),
+            shaders: Arc::clone(&state.shaders),
+            pipelines: Arc::clone(&state.pipelines),
+            compute_pipelines: Arc::clone(&state.compute_pipelines),
+            render_targets: Arc::clone(&state.render_targets),
+            textures: Arc::clone(&state.textures),
+            samplers: Arc::clone(&state.samplers),
+            use_global_buffer_barriers,
+        }))
+    }
+
+    fn scope(&self) -> Dx12SubmitScope<'_> {
+        Dx12SubmitScope {
+            ctx: self.ctx,
+            device_handle: self.device_handle,
+            sc: std::sync::Arc::clone(&self.sc),
+            record: Dx12RecordState {
+                ld: &self.ld,
+                devices: &self.devices,
+                contexts: &self.contexts,
+                frame_table: Arc::clone(&self.frame_table),
+                buffers: &self.buffers,
+                shaders: &self.shaders,
+                pipelines: &self.pipelines,
+                compute_pipelines: &self.compute_pipelines,
+                render_targets: &self.render_targets,
+                textures: &self.textures,
+                samplers: &self.samplers,
+            },
+            context_fences: &self.context_fences,
+            use_global_buffer_barriers: self.use_global_buffer_barriers,
+        }
+    }
+}
+
+impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
+    fn retains_present_partitions(&self) -> bool {
+        true
+    }
+
+    fn submit_standalone(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<TimelineValue> {
+        compute::submit_with_scope(&self.scope(), ctx, commands, sync)
+    }
+
+    fn submit_graph(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<TimelineValue> {
+        compute::submit_graph_with_scope(&self.scope(), ctx, commands, None, sync)
+    }
+
+    fn submit_graph_and_retain(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<TimelineValue> {
+        compute::evict_retained_with_scope(&self.scope(), ctx, key);
+        compute::submit_graph_with_scope(&self.scope(), ctx, commands, Some(key), sync)
+    }
+
+    fn try_resubmit_retained(
+        &self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<TimelineValue>> {
+        compute::try_resubmit_retained_with_scope(&self.scope(), ctx, key, sync)
+    }
+
+    fn evict_retained(&self, ctx: ContextHandle, key: u64) {
+        compute::evict_retained_with_scope(&self.scope(), ctx, key);
+    }
+}

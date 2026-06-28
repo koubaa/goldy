@@ -38,26 +38,25 @@ pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod frame_table;
 mod pipeline;
+mod process_shared;
 mod pso_cache;
 mod render_commands;
 mod render_target;
 mod sampler;
 mod shader;
 mod staging;
+mod submit_session;
 mod surface;
 mod texture;
 mod types;
 mod utils;
 
-use types::{Dx12State, DxgiAdapterInfo, LogicalDevice};
+use types::{Dx12State, LogicalDevice};
 
 use super::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Once, OnceLock};
-use windows::core::Interface;
-use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12Debug, ID3D12Debug1};
-use windows::Win32::Graphics::Dxgi::*;
+use std::sync::{Arc, Mutex};
 
 /// Adapter ID for the WARP device from [`IDXGIFactory4::EnumWarpAdapter`].
 /// Used when `GOLDY_DX12_FORCE_WARP=1`.
@@ -85,8 +84,6 @@ pub(crate) fn env_disable_reserved_buffers() -> bool {
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
 }
 
-static DEBUG_LAYER_INIT: Once = Once::new();
-
 /// The D3D12 debug layer raises SEH exception 0x87D when it detects API
 /// violations. Without a handler, the default behaviour terminates the process
 /// with exit code 2173 (= 0x87D). This filter catches the exception so that
@@ -94,7 +91,7 @@ static DEBUG_LAYER_INIT: Once = Once::new();
 pub(super) fn install_debug_layer_exception_handler() {
     const D3D12_DEBUG_LAYER_EXCEPTION: u32 = 0x87D;
 
-    static HANDLER_INIT: Once = Once::new();
+    static HANDLER_INIT: std::sync::Once = std::sync::Once::new();
     HANDLER_INIT.call_once(|| {
         extern "system" {
             fn SetUnhandledExceptionFilter(
@@ -131,38 +128,20 @@ pub(super) fn install_debug_layer_exception_handler() {
     });
 }
 
-/// Shared DX12 backend singleton.
-///
-/// The D3D12 debug layer tracks all objects process-wide and is not thread-safe
-/// under concurrent operations from multiple backend instances. Sharing a single
-/// backend lets the existing `Arc<Mutex<...>>` in `Instance`/`Device` naturally
-/// serialize all D3D12 calls, preventing access violations in parallel tests.
-static SHARED_DX12: OnceLock<Arc<Mutex<Box<dyn super::GpuBackend>>>> = OnceLock::new();
-
 /// True when the D3D12 debug layer will be enabled (debug build or GOLDY_DX12_DEBUG=1).
-/// Used to decide between singleton (debug) vs per-instance (release) backend.
-///
-/// Tests that create multiple D3D12 devices should serialize under a lock when
-/// this returns `true` — the debug layer validates resources process-wide and
-/// is not safe under concurrent device lifetimes.
 pub fn is_debug_mode() -> bool {
     let no_debug = std::env::var("GOLDY_DX12_NO_DEBUG").is_ok_and(|v| v == "1" || v == "true");
     !no_debug && (cfg!(debug_assertions) || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true"))
 }
 
-/// Get or create the shared DX12 backend.
+/// Get or create a DX12 backend for one [`crate::Instance`].
+///
+/// Each instance owns independent [`Dx12State`] (resource tables, contexts, devices) so
+/// lock-free submit sessions never share mutable backend state across concurrent clients.
+/// DXGI factory + adapter enumeration are process-wide via [`process_shared::process_shared`].
 pub fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>> {
-    if is_debug_mode() {
-        Ok(SHARED_DX12
-            .get_or_init(|| {
-                let backend = Dx12Backend::new().expect("Failed to create DX12 backend");
-                Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>))
-            })
-            .clone())
-    } else {
-        let backend = Dx12Backend::new()?;
-        Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
-    }
+    let backend = Dx12Backend::new()?;
+    Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
 }
 
 /// DirectX 12 backend.
@@ -175,138 +154,19 @@ impl Dx12Backend {
     pub fn new() -> Result<Self> {
         tracing::info!("Initializing DX12 backend");
 
-        // Enable debug layer in debug builds or when GOLDY_DX12_DEBUG=1.
-        // Set GOLDY_DX12_NO_DEBUG=1 to force-disable (avoids debug-layer crashes
-        // in parallel test threads where multiple D3D12 devices coexist).
-        DEBUG_LAYER_INIT.call_once(|| {
-            if is_debug_mode() {
-                let mut debug_interface: Option<ID3D12Debug> = None;
-                if unsafe { D3D12GetDebugInterface(&mut debug_interface) }.is_ok() {
-                    if let Some(d) = debug_interface {
-                        unsafe { d.EnableDebugLayer() };
-                        tracing::info!("D3D12 debug layer enabled");
-
-                        // GPU-Based Validation: catches UAV/SRV descriptor mismatches,
-                        // resource state errors, and out-of-bounds access on the GPU timeline.
-                        // Very slow — enable with GOLDY_DX12_GBV=1.
-                        let enable_gbv =
-                            std::env::var("GOLDY_DX12_GBV").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-                        if enable_gbv {
-                            if let Ok(debug1) = d.cast::<ID3D12Debug1>() {
-                                unsafe { debug1.SetEnableGPUBasedValidation(true) };
-                                tracing::info!("D3D12 GPU-Based Validation (GBV) enabled");
-                            } else {
-                                tracing::warn!("ID3D12Debug1 not available — GPU-Based Validation unavailable");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // Create DXGI factory
-        let factory_flags = if is_debug_mode() {
-            DXGI_CREATE_FACTORY_DEBUG
-        } else {
-            DXGI_CREATE_FACTORY_FLAGS(0)
-        };
-
-        let factory: IDXGIFactory4 =
-            unsafe { CreateDXGIFactory2(factory_flags) }.context("Failed to create DXGI factory")?;
-
-        // Check tearing support (IDXGIFactory5::CheckFeatureSupport)
-        let allow_tearing = factory
-            .cast::<IDXGIFactory5>()
-            .ok()
-            .and_then(|f5| {
-                let mut allow: i32 = 0;
-                let hr = unsafe {
-                    f5.CheckFeatureSupport(
-                        DXGI_FEATURE_PRESENT_ALLOW_TEARING,
-                        &mut allow as *mut _ as *mut _,
-                        std::mem::size_of::<i32>() as u32,
-                    )
-                };
-                hr.ok().map(|()| allow != 0)
-            })
-            .unwrap_or(false);
-        tracing::info!("DXGI tearing support: {allow_tearing}");
-
-        // Enumerate adapters
-        let mut adapters = Vec::new();
-        let mut adapter_index = 0u32;
-
-        loop {
-            let adapter_result: Result<IDXGIAdapter1, _> = unsafe { factory.EnumAdapters1(adapter_index) };
-            match adapter_result {
-                Ok(adapter) => {
-                    let desc = match unsafe { adapter.GetDesc1() } {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    };
-
-                    // Skip software adapters unless explicitly requested
-                    let flags = DXGI_ADAPTER_FLAG(desc.Flags as i32);
-                    if !flags.contains(DXGI_ADAPTER_FLAG_SOFTWARE) {
-                        let name = String::from_utf16_lossy(&desc.Description)
-                            .trim_end_matches('\0')
-                            .to_string();
-                        tracing::info!("  [{}] {}", adapter_index, name);
-
-                        let supports_reserved_buffers = device::query_supports_reserved_buffers(&adapter);
-                        adapters.push(DxgiAdapterInfo {
-                            adapter,
-                            desc,
-                            adapter_id: adapter_index,
-                            supports_reserved_buffers,
-                        });
-                    }
-                    adapter_index += 1;
-                }
-                Err(_) => break,
-            }
-        }
-
-        tracing::info!("Found {} hardware DXGI adapters", adapters.len());
-
-        if env_allow_warp() {
-            let warp_result: windows::core::Result<IDXGIAdapter> = unsafe { factory.EnumWarpAdapter() };
-            match warp_result {
-                Ok(warp) => match warp.cast::<IDXGIAdapter1>() {
-                    Ok(adapter) => match unsafe { adapter.GetDesc1() } {
-                        Ok(desc) => {
-                            let name = String::from_utf16_lossy(&desc.Description)
-                                .trim_end_matches('\0')
-                                .to_string();
-                            tracing::info!("  [{}] {} (WARP)", WARP_ADAPTER_ID, name);
-                            let supports_reserved_buffers = device::query_supports_reserved_buffers(&adapter);
-                            adapters.push(DxgiAdapterInfo {
-                                adapter,
-                                desc,
-                                adapter_id: WARP_ADAPTER_ID,
-                                supports_reserved_buffers,
-                            });
-                        }
-                        Err(e) => tracing::warn!("WARP GetDesc1 failed: {:?}", e),
-                    },
-                    Err(e) => tracing::warn!("WARP IDXGIAdapter cast failed: {:?}", e),
-                },
-                Err(e) => tracing::warn!("EnumWarpAdapter failed: {:?}", e),
-            }
-        }
-
-        tracing::info!("Total {} DX12 adapters (including WARP if enabled)", adapters.len());
+        let shared = process_shared::process_shared()?;
+        install_debug_layer_exception_handler();
 
         // Create Slang compiler
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         let state = Dx12State {
-            factory,
-            allow_tearing,
-            adapters,
+            factory: shared.factory.clone(),
+            allow_tearing: shared.allow_tearing,
+            adapters: shared.adapters.clone(),
             devices: HashMap::new(),
             next_device_handle: 1,
-            contexts: HashMap::new(),
+            contexts: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             next_context_id: 1,
             context_fences: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             buffers: std::sync::Arc::new(std::sync::RwLock::new(types::BufferTable::new())),
@@ -324,7 +184,7 @@ impl Dx12Backend {
             free_dsv_offsets: Vec::new(),
             slang_compiler,
             device_removed: std::sync::atomic::AtomicBool::new(false),
-            frame_tables: HashMap::new(),
+            frame_tables: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         Ok(Self { state })
@@ -592,6 +452,8 @@ impl GpuBackend for Dx12Backend {
         let ctxs: Vec<ContextHandle> = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .iter()
             .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
@@ -624,7 +486,7 @@ impl GpuBackend for Dx12Backend {
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
         Some(std::sync::Arc::new(Dx12ContextTimelineReader {
-            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
+            sc: std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?),
         }))
     }
 
@@ -649,7 +511,7 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         Some(std::sync::Arc::new(Dx12ContextDeferredDeletionFlush {
             ctx,
-            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
+            sc: std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?),
             ld: std::sync::Arc::clone(self.state.devices.get(&device_handle)?),
             context_fences: std::sync::Arc::clone(&self.state.context_fences),
         }))
@@ -972,10 +834,11 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
-        let Some(sc_arc) = self.state.contexts.get(&ctx) else {
-            return 0;
-        };
-        unsafe { sc_arc.lock().unwrap().fence.GetCompletedValue() }
+        let contexts = self.state.contexts.read().unwrap();
+        match contexts.get(&ctx) {
+            Some(sc_arc) => unsafe { sc_arc.lock().unwrap().fence.GetCompletedValue() },
+            None => 0,
+        }
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
@@ -990,6 +853,8 @@ impl GpuBackend for Dx12Backend {
         let fence = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .values()
             .filter_map(|sc_arc| {
                 let sc = sc_arc.lock().unwrap();
@@ -1019,6 +884,8 @@ impl GpuBackend for Dx12Backend {
         let signal_queue = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .get(&ctx)
             .map(|sc_arc| std::sync::Arc::clone(&sc_arc.lock().unwrap().signal_queue));
         let Some(signal_queue) = signal_queue else {
@@ -1042,7 +909,8 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc_arc = self.state.contexts.get(&ctx)?;
+        let contexts = self.state.contexts.read().unwrap();
+        let sc_arc = contexts.get(&ctx)?;
         let sc = sc_arc.lock().unwrap();
         let progress = unsafe { sc.fence.GetCompletedValue() };
         if progress < sc.last_submitted_seq {
@@ -1318,7 +1186,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn reset_buffer_heaps(&mut self, device_handle: DeviceHandle) {
-        for sc_arc in self.state.contexts.values() {
+        for sc_arc in self.state.contexts.read().unwrap().values() {
             let mut sc = sc_arc.lock().unwrap();
             if sc.device == device_handle {
                 sc.staging_belt.trim();
@@ -1366,6 +1234,17 @@ impl GpuBackend for Dx12Backend {
             .get(&device_handle)
             .map(|d| d.deletion_queue.lock().unwrap().pending_len())
             .unwrap_or(0)
+    }
+}
+
+impl crate::backend::GpuBackendSubmitSession for Dx12Backend {
+    fn clone_context_submit_session(
+        &self,
+        ctx: ContextHandle,
+        _backend: std::sync::Arc<std::sync::Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    ) -> std::sync::Arc<dyn crate::backend::ContextSubmitSession> {
+        submit_session::Dx12SubmitSession::clone_from_state(&self.state, ctx)
+            .unwrap_or_else(|e| panic!("clone_context_submit_session({ctx}): {e:#}"))
     }
 }
 

@@ -31,7 +31,7 @@ use super::barriers;
 use super::render_commands;
 use super::texture;
 use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
-use super::utils::{depth_format_to_dxgi, dxgi_to_format};
+use super::utils::{depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};
 use crate::types::{Color, DepthFormat, TextureFlags, TextureFormat, TextureKind};
@@ -413,7 +413,7 @@ pub(super) fn acquire(
         surface.current_frame = (present_slot + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
+    if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
         sc_arc
             .lock()
             .unwrap()
@@ -610,11 +610,17 @@ pub(super) fn render(
         ]);
     }
 
-    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(state, commands)?;
+    let (staging_data, lowered, has_bindings) =
+        super::frame_table::prepare_render_commands_state(state, device_handle, commands)?;
     if has_bindings {
         super::frame_table::record_prologue(
             &state.contexts,
-            &state.frame_tables,
+            state
+                .frame_tables
+                .read()
+                .unwrap()
+                .get(&device_handle)
+                .context("frame table not initialized")?,
             &state.buffers.read().unwrap().entries,
             device_handle,
             cmd,
@@ -623,7 +629,7 @@ pub(super) fn render(
     }
 
     // Execute render commands
-    render_commands::record(cmd, &lowered, device_handle, state)?;
+    render_commands::record_state(cmd, &lowered, device_handle, state)?;
 
     // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
     // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.
@@ -654,16 +660,7 @@ pub(super) fn render(
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
-    // Signal fence for this frame
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal fence")?;
+    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
 
     // Update fence value for next operation
 
@@ -779,7 +776,7 @@ pub(super) fn finish_present(
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
-        if let Some(sc_arc) = state.contexts.get(&ctx) {
+        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
             sc_arc
                 .lock()
                 .unwrap()
@@ -879,20 +876,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
             unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-            unsafe {
-                self.logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-            }
-
-            return_fence = self
-                .logical_device
-                .timeline_next
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            unsafe {
-                self.logical_device
-                    .command_queue
-                    .Signal(&self.logical_device.fence, return_fence)
-            }
-            .context("Failed to signal fence after present copy")?;
+            return_fence = execute_command_lists_and_signal_device(&self.logical_device, &[Some(cmd_list)])?;
             scratch_layout_updated = true;
         }
 

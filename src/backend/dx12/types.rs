@@ -437,6 +437,7 @@ mod registry_tests {
 /// Information about a physical DXGI adapter.
 /// Named DxgiAdapterInfo to avoid conflict with super::AdapterInfo.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) struct DxgiAdapterInfo {
     pub adapter: Dxgi::IDXGIAdapter1,
     pub desc: Dxgi::DXGI_ADAPTER_DESC1,
@@ -785,6 +786,16 @@ pub(crate) type SharedLogicalDevice = Arc<LogicalDevice>;
 /// Shared submission context handle — allows cloning a context reference out of `Dx12State`
 /// before dropping the global backend lock, enabling fine-grained per-context locking.
 pub(crate) type SharedSubmissionContext = Arc<Mutex<Dx12SubmissionContext>>;
+
+/// Live contexts keyed by handle — `Arc<RwLock<>>` so submit sessions can scan/evict retained
+/// graphs without the global backend mutex.
+pub(crate) type SharedContextMap = Arc<std::sync::RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
+
+/// Per-device frame-table GPU state — shared via `Arc` for lock-free submit recording.
+pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
+
+/// Frame tables keyed by device — cloned into [`super::submit_session::Dx12SubmitSession`].
+pub(crate) type SharedFrameTableMap = Arc<std::sync::RwLock<HashMap<super::DeviceHandle, SharedFrameTableDevice>>>;
 
 impl LogicalDevice {
     pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
@@ -1184,7 +1195,7 @@ pub(super) struct Dx12State {
     pub adapters: Vec<DxgiAdapterInfo>,
     pub devices: HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
-    pub contexts: HashMap<ContextHandle, SharedSubmissionContext>,
+    pub contexts: SharedContextMap,
     pub next_context_id: super::ContextHandle,
     /// Fence handles for every live context, keyed by context ID.
     ///
@@ -1222,5 +1233,5 @@ pub(super) struct Dx12State {
     pub device_removed: std::sync::atomic::AtomicBool,
     /// Per-device frame-table GPU resources (reserved bindless slots 0/1).
     #[cfg(all(feature = "dx12", target_os = "windows"))]
-    pub frame_tables: HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
+    pub frame_tables: SharedFrameTableMap,
 }

@@ -130,6 +130,50 @@ fn alloc_committed_buffer_pair(
     Ok((resource, coherent_readback, coherent_readback_mapped))
 }
 
+/// Eager UPLOAD heap + persistent map for [`BufferFlags::CPU_WRITABLE`] storage buffers.
+fn create_cpu_writable_upload(logical_device: &LogicalDevice, allocation_size: u64) -> Result<(ID3D12Resource, usize)> {
+    let upload_heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_UPLOAD,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+        CreationNodeMask: 0,
+        VisibleNodeMask: 0,
+    };
+    let upload_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: allocation_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: D3D12_RESOURCE_FLAG_NONE,
+    };
+    let mut upload: Option<ID3D12Resource> = None;
+    unsafe {
+        logical_device.device.CreateCommittedResource(
+            &upload_heap,
+            D3D12_HEAP_FLAG_NONE,
+            &upload_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            None,
+            &mut upload,
+        )
+    }
+    .context("Failed to create CPU_WRITABLE upload buffer")?;
+    let upload = upload.context("CreateCommittedResource upload returned null")?;
+    let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
+    let no_read = D3D12_RANGE { Begin: 0, End: 0 };
+    unsafe { upload.Map(0, Some(&no_read), Some(&mut mapped)) }.context("Failed to map CPU_WRITABLE upload buffer")?;
+    let p = mapped as *mut u8;
+    if p.is_null() {
+        anyhow::bail!("Map returned null for CPU_WRITABLE upload");
+    }
+    Ok((upload, p as usize))
+}
+
 fn rewrite_root_buffer_descriptors(
     logical_device: &LogicalDevice,
     new_resource: &ID3D12Resource,
@@ -523,17 +567,9 @@ pub(super) fn resize(
 
         unsafe { cmd.Close() }.context("resize_buffer: Close")?;
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
-        unsafe { device.command_queue.ExecuteCommandLists(&lists) };
-
-        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("resize_buffer: Signal")?;
-        wait_for_fence(&device.fence, fence_value)?;
+        let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
+        super::utils::wait_for_fence(&device.fence, fence_value)?;
         deletion_fence_marker = fence_value;
-
-        if let Some(dev) = state.devices.get(&device_handle) {
-            dev.timeline_next
-                .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
-        }
     } else if !old.is_storage && preserve_contents && copy_len > 0 {
         let mut src: *mut std::ffi::c_void = std::ptr::null_mut();
         let read_all = D3D12_RANGE {
@@ -569,6 +605,25 @@ pub(super) fn resize(
         .context("resize_buffer: device for descriptors")?;
     rewrite_root_buffer_descriptors(logical_device, &new_resource, new_size, &old)?;
 
+    let cpu_writable = old.flags.contains(BufferFlags::CPU_WRITABLE);
+    let (upload_buffer, cpu_writable_upload_mapped) = if cpu_writable {
+        let (upload, mapped) = create_cpu_writable_upload(logical_device, new_alloc_width)?;
+        if preserve_contents && copy_len > 0 {
+            if let Some(old_mapped) = old.cpu_writable_upload_mapped {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        old_mapped as *const u8,
+                        mapped as *mut u8,
+                        copy_len as usize,
+                    );
+                }
+            }
+        }
+        (Some(upload), Some(mapped))
+    } else {
+        (None, None)
+    };
+
     state.buffers.write().unwrap().entries.insert(
         buffer_handle,
         BufferState {
@@ -579,12 +634,12 @@ pub(super) fn resize(
             bindless_offset: old.bindless_offset,
             bindless_srv_offset: old.bindless_srv_offset,
             is_storage: old.is_storage,
-            upload_buffer: None,
+            upload_buffer,
             element_stride: old.element_stride,
             is_view: false,
             coherent_readback: new_readback,
             coherent_readback_mapped: new_readback_mapped,
-            cpu_writable_upload_mapped: None,
+            cpu_writable_upload_mapped,
             flags: old.flags,
             transient_placed: false,
             parent_for_view: None,
@@ -824,7 +879,6 @@ pub(super) fn create(
             cpu_writable_upload_mapped,
         )
     };
-
     let handle = state.buffers.write().unwrap().alloc_handle();
 
     // Second pass: register in bindless heap
@@ -1563,23 +1617,6 @@ pub(super) fn create_view(
     Ok(handle)
 }
 
-/// Wait for a fence to reach the specified value.
-/// This is a low-level helper for GPU synchronization.
-fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
-
-    if unsafe { fence.GetCompletedValue() } < value {
-        let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
-
-        unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
-
-        unsafe { WaitForSingleObject(event, INFINITE) };
-        unsafe { CloseHandle(event) }.ok();
-    }
-    Ok(())
-}
-
 /// Max size for the staging/upload buffer used in chunked writes.
 /// Large uploads are split into chunks of this size to avoid massive staging allocations.
 const UPLOAD_CHUNK_SIZE: u64 = 16 * 1024 * 1024; // 16 MB
@@ -1839,15 +1876,8 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
         unsafe { cmd.Close() }.context("Failed to close command list")?;
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
-        unsafe { device.command_queue.ExecuteCommandLists(&lists) };
-
-        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
-        wait_for_fence(&device.fence, fence_value)?;
-        if let Some(dev) = state.devices.get(&device_handle) {
-            dev.timeline_next
-                .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
-        }
+        let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
+        super::utils::wait_for_fence(&device.fence, fence_value)?;
 
         written += this_chunk;
     }
@@ -1880,12 +1910,12 @@ pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> 
 
 /// Resolve which SRV/UAV/CBV view a bindless heap index refers to.
 pub(super) fn bindless_slot_kind_for_index(
-    state: &Dx12State,
+    buffers: &std::collections::HashMap<super::BufferHandle, super::types::BufferState>,
     device_handle: super::DeviceHandle,
     index: u32,
 ) -> Option<crate::types::BindlessSlotKind> {
     use crate::types::BindlessSlotKind;
-    for b in state.buffers.read().unwrap().entries.values() {
+    for b in buffers.values() {
         if b.device_handle != device_handle {
             continue;
         }
@@ -1902,7 +1932,6 @@ pub(super) fn bindless_slot_kind_for_index(
     }
     None
 }
-
 /// Get the SRV (read-only / StructuredBuffer) bindless index for a storage buffer.
 /// Scattered buffers have both a UAV (at bindless_offset) and an SRV (at bindless_srv_offset).
 pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
@@ -1972,7 +2001,6 @@ fn standalone_copy_coherent_readback(
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
 ) -> Result<()> {
-    use super::utils::wait_for_fence;
     use windows::Win32::Graphics::Direct3D12::*;
 
     let device = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -1993,17 +2021,9 @@ fn standalone_copy_coherent_readback(
     unsafe { copy_list.Close() }.context("Failed to close copy command list (coherent readback)")?;
 
     let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
-    unsafe { device.command_queue.ExecuteCommandLists(&lists) };
+    let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
+    super::utils::wait_for_fence(&device.fence, fence_value)?;
 
-    let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
-    unsafe { device.command_queue.Signal(&device.fence, fence_value) }
-        .context("Failed to signal fence (coherent readback)")?;
-    wait_for_fence(&device.fence, fence_value)?;
-
-    if let Some(dev) = state.devices.get(&device_handle) {
-        dev.timeline_next
-            .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
-    }
     Ok(())
 }
 
@@ -2154,16 +2174,8 @@ pub(super) fn read_to_cpu(
         unsafe { copy_list.Close() }.context("Failed to close copy command list")?;
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
-        unsafe { device.command_queue.ExecuteCommandLists(&lists) };
-
-        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
-        wait_for_fence(&device.fence, fence_value)?;
-
-        if let Some(dev) = state.devices.get(&device_handle) {
-            dev.timeline_next
-                .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
-        }
+        let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
+        super::utils::wait_for_fence(&device.fence, fence_value)?;
 
         // Map readback buffer and copy to output
         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -2303,20 +2315,12 @@ pub(super) fn clear(
         unsafe { cmd_list.Close() }.context("Failed to close command list")?;
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd_list.cast().context("Failed to cast command list")?)];
-        unsafe { device.command_queue.ExecuteCommandLists(&lists) };
-
-        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed) + 1;
-        unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
-        wait_for_fence(&device.fence, fence_value)?;
+        let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
+        super::utils::wait_for_fence(&device.fence, fence_value)?;
 
         let removed_reason = unsafe { device.device.GetDeviceRemovedReason() };
         if removed_reason.is_err() {
             anyhow::bail!("Device removed during buffer clear: {:?}", removed_reason);
-        }
-
-        if let Some(dev) = state.devices.get(&device_handle) {
-            dev.timeline_next
-                .store(fence_value + 1, std::sync::atomic::Ordering::Relaxed);
         }
     } else {
         // UPLOAD heap: CPU-accessible, just memset
