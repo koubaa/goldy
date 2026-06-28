@@ -379,7 +379,7 @@ pub(super) fn destroy(
             unsafe {
                 // Wait for all in-flight work to finish before freeing a pipeline
                 // that may still be referenced by an in-flight command buffer.
-                device.device_wait_idle_locked().ok();
+                let _ = device.synchronized_device_wait_idle();
                 if pipeline.pipeline != vk::Pipeline::null() {
                     device.device.destroy_pipeline(pipeline.pipeline, None);
                 }

@@ -200,6 +200,11 @@ pub(super) struct VulkanContextDestroyWork {
 
 impl ContextDestroyHandle for VulkanContextDestroyWork {
     fn wait(&self) -> Result<()> {
+        let _ = self.ld.submission_worker.flush();
+        if self.sc.last_submitted_seq > 0 {
+            let _ = self.ld.submission_worker.wait_submitted(self.sc.last_submitted_seq);
+        }
+        self.ld.submission_worker.check_error()?;
         if self.sc.last_submitted_seq > 0 {
             let wait = vk::SemaphoreWaitInfo::default()
                 .semaphores(std::slice::from_ref(&self.sc.timeline_semaphore))

@@ -235,6 +235,54 @@ pub(super) fn execute_with_waits_and_signal_device(
     Ok(fence_value)
 }
 
+/// GPU-side queue waits, execute, and context-fence signal under per-context queue lock.
+/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+pub(super) fn execute_preallocated_context_submit(
+    logical_device: &LogicalDevice,
+    queue: &ID3D12CommandQueue,
+    queue_lock: &Arc<Mutex<()>>,
+    ctx_fence: &ID3D12Fence,
+    command_lists: &[Option<ID3D12CommandList>],
+    queue_waits: &[(ID3D12Fence, u64)],
+    tv: u64,
+) -> Result<()> {
+    let _guard = queue_lock.lock().unwrap();
+    if !queue_waits.is_empty() {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.queue_wait");
+        for (fence, value) in queue_waits {
+            unsafe { queue.Wait(fence, *value).context("cross-submit GPU queue Wait")? };
+        }
+    }
+    {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
+        unsafe {
+            queue.ExecuteCommandLists(command_lists);
+        }
+        unsafe { queue.Signal(ctx_fence, tv).context("Failed to signal context fence")? };
+    }
+    Ok(())
+}
+
+/// Execute command lists and signal the device fence under [`LogicalDevice::queue_lock`].
+/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+pub(super) fn signal_preallocated_device(
+    logical_device: &LogicalDevice,
+    command_lists: &[Option<ID3D12CommandList>],
+    tv: u64,
+) -> Result<()> {
+    with_queue_lock(logical_device, || {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
+        unsafe {
+            logical_device.command_queue.ExecuteCommandLists(command_lists);
+        }
+        unsafe {
+            logical_device.command_queue.Signal(&logical_device.fence, tv)
+        }
+        .context("Failed to signal device fence")?;
+        Ok(())
+    })
+}
+
 /// Run `f` while holding [`LogicalDevice::queue_lock`] (the queue is externally synchronized).
 pub(super) fn with_queue_lock<R>(logical_device: &LogicalDevice, f: impl FnOnce() -> R) -> R {
     let queue_lock = Arc::clone(&logical_device.queue_lock);

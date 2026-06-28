@@ -59,13 +59,8 @@ fn submit_copy(
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-        let queue_lock = Arc::clone(&device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        device
-            .device
-            .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
-        device.device.queue_wait_idle(device.queue)?;
-        drop(_queue_guard);
+        device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
+        device.synchronized_queue_wait_idle()?;
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
@@ -974,13 +969,8 @@ fn submit_resize_transfer(
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-        let queue_lock = Arc::clone(&device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        device
-            .device
-            .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
-        device.device.queue_wait_idle(device.queue)?;
-        drop(_queue_guard);
+        device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
+        device.synchronized_queue_wait_idle()?;
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
@@ -1762,13 +1752,8 @@ pub(super) fn clear(
     // Submit and wait
     let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
     unsafe {
-        let queue_lock = Arc::clone(&device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        device
-            .device
-            .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
-        device.device.queue_wait_idle(device.queue)?;
-        drop(_queue_guard);
+        device.synchronized_queue_submit(&[submit_info], vk::Fence::null())?;
+        device.synchronized_queue_wait_idle()?;
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 

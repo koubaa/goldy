@@ -18,6 +18,7 @@ mod context;
 mod device;
 mod frame_table;
 mod pipeline;
+mod pending_submit;
 mod present_split;
 mod render_commands;
 mod render_target;
@@ -301,6 +302,12 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
             return Ok(None);
         }
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            ld.submission_worker
+                .wait_submitted_if_scheduled(value, horizon)?;
+            ld.submission_worker.check_error()?;
+        }
         let sem = self
             .state
             .contexts
@@ -322,6 +329,10 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let _ = ld.submission_worker.flush();
+            ld.submission_worker.check_error()?;
+        }
         {
             let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
             compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
@@ -430,7 +441,7 @@ impl GpuBackend for VulkanBackend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.device_wait_idle_locked()
+        ld.synchronized_device_wait_idle()
             .map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
         Ok(())
     }
@@ -1228,6 +1239,12 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
+        if let Some(ld) = self.state.devices.get(&device) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            ld.submission_worker
+                .wait_submitted_if_scheduled(value, horizon)?;
+            ld.submission_worker.check_error()?;
+        }
         context::wait_until_device_seq_at_least(&self.state, device, value);
         Ok(())
     }
@@ -1294,6 +1311,16 @@ impl GpuBackend for VulkanBackend {
         timeout_ms: u32,
     ) -> Result<bool> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            if !ld
+                .submission_worker
+                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
+            {
+                return Ok(false);
+            }
+            ld.submission_worker.check_error()?;
+        }
         let sem = self
             .state
             .contexts

@@ -7,7 +7,7 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
 #[allow(clippy::too_many_arguments)]
@@ -467,21 +467,16 @@ pub(super) fn write(
             .end_command_buffer(cmd_buffer)
             .context("Failed to end command buffer")?;
 
-        // Submit and wait
+        // Submit and wait (`synchronized_*` acquires `queue_lock` internally).
         let cmd_buffers = [cmd_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
-        let queue_lock = Arc::clone(&logical_device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
         logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .synchronized_queue_submit(&[submit_info], vk::Fence::null())
             .context("Failed to submit command buffer")?;
         logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
+            .synchronized_queue_wait_idle()
             .context("Failed to wait for queue")?;
-        drop(_queue_guard);
 
         // Cleanup
         logical_device
@@ -700,21 +695,16 @@ pub(super) fn write_region(
             .end_command_buffer(cmd_buffer)
             .context("Failed to end command buffer")?;
 
-        // Submit and wait
+        // Submit and wait (`synchronized_*` acquires `queue_lock` internally).
         let cmd_buffers = [cmd_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
-        let queue_lock = Arc::clone(&logical_device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
         logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
+            .synchronized_queue_submit(&[submit_info], vk::Fence::null())
             .context("Failed to submit command buffer")?;
         logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
+            .synchronized_queue_wait_idle()
             .context("Failed to wait for queue")?;
-        drop(_queue_guard);
 
         // Cleanup
         logical_device
@@ -1011,23 +1001,11 @@ pub(super) fn read_to_cpu(
     }
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-    unsafe {
-        let queue_lock = Arc::clone(&logical_device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        logical_device
-            .device
-            .queue_submit(
-                logical_device.queue,
-                std::slice::from_ref(&submit_info),
-                vk::Fence::null(),
-            )
-            .context("Failed to submit command buffer")?;
-        logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
-            .context("Failed to wait for queue")?;
-        drop(_queue_guard);
-    }
+    logical_device
+        .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
+        .context("Failed to submit command buffer")?;
+
+    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
 
     unsafe {
         logical_device
@@ -1181,15 +1159,10 @@ pub(super) fn transition_image_layout(
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
-        let queue_lock = Arc::clone(&logical_device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        let sub = logical_device
-            .device
-            .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null());
+        let sub = logical_device.synchronized_queue_submit(&[submit_info], vk::Fence::null());
         sub.context("Failed to submit layout transition")?;
-        let wait = logical_device.device.queue_wait_idle(logical_device.queue);
+        let wait = logical_device.synchronized_queue_wait_idle();
         wait.context("Failed to wait for layout transition")?;
-        drop(_queue_guard);
 
         logical_device
             .device

@@ -1487,6 +1487,12 @@ impl Drop for Scheme {
         use crate::task_graph::cross_submit::clear_scheme_topology_registration;
         clear_scheme_topology_registration(self.scheme_id, &self.prev_topology_parcels);
 
+        let hw = self.ctx.high_water_timeline();
+        if hw > 0 {
+            let _ = self.ctx.wait_until(hw);
+        }
+        self.submit_state.release_backend_retained_graphs(&self.ctx);
+
         let ctx = self.ctx.clone();
         for mut parcel in self.leases.drain(..) {
             let ready_after = parcel.last_referenced();

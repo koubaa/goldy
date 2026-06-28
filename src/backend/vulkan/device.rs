@@ -526,6 +526,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
             legacy_frame_table: Mutex::new(None),
+            submission_worker: Arc::new(crate::backend::submission_worker::SubmissionWorker::new(
+                crate::backend::submission_worker::SUBMISSION_QUEUE_CAPACITY,
+            )),
         }),
     );
 
@@ -612,7 +615,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         "destroying Vulkan device"
     );
     if let Some(logical_device) = state.devices.remove(&device_handle) {
-        let wait_result = logical_device.device_wait_idle_locked();
+        let wait_result = logical_device.synchronized_device_wait_idle();
 
         if !matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
             if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
@@ -621,8 +624,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         }
 
         unsafe {
-            let wait_result = logical_device.device_wait_idle_locked();
-
             // When the device is lost, individual Vulkan destroy calls are unsafe
             // (driver bookkeeping is already corrupt). Per spec, vkDestroyDevice is
             // always valid and implicitly reclaims all child objects, so skip

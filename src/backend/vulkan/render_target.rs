@@ -335,7 +335,7 @@ pub(super) fn destroy(
     if let Some(state) = render_targets.write().unwrap().entries.remove(&target) {
         if let Some(logical_device) = devices.get(&state.device_handle) {
             unsafe {
-                let _ = logical_device.device_wait_idle_locked();
+                let _ = logical_device.synchronized_device_wait_idle();
                 logical_device.device.destroy_image_view(state.image_view, None);
                 logical_device.device.destroy_image(state.image, None);
                 logical_device.device.free_memory(state.image_memory, None);
@@ -613,23 +613,11 @@ where
     unsafe { logical_device.device.end_command_buffer(cmd) }.context("Failed to end command buffer")?;
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-    unsafe {
-        let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        logical_device
-            .device
-            .queue_submit(
-                logical_device.queue,
-                std::slice::from_ref(&submit_info),
-                vk::Fence::null(),
-            )
-            .context("Failed to submit command buffer")?;
-        logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
-            .context("Failed to wait for queue")?;
-        drop(_queue_guard);
-    }
+    logical_device
+        .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
+        .context("Failed to submit command buffer")?;
+
+    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
     // Legacy path waits idle — clear the reservation (no timeline token).
     row_guard.commit(0);
 
@@ -744,6 +732,12 @@ pub(super) fn read_to_cpu(
 
     let logical_device = devices.get(&device_handle).unwrap();
 
+    // Graph/render submits may still be in flight on the async worker; wait for the
+    // render-pass layout transition (COLOR_ATTACHMENT → TRANSFER_SRC) before copy.
+    logical_device.submission_worker.flush()?;
+    logical_device.submission_worker.check_error()?;
+    logical_device.synchronized_queue_wait_idle()?;
+
     // Reset and record copy command
     unsafe {
         logical_device
@@ -789,24 +783,11 @@ pub(super) fn read_to_cpu(
 
     // Submit
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+    logical_device
+        .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
+        .context("Failed to submit command buffer")?;
 
-    unsafe {
-        let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        logical_device
-            .device
-            .queue_submit(
-                logical_device.queue,
-                std::slice::from_ref(&submit_info),
-                vk::Fence::null(),
-            )
-            .context("Failed to submit command buffer")?;
-        logical_device
-            .device
-            .queue_wait_idle(logical_device.queue)
-            .context("Failed to wait for queue")?;
-        drop(_queue_guard);
-    }
+    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
 
     // Read from staging buffer
     unsafe {

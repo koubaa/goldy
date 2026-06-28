@@ -611,13 +611,8 @@ impl PresentGpuWork for MetalPresentGpuWork {
     fn run(self: Box<Self>) -> Result<PresentFinishState> {
         let _tz = crate::tracy_zone!("mtl.present.gpu");
         let owned_command_buffer = self.logical_device.command_queue.new_command_buffer().to_owned();
-        let command_buffer = owned_command_buffer.as_ref();
-        let queue_lock = self.logical_device.queue_lock.clone();
-        let drawable_ptr = self.drawable_ptr as id;
-        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
-
         let signal_value = {
-            let _queue_guard = queue_lock.lock().unwrap();
+            let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
             let signal_value = {
                 let v = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
                 self.logical_device
@@ -625,6 +620,11 @@ impl PresentGpuWork for MetalPresentGpuWork {
                     .fetch_max(v, Ordering::Relaxed);
                 v
             };
+            let command_buffer = owned_command_buffer.as_ref();
+            let queue_lock = self.logical_device.queue_lock.clone();
+            let drawable_ptr = self.drawable_ptr as id;
+            let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
+
             command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
             let surface = self.surface;
             let return_image = self.return_image;
@@ -651,6 +651,7 @@ impl PresentGpuWork for MetalPresentGpuWork {
         };
 
         unsafe {
+            let drawable_ptr = self.drawable_ptr as id;
             let (): () = msg_send![drawable_ptr, release];
         }
 

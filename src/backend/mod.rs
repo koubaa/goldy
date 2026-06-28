@@ -37,6 +37,9 @@ pub mod metal;
 /// task-graph command emission (e.g. `DispatchBatch` argument packing).
 pub(crate) mod shared;
 
+/// Per-device FIFO worker for async GPU queue submission.
+pub(crate) mod submission_worker;
+
 /// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
 #[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
 pub(crate) mod signal_fence;
@@ -904,7 +907,10 @@ impl ContextSubmitSession for LockedSubmitSession {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.backend.lock().unwrap().submit_standalone(ctx, commands, sync)
+        let mut guard = self.backend.lock().unwrap();
+        let tv = guard.submit_standalone(ctx, commands, sync)?;
+        drop(guard);
+        Ok(tv)
     }
 
     fn submit_graph(
