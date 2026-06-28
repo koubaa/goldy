@@ -820,10 +820,9 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 }
 
-/// Crate-internal hook for cloning a per-context submit session at [`crate::Context::new`].
+/// Clone a per-context submit session at [`crate::Context::new`].
 ///
-/// Kept off the public [`GpuBackend`] trait so the return type can stay on the
-/// crate-private [`ContextSubmitSession`] trait.
+/// Real GPU backends return lock-free sessions; Metal and mock use [`LockedSubmitSession`].
 pub(crate) trait GpuBackendSubmitSession {
     fn clone_context_submit_session(
         &self,
@@ -832,35 +831,15 @@ pub(crate) trait GpuBackendSubmitSession {
     ) -> std::sync::Arc<dyn ContextSubmitSession>;
 }
 
-/// Clone a submit session from a type-erased backend handle.
-pub(crate) fn clone_context_submit_session(
-    backend: &mut dyn GpuBackend,
-    ctx: ContextHandle,
-    backend_arc: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
-) -> std::sync::Arc<dyn ContextSubmitSession> {
-    #[cfg(all(feature = "dx12", target_os = "windows"))]
-    if let Some(dx12) = backend.as_any_mut().downcast_mut::<dx12::Dx12Backend>() {
-        return GpuBackendSubmitSession::clone_context_submit_session(dx12, ctx, backend_arc);
-    }
-    #[cfg(feature = "vulkan")]
-    if let Some(vk) = backend.as_any_mut().downcast_mut::<vulkan::VulkanBackend>() {
-        return GpuBackendSubmitSession::clone_context_submit_session(vk, ctx, backend_arc);
-    }
-    let _ = ctx;
-    LockedSubmitSession::with_backend_type(backend_arc, backend.backend_type())
-}
-
-/// Per-context submit session that acquires the global backend mutex only around
-/// individual backend submit calls (Phase 5a). Backends can later replace this
-/// with a lock-free session cloned from `Arc<RwLock<State>>` sub-handles.
+/// Per-context submit session that acquires the global backend mutex around every
+/// submit call. Used by Metal (until lock-free recording lands) and [`mock::MockBackend`].
 pub(crate) struct LockedSubmitSession {
     backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
     backend_type: BackendType,
 }
 
 impl LockedSubmitSession {
-    /// Build a session from a known backend type — use from [`clone_context_submit_session`]
-    /// while the global backend lock is already held (must not re-lock the backend mutex).
+    /// Build a session while the global backend lock is already held (must not re-lock).
     pub fn with_backend_type(
         backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
         backend_type: BackendType,
@@ -950,7 +929,7 @@ pub(crate) trait GpuBackendTimelineWait {
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
-pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit {
+pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit + GpuBackendSubmitSession {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;

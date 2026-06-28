@@ -499,6 +499,16 @@ impl crate::backend::PresentGpuWork for MockPresentGpuWork {
     }
 }
 
+impl crate::backend::GpuBackendSubmitSession for MockBackend {
+    fn clone_context_submit_session(
+        &self,
+        _ctx: ContextHandle,
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    ) -> std::sync::Arc<dyn crate::backend::ContextSubmitSession> {
+        crate::backend::LockedSubmitSession::with_backend_type(backend, self.backend_type())
+    }
+}
+
 impl GpuBackend for MockBackend {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self

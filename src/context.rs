@@ -107,8 +107,8 @@ impl Context {
             (deletion_flush, reclamation_scope)
         };
         let submit_session = {
-            let mut backend = device.inner.backend.lock().unwrap();
-            crate::backend::clone_context_submit_session(&mut **backend, handle, Arc::clone(&device.inner.backend))
+            let backend = device.inner.backend.lock().unwrap();
+            backend.clone_context_submit_session(handle, Arc::clone(&device.inner.backend))
         };
         Ok(Self {
             inner: Arc::new(ContextInner {

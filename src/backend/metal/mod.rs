@@ -1067,6 +1067,16 @@ impl GpuBackend for MetalBackend {
     }
 }
 
+impl crate::backend::GpuBackendSubmitSession for MetalBackend {
+    fn clone_context_submit_session(
+        &self,
+        _ctx: ContextHandle,
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    ) -> std::sync::Arc<dyn crate::backend::ContextSubmitSession> {
+        crate::backend::LockedSubmitSession::with_backend_type(backend, BackendType::Metal)
+    }
+}
+
 struct MetalCommandBufferBlockingWait {
     cb: mtl::CommandBuffer,
 }
