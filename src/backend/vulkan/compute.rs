@@ -801,6 +801,7 @@ pub(super) fn submit_with_scope(
                 y,
                 width,
                 height,
+                ..
             } => {
                 let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
@@ -1779,6 +1780,7 @@ pub(super) fn submit_graph_with_scope(
                         y,
                         width,
                         height,
+                        ..
                     } => {
                         let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;

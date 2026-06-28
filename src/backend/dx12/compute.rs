@@ -1780,14 +1780,22 @@ fn execute_signal_and_finish(
     if !staged_texture_uploads.is_empty() {
         let entries = staged_texture_uploads
             .into_iter()
-            .map(|u| u.staging_entry)
+            .filter_map(|u| {
+                if let super::texture::TextureUploadSource::Pooled(entry) = u.source {
+                    Some(entry)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-        scope
-            .sc
-            .lock()
-            .unwrap()
-            .texture_staging_pool
-            .release(fence_value, entries);
+        if !entries.is_empty() {
+            scope
+                .sc
+                .lock()
+                .unwrap()
+                .texture_staging_pool
+                .release(fence_value, entries);
+        }
     }
 
     Ok(fence_value)
@@ -1917,6 +1925,7 @@ pub(super) fn submit_with_scope(
                 GpuCommand::CopyBufferToTexture {
                     src,
                     src_offset,
+                    src_row_pitch,
                     dst,
                     x,
                     y,
@@ -1930,6 +1939,7 @@ pub(super) fn submit_with_scope(
                         &mut pool,
                         *src,
                         *src_offset,
+                        *src_row_pitch,
                         *dst,
                         *x,
                         *y,
@@ -2176,6 +2186,7 @@ pub(super) fn submit_graph_with_scope(
                     GpuCommand::CopyBufferToTexture {
                         src,
                         src_offset,
+                        src_row_pitch,
                         dst,
                         x,
                         y,
@@ -2189,6 +2200,7 @@ pub(super) fn submit_graph_with_scope(
                             &mut pool,
                             *src,
                             *src_offset,
+                            *src_row_pitch,
                             *dst,
                             *x,
                             *y,
@@ -2406,8 +2418,10 @@ pub(super) fn try_resubmit_retained_with_scope(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
+    let _tz = tracy_zone!("dx12.resubmit_retained");
     let _device_handle = scope.device_handle;
     let retained = {
+        let _tz_lookup = tracy_zone!("dx12.resubmit_retained.lookup");
         let sc = scope.sc.lock().unwrap();
         sc.retained_graphs.get(&key).map(|r| {
             (
@@ -2425,28 +2439,38 @@ pub(super) fn try_resubmit_retained_with_scope(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast retained command list")?;
 
-    let ctx_fence = scope
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .1
-        .clone();
+    let ctx_fence = {
+        let _tz_fence = tracy_zone!("dx12.resubmit_retained.ctx_fence");
+        scope
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .1
+            .clone()
+    };
     let logical_device = scope.ld();
     let fence_value = {
-        let _tz = tracy_zone!("dx12.resubmit_retained");
-        queue_wait_for_epochs(scope, sync)?;
+        {
+            let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
+            queue_wait_for_epochs(scope, sync)?;
+        }
+        let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
         super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
     };
 
-    logical_device
-        .descriptors
-        .lock()
-        .unwrap()
-        .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    {
+        let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
+        logical_device
+            .descriptors
+            .lock()
+            .unwrap()
+            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    }
 
     {
+        let _tz_book = tracy_zone!("dx12.resubmit_retained.bookkeeping");
         let mut sc = scope.sc.lock().unwrap();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
@@ -2454,14 +2478,18 @@ pub(super) fn try_resubmit_retained_with_scope(
         sc.last_submitted_seq = fence_value;
     }
 
-    let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    let retained_del_batch = scope
-        .sc
-        .lock()
-        .unwrap()
-        .deletion_queue
-        .drain_up_to_completed(retired_ctx_completed);
     {
+        let _tz_del = tracy_zone!("dx12.resubmit_retained.deletion_drain");
+        // TODO - This hides latency and can be done asynchronously, but the effect
+        //        of deleting late might affect memory pool usage that could be
+        //        depended on in some workloads.
+        let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+        let retained_del_batch = scope
+            .sc
+            .lock()
+            .unwrap()
+            .deletion_queue
+            .drain_up_to_completed(retired_ctx_completed);
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();

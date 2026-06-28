@@ -9,9 +9,28 @@ use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::*};
 
+/// Which resource provides the pixel data for a staged texture upload.
+pub(super) enum TextureUploadSource {
+    /// Intermediate staging-pool entry holding repacked (pitch-aligned) pixel data.
+    /// Returned to the pool after the command list is executed.
+    Pooled(super::staging::TextureStagingEntry),
+    /// Caller-supplied CPU-writable buffer whose data is already footprint-aligned.
+    /// No staging pool entry is needed; the resource is used directly in CopyTextureRegion.
+    Direct(windows::Win32::Graphics::Direct3D12::ID3D12Resource),
+}
+
+impl TextureUploadSource {
+    fn resource(&self) -> &windows::Win32::Graphics::Direct3D12::ID3D12Resource {
+        match self {
+            TextureUploadSource::Pooled(entry) => &entry.resource,
+            TextureUploadSource::Direct(res) => res,
+        }
+    }
+}
+
 /// Staged texture upload (CPU-filled staging + copy footprint) before GPU copy.
 pub(super) struct StagedTextureUpload {
-    pub staging_entry: super::staging::TextureStagingEntry,
+    pub source: TextureUploadSource,
     pub footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
     pub texture_handle: TextureHandle,
     pub dst_x: u32,
@@ -361,7 +380,7 @@ pub(super) fn stage_texture_upload_full(
     let layout_before = texture.last_layout;
 
     Ok(StagedTextureUpload {
-        staging_entry,
+        source: TextureUploadSource::Pooled(staging_entry),
         footprint,
         texture_handle,
         dst_x: 0,
@@ -455,7 +474,7 @@ pub(super) fn stage_texture_upload_region(
     let layout_before = texture.last_layout;
 
     Ok(StagedTextureUpload {
-        staging_entry,
+        source: TextureUploadSource::Pooled(staging_entry),
         footprint,
         texture_handle,
         dst_x: x,
@@ -465,6 +484,17 @@ pub(super) fn stage_texture_upload_region(
 }
 
 /// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+/// Stage a [`GpuCommand::CopyBufferToTexture`] upload.
+///
+/// When `src_row_pitch == 0` the source is tightly packed and an intermediate
+/// pooled staging buffer is allocated and populated by repacking rows to the
+/// D3D12 footprint pitch.
+///
+/// When `src_row_pitch > 0` the caller has already written data at footprint
+/// pitch into the source buffer starting at `src_offset`, so no repack is
+/// needed.  The source buffer's upload resource is used directly in
+/// [`D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT`], saving both the staging pool
+/// allocation and the per-row memcpy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn stage_copy_buffer_to_texture_upload(
     devices: &std::collections::HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
@@ -473,6 +503,7 @@ pub(super) fn stage_copy_buffer_to_texture_upload(
     pool: &mut super::staging::TextureStagingPool,
     src: super::super::BufferHandle,
     src_offset: u64,
+    src_row_pitch: u32,
     texture_handle: TextureHandle,
     x: u32,
     y: u32,
@@ -480,6 +511,37 @@ pub(super) fn stage_copy_buffer_to_texture_upload(
     height: u32,
 ) -> Result<StagedTextureUpload> {
     let texture = textures.get(&texture_handle).context("Invalid texture handle")?;
+
+    if src_row_pitch > 0 {
+        // Fast path: source buffer already has footprint-aligned rows.  Use it directly.
+        let buffer_state = buffers.get(&src).context("CopyBufferToTexture: invalid source buffer")?;
+        let upload_resource = buffer_state
+            .upload_buffer
+            .as_ref()
+            .context("CopyBufferToTexture: source buffer has no upload heap (not CPU_WRITABLE?)")?
+            .clone();
+        let layout_before = texture.last_layout;
+        let footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+            Offset: src_offset,
+            Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                Format: format_to_dxgi(texture.format),
+                Width: width,
+                Height: height,
+                Depth: 1,
+                RowPitch: src_row_pitch,
+            },
+        };
+        return Ok(StagedTextureUpload {
+            source: TextureUploadSource::Direct(upload_resource),
+            footprint,
+            texture_handle,
+            dst_x: x,
+            dst_y: y,
+            layout_before,
+        });
+    }
+
+    // Slow path: tight source, allocate intermediate staging and repack rows.
     let bpp = texture.format.bytes_per_pixel();
     let flat_len = (width as usize)
         .checked_mul(height as usize)
@@ -531,7 +593,7 @@ pub(super) fn record_staged_texture_upload(
     unsafe { barriers::drop_texture_barriers(&mut b_to_copy) };
 
     let src_location = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: unsafe { std::mem::transmute_copy(&upload.staging_entry.resource) },
+        pResource: unsafe { std::mem::transmute_copy(upload.source.resource()) },
         Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
         Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
             PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
@@ -712,7 +774,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
             let copy = &copies[idx];
 
             let src_location = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: unsafe { std::mem::transmute_copy(&copy.staging_entry.resource) },
+                pResource: unsafe { std::mem::transmute_copy(copy.source.resource()) },
                 Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
                 Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                     PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
@@ -762,8 +824,11 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
 
     // Release and reclaim the staging entries back to the pool immediately.
     // The GPU is idle for this submission (we just waited), so we can safely destroy them.
+    // Direct-source uploads don't own a staging entry, so only destroy Pooled ones.
     for copy in copies {
-        unsafe { copy.staging_entry.destroy() };
+        if let TextureUploadSource::Pooled(entry) = copy.source {
+            unsafe { entry.destroy() };
+        }
     }
 
     tracing::debug!("Flushed {} pending texture copies in one submission", count);

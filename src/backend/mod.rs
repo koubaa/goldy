@@ -633,10 +633,17 @@ pub enum GpuCommand {
         dst_offset: u64,
         size: u64,
     },
-    /// Copy tightly packed pixels from a CPU-writable buffer into a texture subregion.
+    /// Copy pixels from a CPU-writable buffer into a texture subregion.
+    ///
+    /// When `src_row_pitch == 0` the source is tightly packed and the backend will repack
+    /// into a footprint-aligned intermediate buffer.  When `src_row_pitch > 0` the source
+    /// is already footprint-aligned (allocated with `staging_bytes` capacity and rows
+    /// written at `src_row_pitch` stride), and the backend copies directly.
     CopyBufferToTexture {
         src: BufferHandle,
         src_offset: u64,
+        /// 0 = tight source (backend repacks); >0 = footprint pitch, copy directly.
+        src_row_pitch: u32,
         dst: TextureHandle,
         x: u32,
         y: u32,
@@ -1053,6 +1060,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         layout: TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()>;
+
+    /// Barrier-layout tag for retained [`GpuCommand::CopyBufferToTexture`] fingerprinting.
+    ///
+    /// Must change when the texture's copy-source barrier state changes such that a
+    /// retained command buffer's baked barriers would be invalid (typically once,
+    /// COMMON → shader-read after the first upload).
+    fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64;
 
     /// Mock-backend grant readback allocation counter (tests only).
     #[doc(hidden)]

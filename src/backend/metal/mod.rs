@@ -504,6 +504,11 @@ impl GpuBackend for MetalBackend {
         Ok(buffer::query_texture_copy_footprint(width, height, format))
     }
 
+    fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64 {
+        let _ = texture;
+        0
+    }
+
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,

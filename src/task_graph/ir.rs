@@ -171,13 +171,19 @@ pub enum NodeKind {
         dst_offset: u64,
         size: u64,
     },
-    /// Copy flat pixel bytes from a CPU-writable buffer into a texture subregion.
+    /// Copy pixel bytes from a CPU-writable buffer into a texture subregion.
     ///
-    /// Source bytes are tightly packed (`width * height * bpp`); backend lowering
-    /// handles per-platform row-pitch alignment at submit time.
+    /// When `src_row_pitch == 0` the source is tightly packed (`width * height * bpp`)
+    /// and the backend will repack into a footprint-aligned staging buffer at submit time.
+    ///
+    /// When `src_row_pitch > 0` the source buffer was already allocated and written with
+    /// D3D12 footprint row pitch (and padded to `staging_bytes`), so the backend can skip
+    /// the intermediate repack and copy directly from the source parcel.
     CopyBufferToTexture {
         src: ResourceId,
         src_offset: u64,
+        /// 0 = tight layout (backend must repack); >0 = footprint row pitch already applied.
+        src_row_pitch: u32,
         dst: TextureHandle,
         x: u32,
         y: u32,

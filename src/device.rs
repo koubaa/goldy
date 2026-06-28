@@ -1032,6 +1032,26 @@ impl Device {
         Ok(())
     }
 
+    /// Query the platform row-pitch and staging buffer layout for an UPLOAD from a 2-D texture region.
+    ///
+    /// On DX12 rows are padded to 256-byte alignment; on Vulkan and Metal rows are tight
+    /// (`width × bpp`).  Use the returned [`crate::backend::TextureCopyFootprint`] to allocate
+    /// a `CPU_WRITABLE` buffer of `staging_bytes` capacity and write each row at `row_pitch`
+    /// stride starting from byte `footprint_offset` — then pass `row_pitch` as the
+    /// `src_row_pitch` argument to [`crate::Scheme::copy_buffer_to_texture_parcel`] so the
+    /// backend can skip the intermediate repack step.
+    pub fn texture_copy_footprint(
+        &self,
+        width: u32,
+        height: u32,
+        format: crate::types::TextureFormat,
+    ) -> Result<crate::backend::TextureCopyFootprint, GoldyError> {
+        let backend = self.inner.backend.lock().unwrap();
+        backend
+            .query_texture_copy_footprint(self.inner.handle, width, height, format)
+            .map_err(|e| GoldyError::Backend(e))
+    }
+
     /// Get search paths for shader compilation (internal use).
     pub(crate) fn get_shader_search_paths(&self) -> Result<Vec<PathBuf>> {
         self.inner.library_registry.lock().unwrap().get_search_paths()

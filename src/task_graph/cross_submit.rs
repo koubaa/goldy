@@ -513,17 +513,29 @@ impl CrossSubmitScratch {
         waves: &[super::ir::Wave],
     ) -> &SubmitSync {
         self.clear();
-        net_access_for_waves_into(&mut self.net, ir, waves);
-        resource_stamps_from_ir_into(&mut self.registry, &mut self.seen, ir, resource_stamps);
-        build_ledger_snapshot_into(&mut self.ledger, &self.registry);
-        compute_cross_submit_sync_into(
-            &mut self.submit_sync.prologue,
-            &mut self.submit_sync.waits,
-            &mut self.wait_map,
-            &self.net,
-            &self.ledger,
-            submitting_ctx,
-        );
+        {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.net_access");
+            net_access_for_waves_into(&mut self.net, ir, waves);
+        }
+        {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.stamp_registry");
+            resource_stamps_from_ir_into(&mut self.registry, &mut self.seen, ir, resource_stamps);
+        }
+        {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot");
+            build_ledger_snapshot_into(&mut self.ledger, &self.registry);
+        }
+        {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
+            compute_cross_submit_sync_into(
+                &mut self.submit_sync.prologue,
+                &mut self.submit_sync.waits,
+                &mut self.wait_map,
+                &self.net,
+                &self.ledger,
+                submitting_ctx,
+            );
+        }
         &self.submit_sync
     }
 }

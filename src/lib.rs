@@ -84,7 +84,7 @@ pub use signal::{OversubscribedReason, Signal};
 pub use timeline::{Epoch, ReferenceTable, TimelineValue};
 
 pub use backend::GraphCommand;
-pub use backend::{BufferHeapStats, TextureHeapStats};
+pub use backend::{BufferHeapStats, TextureCopyFootprint, TextureHeapStats};
 pub use context::Context;
 pub use device::{
     Adapter, Device, DeviceCapabilities, DeviceDescriptor, Instance, PowerPreference, RequestAdapterOptions,

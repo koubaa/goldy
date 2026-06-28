@@ -262,6 +262,31 @@ pub fn build_edges(ir: &GraphIR) -> Vec<(usize, usize)> {
         }
     }
 
+    // Upload-phase ordering: buffer staging copies (CopyBuffer, ClearBuffer, WriteBuffer)
+    // run in an earlier wave than texture uploads (CopyBufferToTexture, WriteTexture, …)
+    // so retainable buffer-only partitions can be submitted separately from texture uploads.
+    let mut buffer_upload_nodes: Vec<usize> = Vec::new();
+    let mut texture_upload_nodes: Vec<usize> = Vec::new();
+    for (idx, node) in ir.nodes.iter().enumerate() {
+        match &node.kind {
+            NodeKind::ClearBuffer { .. } | NodeKind::CopyBuffer { .. } | NodeKind::WriteBuffer { .. } => {
+                buffer_upload_nodes.push(idx);
+            }
+            NodeKind::CopyBufferToTexture { .. }
+            | NodeKind::WriteTexture { .. }
+            | NodeKind::WriteTextureRegion { .. }
+            | NodeKind::CopyTexture { .. } => {
+                texture_upload_nodes.push(idx);
+            }
+            _ => {}
+        }
+    }
+    for &t in &texture_upload_nodes {
+        for &b in &buffer_upload_nodes {
+            edge_set.insert((b, t));
+        }
+    }
+
     let mut edges: Vec<_> = edge_set.into_iter().collect();
     edges.sort_unstable();
     edges
@@ -647,6 +672,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 NodeKind::CopyBufferToTexture {
                     src,
                     src_offset,
+                    src_row_pitch,
                     dst,
                     x,
                     y,
@@ -657,6 +683,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     commands.push(GpuCommand::CopyBufferToTexture {
                         src: src_handle,
                         src_offset: src_off,
+                        src_row_pitch: *src_row_pitch,
                         dst: *dst,
                         x: *x,
                         y: *y,
@@ -1051,15 +1078,136 @@ pub(crate) fn describe_logical_partitions(ir: &GraphIR, schedule: &CompiledSched
     result
 }
 
+/// Returns false when the wave slice contains nodes that must be submitted standalone
+/// (upload payload staging, non-stable copy destinations, etc.).
+pub(crate) fn waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
+    use super::ResourceId;
+    for wave in waves {
+        for &ni in &wave.node_indices {
+            match &ir.nodes[ni].kind {
+                NodeKind::WriteBuffer { .. }
+                | NodeKind::WriteTexture { .. }
+                | NodeKind::WriteTextureRegion { .. }
+                | NodeKind::CopyBufferToTexture { src_row_pitch: 0, .. }
+                | NodeKind::CopyTexture { .. } => return false,
+                // CopyRenderTarget → PresentLease is retainable via the slot-key
+                // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.
+                // CopyRenderTarget → Texture is also retainable: the texture handle
+                // is stable across submissions, so the blit CB can be reused as-is.
+                // All other destinations (e.g. SwapchainOutput) are not stable and
+                // must be submitted standalone.
+                NodeKind::CopyRenderTarget { dst, .. }
+                    if !matches!(dst, ResourceId::PresentLease(_) | ResourceId::Texture(_)) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+/// Fingerprint contribution from destination texture barrier layouts for pitched
+/// [`NodeKind::CopyBufferToTexture`] nodes in `partition_waves`.
+///
+/// Retained command buffers bake `layout_before` into texture barriers at record time.
+/// When the layout changes (typically once, COMMON → shader-read), the partition key
+/// must change so the backend re-records before resubmitting.
+pub(crate) fn partition_copy_texture_layout_fingerprint(
+    ir: &GraphIR,
+    partition_waves: &[Wave],
+    layout_tag: impl Fn(u64) -> u64,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for wave in partition_waves {
+        for &ni in &wave.node_indices {
+            if let NodeKind::CopyBufferToTexture {
+                src_row_pitch,
+                dst,
+                ..
+            } = &ir.nodes[ni].kind
+            {
+                if *src_row_pitch > 0 {
+                    layout_tag(*dst).hash(&mut h);
+                }
+            }
+        }
+    }
+    h.finish()
+}
+
+/// Subdivide `wave_range` at consecutive wave boundaries where [`waves_can_retain`] changes.
+fn split_wave_range_at_retainability(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    wave_range: std::ops::Range<usize>,
+) -> Vec<std::ops::Range<usize>> {
+    let base = wave_range.start;
+    let waves = &schedule.waves[wave_range.clone()];
+    let len = waves.len();
+    if len <= 1 {
+        return vec![wave_range];
+    }
+
+    let mut out = Vec::new();
+    let mut sub_start = base;
+    for i in 1..len {
+        let prev_retain = waves_can_retain(ir, &waves[i - 1..i]);
+        let curr_retain = waves_can_retain(ir, &waves[i..i + 1]);
+        // Isolate retainable buffer-only upload waves before texture uploads. Do not
+        // split non-retainable upload waves (WriteBuffer) from subsequent compute — those
+        // stay in one partition for payload refresh and barrier-cost heuristics.
+        if prev_retain && !curr_retain {
+            out.push(sub_start..base + i);
+            sub_start = base + i;
+        }
+    }
+    out.push(sub_start..wave_range.end);
+    out
+}
+
+/// Push `wave_range` into `ranges`, optionally splitting at the heaviest barrier boundary
+/// when the slice is a large pure-compute partition.
+fn push_partition_with_barrier_heuristic(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    schedule: &CompiledSchedule,
+    wave_range: std::ops::Range<usize>,
+) {
+    let waves = &schedule.waves[wave_range.clone()];
+    let len = waves.len();
+    if len >= 3 {
+        let (split_offset, max_cost) = waves
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, w)| (i, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
+            .max_by_key(|&(_, cost)| cost)
+            .unwrap(); // safe: len >= 3
+
+        if max_cost > 0 {
+            let abs_split = wave_range.start + split_offset;
+            ranges.push(wave_range.start..abs_split);
+            ranges.push(abs_split..wave_range.end);
+            return;
+        }
+    }
+    ranges.push(wave_range);
+}
+
 /// Compute the wave-index ranges for each actualized partition of a compiled schedule.
 ///
 /// Actualized partitions refine the logical partition layout produced by
-/// [`describe_logical_partitions`] with an optional barrier-cost heuristic: large
-/// pure-compute logical partitions (≥ 3 waves, nonzero barrier cost) are subdivided
-/// at their heaviest wave boundary to expose GPU-pipeline overlap between submissions.
+/// [`describe_logical_partitions`] with:
+/// - retainability splits (buffer-only upload waves vs texture upload waves), and
+/// - an optional barrier-cost heuristic: large pure-compute logical partitions
+///   (≥ 3 waves, nonzero barrier cost) are subdivided at their heaviest wave boundary
+///   to expose GPU-pipeline overlap between submissions.
 ///
 /// The present-boundary and render-kind splits from the logical layer are always
-/// respected; the heuristic is applied only *within* pure-compute non-present partitions.
+/// respected; the heuristics are applied only *within* pure-compute non-present partitions.
 ///
 /// This function always returns at least one range covering all waves.
 pub(crate) fn partition_wave_ranges(ir: &GraphIR, schedule: &CompiledSchedule) -> Vec<std::ops::Range<usize>> {
@@ -1067,29 +1215,13 @@ pub(crate) fn partition_wave_ranges(ir: &GraphIR, schedule: &CompiledSchedule) -
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(logical.len());
 
     for lp in &logical {
-        let waves = &schedule.waves[lp.wave_range.clone()];
-        let len = waves.len();
-
-        // Only apply the barrier-cost heuristic to pure-compute, non-present logical
-        // partitions that are large enough to benefit from splitting.
-        if lp.is_pure_compute() && len >= 3 {
-            let (split_offset, max_cost) = waves
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(i, w)| (i, w.barriers_before.buffers.len() + w.barriers_before.textures.len()))
-                .max_by_key(|&(_, cost)| cost)
-                .unwrap(); // safe: len >= 3
-
-            if max_cost > 0 {
-                let abs_split = lp.wave_range.start + split_offset;
-                ranges.push(lp.wave_range.start..abs_split);
-                ranges.push(abs_split..lp.wave_range.end);
-                continue;
+        if lp.is_pure_compute() && lp.wave_range.len() >= 2 {
+            for sub in split_wave_range_at_retainability(ir, schedule, lp.wave_range.clone()) {
+                push_partition_with_barrier_heuristic(&mut ranges, schedule, sub);
             }
+        } else {
+            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone());
         }
-
-        ranges.push(lp.wave_range.clone());
     }
 
     ranges
@@ -1185,6 +1317,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                 NodeKind::CopyBufferToTexture {
                     src,
                     src_offset,
+                    src_row_pitch,
                     dst,
                     x,
                     y,
@@ -1195,6 +1328,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     commands.push(GraphCommand::Compute(GpuCommand::CopyBufferToTexture {
                         src: src_handle,
                         src_offset: src_off,
+                        src_row_pitch: *src_row_pitch,
                         dst: *dst,
                         x: *x,
                         y: *y,
@@ -1431,6 +1565,122 @@ mod tests {
                 height: 1,
             },
         }
+    }
+
+    fn copy_buffer_node(label: &'static str, src: ResourceId, dst: ResourceId) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![
+                ResourceBinding {
+                    resource: src,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src,
+                src_offset: 0,
+                dst,
+                dst_offset: 0,
+                size: 64,
+            },
+        }
+    }
+
+    fn copy_buffer_to_texture_node(
+        label: &'static str,
+        src: ResourceId,
+        dst: ResourceId,
+        tex_handle: u64,
+        src_row_pitch: u32,
+    ) -> TaskNode {
+        TaskNode {
+            label,
+            bindings: vec![
+                ResourceBinding {
+                    resource: src,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBufferToTexture {
+                src,
+                src_offset: 0,
+                src_row_pitch,
+                dst: tex_handle,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn upload_phase_ordering_splits_buffer_and_texture_nodes_into_waves() {
+        let ir = GraphIR {
+            nodes: vec![
+                copy_buffer_node("scene", buf(0), buf(1)),
+                copy_buffer_to_texture_node("gradient", buf(2), ResourceId::Texture(3), 3, 0),
+            ],
+        };
+        let waves = graph_node_waves(&ir).unwrap();
+        assert_eq!(waves, vec![0, 1], "buffer uploads must precede texture uploads in separate waves");
+    }
+
+    #[test]
+    fn upload_phase_partition_splits_retainable_buffer_wave_from_texture_wave() {
+        let ir = GraphIR {
+            nodes: vec![
+                copy_buffer_node("scene", buf(0), buf(1)),
+                copy_buffer_node("config", buf(2), buf(3)),
+                copy_buffer_to_texture_node("gradient", buf(4), ResourceId::Texture(5), 5, 0),
+            ],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        let ranges = partition_wave_ranges(&ir, &schedule);
+        assert_eq!(ranges.len(), 2, "buffer-only and texture upload waves must be separate partitions");
+        assert!(waves_can_retain(&ir, &schedule.waves[ranges[0].clone()]));
+        assert!(!waves_can_retain(&ir, &schedule.waves[ranges[1].clone()]));
+    }
+
+    #[test]
+    fn pitched_copy_buffer_to_texture_wave_is_retainable() {
+        let ir = GraphIR {
+            nodes: vec![copy_buffer_to_texture_node(
+                "gradient",
+                buf(0),
+                ResourceId::Texture(1),
+                1,
+                256,
+            )],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        assert!(waves_can_retain(&ir, &schedule.waves));
+    }
+
+    #[test]
+    fn tight_copy_buffer_to_texture_wave_is_not_retainable() {
+        let ir = GraphIR {
+            nodes: vec![copy_buffer_to_texture_node(
+                "gradient",
+                buf(0),
+                ResourceId::Texture(1),
+                1,
+                0,
+            )],
+        };
+        let edges = build_edges(&ir);
+        let schedule = schedule_waves(&ir, &edges);
+        assert!(!waves_can_retain(&ir, &schedule.waves));
     }
 
     #[test]

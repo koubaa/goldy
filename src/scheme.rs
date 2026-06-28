@@ -714,11 +714,18 @@ impl Scheme {
     ///
     /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
     /// on a [`crate::types::BufferFlags::CPU_WRITABLE`] staging parcel before each [`Self::submit`].
-    #[allow(clippy::too_many_arguments)] // mirrors TaskGraph region + buffer offset parameters
+    ///
+    /// `src_row_pitch`: pass `0` when the source is tightly packed (`width * height * bpp`);
+    /// the backend will repack into an intermediate footprint-aligned buffer at submit time.
+    /// Pass the actual footprint row pitch (from [`crate::Device::texture_copy_footprint`]) when
+    /// the source was allocated and written with that pitch — the backend will then copy directly,
+    /// skipping the intermediate buffer.
+    #[allow(clippy::too_many_arguments)]
     pub fn copy_buffer_to_texture_parcel(
         &mut self,
         src: &Parcel,
         src_offset: u64,
+        src_row_pitch: u32,
         dst: &crate::Texture,
         x: u32,
         y: u32,
@@ -766,6 +773,7 @@ impl Scheme {
             kind: NodeKind::CopyBufferToTexture {
                 src: src_resource,
                 src_offset,
+                src_row_pitch,
                 dst: th,
                 x,
                 y,

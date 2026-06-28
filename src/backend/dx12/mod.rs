@@ -651,6 +651,17 @@ impl GpuBackend for Dx12Backend {
         texture::query_texture_copy_footprint(&self.state, device, width, height, format)
     }
 
+    fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64 {
+        self.state
+            .textures
+            .read()
+            .unwrap()
+            .entries
+            .get(&texture)
+            .map(|t| t.last_layout.0 as u64)
+            .unwrap_or(0)
+    }
+
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
