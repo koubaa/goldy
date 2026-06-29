@@ -6,6 +6,8 @@ use crate::timeline::TimelineValue;
 use anyhow::Result;
 use block::ConcreteBlock;
 use ::metal as mtl;
+use cocoa::base::id;
+use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -15,13 +17,34 @@ pub(super) fn preallocate_device_timeline(ld: &SharedLogicalDevice) -> TimelineV
     v
 }
 
+fn track_in_flight_cb(
+    sc_arc: &SharedMetalSubmissionContext,
+    signal_value: TimelineValue,
+    command_buffer: &mtl::CommandBuffer,
+) {
+    let mut sc = sc_arc.lock().unwrap();
+    sc.in_flight_command_buffers
+        .push_back((signal_value, command_buffer.to_owned()));
+    super::drain_completed_cbs(&mut sc);
+}
+
+fn untrack_in_flight_cb(sc_arc: &SharedMetalSubmissionContext, signal_value: TimelineValue) {
+    let mut sc = sc_arc.lock().unwrap();
+    if sc
+        .in_flight_command_buffers
+        .back()
+        .is_some_and(|(tv, _)| *tv == signal_value)
+    {
+        sc.in_flight_command_buffers.pop_back();
+    }
+}
+
 struct MetalCommitPendingSubmit {
     logical_device: SharedLogicalDevice,
     command_buffer: mtl::CommandBuffer,
     signal_value: TimelineValue,
     timeline_event: mtl::SharedEvent,
     waiter: TimelineWaiter,
-    sc_arc: Option<SharedMetalSubmissionContext>,
     log_kind: &'static str,
     api_log_commit: bool,
     compute_commit_instant: Option<Instant>,
@@ -51,8 +74,8 @@ impl PendingSubmit for MetalCommitPendingSubmit {
                 let cpu_lifetime = start.elapsed();
                 let (gpu_start, gpu_end): (f64, f64) = unsafe {
                     (
-                        objc::msg_send![cb, GPUStartTime],
-                        objc::msg_send![cb, GPUEndTime],
+                        msg_send![cb, GPUStartTime],
+                        msg_send![cb, GPUEndTime],
                     )
                 };
                 let gpu_ms = (gpu_end - gpu_start) * 1000.0;
@@ -63,8 +86,8 @@ impl PendingSubmit for MetalCommitPendingSubmit {
                     crate::gpu_profiler::log_cb_timing("metal", signal_value, gpu_ms);
                 }
             } else if crate::gpu_profiler::gpu_profile_enabled() {
-                let gpu_start: f64 = unsafe { objc::msg_send![cb, GPUStartTime] };
-                let gpu_end: f64 = unsafe { objc::msg_send![cb, GPUEndTime] };
+                let gpu_start: f64 = unsafe { msg_send![cb, GPUStartTime] };
+                let gpu_end: f64 = unsafe { msg_send![cb, GPUEndTime] };
                 let ms = (gpu_end - gpu_start) * 1000.0;
                 crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
             }
@@ -80,13 +103,6 @@ impl PendingSubmit for MetalCommitPendingSubmit {
         {
             let _commit = crate::tracy_zone!("goldy.submit_worker.mtl.execute_and_signal");
             command_buffer_ref.commit();
-        }
-
-        if let Some(sc_arc) = self.sc_arc {
-            let mut sc = sc_arc.lock().unwrap();
-            sc.in_flight_command_buffers
-                .push_back((signal_value, self.command_buffer));
-            super::drain_completed_cbs(&mut sc);
         }
 
         Ok(())
@@ -105,7 +121,10 @@ pub(super) fn enqueue_metal_commit(
     compute_commit_instant: Option<Instant>,
 ) -> Result<()> {
     ld.submission_worker.check_error()?;
-    ld.submission_worker.enqueue(
+    if let Some(ref sc_arc) = sc_arc {
+        track_in_flight_cb(sc_arc, signal_value, &command_buffer);
+    }
+    match ld.submission_worker.enqueue(
         signal_value,
         Box::new(MetalCommitPendingSubmit {
             logical_device: std::sync::Arc::clone(ld),
@@ -113,12 +132,19 @@ pub(super) fn enqueue_metal_commit(
             signal_value,
             timeline_event,
             waiter,
-            sc_arc,
             log_kind,
             api_log_commit,
             compute_commit_instant,
         }),
-    )
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(ref sc_arc) = sc_arc {
+                untrack_in_flight_cb(sc_arc, signal_value);
+            }
+            Err(e)
+        }
+    }
 }
 
 struct MetalPresentPendingSubmit {
@@ -127,7 +153,6 @@ struct MetalPresentPendingSubmit {
     signal_value: TimelineValue,
     timeline_event: mtl::SharedEvent,
     waiter: TimelineWaiter,
-    sc_arc: SharedMetalSubmissionContext,
     drawable_ptr: usize,
     return_image: Option<u32>,
     signal_queue_present: std::sync::Arc<crate::signal::SignalQueue>,
@@ -138,8 +163,6 @@ struct MetalPresentPendingSubmit {
 impl PendingSubmit for MetalPresentPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.present");
-        use objc::runtime::id;
-        use objc::{msg_send, sel, sel_impl};
 
         let command_buffer = self.command_buffer.as_ref();
         let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
@@ -179,10 +202,6 @@ impl PendingSubmit for MetalPresentPendingSubmit {
             let (): () = msg_send![drawable_ptr, release];
         }
 
-        let mut sc = self.sc_arc.lock().unwrap();
-        sc.in_flight_command_buffers
-            .push_back((signal_value, self.command_buffer));
-        super::drain_completed_cbs(&mut sc);
         Ok(())
     }
 }
@@ -202,7 +221,8 @@ pub(super) fn enqueue_metal_present(
 ) -> Result<()> {
     ld.timeline_scheduled_max.fetch_max(signal_value, Ordering::Relaxed);
     ld.submission_worker.check_error()?;
-    ld.submission_worker.enqueue(
+    track_in_flight_cb(&sc_arc, signal_value, &command_buffer);
+    match ld.submission_worker.enqueue(
         signal_value,
         Box::new(MetalPresentPendingSubmit {
             logical_device: std::sync::Arc::clone(ld),
@@ -210,12 +230,17 @@ pub(super) fn enqueue_metal_present(
             signal_value,
             timeline_event,
             waiter,
-            sc_arc,
             drawable_ptr,
             return_image,
             signal_queue_present,
             return_pending,
             pending_acquire_count,
         }),
-    )
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            untrack_in_flight_cb(&sc_arc, signal_value);
+            Err(e)
+        }
+    }
 }

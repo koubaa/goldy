@@ -630,7 +630,8 @@ fn grant_read_cloned_frame_double_read_errors() {
     assert!(err.to_string().contains("already consumed"), "unexpected error: {err}");
 }
 
-/// Grant with no producing dispatch copies uninitialized parcel bytes (zeros on fresh acquire).
+/// Grant with no producing dispatch copies parcel bytes as-is (zero-initialized here so
+/// shared-device heap reuse does not inject stale fill_42 contents from prior tests).
 #[test]
 fn grant_read_without_producing_dispatch_reads_zeros() {
     let _guard = test_lock();
@@ -638,14 +639,23 @@ fn grant_read_without_producing_dispatch_reads_zeros() {
 
     let mut pool = RetainedPool::new(device.clone());
     let ctx = submission_context(&device);
+    const GRANT_ZERO_TEST_U32S: usize = 64;
+    const GRANT_ZERO_TEST_BYTES: u64 = (GRANT_ZERO_TEST_U32S as u64) * 4;
+    let zeros = vec![0u8; GRANT_ZERO_TEST_BYTES as usize];
     let buf = pool
-        .acquire_buffer(64 * 4, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            GRANT_ZERO_TEST_BYTES,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            Some(&zeros),
+        )
         .expect("output parcel");
 
     let mut scheme = Scheme::new(&ctx);
     let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().expect("submit");
-    let values = read_grant_u32(&grant, &frame, 64);
+    let values = read_grant_u32(&grant, &frame, GRANT_ZERO_TEST_U32S);
     assert!(
         values.iter().all(|&v| v == 0),
         "expected zeros without a producer dispatch"
