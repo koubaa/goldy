@@ -101,23 +101,26 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     };
     let (device, last_submitted_seq, ctx_fence) = drain;
     if let Some(ld) = state.devices.get(&device) {
-        if let Err(e) = ld.submission_worker.flush() {
-            tracing::warn!("context {ctx} destroy: submission worker flush failed: {e:#}");
-        }
-        if last_submitted_seq > 0 {
-            if let Err(e) = ld.submission_worker.wait_submitted(last_submitted_seq) {
-                tracing::warn!("context {ctx} destroy: wait_submitted failed: {e:#}");
+        match ld.submission_worker.flush() {
+            Ok(()) if last_submitted_seq > 0 => {
+                if let Err(e) = ld.submission_worker.wait_submitted(last_submitted_seq) {
+                    tracing::warn!("context {ctx} destroy: wait_submitted failed: {e:#}");
+                } else {
+                    let submitted = ld
+                        .submission_worker
+                        .submitted_epoch()
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let fence_wait = last_submitted_seq.min(submitted);
+                    if fence_wait > 0 {
+                        let _ = super::utils::wait_for_fence(&ctx_fence, fence_wait);
+                    }
+                }
             }
-            let submitted = ld
-                .submission_worker
-                .submitted_epoch()
-                .load(std::sync::atomic::Ordering::Acquire);
-            let fence_wait = last_submitted_seq.min(submitted);
-            if fence_wait > 0 {
-                let _ = super::utils::wait_for_fence(&ctx_fence, fence_wait);
+            Err(e) => {
+                tracing::warn!("context {ctx} destroy: submission worker flush failed: {e:#}");
             }
+            Ok(()) => {}
         }
-        let _ = ld.submission_worker.check_error();
     }
 
     // Remove from both maps; the fence index must not outlive the context.

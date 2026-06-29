@@ -137,6 +137,9 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
             &self.queue_waits,
             self.fence_value,
         )?;
+        // Read completed value immediately after Signal without blocking: the GPU has not
+        // finished this submission yet, so we only drain deletions retired by prior work.
+        // Waiting for `fence_value` here would stall the submission worker on every resubmit.
         let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
         let retained_del_batch = {
             let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.deletion_drain");

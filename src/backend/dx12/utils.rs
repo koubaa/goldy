@@ -276,25 +276,6 @@ pub(super) fn signal_preallocated_device(
     })
 }
 
-/// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
-pub(super) fn execute_command_lists_and_signal_context(
-    logical_device: &LogicalDevice,
-    ctx_fence: &ID3D12Fence,
-    command_lists: &[Option<ID3D12CommandList>],
-) -> Result<u64> {
-    let queue_lock = Arc::clone(&logical_device.queue_lock);
-    let _guard = queue_lock.lock().unwrap();
-    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(command_lists);
-    }
-    unsafe {
-        logical_device.command_queue.Signal(ctx_fence, fence_value)
-    }
-    .context("Failed to signal context fence")?;
-    Ok(fence_value)
-}
-
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {

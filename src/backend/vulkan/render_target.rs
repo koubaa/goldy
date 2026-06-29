@@ -723,7 +723,6 @@ pub(super) fn read_to_cpu(
     // Graph/render submits may still be in flight on the async worker; wait for the
     // render-pass layout transition (COLOR_ATTACHMENT → TRANSFER_SRC) before copy.
     logical_device.submission_worker.flush()?;
-    logical_device.submission_worker.check_error()?;
     logical_device.synchronized_queue_wait_idle()?;
 
     // Reset and record copy command

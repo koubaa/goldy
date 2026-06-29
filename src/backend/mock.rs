@@ -338,17 +338,28 @@ impl MockBackend {
                 tv,
                 context_state,
             }),
-        )?;
-        dev.submission_worker.wait_submitted(tv)?;
-        dev.submission_worker.check_error()
+        )
+    }
+
+    /// Block until the worker has executed a mock submit (uses condvar, not spin-wait).
+    fn await_mock_submit(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
+        let device = self.context_device(ctx);
+        let dev = self
+            .devices
+            .get(&device)
+            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+        dev.submission_worker.wait_submitted(tv)
     }
 
     fn mock_scheduled_horizon(&self, device: DeviceHandle) -> u64 {
         self.devices
             .get(&device)
-            .map(|d| d.timeline_next.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|d| {
+                d.timeline_next
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    .saturating_sub(1)
+            })
             .unwrap_or(0)
-            .saturating_sub(1)
     }
 
     fn record_submit_sync(&mut self, sync: Option<&SubmitSync>) -> Result<()> {
@@ -471,11 +482,10 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device = self.context_device(ctx);
         if let Some(dev) = self.devices.get(&device) {
-            let _ = dev.submission_worker.flush();
+            dev.submission_worker.flush()?;
             let horizon = self.mock_scheduled_horizon(device);
             dev.submission_worker
                 .wait_submitted_if_scheduled(value, horizon)?;
-            dev.submission_worker.check_error()?;
         }
         self.wait_until_count += 1;
         let cur = self.gpu_progress(ctx);
@@ -530,6 +540,7 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
         self.context_state_mut(finish.frame.context).last_submitted_seq = tv;
         self.enqueue_mock_submit(finish.frame.context, tv)?;
+        self.await_mock_submit(finish.frame.context, tv)?;
         Ok(tv)
     }
 }
@@ -633,9 +644,8 @@ impl GpuBackend for MockBackend {
         let scheduled = self.mock_scheduled_horizon(device);
         if scheduled > 0 {
             if let Some(dev) = self.devices.get(&device) {
+                dev.submission_worker.flush()?;
                 dev.submission_worker.wait_submitted(scheduled)?;
-                dev.submission_worker.check_error()?;
-                let _ = dev.submission_worker.flush();
             }
             self.complete_device_seq_on_all_contexts(device, scheduled);
         }
@@ -1598,11 +1608,10 @@ impl GpuBackend for MockBackend {
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         if let Some(dev) = self.devices.get(&device) {
-            let _ = dev.submission_worker.flush();
+            dev.submission_worker.flush()?;
             let horizon = self.mock_scheduled_horizon(device);
             dev.submission_worker
                 .wait_submitted_if_scheduled(value, horizon)?;
-            dev.submission_worker.check_error()?;
         }
         // On the mock, advance every context on this device to at least `value`
         // so that device_retired() >= value after the call.
@@ -1661,7 +1670,6 @@ impl GpuBackend for MockBackend {
             {
                 return Ok(false);
             }
-            dev.submission_worker.check_error()?;
         }
         self.finish_timeline_wait(ctx, value)?;
         Ok(true)
@@ -1712,6 +1720,7 @@ impl GpuBackend for MockBackend {
             state.last_submitted_seq = tv;
         }
         self.enqueue_mock_submit(ctx, tv)?;
+        self.await_mock_submit(ctx, tv)?;
         Ok(tv)
     }
 
@@ -1815,6 +1824,7 @@ impl GpuBackend for MockBackend {
         let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
         self.context_state_mut(frame.context).last_submitted_seq = tv;
         self.enqueue_mock_submit(frame.context, tv)?;
+        self.await_mock_submit(frame.context, tv)?;
         Ok(tv)
     }
 

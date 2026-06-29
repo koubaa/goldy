@@ -1,7 +1,7 @@
 //! Per-device FIFO submission worker.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ pub(crate) const SUBMISSION_QUEUE_CAPACITY: usize = 128;
 pub(crate) struct SubmissionWorker {
     submitted_epoch: Arc<AtomicU64>,
     latched_error: Arc<Mutex<Option<anyhow::Error>>>,
+    wait_notify: Arc<(Mutex<()>, Condvar)>,
     sender: std::sync::mpsc::SyncSender<WorkerMessage>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -31,15 +32,18 @@ impl SubmissionWorker {
         let (sender, receiver) = std::sync::mpsc::sync_channel(capacity.max(1));
         let submitted_epoch = Arc::new(AtomicU64::new(0));
         let latched_error: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
+        let wait_notify = Arc::new((Mutex::new(()), Condvar::new()));
         let epoch_worker = Arc::clone(&submitted_epoch);
         let err_worker = Arc::clone(&latched_error);
+        let notify_worker = Arc::clone(&wait_notify);
         let thread = thread::Builder::new()
             .name("goldy-submit".into())
-            .spawn(move || worker_loop(receiver, epoch_worker, err_worker))
+            .spawn(move || worker_loop(receiver, epoch_worker, err_worker, notify_worker))
             .expect("spawn goldy submission worker");
         Self {
             submitted_epoch,
             latched_error,
+            wait_notify,
             sender,
             thread: Mutex::new(Some(thread)),
         }
@@ -68,10 +72,7 @@ impl SubmissionWorker {
         if tv == 0 {
             return Ok(());
         }
-        while self.submitted_epoch.load(Ordering::Acquire) < tv {
-            self.check_error()?;
-            thread::yield_now();
-        }
+        wait_for_submitted_epoch(&self.submitted_epoch, &self.wait_notify, &self.latched_error, tv, None)?;
         Ok(())
     }
 
@@ -81,14 +82,13 @@ impl SubmissionWorker {
             return Ok(true);
         }
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        while self.submitted_epoch.load(Ordering::Acquire) < tv {
-            self.check_error()?;
-            if Instant::now() >= deadline {
-                return Ok(false);
-            }
-            thread::yield_now();
-        }
-        Ok(true)
+        wait_for_submitted_epoch(
+            &self.submitted_epoch,
+            &self.wait_notify,
+            &self.latched_error,
+            tv,
+            Some(deadline),
+        )
     }
 
     /// Like [`wait_submitted`](Self::wait_submitted), but no-ops when `tv` was never scheduled.
@@ -117,17 +117,19 @@ impl SubmissionWorker {
     }
 
     pub fn flush(&self) -> Result<()> {
-        self.check_error()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.sender
             .send(WorkerMessage::Flush { done: tx })
             .map_err(|e| anyhow::anyhow!("submission worker channel closed: {e}"))?;
-        rx.recv()?.map_err(|e| e)?;
-        self.check_error()
+        rx.recv()
+            .map_err(|e| anyhow::anyhow!("submission worker flush response lost: {e}"))?
     }
 
     pub fn shutdown(&self) {
-        let _ = self.sender.send(WorkerMessage::Shutdown);
+        let _ = self.flush();
+        if self.sender.try_send(WorkerMessage::Shutdown).is_err() {
+            let _ = self.sender.send(WorkerMessage::Shutdown);
+        }
         if let Some(handle) = self.thread.lock().unwrap().take() {
             let _ = handle.join();
         }
@@ -140,10 +142,67 @@ impl Drop for SubmissionWorker {
     }
 }
 
+fn advance_submitted_epoch(
+    submitted_epoch: &AtomicU64,
+    wait_notify: &Arc<(Mutex<()>, Condvar)>,
+    tv: u64,
+) {
+    submitted_epoch.fetch_max(tv, Ordering::Release);
+    wait_notify.1.notify_all();
+}
+
+fn wait_for_submitted_epoch(
+    submitted_epoch: &AtomicU64,
+    wait_notify: &Arc<(Mutex<()>, Condvar)>,
+    latched_error: &Arc<Mutex<Option<anyhow::Error>>>,
+    tv: u64,
+    deadline: Option<Instant>,
+) -> Result<bool> {
+    while submitted_epoch.load(Ordering::Acquire) < tv {
+        if latched_error.lock().unwrap().is_some() {
+            if let Some(err) = latched_error.lock().unwrap().take() {
+                return Err(err);
+            }
+        }
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return Ok(false);
+            }
+        }
+        let guard = wait_notify.0.lock().unwrap();
+        if submitted_epoch.load(Ordering::Acquire) >= tv {
+            break;
+        }
+        if latched_error.lock().unwrap().is_some() {
+            drop(guard);
+            if let Some(err) = latched_error.lock().unwrap().take() {
+                return Err(err);
+            }
+            continue;
+        }
+        match deadline {
+            None => {
+                let guard = wait_notify.1.wait(guard).unwrap();
+                drop(guard);
+            }
+            Some(d) => {
+                let remaining = d.saturating_duration_since(Instant::now());
+                let (guard, timeout) = wait_notify.1.wait_timeout(guard, remaining).unwrap();
+                drop(guard);
+                if timeout.timed_out() && submitted_epoch.load(Ordering::Acquire) < tv && Instant::now() >= d {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn worker_loop(
     receiver: std::sync::mpsc::Receiver<WorkerMessage>,
     submitted_epoch: Arc<AtomicU64>,
     latched_error: Arc<Mutex<Option<anyhow::Error>>>,
+    wait_notify: Arc<(Mutex<()>, Condvar)>,
 ) {
     #[cfg(feature = "tracy")]
     crate::_tracy_client::set_thread_name!("goldy-submit");
@@ -160,25 +219,26 @@ fn worker_loop(
             WorkerMessage::Submit { tv, work } => {
                 let _exec = crate::tracy_zone!("goldy.submit_worker.execute");
                 if latched_error.lock().unwrap().is_some() {
-                    // Still advance so wait_submitted(last_submitted_seq) cannot spin
+                    // Still advance so wait_submitted(last_submitted_seq) cannot block
                     // forever after an earlier execute failure skipped this job.
-                    submitted_epoch.fetch_max(tv, Ordering::Release);
+                    advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                     continue;
                 }
                 match work.execute() {
                     Ok(()) => {
-                        submitted_epoch.fetch_max(tv, Ordering::Release);
+                        advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                     }
                     Err(e) => {
-                        submitted_epoch.fetch_max(tv, Ordering::Release);
+                        advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                         *latched_error.lock().unwrap() = Some(e);
+                        wait_notify.1.notify_all();
                     }
                 }
             }
             WorkerMessage::Flush { done } => {
                 let _flush = crate::tracy_zone!("goldy.submit_worker.flush");
-                let res = if latched_error.lock().unwrap().is_some() {
-                    Err(anyhow::anyhow!("submission worker latched error"))
+                let res = if let Some(e) = latched_error.lock().unwrap().take() {
+                    Err(e)
                 } else {
                     Ok(())
                 };
@@ -190,10 +250,10 @@ fn worker_loop(
 }
 
 pub(crate) fn allocate_timeline_value(timeline_next: &AtomicU64) -> u64 {
-    timeline_next.fetch_add(1, Ordering::Relaxed)
+    timeline_next.fetch_add(1, Ordering::AcqRel)
 }
 
 /// Highest timeline value pre-allocated on this device (may still be in the worker queue).
 pub(crate) fn submission_horizon(timeline_next: &AtomicU64) -> u64 {
-    timeline_next.load(Ordering::Relaxed).saturating_sub(1)
+    timeline_next.load(Ordering::Acquire).saturating_sub(1)
 }
