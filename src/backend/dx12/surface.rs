@@ -1310,6 +1310,15 @@ pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) 
 /// Resize a surface.
 #[allow(clippy::too_many_lines)]
 pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+    // Skip redundant rebuilds when the clamped extent already matches (winit can
+    // emit duplicate Resized events during window drag).
+    if let Some(surface) = state.surfaces.get(&surface_handle) {
+        if surface.width == width && surface.height == height {
+            tracing::trace!(surface = surface_handle, width, height, "dx12::surface::resize skipped (unchanged)");
+            return Ok(());
+        }
+    }
+
     // Get device handle and surface format first
     let (device_handle, surface_format) = {
         let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
@@ -1485,11 +1494,26 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
         surface.dsv_offset = Some(dsv_off);
     }
 
+    let goldy_format = dxgi_to_format(surface_format).unwrap_or(TextureFormat::Bgra8Unorm);
+    let mut scratches = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    for i in 0..MAX_FRAMES_IN_FLIGHT {
+        let h = ensure_compute_scratch_texture(
+            state,
+            surface_handle,
+            i,
+            width,
+            height,
+            goldy_format,
+            device_handle,
+        )?;
+        scratches.push(Some(h));
+    }
+
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
     surface.current_frame = 0;
     surface.current_image_index = None;
     surface.current_texture_handle = None;
-    surface.compute_scratch_textures = vec![None; MAX_FRAMES_IN_FLIGHT];
+    surface.compute_scratch_textures = scratches;
     surface.pending_acquire_count = 0;
     surface.pending_swapchain_returns.clear();
 
