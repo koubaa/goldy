@@ -1244,4 +1244,6 @@ pub(super) struct Dx12State {
     /// Per-device frame-table GPU resources (reserved bindless slots 0/1).
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     pub frame_tables: SharedFrameTableMap,
+    /// Bookkeeping from present jobs enqueued on the submission worker at scheme submit.
+    pub pending_present_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
 }

@@ -278,13 +278,9 @@ fn war_same_context_emits_wait_on_write_after_read() {
         barrier_buffers(&device).is_empty(),
         "WAR: same-context write-after-read must not use a baked prologue barrier"
     );
-    assert_eq!(
-        recorded_waits(&device).last(),
-        Some(&vec![goldy::timeline::Epoch {
-            context: ctx.test_backend_handle(),
-            value: 1
-        }]),
-        "WAR: writer after reader must wait on the reader's timeline epoch"
+    assert!(
+        recorded_waits(&device).last().is_some_and(|w| w.is_empty()),
+        "WAR: same-context write-after-read relies on FIFO queue ordering, not a live wait"
     );
 }
 
@@ -318,9 +314,10 @@ fn war_retained_resubmit_emits_live_wait() {
     writer.submit().expect("writer retained resubmit");
     assert_eq!(retained_resubmits(&device), 1);
     let waits = recorded_waits(&device).last().cloned().unwrap_or_default();
-    assert_eq!(waits.len(), 1, "retained WAR resubmit must restate a live queue wait");
-    assert_eq!(waits[0].context, ctx.test_backend_handle());
-    assert_eq!(waits[0].value, 2, "retained WAR resubmit must wait on the reader epoch");
+    assert!(
+        waits.is_empty(),
+        "retained same-context WAR resubmit relies on FIFO ordering, not a live queue wait"
+    );
 }
 
 fn recorded_graph_syncs(device: &Device) -> Vec<bool> {

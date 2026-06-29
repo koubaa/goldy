@@ -48,6 +48,9 @@ pub(crate) struct ParcelStamp {
     /// Set when this stamp is registered for scheme/task-graph hazard tracking.
     /// TODO: delete this when task graph is eliminated
     scheme_registered: Arc<AtomicBool>,
+    /// Pending present-easement promises on this stamp require a live same-context WAR wait
+    /// when folded (legacy present path — not scheduled on the submission worker at submit).
+    legacy_present_easement: Arc<AtomicBool>,
 }
 
 impl ParcelStamp {
@@ -58,6 +61,7 @@ impl ParcelStamp {
             pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
             scheme_registered: Arc::new(AtomicBool::new(false)),
+            legacy_present_easement: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -68,7 +72,17 @@ impl ParcelStamp {
             pending: Arc::clone(&self.pending),
             home_device: self.home_device.clone(),
             scheme_registered: Arc::clone(&self.scheme_registered),
+            legacy_present_easement: Arc::clone(&self.legacy_present_easement),
         }
+    }
+
+    pub(crate) fn set_legacy_present_easement(&self, legacy: bool) {
+        self.legacy_present_easement
+            .store(legacy, Ordering::Release);
+    }
+
+    pub(crate) fn is_legacy_present_easement(&self) -> bool {
+        self.legacy_present_easement.load(Ordering::Acquire)
     }
 
     //TODO: delete this when taskgraph is removed
@@ -90,7 +104,7 @@ impl ParcelStamp {
     }
 
     /// Submission-order gate: block until every pending promise is resolved or abandoned,
-    /// folding resolved values into [`ResourceSync::foreign_reads`]. This is not a GPU-completion wait.
+    /// folding resolved values into [`ResourceSync::last_reads`]. This is not a GPU-completion wait.
     ///
     /// # Threading contract (strict — do not violate)
     ///
@@ -122,7 +136,10 @@ impl ParcelStamp {
             pending.retain(|promise| match promise.poll() {
                 PromiseState::Pending => true,
                 PromiseState::Resolved(tv) => {
-                    sync.record_foreign_read(ctx, tv);
+                    sync.record_read(ctx, tv);
+                    if self.is_legacy_present_easement() {
+                        sync.mark_war_read(ctx, tv);
+                    }
                     false
                 }
                 PromiseState::Abandoned => false,
@@ -146,7 +163,10 @@ impl ParcelStamp {
                 true
             }
             PromiseState::Resolved(tv) => {
-                sync.record_foreign_read(ctx, tv);
+                sync.record_read(ctx, tv);
+                if self.is_legacy_present_easement() {
+                    sync.mark_war_read(ctx, tv);
+                }
                 false
             }
             PromiseState::Abandoned => false,
@@ -1184,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn settle_lazy_gc_folds_resolved_promise_into_foreign_reads() {
+    fn settle_lazy_gc_folds_resolved_promise_into_last_reads() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
         let ctx = device.create_context().unwrap();
@@ -1196,9 +1216,7 @@ mod tests {
         resolver.resolve(25);
         assert_eq!(parcel.settle(&ctx), Settle::Waiting(25));
         assert!(stamp.pending.lock().unwrap().is_empty());
-        let sync = stamp.sync.lock().unwrap();
-        assert_eq!(sync.foreign_reads.get(&ctx_handle), Some(&25));
-        assert!(sync.last_reads.is_empty());
+        assert_eq!(stamp.sync.lock().unwrap().last_reads.get(&ctx_handle), Some(&25));
     }
 
     #[test]

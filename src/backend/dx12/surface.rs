@@ -712,6 +712,144 @@ pub(super) fn prepare_present_work(
     frame: crate::backend::FrameToken,
     _submit_tv: u64,
 ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
+    Ok(Box::new(prepare_present_plan(state, frame)?.into_gpu_work()))
+}
+
+struct Dx12PresentPlan {
+    frame: crate::backend::FrameToken,
+    image_index: usize,
+    present_slot: usize,
+    scratch_handle: TextureHandle,
+    render_pass_submitted: bool,
+    logical_device: std::sync::Arc<LogicalDevice>,
+    scratch_res: ID3D12Resource,
+    backbuffer: ID3D12Resource,
+    cmd7: ID3D12GraphicsCommandList7,
+    cmd_alloc: ID3D12CommandAllocator,
+    swapchain: IDXGISwapChain3,
+    present_mode: crate::types::PresentMode,
+    allow_tearing: bool,
+    existing_fence: u64,
+}
+
+impl Dx12PresentPlan {
+    fn into_gpu_work(self) -> Dx12PresentGpuWork {
+        Dx12PresentGpuWork {
+            frame: self.frame,
+            image_index: self.image_index,
+            present_slot: self.present_slot,
+            scratch_handle: self.scratch_handle,
+            render_pass_submitted: self.render_pass_submitted,
+            logical_device: self.logical_device,
+            scratch_res: self.scratch_res,
+            backbuffer: self.backbuffer,
+            cmd7: self.cmd7,
+            cmd_alloc: self.cmd_alloc,
+            swapchain: self.swapchain,
+            present_mode: self.present_mode,
+            allow_tearing: self.allow_tearing,
+            existing_fence: self.existing_fence,
+        }
+    }
+
+    fn record_present_copy(&self) -> Result<(Vec<Option<ID3D12CommandList>>, u64)> {
+        if self.render_pass_submitted {
+            return Ok((Vec::new(), 0));
+        }
+
+        let _tz = crate::tracy_zone!("dx12.present.copy_to_backbuffer");
+        unsafe { self.cmd_alloc.Reset() }.context("Failed to reset command allocator for present copy")?;
+        let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
+        unsafe { cmd_gfx.Reset(&self.cmd_alloc, None) }.context("Failed to reset command list for present copy")?;
+
+        unsafe { cmd_gfx.DiscardResource(&self.backbuffer, None) };
+
+        let mut prep_barriers = vec![
+            barriers::texture_barrier_full(
+                &self.scratch_res,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+            ),
+            barriers::texture_barrier_full(
+                &self.backbuffer,
+                D3D12_BARRIER_SYNC_NONE,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_NO_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_LAYOUT_UNDEFINED,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+            ),
+        ];
+        unsafe { barriers::barrier_textures(&self.cmd7, &prep_barriers) };
+        unsafe { barriers::drop_texture_barriers(&mut prep_barriers) };
+
+        unsafe { cmd_gfx.CopyResource(&self.backbuffer, &self.scratch_res) };
+
+        let mut post_barriers = vec![
+            barriers::texture_barrier_full(
+                &self.backbuffer,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_NONE,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                D3D12_BARRIER_ACCESS_NO_ACCESS,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+                D3D12_BARRIER_LAYOUT_PRESENT,
+            ),
+            barriers::texture_barrier_full(
+                &self.scratch_res,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+            ),
+        ];
+        unsafe { barriers::barrier_textures(&self.cmd7, &post_barriers) };
+        unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+
+        unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
+
+        let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
+        // Pre-allocated on the render thread; enqueued on the FIFO worker after compute partitions.
+        // GPU ordering vs prior compute relies on single-queue FIFO submission (no explicit Wait).
+        let copy_tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
+        Ok((vec![Some(cmd_list)], copy_tv))
+    }
+
+    fn build_finish_state(&self, return_fence: u64, scratch_layout_updated: bool) -> crate::backend::PresentFinishState {
+        let present_timeline = if scratch_layout_updated {
+            return_fence
+        } else {
+            self.logical_device
+                .timeline_next
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(1)
+        };
+        crate::backend::PresentFinishState {
+            frame: self.frame,
+            return_fence,
+            scratch_texture: Some(self.scratch_handle),
+            scratch_layout_updated,
+            present_timeline,
+            copy_timeline: if scratch_layout_updated {
+                Some(return_fence)
+            } else {
+                None
+            },
+            frame_compute_timeline: None,
+            signal_timeline: None,
+            render_pass_submitted: self.render_pass_submitted,
+            present_ok: true,
+        }
+    }
+}
+
+fn prepare_present_plan(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<Dx12PresentPlan> {
     let surface_handle = frame.surface;
     let image_index = frame.image as usize;
     let present_slot = frame.present_slot as usize;
@@ -751,7 +889,7 @@ pub(super) fn prepare_present_work(
         .clone();
     let existing_fence = surface.frame_sync[present_slot].fence_value;
 
-    Ok(Box::new(Dx12PresentGpuWork {
+    Ok(Dx12PresentPlan {
         frame,
         image_index,
         present_slot,
@@ -766,7 +904,219 @@ pub(super) fn prepare_present_work(
         present_mode,
         allow_tearing,
         existing_fence,
-    }))
+    })
+}
+
+/// Enqueue present copy + DXGI Present on the submission worker during scheme submit.
+pub(super) fn schedule_present_on_submission_worker(
+    state: &mut Dx12State,
+    frame: crate::backend::FrameToken,
+    _submit_tv: u64,
+) -> Result<u64> {
+    let plan = prepare_present_plan(state, frame)?;
+    let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
+    let (command_lists, copy_tv) = plan.record_present_copy()?;
+    let return_fence = if copy_tv > 0 { copy_tv } else { plan.existing_fence };
+    let scratch_layout_updated = copy_tv > 0;
+    let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
+    let present_tv = super::pending_submit::enqueue_scheduled_present(
+        &plan.logical_device,
+        command_lists,
+        copy_tv,
+        plan.swapchain,
+        plan.present_mode,
+        plan.allow_tearing,
+        finish,
+        pending_finishes,
+    )?;
+    Ok(present_tv)
+}
+
+fn synthesize_scheduled_present_finish(
+    state: &Dx12State,
+    frame: crate::backend::FrameToken,
+    present_tv: u64,
+) -> Result<crate::backend::PresentFinishState> {
+    let surface = state
+        .surfaces
+        .get(&frame.surface)
+        .with_context(|| format!("Invalid surface handle {:?}", frame.surface))?;
+    let image_index = frame.image as usize;
+    let present_slot = frame.present_slot as usize;
+    let scratch_handle = surface
+        .compute_scratch_textures
+        .get(image_index)
+        .copied()
+        .flatten()
+        .with_context(|| format!("No scratch texture for swapchain image {image_index}"))?;
+    let render_pass_submitted = surface.frame_sync[present_slot].render_pass_submitted;
+    let return_fence = if render_pass_submitted {
+        surface.frame_sync[present_slot].fence_value
+    } else {
+        present_tv
+    };
+    let scratch_layout_updated = !render_pass_submitted;
+    let present_timeline = if scratch_layout_updated {
+        return_fence
+    } else {
+        state
+            .devices
+            .get(&surface.device_handle)
+            .map(|d| {
+                d.timeline_next
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(1)
+            })
+            .unwrap_or(return_fence)
+    };
+    Ok(crate::backend::PresentFinishState {
+        frame,
+        return_fence,
+        scratch_texture: Some(scratch_handle),
+        scratch_layout_updated,
+        present_timeline,
+        copy_timeline: if scratch_layout_updated {
+            Some(return_fence)
+        } else {
+            None
+        },
+        frame_compute_timeline: None,
+        signal_timeline: None,
+        render_pass_submitted,
+        present_ok: true,
+    })
+}
+
+pub(super) fn take_scheduled_present_blocking_wait(
+    state: &Dx12State,
+    frame: crate::backend::FrameToken,
+    present_tv: u64,
+) -> Result<Option<Box<dyn crate::backend::ScheduledPresentBlockingWait>>> {
+    let device_handle = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?
+        .clone();
+    let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
+    let ctx_fence = state
+        .context_fences
+        .read()
+        .unwrap()
+        .get(&frame.context)
+        .map(|(_, fence)| fence.clone());
+    Ok(Some(Box::new(Dx12ScheduledPresentWait {
+        logical_device,
+        pending_finishes,
+        frame,
+        present_tv,
+        ctx_fence,
+    })))
+}
+
+struct Dx12ScheduledPresentWait {
+    logical_device: std::sync::Arc<LogicalDevice>,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+    frame: crate::backend::FrameToken,
+    present_tv: u64,
+    ctx_fence: Option<ID3D12Fence>,
+}
+
+impl crate::backend::ScheduledPresentBlockingWait for Dx12ScheduledPresentWait {
+    fn run(self: Box<Self>) -> Result<crate::backend::ScheduledPresentWaitOutcome> {
+        let _tz = crate::tracy_zone!("goldy.dx12.scheduled_present.wait");
+        self.logical_device.submission_worker.wait_submitted(self.present_tv)?;
+        self.logical_device.submission_worker.check_error()?;
+
+        let finish = {
+            let mut pending = self.pending_finishes.lock().unwrap();
+            pending
+                .iter()
+                .position(|f| {
+                    f.frame.surface == self.frame.surface
+                        && f.frame.image == self.frame.image
+                        && f.frame.present_slot == self.frame.present_slot
+                })
+                .map(|idx| pending.remove(idx))
+        };
+        let return_fence = finish.as_ref().map(|f| f.return_fence).unwrap_or(0);
+        if return_fence > 0 {
+            super::utils::wait_for_fence(&self.logical_device.fence, return_fence)?;
+            if let Some(ctx_fence) = &self.ctx_fence {
+                super::utils::sync_context_fence_after_device_retire(
+                    &self.logical_device,
+                    &self.logical_device.fence,
+                    ctx_fence,
+                    return_fence,
+                )?;
+            }
+        }
+        Ok(crate::backend::ScheduledPresentWaitOutcome {
+            frame: self.frame,
+            present_tv: self.present_tv,
+            finish,
+            return_fence,
+        })
+    }
+}
+
+pub(super) fn apply_scheduled_present_bookkeeping(
+    state: &mut Dx12State,
+    outcome: crate::backend::ScheduledPresentWaitOutcome,
+) -> Result<()> {
+    let finish = match outcome.finish {
+        Some(finish) => finish,
+        None => {
+            tracing::warn!(
+                target: "goldy::dx12",
+                surface = outcome.frame.surface,
+                image = outcome.frame.image,
+                present_slot = outcome.frame.present_slot,
+                present_tv = outcome.present_tv,
+                "scheduled present finish missing from pending queue; synthesizing surface bookkeeping"
+            );
+            synthesize_scheduled_present_finish(state, outcome.frame, outcome.present_tv)?
+        }
+    };
+    let return_fence = finish.return_fence;
+    let surface_handle = finish.frame.surface;
+    let ctx = finish.frame.context;
+    finish_present(state, finish, outcome.present_tv)?;
+    if return_fence > 0 {
+        flush_swapchain_returns_to_progress(state, surface_handle, ctx, return_fence);
+    }
+    Ok(())
+}
+
+/// Release flip-model acquire slots once `return_fence` has retired on the device fence.
+fn flush_swapchain_returns_to_progress(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
+    retire_progress: u64,
+) {
+    let contexts = state.contexts.read().unwrap();
+    let Some(sc_arc) = contexts.get(&ctx) else {
+        return;
+    };
+    let mut sc = sc_arc.lock().unwrap();
+    let Some(surf) = state.surfaces.get_mut(&surface_handle) else {
+        return;
+    };
+    surf.pending_swapchain_returns.retain(|&(idx, tv)| {
+        if retire_progress >= tv {
+            sc.signal_queue
+                .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+            surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
+            false
+        } else {
+            true
+        }
+    });
 }
 
 pub(super) fn finish_present(
@@ -1230,7 +1580,7 @@ fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
 }
 
 /// Map a `PresentMode` to DXGI `Present()` arguments (SyncInterval, Flags).
-fn present_args(mode: crate::types::PresentMode, allow_tearing: bool) -> (u32, DXGI_PRESENT) {
+pub(super) fn present_args(mode: crate::types::PresentMode, allow_tearing: bool) -> (u32, DXGI_PRESENT) {
     use crate::types::PresentMode;
     match mode {
         PresentMode::Fifo | PresentMode::Mailbox | PresentMode::Auto => (1, DXGI_PRESENT(0)),

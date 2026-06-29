@@ -74,6 +74,8 @@ pub struct MockBackend {
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
+    /// When true, [`Scheme::submit`] enqueues present on the per-device submission worker.
+    schedules_present_on_submit_worker: bool,
     /// Device-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
@@ -266,6 +268,7 @@ impl MockBackend {
             readback_free_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
+            schedules_present_on_submit_worker: true,
             device_retired_floor: HashMap::new(),
             surface_pending_acquire: HashMap::new(),
             contexts: HashMap::new(),
@@ -319,26 +322,47 @@ impl MockBackend {
         self.context_state(ctx).signal_queue.push(signal);
     }
 
-    fn enqueue_mock_submit(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
+    fn mock_pending_submit(ctx: ContextHandle, tv: u64, context_state: Arc<Mutex<MockContextState>>) -> Box<dyn crate::backend::submission_worker::PendingSubmit> {
+        Box::new(MockPendingSubmit {
+            ctx,
+            tv,
+            context_state,
+        })
+    }
+
+    fn mock_submit_worker(&self, ctx: ContextHandle) -> Result<Arc<crate::backend::submission_worker::SubmissionWorker>> {
         let device = self.context_device(ctx);
-        let dev = self
-            .devices
-            .get(&device)
-            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
-        dev.submission_worker.check_error()?;
-        let context_state = Arc::clone(
+        Ok(Arc::clone(
+            &self
+                .devices
+                .get(&device)
+                .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?
+                .submission_worker,
+        ))
+    }
+
+    fn mock_context_state(&self, ctx: ContextHandle) -> Result<Arc<Mutex<MockContextState>>> {
+        Ok(Arc::clone(
             self.contexts
                 .get(&ctx)
                 .ok_or_else(|| anyhow::anyhow!("Invalid context handle"))?,
-        );
-        dev.submission_worker.enqueue(
-            tv,
-            Box::new(MockPendingSubmit {
-                ctx,
-                tv,
-                context_state,
-            }),
-        )
+        ))
+    }
+
+    /// Enqueue present work on the worker without completing it (FIFO-at-submit path).
+    fn enqueue_mock_submit_deferred(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
+        let worker = self.mock_submit_worker(ctx)?;
+        worker.check_error()?;
+        let context_state = self.mock_context_state(ctx)?;
+        worker.enqueue(tv, Self::mock_pending_submit(ctx, tv, context_state))
+    }
+
+    /// Complete a mock submit synchronously on the calling thread.
+    fn run_mock_submit_now(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
+        let worker = self.mock_submit_worker(ctx)?;
+        worker.check_error()?;
+        let context_state = self.mock_context_state(ctx)?;
+        worker.execute_immediately(tv, Self::mock_pending_submit(ctx, tv, context_state))
     }
 
     /// Block until the worker has executed a mock submit (uses condvar, not spin-wait).
@@ -380,6 +404,11 @@ impl MockBackend {
     /// rather than assuming a hardcoded format.
     pub fn set_default_surface_format(&mut self, format: TextureFormat) {
         self.default_surface_format = format;
+    }
+
+    /// Control whether [`Scheme::submit`] schedules present on the submission worker.
+    pub fn set_schedules_present_on_submit_worker(&mut self, enabled: bool) {
+        self.schedules_present_on_submit_worker = enabled;
     }
 
     /// Number of live retained command lists (test introspection).
@@ -539,14 +568,114 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
             .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
         let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
         self.context_state_mut(finish.frame.context).last_submitted_seq = tv;
-        self.enqueue_mock_submit(finish.frame.context, tv)?;
-        self.await_mock_submit(finish.frame.context, tv)?;
+        self.run_mock_submit_now(finish.frame.context, tv)?;
         Ok(tv)
+    }
+
+    fn schedules_present_on_submit_worker(&self) -> bool {
+        self.schedules_present_on_submit_worker
+    }
+
+    fn schedule_present_on_submission_worker(
+        &mut self,
+        frame: FrameToken,
+        _submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        if let Some(tex_handle) = self
+            .surfaces
+            .get_mut(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .current_texture_handle
+            .take()
+        {
+            self.textures.remove(&tex_handle);
+        }
+        let device = self
+            .surfaces
+            .get(&frame.surface)
+            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
+            .device_handle;
+        let dev = self
+            .devices
+            .get(&device)
+            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+        let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
+        self.enqueue_mock_submit_deferred(frame.context, tv)?;
+        Ok(tv)
+    }
+
+    fn finish_scheduled_present(
+        &mut self,
+        frame: FrameToken,
+        present_tv: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let wait = self.take_scheduled_present_blocking_wait(frame, present_tv)?;
+        let Some(wait) = wait else {
+            return Ok(());
+        };
+        let outcome = wait.run()?;
+        self.apply_scheduled_present_bookkeeping(outcome)
+    }
+
+    fn take_scheduled_present_blocking_wait(
+        &self,
+        frame: FrameToken,
+        present_tv: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::ScheduledPresentBlockingWait>>> {
+        if !self.schedules_present_on_submit_worker {
+            return Ok(None);
+        }
+        let device = self.context_device(frame.context);
+        let dev = self
+            .devices
+            .get(&device)
+            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+        Ok(Some(Box::new(MockScheduledPresentWait {
+            frame,
+            present_tv,
+            worker: std::sync::Arc::clone(&dev.submission_worker),
+        })))
+    }
+
+    fn apply_scheduled_present_bookkeeping(
+        &mut self,
+        outcome: crate::backend::ScheduledPresentWaitOutcome,
+    ) -> Result<()> {
+        self.surface_present_count += 1;
+        let image_index = outcome.frame.image as u32;
+        self.push_context_signal(
+            outcome.frame.context,
+            crate::signal::Signal::SwapchainReturned { image_index },
+        );
+        if let Some(count) = self.surface_pending_acquire.get_mut(&outcome.frame.surface) {
+            *count = count.saturating_sub(1);
+        }
+        self.context_state_mut(outcome.frame.context).last_submitted_seq = outcome.present_tv;
+        Ok(())
     }
 }
 
 struct MockPresentGpuWork {
     frame: FrameToken,
+}
+
+struct MockScheduledPresentWait {
+    frame: FrameToken,
+    present_tv: crate::timeline::TimelineValue,
+    worker: std::sync::Arc<crate::backend::submission_worker::SubmissionWorker>,
+}
+
+impl crate::backend::ScheduledPresentBlockingWait for MockScheduledPresentWait {
+    fn run(self: Box<Self>) -> Result<crate::backend::ScheduledPresentWaitOutcome> {
+        self.worker.wait_submitted(self.present_tv)?;
+        self.worker.check_error()?;
+        Ok(crate::backend::ScheduledPresentWaitOutcome {
+            frame: self.frame,
+            present_tv: self.present_tv,
+            finish: None,
+            return_fence: self.present_tv,
+        })
+    }
 }
 
 impl crate::backend::PresentGpuWork for MockPresentGpuWork {
@@ -1719,8 +1848,7 @@ impl GpuBackend for MockBackend {
             let mut state = self.context_state_mut(ctx);
             state.last_submitted_seq = tv;
         }
-        self.enqueue_mock_submit(ctx, tv)?;
-        self.await_mock_submit(ctx, tv)?;
+        self.run_mock_submit_now(ctx, tv)?;
         Ok(tv)
     }
 
@@ -1823,8 +1951,7 @@ impl GpuBackend for MockBackend {
             .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
         let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
         self.context_state_mut(frame.context).last_submitted_seq = tv;
-        self.enqueue_mock_submit(frame.context, tv)?;
-        self.await_mock_submit(frame.context, tv)?;
+        self.run_mock_submit_now(frame.context, tv)?;
         Ok(tv)
     }
 

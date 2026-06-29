@@ -564,6 +564,17 @@ impl Frame {
             .expect("swapchain texture is only cleared after present")
     }
 
+    pub(crate) fn frame_token(&self) -> crate::backend::FrameToken {
+        self.token
+    }
+
+    /// Present GPU work was enqueued on the submission worker at scheme submit; skip
+    /// implicit present on drop.
+    pub(crate) fn mark_present_scheduled_on_worker(&mut self) {
+        self.presented = true;
+        let _ = self.texture.take();
+    }
+
     /// Timeline of the early (pre-swapchain) compute partition, if one was
     /// submitted during [`Surface::submit_graph_to_frame`]. `None` when the
     /// graph was not split (e.g. all work touches the swapchain). See the

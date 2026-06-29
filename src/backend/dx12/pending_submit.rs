@@ -177,6 +177,85 @@ impl PendingSubmit for Dx12PresentCopyPendingSubmit {
     }
 }
 
+/// Full present job (optional scratch→backbuffer copy + DXGI Present) enqueued at scheme submit.
+pub(super) struct Dx12ScheduledPresentPendingSubmit {
+    logical_device: SharedLogicalDevice,
+    command_lists: Vec<Option<ID3D12CommandList>>,
+    copy_tv: u64,
+    enqueue_tv: u64,
+    swapchain: windows::Win32::Graphics::Dxgi::IDXGISwapChain3,
+    present_mode: crate::types::PresentMode,
+    allow_tearing: bool,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+}
+
+impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
+    fn execute(self: Box<Self>) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.scheduled_present");
+        if !self.command_lists.is_empty() {
+            super::utils::signal_preallocated_device(&self.logical_device, &self.command_lists, self.copy_tv)?;
+        } else {
+            super::utils::with_queue_lock(&self.logical_device, || {
+                unsafe {
+                    self.logical_device
+                        .command_queue
+                        .Signal(&self.logical_device.fence, self.enqueue_tv)
+                }
+                .context("Failed to signal device fence for scheduled present")
+            })?;
+        }
+
+        {
+            let _tz = crate::tracy_zone!("dx12.present.swapchain_present");
+            // SAFETY: flip-model `Present` with `DXGI_SWAP_EFFECT_FLIP_DISCARD` is valid from any
+            // thread; the submission worker serializes queue access via `queue_lock`.
+            let (sync_interval, present_flags) =
+                super::surface::present_args(self.present_mode, self.allow_tearing);
+            let hr = unsafe { self.swapchain.Present(sync_interval, present_flags) };
+            if hr.is_err() {
+                anyhow::bail!("Present failed with HRESULT: {:?}", hr);
+            }
+        }
+
+        self.pending_finishes.lock().unwrap().push(self.finish);
+        Ok(())
+    }
+}
+
+pub(super) fn enqueue_scheduled_present(
+    logical_device: &SharedLogicalDevice,
+    command_lists: Vec<Option<ID3D12CommandList>>,
+    copy_tv: u64,
+    swapchain: windows::Win32::Graphics::Dxgi::IDXGISwapChain3,
+    present_mode: crate::types::PresentMode,
+    allow_tearing: bool,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+) -> Result<u64> {
+    logical_device.submission_worker.check_error()?;
+    let enqueue_tv = if copy_tv > 0 {
+        copy_tv
+    } else {
+        crate::backend::submission_worker::allocate_timeline_value(&logical_device.timeline_next)
+    };
+    logical_device.submission_worker.enqueue(
+        enqueue_tv,
+        Box::new(Dx12ScheduledPresentPendingSubmit {
+            logical_device: Arc::clone(logical_device),
+            command_lists,
+            copy_tv,
+            enqueue_tv,
+            swapchain,
+            present_mode,
+            allow_tearing,
+            finish,
+            pending_finishes,
+        }),
+    )?;
+    Ok(enqueue_tv)
+}
+
 pub(super) fn enqueue_present_copy(
     logical_device: &SharedLogicalDevice,
     command_lists: Vec<Option<ID3D12CommandList>>,

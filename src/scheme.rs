@@ -172,6 +172,7 @@ impl fmt::Debug for GrantStagingPool {
 struct SubmissionData {
     scheme_id: u64,
     timeline: TimelineValue,
+    backend: Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
     /// Per-grant staging buffer for this submission; taken by [`ReadGrant::consume`].
     cells: Vec<Mutex<Option<BufferHandle>>>,
     /// Per-grant pools; used to recycle or free unconsumed cells on drop.
@@ -180,6 +181,11 @@ struct SubmissionData {
     present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
     /// Resolvers for present easement timeline promises; resolved by [`Grant::consume`].
     present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
+    /// Pre-allocated present easement timeline per grant when present GPU work was
+    /// enqueued on the submission worker at submit (promise still resolved at consume).
+    present_fifo_tvs: Vec<Option<TimelineValue>>,
+    /// Frame tokens for grants whose present was scheduled on the worker (no GPU work at consume).
+    present_fifo_tokens: Vec<Mutex<Option<crate::backend::FrameToken>>>,
 }
 
 impl Drop for SubmissionData {
@@ -189,6 +195,20 @@ impl Drop for SubmissionData {
             if let Some(handle) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 pool.return_handle(handle, ready_after);
             }
+        }
+        let mut pending_finishes: Vec<(crate::backend::FrameToken, TimelineValue)> = Vec::new();
+        for (idx, tv) in self.present_fifo_tvs.iter().enumerate() {
+            if let (Some(tv), Some(token)) = (
+                tv,
+                self.present_fifo_tokens
+                    .get(idx)
+                    .and_then(|m| m.lock().unwrap().take()),
+            ) {
+                pending_finishes.push((token, *tv));
+            }
+        }
+        for (token, tv) in pending_finishes {
+            let _ = complete_scheduled_present(&self.backend, token, tv);
         }
         for frame_mutex in &self.present_frames {
             if let Ok(mut slot) = frame_mutex.lock() {
@@ -209,6 +229,7 @@ impl fmt::Debug for SubmissionData {
             .field("staging_pools", &self.staging_pools.len())
             .field("present_frames", &self.present_frames.len())
             .field("present_resolvers", &self.present_resolvers.len())
+            .field("present_fifo_tvs", &self.present_fifo_tvs.len())
             .finish()
     }
 }
@@ -234,6 +255,11 @@ impl Submission {
     /// Block until this submission's GPU work has completed.
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
         ctx.wait_until(self.data.timeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn present_fifo_tv(&self, grant_idx: usize) -> Option<TimelineValue> {
+        self.data.present_fifo_tvs.get(grant_idx).copied().flatten()
     }
 }
 
@@ -292,27 +318,60 @@ impl Grant for PresentGrant {
             )));
         }
         let idx = self.grant_id as usize;
-        let frame_mutex = submission.data.present_frames.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "present grant index {} out of range for submission ({} present grants)",
-                idx,
-                submission.data.present_frames.len()
-            ))
-        })?;
-        let mut slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-        let surface_frame = slot
-            .take()
-            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
-        let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
-        let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
-            GoldyError::Backend(anyhow::anyhow!(
-                "present resolver index {} out of range for submission ({} present grants)",
-                idx,
-                submission.data.present_resolvers.len()
-            ))
-        })?;
-        if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            resolver.resolve(present_tv);
+
+        if let Some(present_tv) = submission.data.present_fifo_tvs.get(idx).copied().flatten() {
+            let token = submission
+                .data
+                .present_fifo_tokens
+                .get(idx)
+                .ok_or_else(|| {
+                    GoldyError::Backend(anyhow::anyhow!(
+                        "present FIFO token missing for grant index {idx}"
+                    ))
+                })?
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| {
+                    GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission"))
+                })?;
+            if let Some(frame_mutex) = submission.data.present_frames.get(idx) {
+                let _ = frame_mutex.lock().unwrap_or_else(|e| e.into_inner()).take();
+            }
+            let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present resolver index {} out of range for submission ({} present grants)",
+                    idx,
+                    submission.data.present_resolvers.len()
+                ))
+            })?;
+            if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                resolver.resolve(present_tv);
+            }
+            complete_scheduled_present(&submission.data.backend, token, present_tv)?;
+        } else {
+            let frame_mutex = submission.data.present_frames.get(idx).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present grant index {} out of range for submission ({} present grants)",
+                    idx,
+                    submission.data.present_frames.len()
+                ))
+            })?;
+            let mut slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let surface_frame = slot.take().ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission"))
+            })?;
+            let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
+            let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
+                GoldyError::Backend(anyhow::anyhow!(
+                    "present resolver index {} out of range for submission ({} present grants)",
+                    idx,
+                    submission.data.present_resolvers.len()
+                ))
+            })?;
+            if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                resolver.resolve(present_tv);
+            }
         }
 
         if self.pool.speculative_acquire || validation_env::speculative_present_acquire_enabled() {
@@ -396,6 +455,52 @@ fn claim_present_easement_promises(
         resolvers.push(Mutex::new(Some(resolver)));
     }
     resolvers
+}
+
+fn configure_present_easement_stamps(
+    ir: &GraphIR,
+    present_grants: &[PresentGrantInfo],
+    present_fifo_tvs: &[Option<TimelineValue>],
+    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    ctx: crate::backend::ContextHandle,
+    fifo_on_worker: bool,
+) {
+    for (idx, grant) in present_grants.iter().enumerate() {
+        let stamps = present_easement_source_stamps(ir, grant.lease_id, resource_stamps);
+        if fifo_on_worker {
+            if let Some(present_tv) = present_fifo_tvs.get(idx).copied().flatten() {
+                for stamp in stamps {
+                    stamp.set_legacy_present_easement(false);
+                    stamp.sync.lock().unwrap().mark_fifo_ordered_read(ctx, present_tv);
+                }
+            }
+        } else {
+            for stamp in stamps {
+                stamp.set_legacy_present_easement(true);
+            }
+        }
+    }
+}
+
+fn complete_scheduled_present(
+    backend: &Arc<Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    frame: crate::backend::FrameToken,
+    present_tv: TimelineValue,
+) -> Result<(), GoldyError> {
+    let wait = {
+        let b = backend.lock().unwrap();
+        b.take_scheduled_present_blocking_wait(frame, present_tv)
+            .map_err(|e| GoldyError::Backend(e))?
+    };
+    let Some(wait) = wait else {
+        return Ok(());
+    };
+    let outcome = wait.run().map_err(GoldyError::Backend)?;
+    backend
+        .lock()
+        .unwrap()
+        .apply_scheduled_present_bookkeeping(outcome)
+        .map_err(GoldyError::Backend)
 }
 
 /// Stable index of a read-easement grant recorded in the scheme IR.
@@ -1229,8 +1334,64 @@ impl Scheme {
 
         let present_resolvers =
             claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
-        let submission = self.finish_submit_frame(tv, surface_frames, present_resolvers)?;
+        let fifo_on_worker = {
+            let backend = self.ctx.device().inner.backend.lock().unwrap();
+            backend.schedules_present_on_submit_worker()
+        };
+        let (present_fifo_tvs, present_fifo_tokens) = Self::schedule_presents_on_worker_if_supported(
+            &self.ctx,
+            tv,
+            &mut surface_frames,
+        )?;
+        configure_present_easement_stamps(
+            &self.ir,
+            &self.present_grants,
+            &present_fifo_tvs,
+            self.submit_state.resource_stamps(),
+            self.ctx.backend_handle(),
+            fifo_on_worker,
+        );
+        let submission = self.finish_submit_frame(
+            tv,
+            surface_frames,
+            present_resolvers,
+            present_fifo_tvs,
+            present_fifo_tokens,
+        )?;
         Ok(submission)
+    }
+
+    fn schedule_presents_on_worker_if_supported(
+        ctx: &Context,
+        compute_tv: TimelineValue,
+        surface_frames: &mut [Mutex<Option<crate::surface::Frame>>],
+    ) -> Result<(Vec<Option<TimelineValue>>, Vec<Mutex<Option<crate::backend::FrameToken>>>), GoldyError> {
+        let mut backend = ctx.device().inner.backend.lock().unwrap();
+        if !backend.schedules_present_on_submit_worker() {
+            let n = surface_frames.len();
+            return Ok((
+                vec![None; n],
+                (0..n).map(|_| Mutex::new(None)).collect(),
+            ));
+        }
+        let mut tvs = Vec::with_capacity(surface_frames.len());
+        let mut tokens = Vec::with_capacity(surface_frames.len());
+        for frame_mutex in surface_frames.iter() {
+            let mut slot = frame_mutex.lock().unwrap();
+            let mut frame = slot
+                .take()
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("present frame missing at submit")))?;
+            let token = frame.frame_token();
+            frame.mark_present_scheduled_on_worker();
+            drop(frame);
+            let present_tv = backend
+                .schedule_present_on_submission_worker(token, compute_tv)
+                .map_err(|e| ctx.classify(e))?;
+            ctx.advance_high_water_timeline(present_tv);
+            tvs.push(Some(present_tv));
+            tokens.push(Mutex::new(Some(token)));
+        }
+        Ok((tvs, tokens))
     }
 
     fn finish_submit_frame(
@@ -1238,16 +1399,22 @@ impl Scheme {
         tv_dispatch: TimelineValue,
         present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
         present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
+        present_fifo_tvs: Vec<Option<TimelineValue>>,
+        present_fifo_tokens: Vec<Mutex<Option<crate::backend::FrameToken>>>,
     ) -> Result<Submission, GoldyError> {
+        let backend = Arc::clone(&self.ctx.device().inner.backend);
         if self.grants.is_empty() {
             return Ok(Submission {
                 data: Arc::new(SubmissionData {
                     scheme_id: self.scheme_id,
                     timeline: tv_dispatch,
+                    backend,
                     cells: Vec::new(),
                     staging_pools: Vec::new(),
                     present_frames,
                     present_resolvers,
+                    present_fifo_tvs,
+                    present_fifo_tokens,
                 }),
             });
         }
@@ -1315,10 +1482,13 @@ impl Scheme {
             data: Arc::new(SubmissionData {
                 scheme_id: self.scheme_id,
                 timeline: tv_copy,
+                backend,
                 cells,
                 staging_pools,
                 present_frames,
                 present_resolvers,
+                present_fifo_tvs,
+                present_fifo_tokens,
             }),
         })
     }
@@ -2281,6 +2451,12 @@ mod tests {
 
     fn mock_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    fn mock_device_legacy_present() -> Arc<Device> {
+        let mut backend = MockBackend::new();
+        backend.set_schedules_present_on_submit_worker(false);
+        Arc::new(Device::from_backend(Box::new(backend)).expect("mock device"))
     }
 
     fn mock_readback_counts(device: &Device) -> (usize, usize) {
@@ -3645,7 +3821,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn dropped_frame_without_present_cancels_swapchain() {
+    fn dropped_submission_finishes_scheduled_present_on_worker() {
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
@@ -3655,13 +3831,13 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let before = mock_present_count(&device);
         {
-            let _frame = scheme.submit().expect("submit");
-            // Drop without calling present — must cancel, not implicitly present.
+            let _submission = scheme.submit().expect("submit");
+            // Drop without consume — present was already enqueued at submit; Drop finishes bookkeeping.
         }
         assert_eq!(
             mock_present_count(&device),
-            before,
-            "dropped Submission must not trigger swapchain present"
+            before + 1,
+            "scheduled present must complete when Submission drops without consume"
         );
     }
 
@@ -4009,7 +4185,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             "folded present read epoch must be at least the frame-1 submit tv"
         );
 
-        // Loop-carried WAR (present read frame N, fine write frame N+1) must plan a live wait.
+        // Loop-carried present WAR is covered by FIFO enqueue order; no live wait needed.
         let mut write_only = HashMap::new();
         write_only.insert(
             key,
@@ -4024,22 +4200,66 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         };
         let plan = compute_cross_submit_sync(&write_only, &ledger, ctx_handle);
         assert!(
-            !plan.waits.is_empty(),
-            "next-frame private write must serialize against prior present read via ledger wait"
+            plan.waits.is_empty(),
+            "FIFO-scheduled present makes same-context loop-carried WAR wait redundant (got {:?})",
+            plan.waits
         );
-        assert_eq!(plan.waits[0].value, present_read_tv);
     }
 
-    /// The actual submit path (not just `compute_cross_submit_sync` planning) must
-    /// emit a live queue-wait on frame 2 against the prior frame's present-read
-    /// epoch. Goldy `Scheme::submit` never touches ekrano's `FrameOrchestrator`;
-    /// this test isolates ledger enforcement from orchestrator slot stamping.
+    /// When present is scheduled on the submission worker at submit, frame N+1 does not
+    /// need a live same-context WAR wait against frame N's present-read epoch.
+    #[test]
+    fn present_war_fifo_ordering_on_second_submit_path() {
+        use crate::timeline::Epoch;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_texture_shader(&device));
+        let ctx_handle = ctx.backend_handle();
+
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("fine_write", &pipeline)
+            .with_parcel(&tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.copy_texture_to_present(&tex, &lease);
+        let present = scheme.grant_present(&lease);
+
+        let sub1 = scheme.submit().expect("submit frame 1");
+        let compute_tv = sub1.timeline_value();
+        let present_tv = sub1
+            .present_fifo_tv(0)
+            .expect("present scheduled on worker at submit");
+        assert!(
+            present_tv >= compute_tv,
+            "present epoch must cover the frame-1 submit (present={present_tv}, compute={compute_tv})"
+        );
+        present.consume(&sub1).expect("present frame 1");
+
+        let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
+        let _sub2 = scheme.submit().expect("submit frame 2");
+        let frame2_waits: Vec<Epoch> = device.with_mock_backend(|b| {
+            b.recorded_waits[waits_before..]
+                .iter()
+                .flat_map(|w| w.iter().copied())
+                .collect()
+        });
+        assert!(
+            frame2_waits
+                .iter()
+                .all(|e| !(e.context == ctx_handle && e.value >= present_tv)),
+            "FIFO present ordering makes same-context WAR wait redundant (got {frame2_waits:?})"
+        );
+    }
+
     #[test]
     fn present_war_ledger_live_wait_on_second_submit_path() {
         use crate::task_graph::cross_submit::ResourceKey;
         use crate::timeline::{Epoch, PromiseState};
 
-        let device = mock_device();
+        let device = mock_device_legacy_present();
         let (ctx, spool) = mock_swapchain_pool(&device);
         let lease = spool.lease();
         let tex = mock_direct_texture(&device);

@@ -795,6 +795,21 @@ pub(crate) trait PresentGpuWork: Send {
     fn run(self: Box<Self>) -> Result<PresentFinishState>;
 }
 
+/// Outcome of blocking waits for a present job scheduled on the submission worker at submit.
+#[allow(dead_code)]
+pub(crate) struct ScheduledPresentWaitOutcome {
+    pub frame: FrameToken,
+    pub present_tv: crate::timeline::TimelineValue,
+    /// `None` when the worker finished but bookkeeping was not queued (synthesize in apply).
+    pub finish: Option<PresentFinishState>,
+    pub return_fence: crate::timeline::TimelineValue,
+}
+
+/// Blocking GPU waits for a scheduled present job — run outside the global backend lock.
+pub(crate) trait ScheduledPresentBlockingWait: Send {
+    fn run(self: Box<Self>) -> Result<ScheduledPresentWaitOutcome>;
+}
+
 /// Result of a blocking swapchain acquire call run outside the global backend lock.
 #[allow(dead_code)]
 pub struct SurfaceAcquireDrawable {
@@ -913,7 +928,10 @@ impl ContextSubmitSession for LockedSubmitSession {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.backend.lock().unwrap().submit_graph(ctx, commands, sync)
+        let mut guard = self.backend.lock().unwrap();
+        let tv = guard.submit_graph(ctx, commands, sync)?;
+        drop(guard);
+        Ok(tv)
     }
 
     fn submit_graph_and_retain(
@@ -923,10 +941,10 @@ impl ContextSubmitSession for LockedSubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.backend
-            .lock()
-            .unwrap()
-            .submit_graph_and_retain(ctx, commands, key, sync)
+        let mut guard = self.backend.lock().unwrap();
+        let tv = guard.submit_graph_and_retain(ctx, commands, key, sync)?;
+        drop(guard);
+        Ok(tv)
     }
 
     fn try_resubmit_retained(
@@ -935,7 +953,10 @@ impl ContextSubmitSession for LockedSubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
+        let mut guard = self.backend.lock().unwrap();
+        let tv = guard.try_resubmit_retained(ctx, key, sync)?;
+        drop(guard);
+        Ok(tv)
     }
 
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {
@@ -957,6 +978,57 @@ pub(crate) trait GpuBackendPresentSplit {
         finish: PresentFinishState,
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue>;
+
+    /// When true, [`Scheme::submit`](crate::Scheme::submit) enqueues present copy +
+    /// WSI present on the per-device submission worker immediately after compute
+    /// partitions, so execution order matches enqueue order without a loop-carried
+    /// same-context WAR wait on the next frame.
+    fn schedules_present_on_submit_worker(&self) -> bool {
+        false
+    }
+
+    /// Enqueue present GPU work on the submission worker during scheme submit.
+    /// Returns the pre-allocated present easement timeline value.
+    fn schedule_present_on_submission_worker(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        let _ = (frame, submit_tv);
+        anyhow::bail!("schedule_present_on_submission_worker not implemented for this backend")
+    }
+
+    /// Apply deferred present bookkeeping after a present job scheduled at submit time.
+    fn take_scheduled_present_blocking_wait(
+        &self,
+        frame: FrameToken,
+        present_tv: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn ScheduledPresentBlockingWait>>> {
+        let _ = (frame, present_tv);
+        Ok(None)
+    }
+
+    fn apply_scheduled_present_bookkeeping(
+        &mut self,
+        outcome: ScheduledPresentWaitOutcome,
+    ) -> Result<()> {
+        let _ = outcome;
+        Ok(())
+    }
+
+    /// Apply deferred present bookkeeping after a present job scheduled at submit time.
+    fn finish_scheduled_present(
+        &mut self,
+        frame: FrameToken,
+        present_tv: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let wait = self.take_scheduled_present_blocking_wait(frame, present_tv)?;
+        let Some(wait) = wait else {
+            return Ok(());
+        };
+        let outcome = wait.run()?;
+        self.apply_scheduled_present_bookkeeping(outcome)
+    }
 }
 
 /// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)

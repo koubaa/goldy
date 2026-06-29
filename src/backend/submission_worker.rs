@@ -67,6 +67,27 @@ impl SubmissionWorker {
             .map_err(|e| anyhow::anyhow!("submission worker channel closed: {e}"))
     }
 
+    /// Run one submit job on the calling thread and advance the submitted epoch.
+    ///
+    /// Used by the mock backend for compute/transfer submits so unit tests do not spawn
+    /// blocking worker waits (and backend mutex holds) under parallel `cargo test`.
+    /// FIFO present-at-submit still uses [`Self::enqueue`] so ordering matches real backends.
+    pub fn execute_immediately(&self, tv: u64, work: Box<dyn PendingSubmit>) -> Result<()> {
+        self.check_error()?;
+        match work.execute() {
+            Ok(()) => {
+                advance_submitted_epoch(&self.submitted_epoch, &self.wait_notify, tv);
+                Ok(())
+            }
+            Err(e) => {
+                advance_submitted_epoch(&self.submitted_epoch, &self.wait_notify, tv);
+                *self.latched_error.lock().unwrap() = Some(e);
+                self.wait_notify.1.notify_all();
+                self.check_error()
+            }
+        }
+    }
+
     pub fn wait_submitted(&self, tv: u64) -> Result<()> {
         self.check_error()?;
         if tv == 0 {

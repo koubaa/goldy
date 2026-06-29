@@ -186,6 +186,7 @@ impl Dx12Backend {
             slang_compiler,
             device_removed: std::sync::atomic::AtomicBool::new(false),
             frame_tables: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            pending_present_finishes: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
 
         Ok(Self { state })
@@ -435,6 +436,33 @@ impl crate::backend::GpuBackendPresentSplit for Dx12Backend {
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
         surface::finish_present(&mut self.state, finish, submit_tv)
+    }
+
+    fn schedules_present_on_submit_worker(&self) -> bool {
+        true
+    }
+
+    fn schedule_present_on_submission_worker(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::schedule_present_on_submission_worker(&mut self.state, frame, submit_tv)
+    }
+
+    fn take_scheduled_present_blocking_wait(
+        &self,
+        frame: FrameToken,
+        present_tv: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::ScheduledPresentBlockingWait>>> {
+        surface::take_scheduled_present_blocking_wait(&self.state, frame, present_tv)
+    }
+
+    fn apply_scheduled_present_bookkeeping(
+        &mut self,
+        outcome: crate::backend::ScheduledPresentWaitOutcome,
+    ) -> Result<()> {
+        surface::apply_scheduled_present_bookkeeping(&mut self.state, outcome)
     }
 }
 

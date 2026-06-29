@@ -47,8 +47,7 @@ pub type ReferenceTable = HashMap<ContextHandle, TimelineValue>;
 /// Direction-aware GPU sync epochs for one retained resource (parcel backing).
 ///
 /// Used by cross-scheme hazard analysis: reads depend on [`Self::last_write`],
-/// writes depend on both [`Self::last_write`] and the read tables
-/// ([`Self::last_reads`], [`Self::foreign_reads`]).
+/// writes depend on both [`Self::last_write`] and [`Self::last_reads`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceSync {
     /// Last submission on `ctx` that wrote this resource.
@@ -58,11 +57,14 @@ pub struct ResourceSync {
     /// Stored as `u8` to avoid a circular module dependency (`timeline` ↔ `task_graph`).
     /// Callers in `task_graph` cast this to `UsageKindFlags` via `from_bits_truncate`.
     pub last_write_kinds: HashMap<ContextHandle, u8>,
-    /// Last Goldy-scheduled read on `ctx` (submit-path [`Self::record_read`]).
+    /// Last submission on `ctx` that read this resource (max per context).
     pub last_reads: ReferenceTable,
-    /// Last read epoch delivered by an exercised claim on `ctx` (promise fold-in on
-    /// [`Self::record_foreign_read`]) — e.g. present easement expiry from `TID_PRESENT`.
-    pub foreign_reads: ReferenceTable,
+    /// Present easement read epochs on `ctx` that require a live queue wait on the next
+    /// same-context write (legacy present path — GPU work not enqueued on the FIFO worker).
+    pub war_read_epochs: ReferenceTable,
+    /// Read epochs on `ctx` whose hazard is covered by present work enqueued on the
+    /// submission worker before the next frame's compute partitions.
+    pub fifo_ordered_reads: ReferenceTable,
 }
 
 impl ResourceSync {
@@ -70,9 +72,6 @@ impl ResourceSync {
     pub fn merged(&self) -> ReferenceTable {
         let mut merged = self.last_write.clone();
         for (&ctx, &tv) in &self.last_reads {
-            mark_reference(&mut merged, ctx, tv);
-        }
-        for (&ctx, &tv) in &self.foreign_reads {
             mark_reference(&mut merged, ctx, tv);
         }
         merged
@@ -101,14 +100,16 @@ impl ResourceSync {
         }
     }
 
-    /// Record a read from Goldy-scheduled submit work on `ctx`.
     pub fn record_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {
         mark_reference(&mut self.last_reads, ctx, tv);
     }
 
-    /// Record a read epoch delivered by an exercised claim (off-submit-thread).
-    pub fn record_foreign_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {
-        mark_reference(&mut self.foreign_reads, ctx, tv);
+    pub fn mark_war_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {
+        mark_reference(&mut self.war_read_epochs, ctx, tv);
+    }
+
+    pub fn mark_fifo_ordered_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {
+        mark_reference(&mut self.fifo_ordered_reads, ctx, tv);
     }
 
     /// Conservative touch for legacy/test-only use when kinds are unknown.
@@ -356,25 +357,6 @@ mod tests {
         sync.record_any(1, 4);
         assert_eq!(sync.last_write_kinds.get(&1), Some(&WRITE_KINDS_COMPUTE_TRANSFER));
         assert_eq!(sync.last_reads.get(&1), Some(&4));
-        assert!(sync.foreign_reads.is_empty());
-    }
-
-    #[test]
-    fn foreign_read_does_not_touch_last_reads() {
-        let mut sync = ResourceSync::default();
-        sync.record_foreign_read(1, 42);
-        assert_eq!(sync.foreign_reads.get(&1), Some(&42));
-        assert!(sync.last_reads.is_empty());
-    }
-
-    #[test]
-    fn merged_includes_foreign_reads() {
-        let mut sync = ResourceSync::default();
-        sync.record_read(1, 10);
-        sync.record_foreign_read(2, 20);
-        let merged = sync.merged();
-        assert_eq!(merged.get(&1), Some(&10));
-        assert_eq!(merged.get(&2), Some(&20));
     }
 
     #[test]

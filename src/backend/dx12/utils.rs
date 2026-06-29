@@ -256,6 +256,39 @@ pub(super) fn signal_preallocated_context(
     execute_preallocated_context_submit(logical_device, ctx_fence, command_lists, &[], tv)
 }
 
+/// Advance a context fence to `retire_tv` after the matching device-fence value has retired.
+///
+/// Scheduled present work signals the device fence but not the per-context fence. Ledger
+/// settlement (`is_settled` / `wait_until_parcel_ready`) keys off context progress, so
+/// present easement reads would otherwise stall prepare forever while scanout has finished.
+pub(super) fn sync_context_fence_after_device_retire(
+    logical_device: &LogicalDevice,
+    device_fence: &ID3D12Fence,
+    ctx_fence: &ID3D12Fence,
+    retire_tv: u64,
+) -> Result<()> {
+    if retire_tv == 0 {
+        return Ok(());
+    }
+    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+    if ctx_completed >= retire_tv {
+        return Ok(());
+    }
+    with_queue_lock(logical_device, || {
+        unsafe {
+            logical_device
+                .command_queue
+                .Wait(device_fence, retire_tv)
+                .context("context fence sync: Wait device fence")?;
+            logical_device
+                .command_queue
+                .Signal(ctx_fence, retire_tv)
+                .context("context fence sync: Signal context fence")?;
+        }
+        Ok(())
+    })
+}
+
 /// Execute command lists and signal the device fence under [`LogicalDevice::queue_lock`].
 /// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
 pub(super) fn signal_preallocated_device(
