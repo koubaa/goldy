@@ -500,7 +500,8 @@ fn complete_scheduled_present(
         .lock()
         .unwrap()
         .apply_scheduled_present_bookkeeping(outcome)
-        .map_err(GoldyError::Backend)
+        .map_err(GoldyError::Backend)?;
+    Ok(())
 }
 
 /// Stable index of a read-easement grant recorded in the scheme IR.

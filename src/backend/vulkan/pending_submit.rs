@@ -300,3 +300,165 @@ pub(super) fn enqueue_vulkan_present_copy(
         }),
     )
 }
+
+/// Full present job (optional scratch→swapchain copy + WSI present) enqueued at scheme submit.
+struct VulkanScheduledPresentPendingSubmit {
+    ld: SharedLogicalDevice,
+    instance: ash::Instance,
+    copy_cb: vk::CommandBuffer,
+    timeline_sem: vk::Semaphore,
+    image_available_sem: vk::Semaphore,
+    render_finished_sem: vk::Semaphore,
+    copy_tv: u64,
+    enqueue_tv: u64,
+    render_pass_submitted: bool,
+    swapchain: vk::SwapchainKHR,
+    image_index: u32,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    swapchain_out_of_date: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PendingSubmit for VulkanScheduledPresentPendingSubmit {
+    fn execute(self: Box<Self>) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.vk.scheduled_present");
+        let queue_lock = Arc::clone(&self.ld.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
+
+        if !self.render_pass_submitted {
+            let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(self.copy_cb);
+            let wait_acq = vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.image_available_sem)
+                .value(0)
+                .stage_mask(vk::PipelineStageFlags2::TRANSFER);
+            let waits = [wait_acq];
+            let sig_render_finished = vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.render_finished_sem)
+                .value(0)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            let sig_timeline = vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.timeline_sem)
+                .value(self.copy_tv)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            let signals = [sig_render_finished, sig_timeline];
+            let submit = vk::SubmitInfo2::default()
+                .wait_semaphore_infos(&waits)
+                .command_buffer_infos(std::slice::from_ref(&cmd_info))
+                .signal_semaphore_infos(&signals);
+            let _submit = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit2");
+            unsafe {
+                self.ld.device.queue_submit2(
+                    self.ld.queue,
+                    std::slice::from_ref(&submit),
+                    vk::Fence::null(),
+                )
+            }
+            .context("Failed queue_submit2 on submission worker (scheduled present copy)")?;
+        } else {
+            let sig_timeline = vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.timeline_sem)
+                .value(self.enqueue_tv)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            let submit = vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&sig_timeline));
+            unsafe {
+                self.ld.device.queue_submit2(
+                    self.ld.queue,
+                    std::slice::from_ref(&submit),
+                    vk::Fence::null(),
+                )
+            }
+            .context("Failed queue_submit2 on submission worker (scheduled present signal)")?;
+        }
+
+        {
+            let _pz = crate::tracy_zone!("vk.present.queue_present");
+            let swapchain_loader = ash::khr::swapchain::Device::new(&self.instance, &self.ld.device);
+            let swapchains = [self.swapchain];
+            let image_indices = [self.image_index];
+            let wait_semaphores = [self.render_finished_sem];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&wait_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+            let result = unsafe { swapchain_loader.queue_present(self.ld.queue, &present_info) };
+            let present_ok = matches!(result, Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR));
+            if let Err(e) = &result {
+                let expected_during_resize =
+                    matches!(*e, vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR);
+                if expected_during_resize {
+                    if *e == vk::Result::ERROR_OUT_OF_DATE_KHR {
+                        self.swapchain_out_of_date
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    tracing::debug!(
+                        image_index = self.image_index,
+                        result = ?e,
+                        "scheduled queue_present: swapchain out of date (will rebuild)"
+                    );
+                } else {
+                    tracing::warn!(
+                        image_index = self.image_index,
+                        result = ?e,
+                        "scheduled queue_present failed"
+                    );
+                    if *e == vk::Result::ERROR_DEVICE_LOST {
+                        self.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    anyhow::bail!("Failed to present: {:?}", e);
+                }
+            }
+            if !present_ok {
+                anyhow::bail!("Failed to present");
+            }
+        }
+
+        self.pending_finishes.lock().unwrap().push(self.finish);
+        Ok(())
+    }
+}
+
+pub(super) fn enqueue_scheduled_present(
+    ld: &SharedLogicalDevice,
+    instance: ash::Instance,
+    copy_cb: vk::CommandBuffer,
+    timeline_sem: vk::Semaphore,
+    image_available_sem: vk::Semaphore,
+    render_finished_sem: vk::Semaphore,
+    copy_tv: u64,
+    render_pass_submitted: bool,
+    swapchain: vk::SwapchainKHR,
+    image_index: u32,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    swapchain_out_of_date: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<u64> {
+    ld.submission_worker.check_error()?;
+    let enqueue_tv = if copy_tv > 0 {
+        copy_tv
+    } else {
+        crate::backend::submission_worker::allocate_timeline_value(&ld.timeline_next)
+    };
+    ld.submission_worker.enqueue(
+        enqueue_tv,
+        Box::new(VulkanScheduledPresentPendingSubmit {
+            ld: Arc::clone(ld),
+            instance,
+            copy_cb,
+            timeline_sem,
+            image_available_sem,
+            render_finished_sem,
+            copy_tv,
+            enqueue_tv,
+            render_pass_submitted,
+            swapchain,
+            image_index,
+            finish,
+            pending_finishes,
+            device_lost,
+            swapchain_out_of_date,
+        }),
+    )?;
+    Ok(enqueue_tv)
+}

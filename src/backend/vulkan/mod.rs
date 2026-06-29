@@ -39,20 +39,30 @@ use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-/// Process-global lock serialising `vkCreateInstance` and `vkDestroyInstance`.
+/// Process-global lock serialising Vulkan loader/instance setup and teardown.
 ///
-/// The Vulkan spec marks both calls as implicitly externally synchronized at the
-/// loader level (ICD enumeration, dispatch-table construction, layer init). No
-/// internal lock protects that global state, so concurrent calls from different
-/// test threads produce undefined behaviour — visible as a SIGSEGV on lavapipe
-/// and as heap corruption on other software renderers.  Hardware drivers often
-/// have incidental internal serialisation that masks the race, but the UB exists
-/// regardless.  Holding this lock only for the duration of instance
-/// creation/destruction adds negligible overhead in production (instances are
-/// long-lived) while making tests safe under the default parallel test runner.
+/// The Vulkan spec marks `vkCreateInstance`, `vkDestroyInstance`, and loader
+/// dispatch-table construction as externally synchronized. Concurrent setup from
+/// different threads produces undefined behaviour — visible as SIGSEGV on
+/// lavapipe and heap corruption on other software renderers. This lock covers
+/// the full setup path (`Entry::load`, pre-create loader queries, and
+/// `create_instance`) and `destroy_instance` only; per-instance GPU work is
+/// not serialized.
 static VK_INSTANCE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Process-global Vulkan loader. Loaded once under [`VK_INSTANCE_LOCK`].
+static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
+
+/// Return the process-global `ash::Entry`, loading the Vulkan library on first use.
+///
+/// Must be called while holding [`VK_INSTANCE_LOCK`].
+fn vulkan_entry_locked() -> &'static ash::Entry {
+    VK_ENTRY.get_or_init(|| unsafe {
+        ash::Entry::load().expect("Failed to load Vulkan library")
+    })
+}
 
 /// Extract push-constant slot categories for a render pipeline from shader
 /// reflection. Fragment shader data takes precedence; vertex is a fallback.
@@ -126,61 +136,63 @@ impl VulkanBackend {
     pub fn new() -> Result<Self> {
         tracing::info!("Initializing Vulkan backend");
 
-        // Load Vulkan library
-        let entry = unsafe { ash::Entry::load() }.context("Failed to load Vulkan library")?;
-
-        // Check instance version (note: this is the loader version, not driver version)
-        let instance_version = unsafe { entry.try_enumerate_instance_version() }
-            .context("Failed to enumerate instance version")?
-            .unwrap_or(vk::API_VERSION_1_0);
-
-        let major = vk::api_version_major(instance_version);
-        let minor = vk::api_version_minor(instance_version);
-        tracing::info!("Vulkan loader version: {}.{}", major, minor);
-
-        // Note: We request 1.4 from the instance, but the loader may be older.
-        // The actual version check happens per-device when we enumerate physical devices.
-        // Drivers can support 1.4 even if the loader is 1.3.
-
-        // Create instance with Vulkan 1.4 and surface extensions
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(c"goldy")
-            .application_version(vk::make_api_version(0, 0, 1, 0))
-            .engine_name(c"goldy")
-            .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::make_api_version(0, 1, 4, 0));
-
-        // Surface extensions for windowed presentation
-        let mut extensions: Vec<*const c_char> = vec![khr::surface::NAME.as_ptr()];
-
-        #[cfg(target_os = "windows")]
-        extensions.push(khr::win32_surface::NAME.as_ptr());
-
-        #[cfg(target_os = "linux")]
-        extensions.push(khr::wayland_surface::NAME.as_ptr());
-
-        // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
-        let enable_validation = vulkan_instance_validation_enabled();
-        let mut enabled_layers: Vec<*const c_char> = Vec::new();
-        if enable_validation {
-            tracing::info!("Vulkan validation layers ENABLED");
-            extensions.push(ash::ext::debug_utils::NAME.as_ptr());
-            enabled_layers.push(c"VK_LAYER_KHRONOS_validation".as_ptr());
-        }
-
-        // GOLDY_API_LOG → VK_LAYER_LUNARG_api_dump (JSON file); see api_log.rs.
-        if let Some(layer) = api_log::configure_and_layer(&entry) {
-            enabled_layers.push(layer);
-        }
-
-        let create_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(&extensions)
-            .enabled_layer_names(&enabled_layers);
-
-        let instance = {
+        let (entry, instance, enable_validation) = {
             let _guard = VK_INSTANCE_LOCK.lock().unwrap();
-            unsafe { entry.create_instance(&create_info, None) }.context("Failed to create Vulkan instance")?
+            let entry = vulkan_entry_locked();
+
+            // Check instance version (note: this is the loader version, not driver version)
+            let instance_version = unsafe { entry.try_enumerate_instance_version() }
+                .context("Failed to enumerate instance version")?
+                .unwrap_or(vk::API_VERSION_1_0);
+
+            let major = vk::api_version_major(instance_version);
+            let minor = vk::api_version_minor(instance_version);
+            tracing::info!("Vulkan loader version: {}.{}", major, minor);
+
+            // Note: We request 1.4 from the instance, but the loader may be older.
+            // The actual version check happens per-device when we enumerate physical devices.
+            // Drivers can support 1.4 even if the loader is 1.3.
+
+            // Create instance with Vulkan 1.4 and surface extensions
+            let app_info = vk::ApplicationInfo::default()
+                .application_name(c"goldy")
+                .application_version(vk::make_api_version(0, 0, 1, 0))
+                .engine_name(c"goldy")
+                .engine_version(vk::make_api_version(0, 0, 1, 0))
+                .api_version(vk::make_api_version(0, 1, 4, 0));
+
+            // Surface extensions for windowed presentation
+            let mut extensions: Vec<*const c_char> = vec![khr::surface::NAME.as_ptr()];
+
+            #[cfg(target_os = "windows")]
+            extensions.push(khr::win32_surface::NAME.as_ptr());
+
+            #[cfg(target_os = "linux")]
+            extensions.push(khr::wayland_surface::NAME.as_ptr());
+
+            // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
+            let enable_validation = vulkan_instance_validation_enabled();
+            let mut enabled_layers: Vec<*const c_char> = Vec::new();
+            if enable_validation {
+                tracing::info!("Vulkan validation layers ENABLED");
+                extensions.push(ash::ext::debug_utils::NAME.as_ptr());
+                enabled_layers.push(c"VK_LAYER_KHRONOS_validation".as_ptr());
+            }
+
+            // GOLDY_API_LOG → VK_LAYER_LUNARG_api_dump (JSON file); see api_log.rs.
+            if let Some(layer) = api_log::configure_and_layer(entry) {
+                enabled_layers.push(layer);
+            }
+
+            let create_info = vk::InstanceCreateInfo::default()
+                .application_info(&app_info)
+                .enabled_extension_names(&extensions)
+                .enabled_layer_names(&enabled_layers);
+
+            let instance = unsafe { entry.create_instance(&create_info, None) }
+                .context("Failed to create Vulkan instance")?;
+
+            (entry.clone(), instance, enable_validation)
         };
 
         if enable_validation {
@@ -269,6 +281,7 @@ impl VulkanBackend {
             device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             enable_validation,
             frame_tables: Arc::new(RwLock::new(HashMap::new())),
+            pending_present_finishes: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
 
         Ok(Self { state })
@@ -365,7 +378,7 @@ impl crate::backend::GpuBackendPresentSplit for VulkanBackend {
         frame: FrameToken,
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
-        present_split::prepare_present_work(&self.state, frame, submit_tv)
+        present_split::prepare_present_work(&mut self.state, frame, submit_tv)
     }
 
     fn finish_present(
@@ -374,6 +387,33 @@ impl crate::backend::GpuBackendPresentSplit for VulkanBackend {
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue> {
         present_split::finish_present(&mut self.state, finish)
+    }
+
+    fn schedules_present_on_submit_worker(&self) -> bool {
+        true
+    }
+
+    fn schedule_present_on_submission_worker(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        present_split::schedule_present_on_submission_worker(&mut self.state, frame, submit_tv)
+    }
+
+    fn take_scheduled_present_blocking_wait(
+        &self,
+        frame: FrameToken,
+        present_tv: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::ScheduledPresentBlockingWait>>> {
+        present_split::take_scheduled_present_blocking_wait(&self.state, frame, present_tv)
+    }
+
+    fn apply_scheduled_present_bookkeeping(
+        &mut self,
+        outcome: crate::backend::ScheduledPresentWaitOutcome,
+    ) -> Result<()> {
+        present_split::apply_scheduled_present_bookkeeping(&mut self.state, outcome)
     }
 }
 
@@ -987,6 +1027,19 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {
+        let needs = surface::needs_swapchain_recreate(
+            &self.state.entry,
+            &self.state.instance,
+            &self.state.devices,
+            &self.state.surfaces,
+            surface_handle,
+            width,
+            height,
+        )?;
+        if !needs {
+            return Ok(());
+        }
+        present_split::prepare_surface_for_resize(&mut self.state, surface_handle)?;
         surface::resize(
             &self.state.entry,
             &self.state.instance,

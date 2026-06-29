@@ -413,6 +413,8 @@ pub(super) fn create(
             frame_pending_gpu_commands: Vec::new(),
             pending_acquire_count: 0,
             pending_swapchain_returns: Vec::new(),
+            resize_prepare_applied: std::collections::HashSet::new(),
+            swapchain_out_of_date: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     );
 
@@ -854,6 +856,10 @@ pub(super) fn acquire(
             Ok((image_index as SwapchainImageHandle, current_frame as u32))
         }
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+            if let Some(s) = state.surfaces.get_mut(&surface_handle) {
+                s.swapchain_out_of_date
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             tracing::info!("Swapchain out of date - resize required");
             anyhow::bail!("Surface out of date - call resize() and retry")
         }
@@ -1293,6 +1299,45 @@ pub(super) fn present(
     present_frame(state, frame, frame_compute_timeline_value)
 }
 
+/// Returns false when the clamped extent and present mode already match the live swapchain.
+pub(super) fn needs_swapchain_recreate(
+    entry: &Entry,
+    instance: &Instance,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
+    surface_handle: SurfaceHandle,
+    width: u32,
+    height: u32,
+) -> Result<bool> {
+    let (device_handle, surface) = {
+        let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
+        (surface_state.device_handle, surface_state.surface)
+    };
+    let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
+    let surface_loader = khr::surface::Instance::new(entry, instance);
+    let capabilities = unsafe {
+        surface_loader.get_physical_device_surface_capabilities(logical_device.physical_device, surface)
+    }
+    .context("Failed to get surface capabilities")?;
+    let extent = vk::Extent2D {
+        width: width.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
+        height: height.clamp(
+            capabilities.min_image_extent.height,
+            capabilities.max_image_extent.height,
+        ),
+    };
+    let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
+    let out_of_date = surface_state
+        .swapchain_out_of_date
+        .load(std::sync::atomic::Ordering::Acquire);
+    Ok(
+        surface_state.width != extent.width
+            || surface_state.height != extent.height
+            || surface_state.present_mode_dirty
+            || out_of_date,
+    )
+}
+
 /// Resize the surface's swapchain.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resize(
@@ -1343,16 +1388,20 @@ pub(super) fn resize(
     // always triggers recreation even when the window dimensions are unchanged.
     {
         let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
+        let out_of_date = surface_state
+            .swapchain_out_of_date
+            .load(std::sync::atomic::Ordering::Acquire);
         if surface_state.width == extent.width
             && surface_state.height == extent.height
             && !surface_state.present_mode_dirty
+            && !out_of_date
         {
             return Ok(());
         }
     }
 
-    // Wait for all in-flight frames to complete before resizing
-    logical_device.synchronized_device_wait_idle()?;
+    // Wait for scheduled FIFO presents and the graphics queue before resizing.
+    // (Full prepare runs in `VulkanBackend::surface_resize` before this function.)
 
     // Destroy old depth buffer (must be before swapchain recreation)
     if let Some(surface_state) = surfaces.get(&surface_handle) {
@@ -1594,6 +1643,9 @@ pub(super) fn resize(
         surface_state.present_mode_dirty = false;
         surface_state.pending_acquire_count = 0;
         surface_state.pending_swapchain_returns.clear();
+        surface_state
+            .swapchain_out_of_date
+            .store(false, std::sync::atomic::Ordering::Release);
         // scratch_texture_slots was already reset above after destroying old slots.
     }
 

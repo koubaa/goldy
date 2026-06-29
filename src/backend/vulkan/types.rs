@@ -1084,6 +1084,11 @@ pub(crate) struct SurfaceState {
     pub pending_acquire_count: u32,
     /// `(image_index, timeline)` pairs waiting for GPU completion before `SwapchainReturned`.
     pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
+    /// Present bookkeeping applied during [`super::present_split::prepare_surface_for_resize`]
+    /// so a concurrent TID_PRESENT does not double-apply the same frame.
+    pub resize_prepare_applied: std::collections::HashSet<(u64, u32)>,
+    /// Set when acquire or queue_present returns OUT_OF_DATE; cleared after swapchain recreation.
+    pub swapchain_out_of_date: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Pending buffer operations for command recording.
@@ -1473,4 +1478,6 @@ pub(super) struct VulkanState {
     pub enable_validation: bool,
     /// Per-device frame-table GPU resources (selector, device table, upload staging).
     pub frame_tables: SharedFrameTableMap,
+    /// Present bookkeeping queued by the submission worker after scheduled present jobs.
+    pub pending_present_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
 }
