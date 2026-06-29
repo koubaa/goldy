@@ -454,8 +454,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            let _ = ld.submission_worker.flush();
-            ld.submission_worker.check_error()?;
+            ld.submission_worker.flush()?;
         }
         let fence = self
             .state
@@ -949,10 +948,11 @@ impl GpuBackend for Dx12Backend {
             return Ok(());
         }
         if let Some(ld) = self.state.devices.get(&device) {
+            ld.submission_worker.flush()?;
             let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            ld.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
-            ld.submission_worker.check_error()?;
+            if value <= horizon {
+                ld.submission_worker.wait_submitted(value)?;
+            }
         }
         // Find the context that submitted value (or past it) and wait on its fence.
         let fence = {
@@ -967,10 +967,11 @@ impl GpuBackend for Dx12Backend {
         };
         if let Some(fence) = fence {
             utils::wait_for_fence(&fence, value)?;
-        }
-        // If no context has submitted past value yet, device_wait_idle is the safe fallback.
-        if context::device_retired(&self.state, device) < value {
-            self.device_wait_idle(device)?;
+        } else if context::device_retired(&self.state, device) < value {
+            // Present copies and other device-fence work may not map to a context fence.
+            if let Some(ld) = self.state.devices.get(&device) {
+                utils::wait_for_fence(&ld.fence, value)?;
+            }
         }
         Ok(())
     }

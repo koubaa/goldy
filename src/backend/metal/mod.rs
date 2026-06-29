@@ -791,10 +791,10 @@ impl GpuBackend for MetalBackend {
             .devices
             .get(&device)
             .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
-        let horizon = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Relaxed);
+        ld.submission_worker.flush()?;
+        let horizon = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Acquire);
         ld.submission_worker
             .wait_submitted_if_scheduled(value, horizon)?;
-        ld.submission_worker.check_error()?;
         let timeout = std::time::Duration::from_secs(60);
         if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
             Ok(())

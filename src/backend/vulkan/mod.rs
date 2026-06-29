@@ -330,8 +330,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            let _ = ld.submission_worker.flush();
-            ld.submission_worker.check_error()?;
+            ld.submission_worker.flush()?;
         }
         {
             let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
@@ -1240,10 +1239,11 @@ impl GpuBackend for VulkanBackend {
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
         if let Some(ld) = self.state.devices.get(&device) {
+            ld.submission_worker.flush()?;
             let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            ld.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
-            ld.submission_worker.check_error()?;
+            if value <= horizon {
+                ld.submission_worker.wait_submitted(value)?;
+            }
         }
         context::wait_until_device_seq_at_least(&self.state, device, value);
         Ok(())
