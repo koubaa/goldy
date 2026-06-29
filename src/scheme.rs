@@ -26,6 +26,7 @@ use crate::task_graph::{
     PRESENT_LEASE_SLOT_PLACEHOLDER,
 };
 use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
+use crate::tracy_frame_mark;
 use crate::types::{
     BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
     TextureFormat, TextureKind,
@@ -501,6 +502,9 @@ fn complete_scheduled_present(
         .unwrap()
         .apply_scheduled_present_bookkeeping(outcome)
         .map_err(GoldyError::Backend)?;
+    // FIFO scheduled present bypasses `Frame::present()` → `apply_frame_bookkeeping`, which
+    // is where the legacy path emits Tracy's main frame boundary.
+    tracy_frame_mark!();
     Ok(())
 }
 
