@@ -216,6 +216,14 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
             return Ok(None);
         }
 
+        let device = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            ld.submission_worker
+                .wait_submitted_if_scheduled(value, horizon)?;
+            ld.submission_worker.check_error()?;
+        }
+
         let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
             let sc = sc_arc.lock().unwrap();
             sc.in_flight_command_buffers
@@ -247,6 +255,10 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         use std::sync::atomic::Ordering;
         let device = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device) {
+            let _ = ld.submission_worker.flush();
+            ld.submission_worker.check_error()?;
+        }
         let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
         let retired = context::device_retired(&self.state, device);
         if let Some(ld) = self.state.devices.get(&device) {
