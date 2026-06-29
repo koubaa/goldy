@@ -1300,6 +1300,8 @@ pub(super) struct MetalState {
     /// `None` after release via [`crate::device::Device::release_idle_shader_compiler`].
     /// Re-created automatically on demand when a shader must be lazily compiled.
     pub slang_compiler: Option<crate::slang::SlangCompiler>,
+    /// Present bookkeeping queued by the submission worker after scheduled present jobs.
+    pub pending_present_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
 }
 
 impl MetalState {

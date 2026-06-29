@@ -244,3 +244,109 @@ pub(super) fn enqueue_metal_present(
         }
     }
 }
+
+struct MetalScheduledPresentPendingSubmit {
+    logical_device: SharedLogicalDevice,
+    command_buffer: mtl::CommandBuffer,
+    signal_value: TimelineValue,
+    timeline_event: mtl::SharedEvent,
+    waiter: TimelineWaiter,
+    drawable_ptr: usize,
+    return_image: Option<u32>,
+    signal_queue_present: std::sync::Arc<crate::signal::SignalQueue>,
+    return_pending: std::sync::Arc<std::sync::Mutex<Vec<super::types::PendingSwapchainReturn>>>,
+    pending_acquire_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+}
+
+impl PendingSubmit for MetalScheduledPresentPendingSubmit {
+    fn execute(self: Box<Self>) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.scheduled_present");
+
+        let command_buffer = self.command_buffer.as_ref();
+        let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
+        let signal_value = self.signal_value;
+        let drawable_ptr = self.drawable_ptr as id;
+        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
+
+        command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
+        let return_image = self.return_image;
+        let signal_queue_present = std::sync::Arc::clone(&self.signal_queue_present);
+        let return_pending = std::sync::Arc::clone(&self.return_pending);
+        let pending_acquire_count = std::sync::Arc::clone(&self.pending_acquire_count);
+        let waiter = self.waiter.clone();
+        let handler = ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+            waiter.signal(signal_value);
+            if let Some(idx) = return_image {
+                signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                if let Ok(mut pending) = return_pending.lock() {
+                    pending.push(super::types::PendingSwapchainReturn {
+                        pending_acquire_count: std::sync::Arc::clone(&pending_acquire_count),
+                    });
+                }
+            }
+        })
+        .copy();
+        command_buffer.add_completed_handler(&handler);
+        command_buffer.present_drawable(drawable_ref);
+        if super::api_log::enabled() {
+            super::api_log::log_present_drawable(signal_value);
+        }
+        {
+            let _commit = crate::tracy_zone!("goldy.submit_worker.mtl.execute_and_signal");
+            command_buffer.commit();
+        }
+
+        unsafe {
+            let (): () = msg_send![drawable_ptr, release];
+        }
+
+        self.pending_finishes.lock().unwrap().push(self.finish);
+        Ok(())
+    }
+}
+
+/// Present job enqueued at scheme submit time (FIFO ordering with compute partitions).
+pub(super) fn enqueue_metal_scheduled_present(
+    ld: &SharedLogicalDevice,
+    command_buffer: mtl::CommandBuffer,
+    signal_value: TimelineValue,
+    timeline_event: mtl::SharedEvent,
+    waiter: TimelineWaiter,
+    sc_arc: SharedMetalSubmissionContext,
+    drawable_ptr: usize,
+    return_image: Option<u32>,
+    signal_queue_present: std::sync::Arc<crate::signal::SignalQueue>,
+    return_pending: std::sync::Arc<std::sync::Mutex<Vec<super::types::PendingSwapchainReturn>>>,
+    pending_acquire_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+) -> Result<()> {
+    ld.timeline_scheduled_max.fetch_max(signal_value, Ordering::Relaxed);
+    ld.submission_worker.check_error()?;
+    track_in_flight_cb(&sc_arc, signal_value, &command_buffer);
+    match ld.submission_worker.enqueue(
+        signal_value,
+        Box::new(MetalScheduledPresentPendingSubmit {
+            logical_device: std::sync::Arc::clone(ld),
+            command_buffer,
+            signal_value,
+            timeline_event,
+            waiter,
+            drawable_ptr,
+            return_image,
+            signal_queue_present,
+            return_pending,
+            pending_acquire_count,
+            finish,
+            pending_finishes,
+        }),
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            untrack_in_flight_cb(&sc_arc, signal_value);
+            Err(e)
+        }
+    }
+}

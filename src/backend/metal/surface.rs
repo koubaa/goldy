@@ -55,7 +55,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::types::{SharedLogicalDevice, SharedMetalSubmissionContext, TimelineWaiter};
-use crate::backend::{PresentFinishState, PresentGpuWork};
+use crate::backend::{PresentFinishState, PresentGpuWork, ScheduledPresentBlockingWait, ScheduledPresentWaitOutcome};
 use crate::timeline::TimelineValue;
 
 /// Create a surface for window presentation.
@@ -742,6 +742,208 @@ pub(super) fn finish_present(
     Ok(finish.present_timeline)
 }
 
+pub(super) fn schedule_present_on_submission_worker(
+    state: &mut MetalState,
+    frame: crate::backend::FrameToken,
+    _submit_tv: TimelineValue,
+) -> Result<TimelineValue> {
+    let surface = frame.surface;
+    let present_slot = frame.present_slot as usize;
+    let ctx = frame.context;
+
+    let (
+        device_handle,
+        return_image,
+        pending_acquire_count,
+        drawable_ptr,
+        tex_handle,
+    ) = {
+        let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+        let device_handle = surface_state.device_handle;
+        let return_image = surface_state.last_acquired_image_index;
+        let pending_acquire_count = std::sync::Arc::clone(&surface_state.pending_acquire_count);
+        let drawable_ptr = surface_state.drawable_slots[present_slot].take();
+        let tex_handle = surface_state.drawable_texture_handles[present_slot].take();
+        if surface_state.current_texture_handle == tex_handle {
+            surface_state.current_texture_handle = None;
+        }
+        surface_state.last_acquired_image_index = None;
+        (
+            device_handle,
+            return_image,
+            pending_acquire_count,
+            drawable_ptr,
+            tex_handle,
+        )
+    };
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Device no longer valid")?
+        .clone();
+    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
+    let (timeline_event, waiter, signal_queue_present, return_pending) = {
+        let sc = sc_arc.lock().unwrap();
+        (
+            sc.timeline_event.clone(),
+            sc.timeline_waiter.clone(),
+            std::sync::Arc::clone(&sc.signal_queue),
+            sc.pending_swapchain_returns.clone(),
+        )
+    };
+
+    let signal_value = super::pending_submit::preallocate_device_timeline(&logical_device);
+    let present_ok = drawable_ptr.is_some();
+    let finish = PresentFinishState {
+        frame,
+        return_fence: 0,
+        scratch_texture: tex_handle,
+        scratch_layout_updated: false,
+        present_timeline: signal_value,
+        copy_timeline: None,
+        frame_compute_timeline: None,
+        signal_timeline: Some(signal_value),
+        render_pass_submitted: false,
+        present_ok,
+    };
+
+    let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
+
+    if let Some(drawable_ptr) = drawable_ptr {
+        let command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
+        super::pending_submit::enqueue_metal_scheduled_present(
+            &logical_device,
+            command_buffer,
+            signal_value,
+            timeline_event,
+            waiter,
+            sc_arc,
+            drawable_ptr as usize,
+            return_image,
+            signal_queue_present,
+            return_pending,
+            pending_acquire_count,
+            finish,
+            pending_finishes,
+        )?;
+    } else {
+        let command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
+        super::pending_submit::enqueue_metal_commit(
+            &logical_device,
+            command_buffer,
+            signal_value,
+            timeline_event,
+            waiter,
+            Some(sc_arc),
+            "skip_present",
+            false,
+            None,
+        )?;
+        pending_finishes.lock().unwrap().push(finish);
+    }
+
+    Ok(signal_value)
+}
+
+fn synthesize_scheduled_present_finish(
+    frame: crate::backend::FrameToken,
+    present_tv: TimelineValue,
+) -> PresentFinishState {
+    PresentFinishState {
+        frame,
+        return_fence: 0,
+        scratch_texture: None,
+        scratch_layout_updated: false,
+        present_timeline: present_tv,
+        copy_timeline: None,
+        frame_compute_timeline: None,
+        signal_timeline: Some(present_tv),
+        render_pass_submitted: false,
+        present_ok: true,
+    }
+}
+
+pub(super) fn take_scheduled_present_blocking_wait(
+    state: &MetalState,
+    frame: crate::backend::FrameToken,
+    present_tv: TimelineValue,
+) -> Result<Option<Box<dyn ScheduledPresentBlockingWait>>> {
+    let device_handle = state
+        .surfaces
+        .get(&frame.surface)
+        .context("Invalid surface handle")?
+        .device_handle;
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?
+        .clone();
+    let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
+    Ok(Some(Box::new(MetalScheduledPresentWait {
+        worker: std::sync::Arc::clone(&logical_device.submission_worker),
+        pending_finishes,
+        frame,
+        present_tv,
+    })))
+}
+
+struct MetalScheduledPresentWait {
+    worker: std::sync::Arc<crate::backend::submission_worker::SubmissionWorker>,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<PresentFinishState>>>,
+    frame: crate::backend::FrameToken,
+    present_tv: TimelineValue,
+}
+
+impl ScheduledPresentBlockingWait for MetalScheduledPresentWait {
+    fn run(self: Box<Self>) -> Result<ScheduledPresentWaitOutcome> {
+        let _tz = crate::tracy_zone!("goldy.mtl.scheduled_present.wait");
+        self.worker.wait_submitted(self.present_tv)?;
+        self.worker.check_error()?;
+
+        let finish = {
+            let mut pending = self.pending_finishes.lock().unwrap();
+            pending
+                .iter()
+                .position(|f| {
+                    f.frame.surface == self.frame.surface
+                        && f.frame.image == self.frame.image
+                        && f.frame.present_slot == self.frame.present_slot
+                })
+                .map(|idx| pending.remove(idx))
+        };
+
+        Ok(ScheduledPresentWaitOutcome {
+            frame: self.frame,
+            present_tv: self.present_tv,
+            finish,
+            return_fence: 0,
+        })
+    }
+}
+
+pub(super) fn apply_scheduled_present_bookkeeping(
+    state: &mut MetalState,
+    outcome: ScheduledPresentWaitOutcome,
+) -> Result<()> {
+    let finish = match outcome.finish {
+        Some(finish) => finish,
+        None => {
+            tracing::warn!(
+                target: "goldy::metal",
+                surface = outcome.frame.surface,
+                image = outcome.frame.image,
+                present_slot = outcome.frame.present_slot,
+                present_tv = outcome.present_tv,
+                "scheduled present finish missing from pending queue; synthesizing surface bookkeeping"
+            );
+            synthesize_scheduled_present_finish(outcome.frame, outcome.present_tv)
+        }
+    };
+    finish_present(state, finish, outcome.present_tv)?;
+    Ok(())
+}
+
 struct MetalSkipPresentGpuWork {
     frame: crate::backend::FrameToken,
     present_timeline: TimelineValue,
@@ -1060,5 +1262,171 @@ fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle)
                 .unregister_texture(tex_handle);
         }
         tracing::debug!("Unregistered surface drawable texture {}", tex_handle);
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+mod fifo_present_tests {
+    use super::*;
+    use crate::backend::metal::MetalBackend;
+    use crate::backend::GpuBackendPresentSplit;
+    use crate::backend::GpuBackend;
+    use crate::{Device, DeviceDescriptor, Grant, Instance, RequestAdapterOptions, Scheme, SwapchainPool};
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+    use raw_window_handle::{
+        AppKitDisplayHandle, AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle,
+    };
+    use std::ptr::NonNull;
+    use std::time::{Duration, Instant};
+
+    struct TestWindow {
+        _window: id,
+        ns_view: NonNull<std::ffi::c_void>,
+    }
+
+    impl TestWindow {
+        fn new(width: f64, height: f64) -> Self {
+            unsafe {
+                let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(width, height));
+                let window: id = msg_send![class!(NSWindow), alloc];
+                // NSTitledWindowMask = 1, NSBackingStoreBuffered = 2
+                let window: id = msg_send![
+                    window,
+                    initWithContentRect: frame
+                    styleMask: 1u64
+                    backing: 2i64
+                    defer: NO
+                ];
+                let view: id = msg_send![window, contentView];
+                let (): () = msg_send![view, retain];
+                let (): () = msg_send![window, retain];
+                Self {
+                    _window: window,
+                    ns_view: NonNull::new(view as *mut std::ffi::c_void).expect("content view"),
+                }
+            }
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe {
+                let (): () = msg_send![self.ns_view.as_ptr() as id, release];
+                let (): () = msg_send![self._window, release];
+            }
+        }
+    }
+
+    impl HasWindowHandle for TestWindow {
+        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+            let handle = AppKitWindowHandle::new(self.ns_view);
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle)) })
+        }
+    }
+
+    impl HasDisplayHandle for TestWindow {
+        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+            let handle = AppKitDisplayHandle::new();
+            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::AppKit(handle)) })
+        }
+    }
+
+    fn make_device() -> Device {
+        let instance = Instance::new().expect("Instance::new");
+        instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .expect("adapter")
+            .request_device(&DeviceDescriptor::default())
+            .expect("device")
+    }
+
+    fn make_swapchain_pool() -> (Device, crate::Context, SwapchainPool) {
+        let device = make_device();
+        let ctx = device.create_context().expect("context");
+        let window = TestWindow::new(64., 64.);
+        let pool = SwapchainPool::new(&ctx, &window, 2).expect("swapchain pool");
+        (device, ctx, pool)
+    }
+
+    #[test]
+    fn fifo_present_enabled_by_default() {
+        let backend = MetalBackend::new().expect("Metal backend");
+        assert!(
+            backend.schedules_present_on_submit_worker(),
+            "Metal must schedule present on the submission worker by default"
+        );
+    }
+
+    #[test]
+    fn schedule_present_returns_tv_gte_compute_tv() {
+        let (_device, ctx, pool) = make_swapchain_pool();
+        let lease = pool.lease();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.grant_present(&lease);
+
+        let sub = scheme.submit().expect("submit");
+        let compute_tv = sub.timeline_value();
+        let present_tv = sub.present_fifo_tv(0).expect("FIFO present tv");
+        assert!(
+            present_tv >= compute_tv,
+            "present epoch must cover frame submit (present={present_tv}, compute={compute_tv})"
+        );
+    }
+
+    #[test]
+    fn scheduled_present_wait_resolves_after_worker() {
+        use std::thread;
+
+        let (_device, ctx, pool) = make_swapchain_pool();
+        let lease = pool.lease();
+        let mut scheme = Scheme::new(&ctx);
+        let present = scheme.grant_present(&lease);
+        let sub = scheme.submit().expect("submit");
+        let present_tv = sub.present_fifo_tv(0).expect("FIFO present tv");
+
+        let handle = thread::spawn(move || present.consume(&sub).expect("consume"));
+
+        let start = Instant::now();
+        while ctx.gpu_progress() < present_tv && start.elapsed() < Duration::from_millis(500) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        handle.join().expect("consume thread");
+
+        assert!(
+            ctx.gpu_progress() >= present_tv,
+            "GPU progress must reach present timeline after scheduled present bookkeeping"
+        );
+    }
+
+    #[test]
+    fn no_drawable_skip_path_unblocks_wait() {
+        let mut backend = MetalBackend::new().expect("Metal backend");
+        let device = backend.create_device(0).expect("device");
+        let ctx = backend.create_context(device).expect("context");
+        let window = TestWindow::new(64., 64.);
+        let surface = backend
+            .create_surface(device, &window, &window, None)
+            .expect("surface");
+        let (token, _tex) = backend.begin_frame(surface, ctx).expect("begin");
+        backend.cancel_frame(token).expect("cancel");
+
+        let present_tv = backend
+            .schedule_present_on_submission_worker(token, 0)
+            .expect("schedule skip present");
+        let wait = backend
+            .take_scheduled_present_blocking_wait(token, present_tv)
+            .expect("take wait")
+            .expect("FIFO wait object");
+        let outcome = wait.run().expect("wait run");
+        assert_eq!(outcome.present_tv, present_tv);
+        assert!(
+            outcome.finish.as_ref().is_some_and(|f| !f.present_ok),
+            "skip path must record present_ok=false"
+        );
+
+        backend
+            .apply_scheduled_present_bookkeeping(outcome)
+            .expect("bookkeeping");
     }
 }
