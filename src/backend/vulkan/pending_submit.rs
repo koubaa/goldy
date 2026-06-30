@@ -51,7 +51,7 @@ pub(super) fn resolve_cross_submit_waits(
             .read()
             .unwrap()
             .get(&epoch.context)
-            .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
+            .with_context(|| format!("cross-submit wait: invalid producer context {:?}", epoch.context))?
             .lock()
             .unwrap()
             .timeline_semaphore;
@@ -84,6 +84,39 @@ pub(super) fn vulkan_post_signal_cleanup(
     registry.drain_ready_slot_reclamations(&completed_values);
 }
 
+/// Per-context deletion drain + slot reclamation on the render/wait thread.
+pub(super) fn vulkan_drain_context_deletion_up_to(
+    ld: &types::LogicalDevice,
+    contexts: &SharedContextMap,
+    device_handle: DeviceHandle,
+    sc: &SharedSubmissionContext,
+    completed: u64,
+) {
+    let _tz = crate::tracy_zone!("goldy.submit.vk.deletion_drain");
+    vulkan_post_signal_cleanup(ld, contexts, device_handle, sc, completed);
+}
+
+pub(super) fn vulkan_finish_staging_after_enqueue(
+    sc: &SharedSubmissionContext,
+    signal_value: TimelineValue,
+    staging_belt_finish: bool,
+    texture_staging_entries: Vec<super::staging::TextureStagingEntry>,
+) {
+    if !staging_belt_finish && texture_staging_entries.is_empty() {
+        return;
+    }
+    let _tz = crate::tracy_zone!("goldy.submit.vk.staging_finish");
+    let mut sc_guard = sc.lock().unwrap();
+    if staging_belt_finish {
+        sc_guard.staging_belt.finish(signal_value);
+    }
+    if !texture_staging_entries.is_empty() {
+        sc_guard
+            .texture_staging_pool
+            .release(signal_value, texture_staging_entries);
+    }
+}
+
 pub(super) struct VulkanQueueSubmitPending {
     ld: SharedLogicalDevice,
     queue: vk::Queue,
@@ -93,11 +126,6 @@ pub(super) struct VulkanQueueSubmitPending {
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
     wait_semaphores: Vec<(vk::Semaphore, u64)>,
-    sc: SharedSubmissionContext,
-    contexts: SharedContextMap,
-    device_handle: DeviceHandle,
-    staging_belt_finish: bool,
-    texture_staging_entries: Vec<super::staging::TextureStagingEntry>,
     gpu_profile: Option<VulkanGpuProfileWork>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -179,40 +207,19 @@ impl PendingSubmit for VulkanQueueSubmitPending {
         };
         queue_submit_result.context("Failed queue_submit2 on submission worker")?;
 
-        {
-            let _tz = crate::tracy_zone!("goldy.submit_worker.vk.post_signal_cleanup");
-            if self.staging_belt_finish {
-                self.sc.lock().unwrap().staging_belt.finish(self.signal_value);
+        if let Some(prof) = self.gpu_profile {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.vk.gpu_profile_readback");
+            unsafe {
+                super::compute::vulkan_finish_gpu_profile_pending(
+                    prof.ctx,
+                    &self.ld.device,
+                    self.timeline_sem,
+                    self.signal_value,
+                    prof.cmd,
+                    prof.prof,
+                    &self.device_lost,
+                )?;
             }
-            if !self.texture_staging_entries.is_empty() {
-                self.sc
-                    .lock()
-                    .unwrap()
-                    .texture_staging_pool
-                    .release(self.signal_value, self.texture_staging_entries);
-            }
-            if let Some(prof) = self.gpu_profile {
-                let sem = self.sc.lock().unwrap().timeline_semaphore;
-                unsafe {
-                    super::compute::vulkan_finish_gpu_profile_pending(
-                        prof.ctx,
-                        &self.ld.device,
-                        sem,
-                        self.signal_value,
-                        prof.cmd,
-                        prof.prof,
-                        &self.device_lost,
-                    )?;
-                }
-            }
-
-            let completed = unsafe {
-                self.ld
-                    .device
-                    .get_semaphore_counter_value(self.timeline_sem)
-                    .unwrap_or(self.signal_value)
-            };
-            vulkan_post_signal_cleanup(&self.ld, &self.contexts, self.device_handle, &self.sc, completed);
         }
         Ok(())
     }
@@ -221,8 +228,6 @@ impl PendingSubmit for VulkanQueueSubmitPending {
 pub(super) fn enqueue_vulkan_submit(
     ld: &SharedLogicalDevice,
     contexts: &SharedContextMap,
-    device_handle: DeviceHandle,
-    sc: &SharedSubmissionContext,
     queue: vk::Queue,
     queue_lock: Arc<std::sync::Mutex<()>>,
     timeline_sem: vk::Semaphore,
@@ -230,8 +235,6 @@ pub(super) fn enqueue_vulkan_submit(
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
     sync: Option<&SubmitSync>,
-    staging_belt_finish: bool,
-    texture_staging_entries: Vec<super::staging::TextureStagingEntry>,
     gpu_profile: Option<VulkanGpuProfileWork>,
     device_lost: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
@@ -249,11 +252,6 @@ pub(super) fn enqueue_vulkan_submit(
             signal_semaphore_infos,
             cmd,
             wait_semaphores,
-            sc: Arc::clone(sc),
-            contexts: Arc::clone(contexts),
-            device_handle,
-            staging_belt_finish,
-            texture_staging_entries,
             gpu_profile,
             device_lost,
         }),

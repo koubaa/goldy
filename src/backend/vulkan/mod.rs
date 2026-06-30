@@ -354,27 +354,15 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
             compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
         }
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            let ctx_completed = self
-                .state
-                .contexts
-                .read()
-                .unwrap()
-                .get(&ctx)
-                .map(|sc| unsafe {
-                    ld.device
-                        .get_semaphore_counter_value(sc.lock().unwrap().timeline_semaphore)
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            let drain_to = value.min(ctx_completed);
-            let ctx_batch: Vec<_> = self
-                .state
-                .contexts
-                .read()
-                .unwrap()
-                .get(&ctx)
-                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(drain_to))
-                .unwrap_or_default();
+            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
+                pending_submit::vulkan_drain_context_deletion_up_to(
+                    ld,
+                    &self.state.contexts,
+                    device_handle,
+                    sc_arc,
+                    value,
+                );
+            }
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
                 let completed_values =
@@ -382,7 +370,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                 let device_batch = ld.drain_deletion_queue_ready(&completed_values);
                 let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                 let mut registry = descriptors_arc.lock().unwrap();
-                for r in ctx_batch.into_iter().chain(device_batch) {
+                for r in device_batch {
                     types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 registry.drain_ready_slot_reclamations(&completed_values);
@@ -1357,22 +1345,21 @@ impl GpuBackend for VulkanBackend {
             Ok(()) => {
                 compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
-                    let ctx_completed = unsafe { ld.device.get_semaphore_counter_value(sem).unwrap_or(0) };
-                    let drain_to = value.min(ctx_completed);
-                    let ctx_batch: Vec<_> = self
-                        .state
-                        .contexts
-                        .read()
-                        .unwrap()
-                        .get(&ctx)
-                        .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(drain_to))
-                        .unwrap_or_default();
+                    if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
+                        pending_submit::vulkan_drain_context_deletion_up_to(
+                            ld,
+                            &self.state.contexts,
+                            device_handle,
+                            sc_arc,
+                            value,
+                        );
+                    }
                     let completed_values =
                         types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
                     let device_batch = ld.drain_deletion_queue_ready(&completed_values);
                     let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                     let mut registry = descriptors_arc.lock().unwrap();
-                    for r in ctx_batch.into_iter().chain(device_batch) {
+                    for r in device_batch {
                         types::destroy_pending_deletion(ld, &mut registry, r);
                     }
                     registry.drain_ready_slot_reclamations(&completed_values);

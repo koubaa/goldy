@@ -181,7 +181,11 @@ fn advance_submitted_epoch(
     tv: u64,
 ) {
     submitted_epoch.fetch_max(tv, Ordering::Release);
+    // Hold the wait mutex while notifying so a waiter cannot pass the epoch
+    // check and then miss the notify before condvar.wait (lost wakeup).
+    let guard = wait_notify.0.lock().unwrap();
     wait_notify.1.notify_all();
+    drop(guard);
 }
 
 fn wait_for_submitted_epoch(
@@ -191,7 +195,7 @@ fn wait_for_submitted_epoch(
     tv: u64,
     deadline: Option<Instant>,
 ) -> Result<bool> {
-    while submitted_epoch.load(Ordering::Acquire) < tv {
+    'wait: while submitted_epoch.load(Ordering::Acquire) < tv {
         if latched_error.lock().unwrap().is_some() {
             if let Some(err) = latched_error.lock().unwrap().take() {
                 return Err(err);
@@ -202,31 +206,37 @@ fn wait_for_submitted_epoch(
                 return Ok(false);
             }
         }
-        let guard = wait_notify.0.lock().unwrap();
-        if submitted_epoch.load(Ordering::Acquire) >= tv {
-            break;
-        }
-        if latched_error.lock().unwrap().is_some() {
-            drop(guard);
-            if let Some(err) = latched_error.lock().unwrap().take() {
-                return Err(err);
-            }
-            continue;
-        }
-        match deadline {
-            None => {
-                let guard = wait_notify.1.wait(guard).unwrap();
+        let mut guard = wait_notify.0.lock().unwrap();
+        while submitted_epoch.load(Ordering::Acquire) < tv {
+            if latched_error.lock().unwrap().is_some() {
                 drop(guard);
+                if let Some(err) = latched_error.lock().unwrap().take() {
+                    return Err(err);
+                }
+                continue 'wait;
             }
-            Some(d) => {
-                let remaining = d.saturating_duration_since(Instant::now());
-                let (guard, timeout) = wait_notify.1.wait_timeout(guard, remaining).unwrap();
-                drop(guard);
-                if timeout.timed_out() && submitted_epoch.load(Ordering::Acquire) < tv && Instant::now() >= d {
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    drop(guard);
                     return Ok(false);
                 }
             }
+            match deadline {
+                None => {
+                    guard = wait_notify.1.wait(guard).unwrap();
+                }
+                Some(d) => {
+                    let remaining = d.saturating_duration_since(Instant::now());
+                    let (g, timeout) = wait_notify.1.wait_timeout(guard, remaining).unwrap();
+                    guard = g;
+                    if timeout.timed_out() && submitted_epoch.load(Ordering::Acquire) < tv && Instant::now() >= d {
+                        drop(guard);
+                        return Ok(false);
+                    }
+                }
+            }
         }
+        drop(guard);
     }
     Ok(true)
 }
