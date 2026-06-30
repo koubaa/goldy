@@ -473,6 +473,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
     /// Pool of command allocators for non-blocking compute submission on this context.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
+    /// Round-robin start index for compute allocator pool reuse.
+    pub allocator_recycle_hint: usize,
     /// Retained command lists keyed by scheme fingerprint for zero-recording-cost re-submission.
     pub retained_graphs: HashMap<u64, RetainedGraph>,
     /// Upload belt for `GpuCommand::WriteBuffer` on this context.

@@ -40,6 +40,8 @@ pub(crate) struct Dx12SubmitScope<'a> {
     pub sc: super::types::SharedSubmissionContext,
     pub record: Dx12RecordState<'a>,
     pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    /// Per-context fence resolved once at scope construction (avoids repeated map lookups).
+    pub ctx_fence: ID3D12Fence,
     pub use_global_buffer_barriers: bool,
 }
 
@@ -140,6 +142,7 @@ pub(crate) struct Dx12SubmitSession {
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
     use_global_buffer_barriers: bool,
+    ctx_fence: ID3D12Fence,
 }
 
 impl Dx12SubmitSession {
@@ -173,6 +176,14 @@ impl Dx12SubmitSession {
             .map(|(handle, device)| (*handle, Arc::clone(device)))
             .collect();
         let use_global_buffer_barriers = ld.adapter_id == super::WARP_ADAPTER_ID;
+        let ctx_fence = state
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .with_context(|| format!("Invalid context handle {ctx}"))?
+            .1
+            .clone();
         Ok(Arc::new(Self {
             ctx,
             device_handle,
@@ -190,6 +201,7 @@ impl Dx12SubmitSession {
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
             use_global_buffer_barriers,
+            ctx_fence,
         }))
     }
 
@@ -212,6 +224,7 @@ impl Dx12SubmitSession {
                 samplers: &self.samplers,
             },
             context_fences: &self.context_fences,
+            ctx_fence: self.ctx_fence.clone(),
             use_global_buffer_barriers: self.use_global_buffer_barriers,
         }
     }

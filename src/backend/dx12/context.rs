@@ -79,6 +79,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence_shutdown,
             fence_thread,
             compute_allocator_pool,
+            allocator_recycle_hint: 0,
             retained_graphs: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
