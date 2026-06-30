@@ -228,7 +228,7 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
         let Some(ld) = self.state.devices.get(&device) else {
             return Ok(None);
         };
-        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+        let horizon = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Acquire);
         if value == 0 || value > horizon {
             return Ok(None);
         }

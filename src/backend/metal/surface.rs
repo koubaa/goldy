@@ -314,6 +314,52 @@ pub(super) fn acquire(
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
 
+}
+
+/// Decrement the surface in-flight acquire counter without wrapping at zero.
+pub(super) fn release_pending_acquire_count(count: &mut u32) {
+    if *count == 0 {
+        tracing::warn!(
+            target: "goldy::metal::surface",
+            "pending_acquire_count decrement at zero (ignored)"
+        );
+        return;
+    }
+    *count = count.saturating_sub(1);
+}
+
+/// Abandon an acquired frame without presenting.
+pub(super) fn cancel_frame(state: &mut MetalState, frame: crate::backend::FrameToken) -> Result<()> {
+    let _tz = crate::tracy_zone!("mtl.surface.cancel_frame");
+    let surface = frame.surface;
+    let present_slot = frame.present_slot as usize;
+
+    let (drawable, tex_handle) = {
+        let ss = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
+
+        let drawable = ss.drawable_slots[present_slot].take();
+        let tex_handle = ss.drawable_texture_handles[present_slot].take();
+        if ss.current_texture_handle == tex_handle {
+            ss.current_texture_handle = None;
+        }
+        ss.last_acquired_image_index = None;
+        ss.frame_pending_gpu_commands.clear();
+
+        release_pending_acquire_count(&mut ss.pending_acquire_count);
+        (drawable, tex_handle)
+    };
+
+    if let Some(d) = drawable {
+        unsafe {
+            let (): () = msg_send![d as id, release];
+        }
+    }
+    if let Some(tex_handle) = tex_handle {
+        unregister_surface_texture(state, tex_handle);
+    }
+    Ok(())
+}
+
 /// Get the texture handle for the currently acquired surface frame.
 pub(super) fn frame_texture(state: &MetalState, surface: SurfaceHandle) -> Option<TextureHandle> {
     state.surfaces.get(&surface).and_then(|s| s.current_texture_handle)

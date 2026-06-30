@@ -86,6 +86,27 @@ impl SubmissionWorker {
             .map_err(|e| anyhow::anyhow!("submission worker channel closed: {e}"))
     }
 
+    /// Run one submit job on the calling thread and advance the submitted epoch.
+    ///
+    /// Used by the mock backend for compute/transfer submits so unit tests do not spawn
+    /// blocking worker waits (and backend mutex holds) under parallel `cargo test`.
+    /// FIFO present-at-submit still uses [`Self::enqueue`] so ordering matches real backends.
+    pub fn execute_immediately(&self, tv: u64, work: Box<dyn PendingSubmit>) -> Result<()> {
+        self.check_error()?;
+        match work.execute() {
+            Ok(()) => {
+                advance_submitted_epoch(&self.submitted_epoch, &self.wait_notify, tv);
+                Ok(())
+            }
+            Err(e) => {
+                advance_submitted_epoch(&self.submitted_epoch, &self.wait_notify, tv);
+                *self.latched_error.lock().unwrap() = Some(e);
+                notify_waiters(&self.wait_notify);
+                self.check_error()
+            }
+        }
+    }
+
     /// Advance the worker epoch for GPU work executed synchronously on the caller thread
     /// (e.g. DX12 device DIRECT-queue render submits) so [`Self::wait_submitted`] matches
     /// [`submission_horizon`](submission_horizon).
@@ -103,7 +124,13 @@ impl SubmissionWorker {
         if tv == 0 {
             return Ok(());
         }
-        wait_for_submitted_epoch(&self.submitted_epoch, &self.wait_notify, &self.latched_error, tv, None)?;
+        wait_for_submitted_epoch(
+            &self.submitted_epoch,
+            &self.wait_notify,
+            &self.latched_error,
+            tv,
+            None,
+        )?;
         Ok(())
     }
 
@@ -183,6 +210,10 @@ fn advance_submitted_epoch(
     submitted_epoch.fetch_max(tv, Ordering::Release);
     // Hold the wait mutex while notifying so a waiter cannot pass the epoch
     // check and then miss the notify before condvar.wait (lost wakeup).
+    notify_waiters(wait_notify);
+}
+
+fn notify_waiters(wait_notify: &Arc<(Mutex<()>, Condvar)>) {
     let guard = wait_notify.0.lock().unwrap();
     wait_notify.1.notify_all();
     drop(guard);
@@ -229,7 +260,10 @@ fn wait_for_submitted_epoch(
                     let remaining = d.saturating_duration_since(Instant::now());
                     let (g, timeout) = wait_notify.1.wait_timeout(guard, remaining).unwrap();
                     guard = g;
-                    if timeout.timed_out() && submitted_epoch.load(Ordering::Acquire) < tv && Instant::now() >= d {
+                    if timeout.timed_out()
+                        && submitted_epoch.load(Ordering::Acquire) < tv
+                        && Instant::now() >= d
+                    {
                         drop(guard);
                         return Ok(false);
                     }
@@ -274,7 +308,7 @@ fn worker_loop(
                     Err(e) => {
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                         *latched_error.lock().unwrap() = Some(e);
-                        wait_notify.1.notify_all();
+                        notify_waiters(&wait_notify);
                     }
                 }
             }

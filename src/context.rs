@@ -186,8 +186,9 @@ impl Context {
 
     fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("context.wait_until");
+        let progress = self.gpu_progress();
         let already_complete = if ctx == self.inner.handle {
-            self.gpu_progress() >= value
+            progress >= value
         } else {
             self.inner.device.context_gpu_progress(ctx).is_some_and(|p| p >= value)
         };
