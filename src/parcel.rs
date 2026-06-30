@@ -19,6 +19,8 @@ use std::ops::{Deref, Index};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use parking_lot::Mutex as ParkingMutex;
+
 /// How a scheme interacts with a shared parcel for cross-scheme topology tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InteractionRole {
@@ -40,7 +42,7 @@ pub(crate) type InteractionSet = Vec<InteractionEdge>;
 
 /// Shared stamp cell and home-device identity for [`TaskGraph`] submit stamping.
 pub(crate) struct ParcelStamp {
-    pub(crate) sync: Arc<Mutex<ResourceSync>>,
+    pub(crate) sync: Arc<ParkingMutex<ResourceSync>>,
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
@@ -56,7 +58,7 @@ pub(crate) struct ParcelStamp {
 impl ParcelStamp {
     pub(crate) fn new(home_device: Weak<DeviceInner>) -> Self {
         Self {
-            sync: Arc::new(Mutex::new(ResourceSync::default())),
+            sync: Arc::new(ParkingMutex::new(ResourceSync::default())),
             interaction_set: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
@@ -95,7 +97,7 @@ impl ParcelStamp {
     }
 
     pub(crate) fn merged_references(&self) -> ReferenceTable {
-        self.sync.lock().unwrap().merged()
+        self.sync.lock().merged()
     }
 
     pub(crate) fn push_pending(&self, promise: TimelinePromise) {
@@ -131,7 +133,7 @@ impl ParcelStamp {
                 }
             }
             let mut pending = self.pending.lock().unwrap();
-            let mut sync = self.sync.lock().unwrap();
+            let mut sync = self.sync.lock();
             pending.retain(|promise| match promise.poll() {
                 PromiseState::Pending => true,
                 PromiseState::Resolved(tv) => {
@@ -154,7 +156,7 @@ impl ParcelStamp {
         if pending.is_empty() {
             return false;
         }
-        let mut sync = self.sync.lock().unwrap();
+        let mut sync = self.sync.lock();
         let mut any_pending = false;
         pending.retain(|promise| match promise.poll() {
             PromiseState::Pending => {
@@ -179,13 +181,13 @@ impl ParcelStamp {
         if self.lazy_gc_pending(ctx_handle) {
             return Settle::Pending;
         }
-        let merged = self.sync.lock().unwrap().merged();
+        let merged = self.sync.lock().merged();
         if merged.is_empty() {
             return Settle::Ready;
         }
         let device = ctx.device();
         let mut waiting = None;
-        for (&c, &tv) in &merged {
+        for (c, tv) in merged.iter() {
             let progress = device
                 .context_gpu_progress(c)
                 .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
@@ -345,11 +347,7 @@ impl Parcel {
 
     /// Record the timeline of the most recent GPU work that referenced this parcel on `ctx`.
     pub fn mark_referenced(&self, ctx: ContextHandle, epoch: TimelineValue) {
-        self.stamp
-            .sync
-            .lock()
-            .unwrap()
-            .record_write(ctx, epoch, WRITE_KINDS_TRANSFER);
+        self.stamp.sync.lock().record_write(ctx, epoch, WRITE_KINDS_TRANSFER);
     }
 
     /// Context-qualified last-referencing timelines for this parcel.
@@ -359,7 +357,7 @@ impl Parcel {
 
     /// Last referencing timeline for a single context, if any.
     pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
-        self.stamp.merged_references().get(&ctx).copied()
+        self.stamp.merged_references().get(ctx)
     }
 
     /// Reuse-gate state for this parcel on `ctx`, including outstanding timeline promises.
@@ -649,15 +647,8 @@ impl Buffer {
     pub fn last_referenced(&self) -> ReferenceTable {
         let mut merged = ReferenceTable::new();
         for unit in &self.units {
-            for (ctx, tv) in unit.last_referenced() {
-                merged
-                    .entry(ctx)
-                    .and_modify(|e| {
-                        if tv > *e {
-                            *e = tv;
-                        }
-                    })
-                    .or_insert(tv);
+            for (ctx, tv) in unit.last_referenced().iter() {
+                crate::timeline::mark_reference(&mut merged, ctx, tv);
             }
         }
         merged
@@ -1215,7 +1206,7 @@ mod tests {
         resolver.resolve(25);
         assert_eq!(parcel.settle(&ctx), Settle::Waiting(25));
         assert!(stamp.pending.lock().unwrap().is_empty());
-        assert_eq!(stamp.sync.lock().unwrap().last_reads.get(&ctx_handle), Some(&25));
+        assert_eq!(stamp.sync.lock().last_reads.get(ctx_handle), Some(25));
     }
 
     #[test]

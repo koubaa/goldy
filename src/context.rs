@@ -491,7 +491,7 @@ impl Context {
         }
         let device = &self.inner.device;
         let mut progress = HashMap::with_capacity(refs.len());
-        for &ctx in refs.keys() {
+        for ctx in refs.keys() {
             let p = device
                 .context_gpu_progress(ctx)
                 .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
@@ -502,7 +502,7 @@ impl Context {
 
     /// Block until every context in `refs` has retired the stamped timeline values.
     pub fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
-        for (&ctx_handle, &tv) in refs {
+        for (ctx_handle, tv) in refs.iter() {
             self.wait_until_context(ctx_handle, tv)?;
         }
         Ok(())

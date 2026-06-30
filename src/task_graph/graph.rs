@@ -3,7 +3,7 @@
 use super::analysis;
 use super::cross_submit::{
     apply_resource_sync_updates, apply_stamp_targets_legacy, prepend_prologue, BufferStampIndex,
-    CrossSubmitScratch, NetAccess, ResourceKey,
+    CrossSubmitScratch, NetAccess, ResourceKey, ResourceKeyMap,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
@@ -295,6 +295,32 @@ fn ensure_partition_cache_vecs(entry: &mut CompiledCacheEntry, partition_count: 
         entry.partition_retention_keys = vec![None; partition_count];
         entry.partition_slot_keys = vec![None; partition_count];
         entry.partition_last_tv = vec![None; partition_count];
+        entry.partition_net_cache = vec![None; partition_count];
+    }
+}
+
+fn take_partition_cached_net(
+    entry: &CompiledCacheEntry,
+    part_idx: usize,
+    retention_fp: u64,
+) -> Option<ResourceKeyMap<NetAccess>> {
+    if entry.partition_retention_keys.get(part_idx).copied().flatten() != Some(retention_fp) {
+        return None;
+    }
+    entry.partition_net_cache.get(part_idx).and_then(|n| n.clone())
+}
+
+fn store_partition_net_cache(
+    entry: &mut CompiledCacheEntry,
+    part_idx: usize,
+    net_was_cached: bool,
+    net: ResourceKeyMap<NetAccess>,
+) {
+    if net_was_cached {
+        return;
+    }
+    if part_idx < entry.partition_net_cache.len() {
+        entry.partition_net_cache[part_idx] = Some(net);
     }
 }
 
@@ -340,12 +366,12 @@ fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
 /// When `resource_stamps` is empty this is a no-op regardless of `net`'s contents, so a stale
 /// `net` (left over from a prior partition because `plan` short-circuited) is harmless.
 fn apply_partition_epoch_stamps(
-    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
     ctx: crate::backend::ContextHandle,
     ir: &GraphIR,
     waves: &[Wave],
-    net: &HashMap<ResourceKey, NetAccess>,
+    net: &ResourceKeyMap<NetAccess>,
     tv: TimelineValue,
 ) {
     if !resource_stamps.is_empty() && !net.is_empty() {
@@ -758,7 +784,14 @@ pub(crate) fn submit_resolved_ir(
         let schedule = analysis::schedule_waves(ir, &edges);
         let g = compile_graph_commands_for_ir(ir);
         let mut cross_scratch = CrossSubmitScratch::new();
-        let sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &schedule.waves);
+        let sync = cross_sync_for_ir(
+            &mut cross_scratch,
+            submit_state,
+            ir,
+            ctx,
+            &schedule.waves,
+            None,
+        );
         let tv = backend_submit_graph(session, ctx, &g, sync)?;
         if let Some(state) = submit_state {
             state.apply_partition_reference_stamps(
@@ -781,7 +814,7 @@ pub(crate) fn submit_resolved_ir(
     for (part_idx, range) in wave_ranges.iter().enumerate() {
         let _tz = crate::tracy_zone!("goldy.submit_partition");
         let waves = cache.as_ref().unwrap().schedule.waves[range.clone()].to_vec();
-        let sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &waves);
+        let sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &waves, None);
         let cache_ref = cache.as_ref().unwrap();
         if let Some(graph_cmds) = cache_ref
             .partitioned_graph_commands
@@ -807,18 +840,71 @@ pub(crate) fn submit_resolved_ir(
     Ok(last_tv)
 }
 
-fn cross_sync_for_stamps<'a>(
-    scratch: &'a mut CrossSubmitScratch,
-    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+fn cross_sync_for_stamps_owned(
+    scratch: &mut CrossSubmitScratch,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     buffer_index: Option<&BufferStampIndex>,
     ir: &GraphIR,
     submitting_ctx: crate::backend::ContextHandle,
     waves: &[Wave],
+    cached_net: Option<ResourceKeyMap<NetAccess>>,
+) -> (Option<SubmitSync>, ResourceKeyMap<NetAccess>) {
+    match scratch.plan_owned(
+        ir,
+        resource_stamps,
+        buffer_index,
+        submitting_ctx,
+        waves,
+        cached_net,
+    ) {
+        Some((sync, net)) => (Some(sync), net),
+        None => (None, ResourceKeyMap::default()),
+    }
+}
+
+fn cross_sync_for_ir_owned(
+    scratch: &mut CrossSubmitScratch,
+    submit_state: Option<&IrSubmitState>,
+    ir: &GraphIR,
+    submitting_ctx: crate::backend::ContextHandle,
+    waves: &[Wave],
+    cached_net: Option<ResourceKeyMap<NetAccess>>,
+) -> (Option<SubmitSync>, ResourceKeyMap<NetAccess>) {
+    let _tz = crate::tracy_zone!("goldy.cross_sync_for_ir");
+    let Some(state) = submit_state else {
+        return (None, ResourceKeyMap::default());
+    };
+    cross_sync_for_stamps_owned(
+        scratch,
+        &state.resource_stamps,
+        Some(&state.buffer_stamp_index),
+        ir,
+        submitting_ctx,
+        waves,
+        cached_net,
+    )
+}
+
+fn cross_sync_for_stamps<'a>(
+    scratch: &'a mut CrossSubmitScratch,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+    buffer_index: Option<&BufferStampIndex>,
+    ir: &GraphIR,
+    submitting_ctx: crate::backend::ContextHandle,
+    waves: &[Wave],
+    cached_net: Option<ResourceKeyMap<NetAccess>>,
 ) -> Option<&'a SubmitSync> {
     if resource_stamps.is_empty() {
         return None;
     }
-    Some(scratch.plan(ir, resource_stamps, buffer_index, submitting_ctx, waves))
+    Some(scratch.plan(
+        ir,
+        resource_stamps,
+        buffer_index,
+        submitting_ctx,
+        waves,
+        cached_net,
+    ))
 }
 
 fn cross_sync_for_ir<'a>(
@@ -827,6 +913,7 @@ fn cross_sync_for_ir<'a>(
     ir: &GraphIR,
     submitting_ctx: crate::backend::ContextHandle,
     waves: &[Wave],
+    cached_net: Option<ResourceKeyMap<NetAccess>>,
 ) -> Option<&'a SubmitSync> {
     let _tz = crate::tracy_zone!("goldy.cross_sync_for_ir");
     let state = submit_state?;
@@ -837,6 +924,7 @@ fn cross_sync_for_ir<'a>(
         ir,
         submitting_ctx,
         waves,
+        cached_net,
     )
 }
 
@@ -932,10 +1020,26 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 let schedule = &cache.as_ref().unwrap().schedule;
                 schedule.waves[merged_range.clone()].to_vec()
             };
-            let sync = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &merged_waves)
+            let cached_net = {
+                let entry = cache.as_ref().unwrap();
+                take_partition_cached_net(entry, part_idx, merged_fp)
             };
+            let net_was_cached = cached_net.is_some();
+            let (sync, net) = {
+                let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
+                cross_sync_for_ir_owned(
+                    &mut cross_scratch,
+                    submit_state,
+                    ir,
+                    ctx,
+                    &merged_waves,
+                    cached_net,
+                )
+            };
+            if !net_was_cached {
+                store_partition_net_cache(cache.as_mut().unwrap(), part_idx, net_was_cached, net.clone());
+            }
+            let sync = sync.as_ref();
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
             if cached_key == Some(merged_fp) {
@@ -950,7 +1054,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                             &context.device().inner,
                             ir,
                             &merged_waves,
-                            cross_scratch.net(),
+                            &net,
                             last_tv,
                         );
                     }
@@ -982,7 +1086,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                     &context.device().inner,
                     ir,
                     &merged_waves,
-                    cross_scratch.net(),
+                    &net,
                     last_tv,
                 );
             }
@@ -996,10 +1100,26 @@ pub(crate) fn submit_resolved_ir_and_retain(
         let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
         let can_retain = partition_waves_can_retain(ir, &waves);
         let has_render = partition_waves_have_render(ir, &waves);
-        let sync = {
-            let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-            cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &waves)
+        let cached_net = {
+            let entry = cache.as_ref().unwrap();
+            take_partition_cached_net(entry, part_idx, part_fp)
         };
+        let net_was_cached = cached_net.is_some();
+        let (sync, net) = {
+            let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
+            cross_sync_for_ir_owned(
+                &mut cross_scratch,
+                submit_state,
+                ir,
+                ctx,
+                &waves,
+                cached_net,
+            )
+        };
+        if !net_was_cached {
+            store_partition_net_cache(cache.as_mut().unwrap(), part_idx, net_was_cached, net.clone());
+        }
+        let sync = sync.as_ref();
 
         if !can_retain {
             // Non-retainable upload/copy partition: submit standalone every frame.
@@ -1017,7 +1137,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                     &context.device().inner,
                     ir,
                     &waves,
-                    cross_scratch.net(),
+                    &net,
                     last_tv,
                 );
             }
@@ -1038,7 +1158,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                         &context.device().inner,
                         ir,
                         &waves,
-                        cross_scratch.net(),
+                        &net,
                         last_tv,
                     );
                 }
@@ -1071,7 +1191,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 &context.device().inner,
                 ir,
                 &waves,
-                cross_scratch.net(),
+                &net,
                 last_tv,
             );
         }
@@ -1099,7 +1219,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     session: &dyn crate::backend::ContextSubmitSession,
     ir: &GraphIR,
     present_slots: &[ResolvedPresentSlot],
-    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     buffer_stamp_index: Option<&BufferStampIndex>,
     stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
     ir_clean: bool,
@@ -1202,17 +1322,27 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     let schedule = &cache.as_ref().unwrap().schedule;
                     schedule.waves[merged_range.clone()].to_vec()
                 };
-                let sync = {
+                let cached_net = {
+                    let entry = cache.as_ref().unwrap();
+                    take_partition_cached_net(entry, part_idx, merged_fp)
+                };
+                let net_was_cached = cached_net.is_some();
+                let (sync, net) = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                    cross_sync_for_stamps(
+                    cross_sync_for_stamps_owned(
                         &mut cross_scratch,
                         resource_stamps,
                         buffer_stamp_index,
                         ir,
                         ctx,
                         &merged_waves,
+                        cached_net,
                     )
                 };
+                if !net_was_cached {
+                    store_partition_net_cache(cache.as_mut().unwrap(), part_idx, net_was_cached, net.clone());
+                }
+                let sync = sync.as_ref();
                 let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
                 if cached_key == Some(merged_fp) {
@@ -1227,7 +1357,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                             ctx,
                             ir,
                             &merged_waves,
-                            cross_scratch.net(),
+                            &net,
                             last_tv,
                         );
                         part_idx += 2;
@@ -1258,7 +1388,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     ctx,
                     ir,
                     &merged_waves,
-                    cross_scratch.net(),
+                    &net,
                     last_tv,
                 );
                 part_idx += 2;
@@ -1271,17 +1401,27 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let can_retain = partition_waves_can_retain(ir, &waves);
             let has_render = partition_waves_have_render(ir, &waves);
             let has_present = analysis::partition_waves_have_present(ir, &waves);
-            let sync = {
+            let cached_net = {
+                let entry = cache.as_ref().unwrap();
+                take_partition_cached_net(entry, part_idx, part_fp)
+            };
+            let net_was_cached = cached_net.is_some();
+            let (sync, net) = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_stamps(
+                cross_sync_for_stamps_owned(
                     &mut cross_scratch,
                     resource_stamps,
                     buffer_stamp_index,
                     ir,
                     ctx,
                     &waves,
+                    cached_net,
                 )
             };
+            if !net_was_cached {
+                store_partition_net_cache(cache.as_mut().unwrap(), part_idx, net_was_cached, net.clone());
+            }
+            let sync = sync.as_ref();
 
             if !can_retain {
                 let cache_entry = cache.as_ref().unwrap();
@@ -1306,7 +1446,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     ctx,
                     ir,
                     &waves,
-                    cross_scratch.net(),
+                    &net,
                     last_tv,
                 );
                 part_idx += 1;
@@ -1343,7 +1483,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         ctx,
                         ir,
                         &waves,
-                        cross_scratch.net(),
+                        &net,
                         last_tv,
                     );
                     part_idx += 1;
@@ -1380,7 +1520,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                             ctx,
                             ir,
                             &waves,
-                            cross_scratch.net(),
+                            &net,
                             last_tv,
                         );
                         part_idx += 1;
@@ -1421,7 +1561,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     ctx,
                     ir,
                     &waves,
-                    cross_scratch.net(),
+                    &net,
                     last_tv,
                 );
                 part_idx += 1;
@@ -1446,7 +1586,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                             ctx,
                             ir,
                             &waves,
-                            cross_scratch.net(),
+                            &net,
                             last_tv,
                         );
                     }
@@ -1477,7 +1617,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 ctx,
                 ir,
                 &waves,
-                cross_scratch.net(),
+                &net,
                 last_tv,
             );
             part_idx += 1;
@@ -1493,7 +1633,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 pub(crate) struct IrSubmitState {
     schedule_cache: Option<CompiledCacheEntry>,
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
-    resource_stamps: HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     buffer_stamp_index: BufferStampIndex,
 }
 
@@ -1502,7 +1642,7 @@ impl IrSubmitState {
         Self {
             schedule_cache: None,
             stamp_targets: Vec::new(),
-            resource_stamps: HashMap::new(),
+            resource_stamps: ResourceKeyMap::default(),
             buffer_stamp_index: BufferStampIndex::new(),
         }
     }
@@ -1539,7 +1679,7 @@ impl IrSubmitState {
         submit_device: &std::sync::Arc<crate::device::DeviceInner>,
         ir: &GraphIR,
         waves: &[Wave],
-        net: &HashMap<ResourceKey, NetAccess>,
+        net: &ResourceKeyMap<NetAccess>,
         tv: TimelineValue,
     ) {
         for stamp in self.resource_stamps.values() {
@@ -1601,7 +1741,7 @@ impl IrSubmitState {
         self.invalidate_retention();
     }
 
-    pub fn resource_stamps(&self) -> &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>> {
+    pub fn resource_stamps(&self) -> &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>> {
         &self.resource_stamps
     }
 
@@ -1677,6 +1817,8 @@ pub(crate) struct CompiledCacheEntry {
     /// A cache hit occurs when the current frame's `slot_key` is already in the set
     /// and the backend can resubmit the retained command buffer.
     partition_slot_keys: Vec<Option<std::collections::HashSet<u64>>>,
+    /// Cached per-partition net access for retained resubmit (skips wave walk when fp matches).
+    partition_net_cache: Vec<Option<ResourceKeyMap<NetAccess>>>,
 }
 
 /// Per-page cache of a fully-lowered [`GraphIR`].
@@ -2642,6 +2784,7 @@ impl TaskGraph {
                 partition_retention_keys: Vec::new(),
                 partition_last_tv: Vec::new(),
                 partition_slot_keys: Vec::new(),
+                partition_net_cache: Vec::new(),
                 partitioned_graph_commands: Vec::new(),
             });
         }
@@ -2704,6 +2847,7 @@ impl TaskGraph {
             partition_retention_keys: Vec::new(),
             partition_last_tv: Vec::new(),
             partition_slot_keys: Vec::new(),
+            partition_net_cache: Vec::new(),
             partitioned_graph_commands: Vec::new(),
         });
         cache.as_ref().unwrap().commands.as_deref().unwrap()
@@ -2740,6 +2884,7 @@ impl TaskGraph {
                 partition_retention_keys: Vec::new(),
                 partition_last_tv: Vec::new(),
                 partition_slot_keys: Vec::new(),
+                partition_net_cache: Vec::new(),
                 partitioned_graph_commands: Vec::new(),
             });
         }
@@ -4701,7 +4846,7 @@ mod tests {
         let tv = graph.submit(&ctx).unwrap();
 
         let stamped = pool.transfer_out_buffer(&ctx, parcel);
-        assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&tv));
+        assert_eq!(stamped.ready_after.get(ctx.backend_handle()), Some(tv));
     }
 
     #[test]

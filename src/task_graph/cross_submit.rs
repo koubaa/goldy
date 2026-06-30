@@ -4,9 +4,10 @@
 //! scoped memory barriers and cross-context queue-waits from the runtime's ledger
 //! (spec §5): the standing per-parcel ownership record on [`crate::parcel::ParcelStamp`].
 
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::backend::{BufferHandle, ContextHandle, SubmitSync, TextureHandle};
 use crate::parcel::{InteractionEdge, InteractionRole, ParcelStamp};
@@ -72,6 +73,9 @@ impl ResourceKey {
     }
 }
 
+/// FxHash-backed map keyed by [`ResourceKey`] (hot-path lookups use integer handles).
+pub type ResourceKeyMap<V> = FxHashMap<ResourceKey, V>;
+
 /// True when two ledger keys refer to overlapping GPU memory for hazard analysis.
 pub(crate) fn resource_keys_alias(a: ResourceKey, b: ResourceKey) -> bool {
     use crate::task_graph::analysis::ranges_overlap;
@@ -104,6 +108,7 @@ fn merge_aliased_ledger_entries(ledger: &LedgerSnapshot, key: ResourceKey) -> Op
     if ledger.contains_key(&key) {
         return None;
     }
+    let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.alias_merge.scan");
     let mut merged: Option<LedgerEntry> = None;
     for (ledger_key, entry) in ledger {
         if !resource_keys_alias(*ledger_key, key) {
@@ -112,22 +117,21 @@ fn merge_aliased_ledger_entries(ledger: &LedgerSnapshot, key: ResourceKey) -> Op
         match &mut merged {
             None => merged = Some(entry.clone()),
             Some(m) => {
-                for (&ctx, &tv) in &entry.sync.last_write {
+                for (ctx, tv) in entry.sync.last_write.iter() {
                     let kinds = entry
                         .sync
                         .last_write_kinds
-                        .get(&ctx)
-                        .copied()
+                        .get(ctx)
                         .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER);
                     m.sync.record_write(ctx, tv, kinds);
                 }
-                for (&ctx, &tv) in &entry.sync.last_reads {
+                for (ctx, tv) in entry.sync.last_reads.iter() {
                     m.sync.record_read(ctx, tv);
                 }
-                for (&ctx, &tv) in &entry.sync.war_read_epochs {
+                for (ctx, tv) in entry.sync.war_read_epochs.iter() {
                     m.sync.mark_war_read(ctx, tv);
                 }
-                for (&ctx, &tv) in &entry.sync.fifo_ordered_reads {
+                for (ctx, tv) in entry.sync.fifo_ordered_reads.iter() {
                     m.sync.mark_fifo_ordered_read(ctx, tv);
                 }
             }
@@ -136,20 +140,109 @@ fn merge_aliased_ledger_entries(ledger: &LedgerSnapshot, key: ResourceKey) -> Op
     merged
 }
 
+fn merge_context_wait(waits: &mut Vec<(ContextHandle, u64)>, ctx: ContextHandle, tv: u64) {
+    for entry in waits.iter_mut() {
+        if entry.0 == ctx {
+            entry.1 = entry.1.max(tv);
+            return;
+        }
+    }
+    waits.push((ctx, tv));
+}
+
+fn sync_has_foreign_context(sync: &ResourceSync, submitting_ctx: ContextHandle) -> bool {
+    sync.last_write
+        .iter()
+        .any(|(ctx, _)| ctx != submitting_ctx)
+        || sync.last_reads.iter().any(|(ctx, _)| ctx != submitting_ctx)
+}
+
+fn apply_cross_submit_hazards_single_context(
+    key: ResourceKey,
+    access: NetAccess,
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    prologue: &mut BarrierSet,
+    context_waits: &mut Vec<(ContextHandle, u64)>,
+) {
+    if access.reads {
+        if sync.last_write.get(submitting_ctx).is_some() {
+            let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                sync.last_write_kinds
+                    .get(submitting_ctx)
+                    .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+            );
+            let usage = BarrierUsage {
+                src: {
+                    let mut s = SlotUsageSet::default();
+                    s.merge(NodeAccess::Write, prev_write_kinds);
+                    s
+                },
+                dst: {
+                    let mut d = SlotUsageSet::default();
+                    d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                    d
+                },
+            };
+            merge_barrier(prologue, key, usage);
+        }
+    }
+
+    if access.writes {
+        if sync.last_write.get(submitting_ctx).is_some() {
+            let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                sync.last_write_kinds
+                    .get(submitting_ctx)
+                    .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+            );
+            let usage = BarrierUsage {
+                src: {
+                    let mut s = SlotUsageSet::default();
+                    s.merge(NodeAccess::Write, prev_write_kinds);
+                    s
+                },
+                dst: {
+                    let mut d = SlotUsageSet::default();
+                    d.merge(NodeAccess::Write, access.write_kinds);
+                    d
+                },
+            };
+            merge_barrier(prologue, key, usage);
+        }
+        if let Some(read_tv) = sync.last_reads.get(submitting_ctx) {
+            if sync.war_read_epochs.get(submitting_ctx).unwrap_or(0) >= read_tv {
+                merge_context_wait(context_waits, submitting_ctx, read_tv);
+            }
+        }
+    }
+}
+
 fn apply_cross_submit_hazards_for_resource(
     key: ResourceKey,
     access: NetAccess,
     sync: &ResourceSync,
     submitting_ctx: ContextHandle,
     prologue: &mut BarrierSet,
-    wait_map: &mut HashMap<ContextHandle, u64>,
+    context_waits: &mut Vec<(ContextHandle, u64)>,
 ) {
+    if !sync_has_foreign_context(sync, submitting_ctx) {
+        apply_cross_submit_hazards_single_context(
+            key,
+            access,
+            sync,
+            submitting_ctx,
+            prologue,
+            context_waits,
+        );
+        return;
+    }
+
     // RAW: this reads -> hazard vs last_write
     if access.reads {
-        for (&ctx, &tv) in &sync.last_write {
+        for (ctx, tv) in sync.last_write.iter() {
             if ctx == submitting_ctx {
                 let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                    *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                    sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
                 );
                 let usage = BarrierUsage {
                     src: {
@@ -165,17 +258,17 @@ fn apply_cross_submit_hazards_for_resource(
                 };
                 merge_barrier(prologue, key, usage);
             } else {
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                merge_context_wait(context_waits, ctx, tv);
             }
         }
     }
 
     // WAW + WAR: this writes -> hazard vs last_write and last_reads
     if access.writes {
-        for (&ctx, &tv) in &sync.last_write {
+        for (ctx, tv) in sync.last_write.iter() {
             if ctx == submitting_ctx {
                 let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                    *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                    sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
                 );
                 let usage = BarrierUsage {
                     src: {
@@ -191,10 +284,10 @@ fn apply_cross_submit_hazards_for_resource(
                 };
                 merge_barrier(prologue, key, usage);
             } else {
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                merge_context_wait(context_waits, ctx, tv);
             }
         }
-        for (&ctx, &tv) in &sync.last_reads {
+        for (ctx, tv) in sync.last_reads.iter() {
             // Cross-context WAR still needs an explicit queue wait.
             //
             // Same-context WAR is skipped when the read hazard is covered by FIFO
@@ -203,9 +296,9 @@ fn apply_cross_submit_hazards_for_resource(
             // (`war_read_epochs`) still emit a live wait because present GPU work may
             // be enqueued after the next frame's compute partitions.
             if ctx != submitting_ctx {
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-            } else if sync.war_read_epochs.get(&ctx).copied().unwrap_or(0) >= tv {
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                merge_context_wait(context_waits, ctx, tv);
+            } else if sync.war_read_epochs.get(ctx).unwrap_or(0) >= tv {
+                merge_context_wait(context_waits, ctx, tv);
             }
         }
     }
@@ -218,7 +311,7 @@ pub struct LedgerEntry {
 }
 
 /// Per-resource ledger keyed by [`ResourceKey`], populated from parcel stamps.
-pub type LedgerSnapshot = HashMap<ResourceKey, LedgerEntry>;
+pub type LedgerSnapshot = ResourceKeyMap<LedgerEntry>;
 
 /// Result of cross-submission hazard analysis for one submit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -274,8 +367,8 @@ fn barrier_usage_kind_for_binding(
 }
 
 /// Union each resource's access across all nodes in `ir`.
-pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> {
-    let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
+pub fn net_access_per_resource(ir: &GraphIR) -> ResourceKeyMap<NetAccess> {
+    let mut net = ResourceKeyMap::default();
     for node in &ir.nodes {
         absorb_node_net_access(&mut net, node);
     }
@@ -283,16 +376,22 @@ pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> 
 }
 
 /// Union each resource's access across the nodes in `waves` (one submit partition).
-pub fn net_access_for_waves_into(out: &mut HashMap<ResourceKey, NetAccess>, ir: &GraphIR, waves: &[super::ir::Wave]) {
-    out.clear();
-    for wave in waves {
-        for &node_idx in &wave.node_indices {
-            absorb_node_net_access(out, &ir.nodes[node_idx]);
+pub fn net_access_for_waves_into(out: &mut ResourceKeyMap<NetAccess>, ir: &GraphIR, waves: &[super::ir::Wave]) {
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.net_access.clear");
+        out.clear();
+    }
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.net_access.absorb");
+        for wave in waves {
+            for &node_idx in &wave.node_indices {
+                absorb_node_net_access(out, &ir.nodes[node_idx]);
+            }
         }
     }
 }
 
-fn absorb_node_net_access(net: &mut HashMap<ResourceKey, NetAccess>, node: &super::ir::TaskNode) {
+fn absorb_node_net_access(net: &mut ResourceKeyMap<NetAccess>, node: &super::ir::TaskNode) {
     if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
         return;
     }
@@ -361,41 +460,56 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
 pub fn compute_cross_submit_sync_into(
     prologue: &mut BarrierSet,
     waits: &mut Vec<Epoch>,
-    wait_map: &mut HashMap<ContextHandle, u64>,
-    net: &HashMap<ResourceKey, NetAccess>,
+    context_waits: &mut Vec<(ContextHandle, u64)>,
+    net: &ResourceKeyMap<NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: ContextHandle,
 ) {
-    prologue.buffers.clear();
-    prologue.textures.clear();
-    prologue.transient_ids.clear();
-    wait_map.clear();
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.reset");
+        prologue.buffers.clear();
+        prologue.textures.clear();
+        prologue.transient_ids.clear();
+        context_waits.clear();
+    }
 
-    for (key, access) in net {
-        if let Some(entry) = ledger.get(key) {
-            apply_cross_submit_hazards_for_resource(
-                *key,
-                *access,
-                &entry.sync,
-                submitting_ctx,
-                prologue,
-                wait_map,
-            );
-        } else if let Some(entry) = merge_aliased_ledger_entries(ledger, *key) {
-            apply_cross_submit_hazards_for_resource(
-                *key,
-                *access,
-                &entry.sync,
-                submitting_ctx,
-                prologue,
-                wait_map,
-            );
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards");
+        for (key, access) in net {
+            if let Some(entry) = ledger.get(key) {
+                let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards.exact");
+                apply_cross_submit_hazards_for_resource(
+                    *key,
+                    *access,
+                    &entry.sync,
+                    submitting_ctx,
+                    prologue,
+                    context_waits,
+                );
+            } else if let Some(entry) = merge_aliased_ledger_entries(ledger, *key) {
+                let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards.alias_merge");
+                apply_cross_submit_hazards_for_resource(
+                    *key,
+                    *access,
+                    &entry.sync,
+                    submitting_ctx,
+                    prologue,
+                    context_waits,
+                );
+            }
         }
     }
 
-    waits.clear();
-    waits.extend(wait_map.drain().map(|(context, value)| Epoch { context, value }));
-    waits.sort_by_key(|e| (e.context, e.value));
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.finalize");
+        waits.clear();
+        waits.extend(
+            context_waits
+                .iter()
+                .map(|&(context, value)| Epoch { context, value }),
+        );
+        waits.sort_by_key(|e| (e.context, e.value));
+    }
 }
 
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
@@ -404,16 +518,16 @@ pub fn compute_cross_submit_sync_into(
     reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
 )]
 pub fn compute_cross_submit_sync(
-    net: &HashMap<ResourceKey, NetAccess>,
+    net: &ResourceKeyMap<NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: crate::backend::ContextHandle,
 ) -> CrossSubmitSync {
     let mut result = CrossSubmitSync::default();
-    let mut wait_map = HashMap::new();
+    let mut context_waits = Vec::new();
     compute_cross_submit_sync_into(
         &mut result.prologue,
         &mut result.waits,
-        &mut wait_map,
+        &mut context_waits,
         net,
         ledger,
         submitting_ctx,
@@ -427,7 +541,8 @@ pub fn compute_cross_submit_sync(
 /// partition when building a ledger snapshot (buffer/range aliasing is parent-local).
 #[derive(Debug, Default)]
 pub(crate) struct BufferStampIndex {
-    by_parent: HashMap<BufferHandle, Vec<ResourceKey>>,
+    by_parent: FxHashMap<BufferHandle, Vec<ResourceKey>>,
+    any_aliased_buffers: bool,
 }
 
 impl BufferStampIndex {
@@ -445,7 +560,15 @@ impl BufferStampIndex {
         let bucket = self.by_parent.entry(parent).or_default();
         if !bucket.contains(&key) {
             bucket.push(key);
+            if bucket.len() > 1 {
+                self.any_aliased_buffers = true;
+            }
         }
+    }
+
+    /// True when at least one buffer parent has multiple registered keys (range aliasing).
+    pub fn any_aliased_buffers(&self) -> bool {
+        self.any_aliased_buffers
     }
 
     /// Candidate keys that might alias `query_key` (same buffer parent only).
@@ -460,9 +583,49 @@ impl BufferStampIndex {
 }
 
 fn insert_ledger_entry(out: &mut LedgerSnapshot, stamp_key: ResourceKey, stamp: &Arc<ParcelStamp>) {
-    out.entry(stamp_key).or_insert_with(|| LedgerEntry {
-        sync: stamp.sync.lock().unwrap().clone(),
+    out.entry(stamp_key).or_insert_with(|| {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.lock_clone");
+        LedgerEntry {
+            sync: stamp.sync.lock().clone(),
+        }
     });
+}
+
+fn collect_ledger_aliases_for_key(
+    out: &mut LedgerSnapshot,
+    query_key: ResourceKey,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
+    buffer_index: Option<&BufferStampIndex>,
+) {
+    if !matches!(
+        query_key,
+        ResourceKey::Buffer(_) | ResourceKey::BufferRange { .. }
+    ) {
+        return;
+    }
+    if let Some(candidates) = buffer_index.and_then(|index| index.candidates_for(query_key)) {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.alias_index");
+        for &stamp_key in candidates {
+            if stamp_key == query_key {
+                continue;
+            }
+            if resource_keys_alias(stamp_key, query_key) {
+                if let Some(stamp) = resource_stamps.get(&stamp_key) {
+                    insert_ledger_entry(out, stamp_key, stamp);
+                }
+            }
+        }
+        return;
+    }
+    let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.alias_scan");
+    for (&stamp_key, stamp) in resource_stamps {
+        if stamp_key == query_key {
+            continue;
+        }
+        if resource_keys_alias(stamp_key, query_key) {
+            insert_ledger_entry(out, stamp_key, stamp);
+        }
+    }
 }
 
 /// Build a ledger snapshot for cross-submit planning: one entry per [`NetAccess`] key
@@ -470,41 +633,28 @@ fn insert_ledger_entry(out: &mut LedgerSnapshot, stamp_key: ResourceKey, stamp: 
 /// a net key (partitioned buffer ranges).
 pub fn build_ledger_snapshot_for_net_into(
     out: &mut LedgerSnapshot,
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     buffer_index: Option<&BufferStampIndex>,
 ) {
-    out.clear();
-    for &query_key in net.keys() {
-        if let Some(stamp) = resource_stamps.get(&query_key) {
-            insert_ledger_entry(out, query_key, stamp);
-        }
-        // Textures and other non-buffer keys only alias on exact match (handled above).
-        if !matches!(
-            query_key,
-            ResourceKey::Buffer(_) | ResourceKey::BufferRange { .. }
-        ) {
-            continue;
-        }
-        if let Some(candidates) = buffer_index.and_then(|index| index.candidates_for(query_key)) {
-            for &stamp_key in candidates {
-                if stamp_key == query_key {
-                    continue;
-                }
-                if resource_keys_alias(stamp_key, query_key) {
-                    if let Some(stamp) = resource_stamps.get(&stamp_key) {
-                        insert_ledger_entry(out, stamp_key, stamp);
-                    }
-                }
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.clear");
+        out.clear();
+    }
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.exact");
+        for &query_key in net.keys() {
+            if let Some(stamp) = resource_stamps.get(&query_key) {
+                insert_ledger_entry(out, query_key, stamp);
             }
-            continue;
         }
-        for (&stamp_key, stamp) in resource_stamps {
-            if stamp_key == query_key {
-                continue;
-            }
-            if resource_keys_alias(stamp_key, query_key) {
-                insert_ledger_entry(out, stamp_key, stamp);
+    }
+    {
+        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.alias");
+        let skip_alias = buffer_index.is_some_and(|index| !index.any_aliased_buffers());
+        if !skip_alias {
+            for &query_key in net.keys() {
+                collect_ledger_aliases_for_key(out, query_key, resource_stamps, buffer_index);
             }
         }
     }
@@ -515,7 +665,7 @@ pub fn build_ledger_snapshot_into(out: &mut LedgerSnapshot, stamps: &[(ResourceK
     out.clear();
     for (key, stamp) in stamps {
         out.entry(*key).or_insert_with(|| LedgerEntry {
-            sync: stamp.sync.lock().unwrap().clone(),
+            sync: stamp.sync.lock().clone(),
         });
     }
 }
@@ -526,7 +676,7 @@ pub fn build_ledger_snapshot_into(out: &mut LedgerSnapshot, stamps: &[(ResourceK
     reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
 )]
 pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> LedgerSnapshot {
-    let mut ledger = LedgerSnapshot::new();
+    let mut ledger = LedgerSnapshot::default();
     build_ledger_snapshot_into(&mut ledger, stamps);
     ledger
 }
@@ -534,9 +684,9 @@ pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> Ledg
 /// Collect unique resource keys from IR that have registered stamps.
 pub fn resource_stamps_from_ir_into(
     out: &mut Vec<(ResourceKey, Arc<ParcelStamp>)>,
-    seen: &mut HashSet<ResourceKey>,
+    seen: &mut FxHashSet<ResourceKey>,
     ir: &GraphIR,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
 ) {
     out.clear();
     seen.clear();
@@ -562,9 +712,9 @@ pub fn resource_stamps_from_ir_into(
 )]
 pub fn resource_stamps_from_ir(
     ir: &GraphIR,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
 ) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     let mut out = Vec::new();
     resource_stamps_from_ir_into(&mut out, &mut seen, ir, resource_stamps);
     out
@@ -575,18 +725,22 @@ pub fn resource_stamps_from_ir(
 /// Retains container capacity across frames so steady-state cross-submit planning avoids
 /// repeated HashMap/Vec/HashSet allocations.
 pub(crate) struct CrossSubmitScratch {
-    net: HashMap<ResourceKey, NetAccess>,
+    net: ResourceKeyMap<NetAccess>,
     ledger: LedgerSnapshot,
-    wait_map: HashMap<ContextHandle, u64>,
+    context_waits: Vec<(ContextHandle, u64)>,
     submit_sync: SubmitSync,
 }
 
 impl Default for CrossSubmitScratch {
     fn default() -> Self {
+        let mut net = ResourceKeyMap::default();
+        net.reserve(32);
+        let mut ledger = ResourceKeyMap::default();
+        ledger.reserve(32);
         Self {
-            net: HashMap::with_capacity(32),
-            ledger: HashMap::with_capacity(32),
-            wait_map: HashMap::with_capacity(4),
+            net,
+            ledger,
+            context_waits: Vec::with_capacity(4),
             submit_sync: SubmitSync::default(),
         }
     }
@@ -602,31 +756,36 @@ impl CrossSubmitScratch {
     /// Stale (or empty) when `plan` was not called for the current partition — callers must
     /// only rely on this when they know the underlying `resource_stamps` is non-empty, since
     /// in that case a stale/empty `net` is harmless (lookups against an empty map are no-ops).
-    pub fn net(&self) -> &HashMap<ResourceKey, NetAccess> {
+    pub fn net(&self) -> &ResourceKeyMap<NetAccess> {
         &self.net
     }
 
     fn clear(&mut self) {
         self.net.clear();
         self.ledger.clear();
-        self.wait_map.clear();
+        self.context_waits.clear();
         self.submit_sync.prologue.buffers.clear();
         self.submit_sync.prologue.textures.clear();
         self.submit_sync.prologue.transient_ids.clear();
         self.submit_sync.waits.clear();
     }
 
-    /// Plan cross-submit sync for one partition, reusing internal buffers.
+    /// `cached_net` — when `Some`, skips the wave walk and reuses a prior partition net
+    /// snapshot (valid when the partition retention fingerprint is unchanged).
     pub fn plan(
         &mut self,
         ir: &GraphIR,
-        resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+        resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
         buffer_index: Option<&BufferStampIndex>,
         submitting_ctx: ContextHandle,
         waves: &[super::ir::Wave],
+        cached_net: Option<ResourceKeyMap<NetAccess>>,
     ) -> &SubmitSync {
         self.clear();
-        {
+        if let Some(net) = cached_net {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.net_access.cached");
+            self.net = net;
+        } else {
             let _tz = crate::tracy_zone!("goldy.cross_sync.net_access");
             net_access_for_waves_into(&mut self.net, ir, waves);
         }
@@ -639,7 +798,7 @@ impl CrossSubmitScratch {
             compute_cross_submit_sync_into(
                 &mut self.submit_sync.prologue,
                 &mut self.submit_sync.waits,
-                &mut self.wait_map,
+                &mut self.context_waits,
                 &self.net,
                 &self.ledger,
                 submitting_ctx,
@@ -647,12 +806,37 @@ impl CrossSubmitScratch {
         }
         &self.submit_sync
     }
+
+    /// Like [`Self::plan`], but returns owned copies so callers can store `net` without
+    /// holding a borrow of `submit_sync`.
+    pub fn plan_owned(
+        &mut self,
+        ir: &GraphIR,
+        resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
+        buffer_index: Option<&BufferStampIndex>,
+        submitting_ctx: ContextHandle,
+        waves: &[super::ir::Wave],
+        cached_net: Option<ResourceKeyMap<NetAccess>>,
+    ) -> Option<(SubmitSync, ResourceKeyMap<NetAccess>)> {
+        if resource_stamps.is_empty() {
+            return None;
+        }
+        self.plan(
+            ir,
+            resource_stamps,
+            buffer_index,
+            submitting_ctx,
+            waves,
+            cached_net,
+        );
+        Some((self.submit_sync.clone(), self.net.clone()))
+    }
 }
 
 /// After a successful submit, record this submission's access on each touched stamp.
 pub fn apply_resource_sync_updates(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     ctx: crate::backend::ContextHandle,
     tv: u64,
 ) {
@@ -660,7 +844,7 @@ pub fn apply_resource_sync_updates(
         let Some(stamp) = resource_stamps.get(key) else {
             continue;
         };
-        let mut sync = stamp.sync.lock().unwrap();
+        let mut sync = stamp.sync.lock();
         if access.writes {
             sync.record_write(ctx, tv, access.write_kinds.bits());
         }
@@ -673,7 +857,7 @@ pub fn apply_resource_sync_updates(
 /// Legacy post-submit stamp: mark merged epoch for every registered stamp target.
 pub fn apply_stamp_targets_legacy(targets: &[Arc<ParcelStamp>], ctx: crate::backend::ContextHandle, tv: u64) {
     for stamp in targets {
-        let mut sync = stamp.sync.lock().unwrap();
+        let mut sync = stamp.sync.lock();
         sync.record_any(ctx, tv);
     }
 }
@@ -736,8 +920,8 @@ type SelfTopologyEdge = (InteractionRole, u8, ContextHandle);
 pub(crate) fn clear_scheme_topology_registration(
     scheme_id: u64,
     prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
-) -> HashMap<ResourceKey, SelfTopologyEdge> {
-    let mut removed = HashMap::new();
+) -> ResourceKeyMap<SelfTopologyEdge> {
+    let mut removed = ResourceKeyMap::default();
     for (key, stamp) in prev_parcels {
         let mut edges = stamp.interaction_set.lock().unwrap();
         if let Some(idx) = edges.iter().position(|edge| edge.scheme_id == scheme_id) {
@@ -750,8 +934,8 @@ pub(crate) fn clear_scheme_topology_registration(
 }
 
 fn topology_parcels_from_net(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
 ) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
     net.keys()
         .filter_map(|key| resource_stamps.get(key).map(|stamp| (*key, Arc::clone(stamp))))
@@ -761,12 +945,12 @@ fn topology_parcels_from_net(
 /// Insert/update this scheme's edges for the current submission and dirty foreign schemes
 /// when a parcel's interaction set actually changes.
 pub(crate) fn update_scheme_topology(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     scheme_id: u64,
     ctx: ContextHandle,
     dirty_flag: &Arc<AtomicBool>,
-    previous_self_edges: &HashMap<ResourceKey, SelfTopologyEdge>,
+    previous_self_edges: &ResourceKeyMap<SelfTopologyEdge>,
 ) {
     let weak_dirty = Arc::downgrade(dirty_flag);
 
@@ -815,8 +999,8 @@ pub(crate) fn update_scheme_topology(
 
 /// Clear prior cross-scheme registration, register the current footprint, return the new set.
 pub(crate) fn reregister_scheme_topology(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
     scheme_id: u64,
     ctx: ContextHandle,
@@ -847,7 +1031,7 @@ mod tests {
     fn ledger_with_write(ctx: ContextHandle, key: ResourceKey, tv: u64) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, tv, WRITE_KINDS_COMPUTE_TRANSFER);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
         ledger
     }
@@ -855,7 +1039,7 @@ mod tests {
     fn ledger_with_write_kinds(ctx: ContextHandle, key: ResourceKey, tv: u64, kinds: UsageKindFlags) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, tv, kinds.bits());
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
         ledger
     }
@@ -863,7 +1047,7 @@ mod tests {
     fn ledger_with_read(ctx: ContextHandle, key: ResourceKey, tv: u64) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_read(ctx, tv);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
         ledger
     }
@@ -890,7 +1074,7 @@ mod tests {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, 44, WRITE_KINDS_COMPUTE_TRANSFER);
         sync.record_read(ctx, 45);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
 
         let mut ir = GraphIR::default();
@@ -974,16 +1158,15 @@ mod tests {
     /// later submission's barrier analysis can recover them.
     #[test]
     fn apply_updates_round_trips_write_kinds() {
-        use std::collections::HashMap;
         use std::sync::Arc;
 
         let ctx = 1;
         let key = buf_key(10);
         let stamp = empty_stamp();
-        let mut stamps: HashMap<ResourceKey, Arc<ParcelStamp>> = HashMap::new();
+        let mut stamps: ResourceKeyMap<Arc<ParcelStamp>> = ResourceKeyMap::default();
         stamps.insert(key, Arc::clone(&stamp));
 
-        let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
+        let mut net: ResourceKeyMap<NetAccess> = ResourceKeyMap::default();
         net.insert(
             key,
             NetAccess {
@@ -997,9 +1180,9 @@ mod tests {
 
         apply_resource_sync_updates(&net, &stamps, ctx, 9);
 
-        let sync = stamp.sync.lock().unwrap();
-        assert_eq!(sync.last_write.get(&ctx), Some(&9));
-        assert_eq!(sync.last_write_kinds.get(&ctx), Some(&UsageKindFlags::TRANSFER.bits()));
+        let sync = stamp.sync.lock();
+        assert_eq!(sync.last_write.get(ctx), Some(9));
+        assert_eq!(sync.last_write_kinds.get(ctx), Some(UsageKindFlags::TRANSFER.bits()));
     }
 
     #[test]
@@ -1037,7 +1220,7 @@ mod tests {
         let ctx = 1;
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
         let net = net_access_per_resource(&ir);
-        let sync = compute_cross_submit_sync(&net, &LedgerSnapshot::new(), ctx);
+        let sync = compute_cross_submit_sync(&net, &LedgerSnapshot::default(), ctx);
         assert!(sync.is_empty());
     }
 
@@ -1147,7 +1330,7 @@ mod tests {
         let mut sync_state = ResourceSync::default();
         sync_state.record_write(ctx_a, 3, WRITE_KINDS_COMPUTE_TRANSFER);
         sync_state.record_write(ctx_b, 7, WRITE_KINDS_COMPUTE_TRANSFER);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Read);
         let net = net_access_per_resource(&ir);
@@ -1200,7 +1383,7 @@ mod tests {
         let mut sync_state = ResourceSync::default();
         sync_state.record_write(ctx, 5, WRITE_KINDS_COMPUTE_TRANSFER);
         sync_state.record_read(ctx, 3);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = GraphIR {
             nodes: vec![TaskNode {
@@ -1265,7 +1448,7 @@ mod tests {
         sync_a.record_write(ctx_a, tv_a, kinds_a.bits());
         let mut sync_b = ResourceSync::default();
         sync_b.record_write(ctx_b, tv_b, kinds_b.bits());
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,
@@ -1403,7 +1586,7 @@ mod tests {
         let mut sync_c = ResourceSync::default();
         sync_c.record_write(ctx_c, 9, UsageKindFlags::TRANSFER.bits());
 
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,
@@ -1482,7 +1665,7 @@ mod tests {
         let mut sync_b = ResourceSync::default();
         sync_b.record_write(ctx, 9, UsageKindFlags::COMPUTE.bits());
 
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,
@@ -1537,7 +1720,7 @@ mod tests {
         };
         let unrelated = ResourceKey::Buffer(99);
 
-        let mut resource_stamps = HashMap::new();
+        let mut resource_stamps = ResourceKeyMap::default();
         resource_stamps.insert(whole, empty_stamp());
         resource_stamps.insert(range_a, empty_stamp());
         resource_stamps.insert(range_b, empty_stamp());
@@ -1553,7 +1736,7 @@ mod tests {
             offset: 16,
             len: 64,
         };
-        let mut net = HashMap::new();
+        let mut net = ResourceKeyMap::default();
         net.insert(
             query,
             NetAccess {
@@ -1562,10 +1745,10 @@ mod tests {
             },
         );
 
-        let mut with_index = LedgerSnapshot::new();
+        let mut with_index = LedgerSnapshot::default();
         build_ledger_snapshot_for_net_into(&mut with_index, &net, &resource_stamps, Some(&index));
 
-        let mut full_scan = LedgerSnapshot::new();
+        let mut full_scan = LedgerSnapshot::default();
         build_ledger_snapshot_for_net_into(&mut full_scan, &net, &resource_stamps, None);
 
         assert_eq!(with_index.len(), full_scan.len());

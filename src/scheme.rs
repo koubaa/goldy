@@ -17,7 +17,7 @@ use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
 use crate::swapchain_pool::PresentLease;
-use crate::task_graph::cross_submit::ResourceKey;
+use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
@@ -408,7 +408,7 @@ struct PresentGrantInfo {
 fn present_easement_source_stamps(
     ir: &GraphIR,
     lease_id: u32,
-    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Arc<crate::parcel::ParcelStamp>> {
     let dst = ResourceId::PresentLease(lease_id);
     let mut out = Vec::new();
@@ -446,7 +446,7 @@ fn present_easement_source_stamps(
 fn claim_present_easement_promises(
     ir: &GraphIR,
     present_grants: &[PresentGrantInfo],
-    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Mutex<Option<PromiseResolver>>> {
     let mut resolvers = Vec::with_capacity(present_grants.len());
     for grant in present_grants {
@@ -463,7 +463,7 @@ fn configure_present_easement_stamps(
     ir: &GraphIR,
     present_grants: &[PresentGrantInfo],
     present_fifo_tvs: &[Option<TimelineValue>],
-    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     ctx: crate::backend::ContextHandle,
     fifo_on_worker: bool,
 ) {
@@ -473,7 +473,7 @@ fn configure_present_easement_stamps(
             if let Some(present_tv) = present_fifo_tvs.get(idx).copied().flatten() {
                 for stamp in stamps {
                     stamp.set_legacy_present_easement(false);
-                    stamp.sync.lock().unwrap().mark_fifo_ordered_read(ctx, present_tv);
+                    stamp.sync.lock().mark_fifo_ordered_read(ctx, present_tv);
                 }
             }
         } else {
@@ -3992,7 +3992,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn submit_gate_folds_resolved_present_promise_into_foreign_reads() {
+    fn submit_gate_folds_resolved_present_promise_into_last_reads() {
         use crate::task_graph::cross_submit::ResourceKey;
 
         let device = mock_device();
@@ -4011,12 +4011,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let _sub2 = scheme.submit().expect("submit 2");
         let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        let sync = stamp.sync.lock().unwrap();
         assert!(
-            sync.foreign_reads.get(&ctx_handle).is_some(),
-            "submit gate must fold resolved present promise into foreign_reads"
+            stamp.sync.lock().last_reads.get(ctx_handle).is_some(),
+            "submit gate must fold resolved present promise into last_reads"
         );
-        drop(sync);
         assert_eq!(
             stamp.pending.lock().unwrap().len(),
             1,
@@ -4091,9 +4089,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     /// read on that cell so cross-frame WAR enforcement can key off `last_reads`.
     #[test]
     fn out_image_fine_write_and_present_copy_share_ledger_identity() {
-        use crate::task_graph::cross_submit::{compute_cross_submit_sync, net_access_per_resource, ResourceKey};
+        use crate::task_graph::cross_submit::{
+            compute_cross_submit_sync, net_access_per_resource, ResourceKey, ResourceKeyMap,
+        };
         use crate::task_graph::ResourceId;
-        use std::collections::HashMap;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -4157,16 +4156,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let sub1 = scheme.submit().expect("submit frame 1");
         let frame1_tv = sub1.timeline_value();
         {
-            let sync = registered.sync.lock().unwrap();
+            let sync = registered.sync.lock();
             let read_tv = sync
                 .last_reads
-                .get(&ctx_handle)
-                .copied()
+                .get(ctx_handle)
                 .expect("present-copy read must be on the ledger after submit");
             let write_tv = sync
                 .last_write
-                .get(&ctx_handle)
-                .copied()
+                .get(ctx_handle)
                 .expect("fine-write must be on the ledger after submit");
             assert!(
                 read_tv <= frame1_tv && write_tv <= frame1_tv,
@@ -4179,8 +4176,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         // Frame 2 submit gate folds the resolved present epoch into last_reads.
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
-            let sync = registered.sync.lock().unwrap();
-            *sync.last_reads.get(&ctx_handle).expect("last_reads after present fold")
+            let sync = registered.sync.lock();
+            sync.last_reads.get(ctx_handle).expect("last_reads after present fold")
         };
         assert!(
             present_read_tv >= frame1_tv,
@@ -4188,15 +4185,15 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
 
         // Loop-carried present WAR is covered by FIFO enqueue order; no live wait needed.
-        let mut write_only = HashMap::new();
+        let mut write_only = ResourceKeyMap::default();
         write_only.insert(
             key,
             net_access_per_resource(&scheme.ir)[&key], // reads+writes in IR; override for next-frame write admission
         );
         write_only.get_mut(&key).unwrap().reads = false;
         let ledger = {
-            let sync = registered.sync.lock().unwrap().clone();
-            let mut ledger = crate::task_graph::cross_submit::LedgerSnapshot::new();
+            let sync = registered.sync.lock().clone();
+            let mut ledger = crate::task_graph::cross_submit::LedgerSnapshot::default();
             ledger.insert(key, crate::task_graph::cross_submit::LedgerEntry { sync });
             ledger
         };
