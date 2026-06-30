@@ -77,8 +77,7 @@ impl ParcelStamp {
     }
 
     pub(crate) fn set_legacy_present_easement(&self, legacy: bool) {
-        self.legacy_present_easement
-            .store(legacy, Ordering::Release);
+        self.legacy_present_easement.store(legacy, Ordering::Release);
     }
 
     pub(crate) fn is_legacy_present_easement(&self) -> bool {

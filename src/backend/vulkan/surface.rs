@@ -1315,10 +1315,9 @@ pub(super) fn needs_swapchain_recreate(
     };
     let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
     let surface_loader = khr::surface::Instance::new(entry, instance);
-    let capabilities = unsafe {
-        surface_loader.get_physical_device_surface_capabilities(logical_device.physical_device, surface)
-    }
-    .context("Failed to get surface capabilities")?;
+    let capabilities =
+        unsafe { surface_loader.get_physical_device_surface_capabilities(logical_device.physical_device, surface) }
+            .context("Failed to get surface capabilities")?;
     let extent = vk::Extent2D {
         width: width.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
         height: height.clamp(
@@ -1330,12 +1329,10 @@ pub(super) fn needs_swapchain_recreate(
     let out_of_date = surface_state
         .swapchain_out_of_date
         .load(std::sync::atomic::Ordering::Acquire);
-    Ok(
-        surface_state.width != extent.width
-            || surface_state.height != extent.height
-            || surface_state.present_mode_dirty
-            || out_of_date,
-    )
+    Ok(surface_state.width != extent.width
+        || surface_state.height != extent.height
+        || surface_state.present_mode_dirty
+        || out_of_date)
 }
 
 /// Resize the surface's swapchain.

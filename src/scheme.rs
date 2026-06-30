@@ -39,6 +39,11 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+type SchedulePresentWorkerOutcome = (
+    Vec<Option<TimelineValue>>,
+    Vec<Mutex<Option<crate::backend::FrameToken>>>,
+);
+
 static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Per-grant staging buffer pool with scheme-lifetime ownership.
@@ -201,9 +206,7 @@ impl Drop for SubmissionData {
         for (idx, tv) in self.present_fifo_tvs.iter().enumerate() {
             if let (Some(tv), Some(token)) = (
                 tv,
-                self.present_fifo_tokens
-                    .get(idx)
-                    .and_then(|m| m.lock().unwrap().take()),
+                self.present_fifo_tokens.get(idx).and_then(|m| m.lock().unwrap().take()),
             ) {
                 pending_finishes.push((token, *tv));
             }
@@ -326,9 +329,7 @@ impl Grant for PresentGrant {
                 .present_fifo_tokens
                 .get(idx)
                 .ok_or_else(|| {
-                    GoldyError::Backend(anyhow::anyhow!(
-                        "present FIFO token missing for grant index {idx}"
-                    ))
+                    GoldyError::Backend(anyhow::anyhow!("present FIFO token missing for grant index {idx}"))
                 })?
                 .lock()
                 .unwrap()
@@ -491,7 +492,7 @@ fn complete_scheduled_present(
     let wait = {
         let b = backend.lock().unwrap();
         b.take_scheduled_present_blocking_wait(frame, present_tv)
-            .map_err(|e| GoldyError::Backend(e))?
+            .map_err(GoldyError::Backend)?
     };
     let Some(wait) = wait else {
         return Ok(());
@@ -1343,11 +1344,8 @@ impl Scheme {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
             backend.schedules_present_on_submit_worker()
         };
-        let (present_fifo_tvs, present_fifo_tokens) = Self::schedule_presents_on_worker_if_supported(
-            &self.ctx,
-            tv,
-            &mut surface_frames,
-        )?;
+        let (present_fifo_tvs, present_fifo_tokens) =
+            Self::schedule_presents_on_worker_if_supported(&self.ctx, tv, &mut surface_frames)?;
         configure_present_easement_stamps(
             &self.ir,
             &self.present_grants,
@@ -1370,15 +1368,12 @@ impl Scheme {
         ctx: &Context,
         compute_tv: TimelineValue,
         surface_frames: &mut [Mutex<Option<crate::surface::Frame>>],
-    ) -> Result<(Vec<Option<TimelineValue>>, Vec<Mutex<Option<crate::backend::FrameToken>>>), GoldyError> {
+    ) -> Result<SchedulePresentWorkerOutcome, GoldyError> {
         let _tz = crate::tracy_zone!("scheme.submit.schedule_present_on_worker");
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         if !backend.schedules_present_on_submit_worker() {
             let n = surface_frames.len();
-            return Ok((
-                vec![None; n],
-                (0..n).map(|_| Mutex::new(None)).collect(),
-            ));
+            return Ok((vec![None; n], (0..n).map(|_| Mutex::new(None)).collect()));
         }
         let mut tvs = Vec::with_capacity(surface_frames.len());
         let mut tokens = Vec::with_capacity(surface_frames.len());
@@ -2449,11 +2444,11 @@ mod tests {
     use crate::device::Device;
     use crate::retained_pool::RetainedPool;
     use crate::shader::ShaderModule;
-    use crate::SwapchainPool;
     use crate::task_graph::NodeAccess;
     use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
     use crate::BufferKind;
+    use crate::SwapchainPool;
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -4236,9 +4231,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let sub1 = scheme.submit().expect("submit frame 1");
         let compute_tv = sub1.timeline_value();
-        let present_tv = sub1
-            .present_fifo_tv(0)
-            .expect("present scheduled on worker at submit");
+        let present_tv = sub1.present_fifo_tv(0).expect("present scheduled on worker at submit");
         assert!(
             present_tv >= compute_tv,
             "present epoch must cover the frame-1 submit (present={present_tv}, compute={compute_tv})"

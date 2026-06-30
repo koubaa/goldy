@@ -768,7 +768,7 @@ impl Dx12PresentPlan {
 
         {
             let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.prep_barriers");
-            let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
+            let _cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
             let mut prep_barriers = vec![
                 barriers::texture_barrier_full(
                     &self.scratch_res,
@@ -839,7 +839,11 @@ impl Dx12PresentPlan {
         Ok((vec![Some(cmd_list)], copy_tv))
     }
 
-    fn build_finish_state(&self, return_fence: u64, scratch_layout_updated: bool) -> crate::backend::PresentFinishState {
+    fn build_finish_state(
+        &self,
+        return_fence: u64,
+        scratch_layout_updated: bool,
+    ) -> crate::backend::PresentFinishState {
         let present_timeline = if scratch_layout_updated {
             return_fence
         } else {
@@ -1132,7 +1136,7 @@ fn flush_swapchain_returns_to_progress(
     let Some(sc_arc) = contexts.get(&ctx) else {
         return;
     };
-    let mut sc = sc_arc.lock().unwrap();
+    let sc = sc_arc.lock().unwrap();
     let Some(surf) = state.surfaces.get_mut(&surface_handle) else {
         return;
     };
@@ -1284,11 +1288,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
             let tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
-            super::pending_submit::enqueue_present_copy(
-                &self.logical_device,
-                vec![Some(cmd_list)],
-                tv,
-            )?;
+            super::pending_submit::enqueue_present_copy(&self.logical_device, vec![Some(cmd_list)], tv)?;
             self.logical_device.submission_worker.wait_submitted(tv)?;
             self.logical_device.submission_worker.check_error()?;
             return_fence = tv;
@@ -1343,7 +1343,12 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     // emit duplicate Resized events during window drag).
     if let Some(surface) = state.surfaces.get(&surface_handle) {
         if surface.width == width && surface.height == height {
-            tracing::trace!(surface = surface_handle, width, height, "dx12::surface::resize skipped (unchanged)");
+            tracing::trace!(
+                surface = surface_handle,
+                width,
+                height,
+                "dx12::surface::resize skipped (unchanged)"
+            );
             return Ok(());
         }
     }
@@ -1526,15 +1531,7 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     let goldy_format = dxgi_to_format(surface_format).unwrap_or(TextureFormat::Bgra8Unorm);
     let mut scratches = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
     for i in 0..MAX_FRAMES_IN_FLIGHT {
-        let h = ensure_compute_scratch_texture(
-            state,
-            surface_handle,
-            i,
-            width,
-            height,
-            goldy_format,
-            device_handle,
-        )?;
+        let h = ensure_compute_scratch_texture(state, surface_handle, i, width, height, goldy_format, device_handle)?;
         scratches.push(Some(h));
     }
 

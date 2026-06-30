@@ -17,8 +17,8 @@ mod compute;
 mod context;
 mod device;
 mod frame_table;
-mod pipeline;
 mod pending_submit;
+mod pipeline;
 mod present_split;
 mod render_commands;
 mod render_target;
@@ -59,9 +59,7 @@ static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 ///
 /// Must be called while holding [`VK_INSTANCE_LOCK`].
 fn vulkan_entry_locked() -> &'static ash::Entry {
-    VK_ENTRY.get_or_init(|| unsafe {
-        ash::Entry::load().expect("Failed to load Vulkan library")
-    })
+    VK_ENTRY.get_or_init(|| unsafe { ash::Entry::load().expect("Failed to load Vulkan library") })
 }
 
 /// Extract push-constant slot categories for a render pipeline from shader
@@ -189,8 +187,8 @@ impl VulkanBackend {
                 .enabled_extension_names(&extensions)
                 .enabled_layer_names(&enabled_layers);
 
-            let instance = unsafe { entry.create_instance(&create_info, None) }
-                .context("Failed to create Vulkan instance")?;
+            let instance =
+                unsafe { entry.create_instance(&create_info, None) }.context("Failed to create Vulkan instance")?;
 
             (entry.clone(), instance, enable_validation)
         };
@@ -376,11 +374,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                     sc_arc,
                     value,
                 );
-                pending_submit::vulkan_drain_pending_gpu_profiles_up_to(
-                    ld,
-                    &mut sc_arc.lock().unwrap(),
-                    value,
-                );
+                pending_submit::vulkan_drain_pending_gpu_profiles_up_to(ld, &mut sc_arc.lock().unwrap(), value);
             }
             let drain_to = value.min(retired);
             let drained = {
@@ -1461,11 +1455,7 @@ impl GpuBackend for VulkanBackend {
                             sc_arc,
                             value,
                         );
-                        pending_submit::vulkan_drain_pending_gpu_profiles_up_to(
-                            ld,
-                            &mut sc_arc.lock().unwrap(),
-                            value,
-                        );
+                        pending_submit::vulkan_drain_pending_gpu_profiles_up_to(ld, &mut sc_arc.lock().unwrap(), value);
                     }
                     let drained = ld.deletion_queue.lock().unwrap().drain_up_to(value.min(retired));
                     let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);

@@ -69,8 +69,7 @@ impl VulkanPresentPlan {
                 .device
                 .reset_command_buffer(self.copy_cb, vk::CommandBufferResetFlags::empty())
                 .context("Failed to reset copy command buffer")?;
-            let begin_info =
-                vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.logical_device
                 .device
                 .begin_command_buffer(self.copy_cb, &begin_info)
@@ -187,12 +186,15 @@ impl VulkanPresentPlan {
 
         // Pre-allocated on the render thread; enqueued on the FIFO worker after compute partitions.
         // GPU ordering vs prior compute relies on single-queue FIFO submission (no explicit Wait).
-        let copy_tv =
-            crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
+        let copy_tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
         Ok(copy_tv)
     }
 
-    fn build_finish_state(&self, return_fence: u64, scratch_layout_updated: bool) -> crate::backend::PresentFinishState {
+    fn build_finish_state(
+        &self,
+        return_fence: u64,
+        scratch_layout_updated: bool,
+    ) -> crate::backend::PresentFinishState {
         let present_timeline = if scratch_layout_updated {
             return_fence
         } else {
@@ -341,10 +343,7 @@ pub(super) fn schedule_present_on_submission_worker(
 }
 
 /// Drain worker-scheduled presents and wait on the graphics queue before swapchain recreation.
-pub(super) fn prepare_surface_for_resize(
-    state: &mut VulkanState,
-    surface_handle: SurfaceHandle,
-) -> Result<()> {
+pub(super) fn prepare_surface_for_resize(state: &mut VulkanState, surface_handle: SurfaceHandle) -> Result<()> {
     let device_handle = state
         .surfaces
         .get(&surface_handle)
@@ -390,9 +389,7 @@ pub(super) fn prepare_surface_for_resize(
                 .values(std::slice::from_ref(&finish.return_fence));
             if let Err(e) = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) } {
                 if e == vk::Result::ERROR_DEVICE_LOST {
-                    state
-                        .device_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    state.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
                     anyhow::bail!("device lost waiting for present before resize: {:?}", e);
                 }
                 tracing::warn!(?e, "wait_semaphores before resize failed; continuing");
@@ -407,12 +404,13 @@ pub(super) fn prepare_surface_for_resize(
 
     if let Err(e) = ld.synchronized_queue_wait_idle() {
         if e == vk::Result::ERROR_DEVICE_LOST {
-            state
-                .device_lost
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            state.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
             anyhow::bail!("device lost before resize: {:?}", e);
         }
-        tracing::warn!(?e, "queue_wait_idle before resize failed; continuing with swapchain recreation");
+        tracing::warn!(
+            ?e,
+            "queue_wait_idle before resize failed; continuing with swapchain recreation"
+        );
     }
     Ok(())
 }
@@ -597,7 +595,7 @@ fn flush_swapchain_returns_to_progress(
     let Some(sc_arc) = contexts.get(&ctx) else {
         return;
     };
-    let mut sc = sc_arc.lock().unwrap();
+    let sc = sc_arc.lock().unwrap();
     let Some(surf) = state.surfaces.get_mut(&surface_handle) else {
         return;
     };

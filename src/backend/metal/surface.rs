@@ -764,13 +764,7 @@ pub(super) fn schedule_present_on_submission_worker(
     let present_slot = frame.present_slot as usize;
     let ctx = frame.context;
 
-    let (
-        device_handle,
-        return_image,
-        pending_acquire_count,
-        drawable_ptr,
-        tex_handle,
-    ) = {
+    let (device_handle, return_image, pending_acquire_count, drawable_ptr, tex_handle) = {
         let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
         let device_handle = surface_state.device_handle;
         let return_image = surface_state.last_acquired_image_index;

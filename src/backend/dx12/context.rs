@@ -132,13 +132,12 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 
     // Cloned per-context handles (`ContextTimelineReader`, `ContextDeferredDeletionFlush`, …)
     // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
-    let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
-        .unwrap_or_else(|arc| {
-            panic!(
-                "context {ctx} Arc still has {} extra owners at destroy",
-                std::sync::Arc::strong_count(&arc).saturating_sub(1)
-            )
-        });
+    let sc_mutex = std::sync::Arc::try_unwrap(sc_arc).unwrap_or_else(|arc| {
+        panic!(
+            "context {ctx} Arc still has {} extra owners at destroy",
+            std::sync::Arc::strong_count(&arc).saturating_sub(1)
+        )
+    });
     let mut sc = sc_mutex.into_inner().expect("context Mutex poisoned");
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
@@ -207,10 +206,7 @@ pub(super) fn drain_pending_gpu_profiles_up_to(
         return;
     }
     let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
-    let (ready, pending): (Vec<_>, Vec<_>) = sc
-        .pending_gpu_profiles
-        .drain(..)
-        .partition(|(tv, _)| *tv <= completed);
+    let (ready, pending): (Vec<_>, Vec<_>) = sc.pending_gpu_profiles.drain(..).partition(|(tv, _)| *tv <= completed);
     sc.pending_gpu_profiles = pending;
     for (tv, prof) in ready {
         if let Err(e) = super::compute::dx12_readback_gpu_profile(&ld.command_queue, tv, prof) {

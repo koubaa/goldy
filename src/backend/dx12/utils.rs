@@ -189,12 +189,8 @@ pub(super) fn execute_command_lists_and_signal_device(
     unsafe {
         logical_device.command_queue.ExecuteCommandLists(command_lists);
     }
-    unsafe {
-        logical_device
-            .command_queue
-            .Signal(&logical_device.fence, fence_value)
-    }
-    .context("Failed to signal device fence")?;
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal device fence")?;
     Ok(fence_value)
 }
 
@@ -245,17 +241,6 @@ pub(super) fn execute_preallocated_context_submit(
     })
 }
 
-/// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
-/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
-pub(super) fn signal_preallocated_context(
-    logical_device: &LogicalDevice,
-    ctx_fence: &ID3D12Fence,
-    command_lists: &[Option<ID3D12CommandList>],
-    tv: u64,
-) -> Result<()> {
-    execute_preallocated_context_submit(logical_device, ctx_fence, command_lists, &[], tv)
-}
-
 /// Advance a context fence to `retire_tv` after the matching device-fence value has retired.
 ///
 /// Scheduled present work signals the device fence but not the per-context fence. Ledger
@@ -301,10 +286,8 @@ pub(super) fn signal_preallocated_device(
         unsafe {
             logical_device.command_queue.ExecuteCommandLists(command_lists);
         }
-        unsafe {
-            logical_device.command_queue.Signal(&logical_device.fence, tv)
-        }
-        .context("Failed to signal device fence")?;
+        unsafe { logical_device.command_queue.Signal(&logical_device.fence, tv) }
+            .context("Failed to signal device fence")?;
         Ok(())
     })
 }

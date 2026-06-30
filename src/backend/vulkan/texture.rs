@@ -994,7 +994,9 @@ pub(super) fn read_to_cpu(
         .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
         .context("Failed to submit command buffer")?;
 
-    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
+    logical_device
+        .synchronized_queue_wait_idle()
+        .context("Failed to wait for queue")?;
 
     unsafe {
         logical_device

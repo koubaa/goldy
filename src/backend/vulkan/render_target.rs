@@ -610,7 +610,9 @@ where
         .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
         .context("Failed to submit command buffer")?;
 
-    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
+    logical_device
+        .synchronized_queue_wait_idle()
+        .context("Failed to wait for queue")?;
 
     if let Some(rt) = render_targets.read().unwrap().entries.get(&target) {
         rt.has_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -774,7 +776,9 @@ pub(super) fn read_to_cpu(
         .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
         .context("Failed to submit command buffer")?;
 
-    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
+    logical_device
+        .synchronized_queue_wait_idle()
+        .context("Failed to wait for queue")?;
 
     // Read from staging buffer
     unsafe {

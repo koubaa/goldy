@@ -5,11 +5,11 @@ use super::super::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
 use super::barriers;
 use super::pso_cache;
 use super::shader;
-use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
+use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
-use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::backend::submission_worker::allocate_timeline_value;
+use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
 use anyhow::{Context, Result};
@@ -448,16 +448,6 @@ pub(super) fn dx12_readback_gpu_profile(
     Ok(())
 }
 
-pub(super) fn dx12_finish_gpu_profile(
-    ctx_fence: &ID3D12Fence,
-    command_queue: &ID3D12CommandQueue,
-    fence_value: u64,
-    profile: Dx12GpuProfileResources,
-) -> Result<()> {
-    super::utils::wait_for_fence(ctx_fence, fence_value)?;
-    dx12_readback_gpu_profile(command_queue, fence_value, profile)
-}
-
 /// Drain any pending debug-layer messages for this device into a single
 /// human-readable string. Returns `None` when the device has no
 /// `ID3D12InfoQueue` (debug layer disabled) or no messages are queued.
@@ -639,36 +629,10 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 // Shared submit helpers
 // ---------------------------------------------------------------------------
 
-/// GPU-side queue waits on producer-context fences before executing consumer work.
-fn queue_wait_for_epochs(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<()> {
-    let Some(s) = sync else {
-        return Ok(());
-    };
-    if s.waits.is_empty() {
-        return Ok(());
-    }
-    let ld = scope.ld();
-    for epoch in &s.waits {
-        let fences = scope.context_fences.read().unwrap();
-        let (_, producer_fence) = fences
-            .get(&epoch.context)
-            .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
-        unsafe {
-            ld.command_queue
-                .Wait(producer_fence, epoch.value)
-                .context("cross-submit GPU queue Wait")?;
-        }
-    }
-    Ok(())
-}
-
 /// Latest device-global seq retired on the scope's device.
 fn device_retired_for_scope(scope: &Dx12SubmitScope<'_>) -> u64 {
     let device = scope.device_handle;
-    let floor = scope
-        .ld()
-        .retired_floor
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let floor = scope.ld().retired_floor.load(std::sync::atomic::Ordering::Relaxed);
     let fences = scope.context_fences.read().unwrap();
     let max_ctx = fences
         .values()
@@ -707,9 +671,7 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
 ///
 /// Returns `(command_list, slot_idx)`.  The slot is taken from the
 /// pool when its fence has already signalled; otherwise a fresh one is created.
-fn acquire_allocator_slot(
-    scope: &Dx12SubmitScope<'_>,
-) -> Result<(ID3D12GraphicsCommandList, usize)> {
+fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
     let _device_handle = scope.device_handle;
     let logical_device = scope.ld();
 
@@ -867,11 +829,13 @@ fn record_gpu_command(
                         crate::backend::validate_bindless_slot_kinds(
                             raw_indices,
                             &pipeline.push_constant_slot_kinds,
-                            |idx| super::buffer::bindless_slot_kind_for_index(
-                                &scope.buffers().read().unwrap().entries,
-                                device_handle,
-                                idx,
-                            ),
+                            |idx| {
+                                super::buffer::bindless_slot_kind_for_index(
+                                    &scope.buffers().read().unwrap().entries,
+                                    device_handle,
+                                    idx,
+                                )
+                            },
                             &pipeline.shader_debug_name,
                         )
                     })?;
@@ -902,11 +866,13 @@ fn record_gpu_command(
                         crate::backend::validate_bindless_slot_kinds(
                             &indices,
                             &pipeline.push_constant_slot_kinds,
-                            |idx| super::buffer::bindless_slot_kind_for_index(
-                                &scope.buffers().read().unwrap().entries,
-                                device_handle,
-                                idx,
-                            ),
+                            |idx| {
+                                super::buffer::bindless_slot_kind_for_index(
+                                    &scope.buffers().read().unwrap().entries,
+                                    device_handle,
+                                    idx,
+                                )
+                            },
                             &pipeline.shader_debug_name,
                         )
                     })?;
@@ -1694,11 +1660,11 @@ fn execute_signal_and_finish(
     let logical_device = scope.ld();
     let fence_value = allocate_timeline_value(&logical_device.timeline_next);
 
-    logical_device.descriptors.lock().unwrap().record_slot_usage(
-        ctx,
-        fence_value,
-        used_slots.iter().copied(),
-    );
+    logical_device
+        .descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
 
     if !pending_deletions.is_empty() {
         let mut sc = scope.sc.lock().unwrap();
@@ -1761,11 +1727,7 @@ fn execute_signal_and_finish(
         let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
         let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
         let mut sc_guard = scope.sc.lock().unwrap();
-        super::context::drain_context_deletion_queue_up_to(
-            logical_device,
-            &mut sc_guard,
-            ctx_completed,
-        );
+        super::context::drain_context_deletion_queue_up_to(logical_device, &mut sc_guard, ctx_completed);
         super::context::drain_pending_gpu_profiles_up_to(logical_device, &mut sc_guard, ctx_completed);
     }
 
@@ -2030,8 +1992,7 @@ pub(super) fn submit_with_scope(
         }
     }
 
-    let used_slots =
-        collect_bindless_slots_from_gpu_commands(&commands, &scope.buffers().read().unwrap().entries);
+    let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &scope.buffers().read().unwrap().entries);
     let tv = execute_signal_and_finish(
         scope,
         &command_list,
@@ -2365,8 +2326,7 @@ pub(super) fn submit_graph_with_scope(
         }
     }
 
-    let used_slots =
-        collect_bindless_slots_from_graph_commands(commands, &scope.buffers().read().unwrap().entries);
+    let used_slots = collect_bindless_slots_from_graph_commands(commands, &scope.buffers().read().unwrap().entries);
     let result = execute_signal_and_finish(
         scope,
         &command_list,
@@ -2553,7 +2513,11 @@ pub(super) fn evict_retained_pinning_row(
                     .filter(|(_, g)| g.frame_table_row == Some(row))
                     .map(|(k, _)| *k)
                     .collect();
-                if keys.is_empty() { None } else { Some((*ctx_h, keys)) }
+                if keys.is_empty() {
+                    None
+                } else {
+                    Some((*ctx_h, keys))
+                }
             })
             .collect()
     }; // contexts_read dropped here — no read guard held during eviction

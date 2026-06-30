@@ -3,9 +3,9 @@
 use super::types::{SharedLogicalDevice, SharedMetalSubmissionContext, TimelineWaiter};
 use crate::backend::submission_worker::{allocate_timeline_value, PendingSubmit};
 use crate::timeline::TimelineValue;
+use ::metal as mtl;
 use anyhow::Result;
 use block::ConcreteBlock;
-use ::metal as mtl;
 use cocoa::base::id;
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::Ordering;
@@ -338,10 +338,7 @@ pub(super) fn enqueue_metal_timeline_signal(
     ld.submission_worker.check_error()?;
     ld.submission_worker.enqueue(
         signal_value,
-        Box::new(MetalTimelineSignalPendingSubmit {
-            signal_value,
-            waiter,
-        }),
+        Box::new(MetalTimelineSignalPendingSubmit { signal_value, waiter }),
     )
 }
 

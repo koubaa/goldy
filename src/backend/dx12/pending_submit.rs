@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandList, ID3D12Fence};
 
 pub(super) fn resolve_queue_waits(
-    ld: &LogicalDevice,
+    _ld: &LogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
     sync: Option<&SubmitSync>,
 ) -> Result<Vec<(ID3D12Fence, u64)>> {
@@ -119,8 +119,7 @@ impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
             let _tz = crate::tracy_zone!("dx12.present.swapchain_present");
             // SAFETY: flip-model `Present` with `DXGI_SWAP_EFFECT_FLIP_DISCARD` is valid from any
             // thread; the submission worker serializes queue access via `queue_lock`.
-            let (sync_interval, present_flags) =
-                super::surface::present_args(self.present_mode, self.allow_tearing);
+            let (sync_interval, present_flags) = super::surface::present_args(self.present_mode, self.allow_tearing);
             let hr = unsafe { self.swapchain.Present(sync_interval, present_flags) };
             if hr.is_err() {
                 anyhow::bail!("Present failed with HRESULT: {:?}", hr);
@@ -144,6 +143,7 @@ impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_scheduled_present(
     logical_device: &SharedLogicalDevice,
     command_lists: Vec<Option<ID3D12CommandList>>,

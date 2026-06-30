@@ -13,7 +13,6 @@ use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Fields from [`VulkanState`] needed by compute/render command recording and queue submit.
@@ -28,7 +27,6 @@ pub(crate) struct VulkanSubmitView<'a> {
     pub textures: &'a SharedTextureTable,
     pub compute_fence_pool: &'a SharedComputeFencePool,
     pub frame_tables: &'a SharedFrameTableMap,
-    pub device_lost: &'a Arc<AtomicBool>,
 }
 
 impl VulkanState {
@@ -44,7 +42,6 @@ impl VulkanState {
             textures: &self.textures,
             compute_fence_pool: &self.compute_fence_pool,
             frame_tables: &self.frame_tables,
-            device_lost: &self.device_lost,
         }
     }
 }
@@ -89,7 +86,6 @@ pub(crate) struct VulkanSubmitSession {
     textures: SharedTextureTable,
     compute_fence_pool: SharedComputeFencePool,
     frame_tables: SharedFrameTableMap,
-    device_lost: Arc<AtomicBool>,
 }
 
 impl VulkanSubmitSession {
@@ -131,7 +127,6 @@ impl VulkanSubmitSession {
             textures: Arc::clone(&state.textures),
             compute_fence_pool: Arc::clone(&state.compute_fence_pool),
             frame_tables: Arc::clone(&state.frame_tables),
-            device_lost: Arc::clone(&state.device_lost),
         }))
     }
 
@@ -151,7 +146,6 @@ impl VulkanSubmitSession {
                 textures: &self.textures,
                 compute_fence_pool: &self.compute_fence_pool,
                 frame_tables: &self.frame_tables,
-                device_lost: &self.device_lost,
             },
             frame_table: Arc::clone(&self.frame_table),
         }

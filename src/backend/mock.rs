@@ -91,7 +91,6 @@ struct MockDevice {
 }
 
 struct MockPendingSubmit {
-    ctx: ContextHandle,
     tv: u64,
     context_state: std::sync::Arc<std::sync::Mutex<MockContextState>>,
 }
@@ -312,25 +311,22 @@ impl MockBackend {
         }
     }
 
-    fn complete_context_seq(&mut self, ctx: ContextHandle, seq: u64) {
-        let mut state = self.context_state_mut(ctx);
-        state.completed = seq;
-        state.last_submitted_seq = seq;
-    }
-
     fn push_context_signal(&self, ctx: ContextHandle, signal: crate::signal::Signal) {
         self.context_state(ctx).signal_queue.push(signal);
     }
 
-    fn mock_pending_submit(ctx: ContextHandle, tv: u64, context_state: Arc<Mutex<MockContextState>>) -> Box<dyn crate::backend::submission_worker::PendingSubmit> {
-        Box::new(MockPendingSubmit {
-            ctx,
-            tv,
-            context_state,
-        })
+    fn mock_pending_submit(
+        _ctx: ContextHandle,
+        tv: u64,
+        context_state: Arc<Mutex<MockContextState>>,
+    ) -> Box<dyn crate::backend::submission_worker::PendingSubmit> {
+        Box::new(MockPendingSubmit { tv, context_state })
     }
 
-    fn mock_submit_worker(&self, ctx: ContextHandle) -> Result<Arc<crate::backend::submission_worker::SubmissionWorker>> {
+    fn mock_submit_worker(
+        &self,
+        ctx: ContextHandle,
+    ) -> Result<Arc<crate::backend::submission_worker::SubmissionWorker>> {
         let device = self.context_device(ctx);
         Ok(Arc::clone(
             &self
@@ -365,16 +361,6 @@ impl MockBackend {
         worker.execute_immediately(tv, Self::mock_pending_submit(ctx, tv, context_state))
     }
 
-    /// Block until the worker has executed a mock submit (uses condvar, not spin-wait).
-    fn await_mock_submit(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
-        let device = self.context_device(ctx);
-        let dev = self
-            .devices
-            .get(&device)
-            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
-        dev.submission_worker.wait_submitted(tv)
-    }
-
     fn mock_scheduled_horizon(&self, device: DeviceHandle) -> u64 {
         self.devices
             .get(&device)
@@ -406,7 +392,7 @@ impl MockBackend {
         self.default_surface_format = format;
     }
 
-    /// Control whether [`Scheme::submit`] schedules present on the submission worker.
+    /// Control whether [`crate::Scheme::submit`] schedules present on the submission worker.
     pub fn set_schedules_present_on_submit_worker(&mut self, enabled: bool) {
         self.schedules_present_on_submit_worker = enabled;
     }
@@ -536,8 +522,7 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
         if let Some(dev) = self.devices.get(&device) {
             dev.submission_worker.flush()?;
             let horizon = self.mock_scheduled_horizon(device);
-            dev.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
+            dev.submission_worker.wait_submitted_if_scheduled(value, horizon)?;
         }
         self.wait_until_count += 1;
         let cur = self.gpu_progress(ctx);
@@ -625,19 +610,6 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
         self.enqueue_mock_submit_deferred(frame.context, tv)?;
         Ok(tv)
-    }
-
-    fn finish_scheduled_present(
-        &mut self,
-        frame: FrameToken,
-        present_tv: crate::timeline::TimelineValue,
-    ) -> Result<()> {
-        let wait = self.take_scheduled_present_blocking_wait(frame, present_tv)?;
-        let Some(wait) = wait else {
-            return Ok(());
-        };
-        let outcome = wait.run()?;
-        self.apply_scheduled_present_bookkeeping(outcome)
     }
 
     fn take_scheduled_present_blocking_wait(
@@ -1762,8 +1734,7 @@ impl GpuBackend for MockBackend {
         if let Some(dev) = self.devices.get(&device) {
             dev.submission_worker.flush()?;
             let horizon = self.mock_scheduled_horizon(device);
-            dev.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
+            dev.submission_worker.wait_submitted_if_scheduled(value, horizon)?;
         }
         // On the mock, advance every context on this device to at least `value`
         // so that device_retired() >= value after the call.
@@ -2759,7 +2730,12 @@ mod tests {
             state.completed = 7;
             state.last_submitted_seq = 10;
         }
-        backend.devices.get(&device).unwrap().timeline_next.store(10, std::sync::atomic::Ordering::Relaxed);
+        backend
+            .devices
+            .get(&device)
+            .unwrap()
+            .timeline_next
+            .store(10, std::sync::atomic::Ordering::Relaxed);
 
         backend.destroy_context(ctx);
 

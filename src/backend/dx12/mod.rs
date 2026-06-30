@@ -59,7 +59,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Adapter ID for the WARP device from [`IDXGIFactory4::EnumWarpAdapter`].
+/// Adapter ID for the WARP device from `IDXGIFactory4::EnumWarpAdapter`.
 /// Used when `GOLDY_DX12_FORCE_WARP=1`.
 pub const WARP_ADAPTER_ID: u32 = u32::MAX;
 
@@ -137,9 +137,9 @@ pub fn is_debug_mode() -> bool {
 
 /// Get or create a DX12 backend for one [`crate::Instance`].
 ///
-/// Each instance owns independent [`Dx12State`] (resource tables, contexts, devices) so
+/// Each instance owns independent `Dx12State` (resource tables, contexts, devices) so
 /// lock-free submit sessions never share mutable backend state across concurrent clients.
-/// DXGI factory + adapter enumeration are process-wide via [`process_shared::process_shared`].
+/// DXGI factory + adapter enumeration are process-wide via `process_shared::process_shared`.
 pub fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>> {
     let backend = Dx12Backend::new()?;
     Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
@@ -431,11 +431,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         if let Some(ld) = self.state.devices.get(&device_handle) {
             if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                 let mut sc = sc_arc.lock().unwrap();
-                context::drain_context_deletion_queue_up_to(
-                    ld,
-                    &mut sc,
-                    completed,
-                );
+                context::drain_context_deletion_queue_up_to(ld, &mut sc, completed);
                 context::drain_pending_gpu_profiles_up_to(ld, &mut sc, completed);
             }
             ld.process_deletion_queue_up_to(value.min(retired));
@@ -959,8 +955,7 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         // Present copy/signal uses the device sync fence; per-context `progress` alone
         // can lag behind `return_fence` values stored in pending_swapchain_returns.
-        let swapchain_retire_progress =
-            progress.max(context::device_retired(&self.state, device_handle));
+        let swapchain_retire_progress = progress.max(context::device_retired(&self.state, device_handle));
         let signal_queue = self
             .state
             .contexts
@@ -1087,11 +1082,7 @@ impl GpuBackend for Dx12Backend {
             if let Some(dev) = self.state.devices.get(&device_handle) {
                 if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                     let mut sc = sc_arc.lock().unwrap();
-                    context::drain_context_deletion_queue_up_to(
-                        dev,
-                        &mut sc,
-                        completed,
-                    );
+                    context::drain_context_deletion_queue_up_to(dev, &mut sc, completed);
                     context::drain_pending_gpu_profiles_up_to(dev, &mut sc, completed);
                 }
                 dev.process_deletion_queue_up_to(value.min(retired));

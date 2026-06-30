@@ -19,18 +19,17 @@
 //! mutation (goldy#211), parcels bound as parcels.
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
-#[path = "common/submission.rs"]
-mod submission;
 #[path = "common/shared_device.rs"]
 mod shared_device;
+#[path = "common/submission.rs"]
+mod submission;
 #[path = "common/upload.rs"]
 mod upload;
 
 use goldy::{
     types::{BufferFlags, DispatchShape},
-    BufferKind, ComputePipeline, Context, Device, Grant, GrantBuffer, NodeAccess, Parcel,
-    ReadGrant, RetainedPool, Scheme, ShaderModule, Submission, TextureFlags, TextureFormat,
-    TextureKind,
+    BufferKind, ComputePipeline, Context, Device, Grant, GrantBuffer, NodeAccess, Parcel, ReadGrant, RetainedPool,
+    Scheme, ShaderModule, Submission, TextureFlags, TextureFormat, TextureKind,
 };
 use shared_device::{shared_device, test_lock};
 use submission::submission_context;

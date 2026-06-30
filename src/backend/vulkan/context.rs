@@ -104,7 +104,7 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         let sc = sc_arc.lock().unwrap();
         (sc.device, sc.last_submitted_seq, sc.timeline_semaphore)
     };
-    let (device, last_seq, timeline_semaphore) = drain;
+    let (device, last_seq, _timeline_semaphore) = drain;
     if let Some(ld) = state.devices.get(&device) {
         let _ = ld.submission_worker.flush();
         if last_seq > 0 {

@@ -77,15 +77,10 @@ pub(super) fn vulkan_drain_pending_gpu_profiles_up_to(
         return;
     }
     let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
-    let (ready, pending): (Vec<_>, Vec<_>) = sc
-        .pending_gpu_profiles
-        .drain(..)
-        .partition(|(tv, _)| *tv <= completed);
+    let (ready, pending): (Vec<_>, Vec<_>) = sc.pending_gpu_profiles.drain(..).partition(|(tv, _)| *tv <= completed);
     sc.pending_gpu_profiles = pending;
     for (tv, prof) in ready {
-        if let Err(e) =
-            unsafe { super::compute::vulkan_readback_gpu_profile(&ld.device, tv, prof.prof) }
-        {
+        if let Err(e) = unsafe { super::compute::vulkan_readback_gpu_profile(&ld.device, tv, prof.prof) } {
             tracing::warn!("GOLDY_GPU_PROFILE: Vulkan readback failed: {e}");
         }
         let _ = (prof.ctx, prof.cmd);
@@ -268,11 +263,9 @@ impl PendingSubmit for VulkanPresentCopyPendingSubmit {
             .signal_semaphore_infos(&signals);
         let _submit = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit2");
         unsafe {
-            self.ld.device.queue_submit2(
-                self.ld.queue,
-                std::slice::from_ref(&submit),
-                vk::Fence::null(),
-            )
+            self.ld
+                .device
+                .queue_submit2(self.ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
         }
         .context("Failed queue_submit2 on submission worker (present copy)")?;
         Ok(())
@@ -350,11 +343,9 @@ impl PendingSubmit for VulkanScheduledPresentPendingSubmit {
                 .signal_semaphore_infos(&signals);
             let _submit = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit2");
             unsafe {
-                self.ld.device.queue_submit2(
-                    self.ld.queue,
-                    std::slice::from_ref(&submit),
-                    vk::Fence::null(),
-                )
+                self.ld
+                    .device
+                    .queue_submit2(self.ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
             }
             .context("Failed queue_submit2 on submission worker (scheduled present copy)")?;
         } else {
@@ -364,11 +355,9 @@ impl PendingSubmit for VulkanScheduledPresentPendingSubmit {
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
             let submit = vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&sig_timeline));
             unsafe {
-                self.ld.device.queue_submit2(
-                    self.ld.queue,
-                    std::slice::from_ref(&submit),
-                    vk::Fence::null(),
-                )
+                self.ld
+                    .device
+                    .queue_submit2(self.ld.queue, std::slice::from_ref(&submit), vk::Fence::null())
             }
             .context("Failed queue_submit2 on submission worker (scheduled present signal)")?;
         }
@@ -420,6 +409,7 @@ impl PendingSubmit for VulkanScheduledPresentPendingSubmit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_scheduled_present(
     ld: &SharedLogicalDevice,
     instance: ash::Instance,

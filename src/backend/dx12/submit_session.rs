@@ -10,7 +10,7 @@ use super::types::{
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSamplerTable, SharedShaderTable,
     SharedSubmissionContext, SharedTextureTable,
 };
-use super::{ContextHandle, DeviceHandle, GraphCommand, GpuCommand, SubmitSync};
+use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
@@ -105,7 +105,10 @@ pub(crate) fn record_state_from_backend<'a>(
             .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
     );
     Ok(Dx12RecordState {
-        ld: state.devices.get(&device_handle).with_context(|| format!("Invalid device {device_handle}"))?,
+        ld: state
+            .devices
+            .get(&device_handle)
+            .with_context(|| format!("Invalid device {device_handle}"))?,
         devices: &state.devices,
         contexts: &state.contexts,
         frame_table,

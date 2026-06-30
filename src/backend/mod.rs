@@ -706,7 +706,8 @@ pub type ComputeCommand = GpuCommand;
 
 /// Blocking GPU timeline wait, cloned out of the backend under the global lock so
 /// [`TimelineBlockingWait::block`] can run without holding it.
-pub(crate) trait TimelineBlockingWait: Send {
+#[doc(hidden)]
+pub trait TimelineBlockingWait: Send {
     fn block(self: Box<Self>) -> Result<()>;
 
     /// Like [`Self::block`] but returns `Ok(false)` on timeout instead of blocking forever.
@@ -1008,15 +1009,13 @@ pub(crate) trait GpuBackendPresentSplit {
         Ok(None)
     }
 
-    fn apply_scheduled_present_bookkeeping(
-        &mut self,
-        outcome: ScheduledPresentWaitOutcome,
-    ) -> Result<()> {
+    fn apply_scheduled_present_bookkeeping(&mut self, outcome: ScheduledPresentWaitOutcome) -> Result<()> {
         let _ = outcome;
         Ok(())
     }
 
     /// Apply deferred present bookkeeping after a present job scheduled at submit time.
+    #[expect(dead_code, reason = "convenience wrapper; callers use split present hooks directly")]
     fn finish_scheduled_present(
         &mut self,
         frame: FrameToken,
