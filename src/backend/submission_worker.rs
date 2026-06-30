@@ -100,7 +100,7 @@ impl SubmissionWorker {
             Err(e) => {
                 advance_submitted_epoch(&self.submitted_epoch, &self.wait_notify, tv);
                 *self.latched_error.lock().unwrap() = Some(e);
-                self.wait_notify.1.notify_all();
+                notify_waiters(&self.wait_notify);
                 self.check_error()
             }
         }
@@ -111,7 +111,13 @@ impl SubmissionWorker {
         if tv == 0 {
             return Ok(());
         }
-        wait_for_submitted_epoch(&self.submitted_epoch, &self.wait_notify, &self.latched_error, tv, None)?;
+        wait_for_submitted_epoch(
+            &self.submitted_epoch,
+            &self.wait_notify,
+            &self.latched_error,
+            tv,
+            None,
+        )?;
         Ok(())
     }
 
@@ -189,6 +195,10 @@ fn advance_submitted_epoch(
     submitted_epoch.fetch_max(tv, Ordering::Release);
     // Hold the wait mutex while notifying so a waiter cannot pass the epoch
     // check and then miss the notify before condvar.wait (lost wakeup).
+    notify_waiters(wait_notify);
+}
+
+fn notify_waiters(wait_notify: &Arc<(Mutex<()>, Condvar)>) {
     let guard = wait_notify.0.lock().unwrap();
     wait_notify.1.notify_all();
     drop(guard);
@@ -235,7 +245,10 @@ fn wait_for_submitted_epoch(
                     let remaining = d.saturating_duration_since(Instant::now());
                     let (g, timeout) = wait_notify.1.wait_timeout(guard, remaining).unwrap();
                     guard = g;
-                    if timeout.timed_out() && submitted_epoch.load(Ordering::Acquire) < tv && Instant::now() >= d {
+                    if timeout.timed_out()
+                        && submitted_epoch.load(Ordering::Acquire) < tv
+                        && Instant::now() >= d
+                    {
                         drop(guard);
                         return Ok(false);
                     }
@@ -280,7 +293,7 @@ fn worker_loop(
                     Err(e) => {
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
                         *latched_error.lock().unwrap() = Some(e);
-                        wait_notify.1.notify_all();
+                        notify_waiters(&wait_notify);
                     }
                 }
             }

@@ -51,7 +51,6 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::types::{SharedLogicalDevice, SharedMetalSubmissionContext, TimelineWaiter};
@@ -426,6 +425,29 @@ pub(super) fn finish_acquire(
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
 
+/// Decrement the surface in-flight acquire counter without wrapping at zero.
+///
+/// `AtomicU32::fetch_sub` wraps to `u32::MAX` when the count is already zero — e.g.
+/// after [`resize`] resets the counter while a present command buffer is still
+/// in flight and its completion handler drains a stale [`super::types::PendingSwapchainReturn`].
+pub(super) fn release_pending_acquire_count(count: &std::sync::Arc<std::sync::atomic::AtomicU32>) {
+    use std::sync::atomic::Ordering;
+    let mut current = count.load(Ordering::Acquire);
+    loop {
+        if current == 0 {
+            tracing::warn!(
+                target: "goldy::metal::surface",
+                "pending_acquire_count decrement at zero (ignored)"
+            );
+            return;
+        }
+        match count.compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// Abandon an acquired frame without presenting.
 pub(super) fn cancel_frame(state: &mut MetalState, frame: crate::backend::FrameToken) -> Result<()> {
     let _tz = crate::tracy_zone!("mtl.surface.cancel_frame");
@@ -443,16 +465,7 @@ pub(super) fn cancel_frame(state: &mut MetalState, frame: crate::backend::FrameT
         ss.last_acquired_image_index = None;
         ss.frame_pending_gpu_commands.clear();
 
-        let prev = ss
-            .pending_acquire_count
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        if prev == 0 {
-            tracing::warn!(
-                surface,
-                present_slot,
-                "cancel_frame: pending_acquire_count was already 0"
-            );
-        }
+        release_pending_acquire_count(&ss.pending_acquire_count);
         (drawable, tex_handle)
     };
 
