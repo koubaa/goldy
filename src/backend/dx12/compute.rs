@@ -1704,7 +1704,7 @@ fn execute_signal_and_finish(
                     types::RetainedGraph {
                         command_list: cl,
                         slot_idx,
-                        used_slots,
+                        used_slots: std::sync::Arc::from(used_slots.into_boxed_slice()),
                         frame_table_staging,
                         frame_table_row,
                     },

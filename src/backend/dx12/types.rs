@@ -14,7 +14,9 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
+use crate::timeline::SmallContextMap;
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -497,7 +499,7 @@ pub(crate) struct RetainedGraph {
     /// Index into [`Dx12SubmissionContext::compute_allocator_pool`] for the backing allocator slot.
     pub slot_idx: usize,
     /// Bindless heap indices baked into this command list (for slot retirement on resubmit).
-    pub used_slots: Vec<DeferredSlot>,
+    pub used_slots: Arc<[DeferredSlot]>,
     /// Snapshot of staging at record time (prologue copy offsets are baked into the CB).
     pub frame_table_staging: Option<std::sync::Arc<[u32]>>,
     /// Row index baked into this CB's prologue copies; pinned until evict.
@@ -600,7 +602,7 @@ pub(crate) struct DescriptorRegistry {
     pub resource_registry: ResourceRegistry,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
     /// Updated at every submit. Entry removed when the slot is queued for reclamation.
-    pub slot_last_seen: HashMap<DeferredSlot, HashMap<super::ContextHandle, u64>>,
+    pub slot_last_seen: FxHashMap<DeferredSlot, SmallContextMap<u64>>,
     /// Slots waiting for referencing contexts to retire before returning to the free list.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
 }
@@ -609,7 +611,7 @@ impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
-            slot_last_seen: HashMap::new(),
+            slot_last_seen: FxHashMap::default(),
             pending_slot_reclamations: Vec::new(),
         }
     }
@@ -625,9 +627,7 @@ impl DescriptorRegistry {
             self.slot_last_seen
                 .entry(slot)
                 .or_default()
-                .entry(ctx)
-                .and_modify(|v| *v = (*v).max(seq))
-                .or_insert(seq);
+                .mark_max(ctx, seq);
         }
     }
 
@@ -636,7 +636,7 @@ impl DescriptorRegistry {
         let requirements: Vec<_> = self
             .slot_last_seen
             .remove(&slot)
-            .map(|m| m.into_iter().collect())
+            .map(|m| m.iter().collect())
             .unwrap_or_default();
         if requirements.is_empty() {
             self.resource_registry.free_deferred_slot(slot);
