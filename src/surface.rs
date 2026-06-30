@@ -231,6 +231,26 @@ impl Surface {
         backend.pending_acquire_count(self.handle)
     }
 
+    pub(crate) fn peek_oldest_pending_swapchain_return(&self) -> Option<crate::timeline::TimelineValue> {
+        let backend = self.backend.lock().unwrap();
+        backend.peek_oldest_pending_swapchain_return(self.handle)
+    }
+
+    pub(crate) fn blocking_wait_swapchain_return(
+        &self,
+        ctx: &crate::Context,
+        return_fence: crate::timeline::TimelineValue,
+    ) -> Result<()> {
+        let wait = {
+            let backend = self.backend.lock().unwrap();
+            backend.take_swapchain_return_blocking_wait(self.handle, ctx.backend_handle(), return_fence)?
+        };
+        if let Some(wait) = wait {
+            wait.block()?;
+        }
+        Ok(())
+    }
+
     /// Compile, auto-partition, and submit a graph that writes to the swapchain
     /// output, deferring surface acquisition until after early partitions are
     /// already executing on the GPU.

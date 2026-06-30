@@ -957,7 +957,8 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         // Present copy/signal uses the device sync fence; per-context `progress` alone
         // can lag behind `return_fence` values stored in pending_swapchain_returns.
-        let swapchain_retire_progress = progress.max(context::device_retired(&self.state, device_handle));
+        let swapchain_retire_progress =
+            progress.max(context::device_retired(&self.state, device_handle));
         let signal_queue = self
             .state
             .contexts
@@ -1003,6 +1004,41 @@ impl GpuBackend for Dx12Backend {
             .get(&surface_handle)
             .map(|s| s.pending_acquire_count)
             .unwrap_or(0)
+    }
+
+    fn peek_oldest_pending_swapchain_return(&self, surface: SurfaceHandle) -> Option<crate::timeline::TimelineValue> {
+        self.state
+            .surfaces
+            .get(&surface)?
+            .pending_swapchain_returns
+            .iter()
+            .map(|&(_, tv)| tv)
+            .min()
+    }
+
+    fn take_swapchain_return_blocking_wait(
+        &self,
+        surface: SurfaceHandle,
+        _ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        let device = self
+            .state
+            .surfaces
+            .get(&surface)
+            .context("Invalid surface handle")?
+            .device_handle;
+        let ld = self
+            .state
+            .devices
+            .get(&device)
+            .context("Surface's device is invalid")?
+            .clone();
+        let device_sync = unsafe { ld.fence.GetCompletedValue() };
+        if device_sync >= value {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(Dx12SwapchainReturnBlockingWait { ld, value })))
     }
 
     fn wait_until_timeout(
@@ -1345,6 +1381,26 @@ impl crate::backend::GpuBackendSubmitSession for Dx12Backend {
 struct Dx12TimelineBlockingWait {
     fence: windows::Win32::Graphics::Direct3D12::ID3D12Fence,
     value: crate::timeline::TimelineValue,
+}
+
+/// Blocks on the device sync fence for a flip-model present-copy return fence.
+struct Dx12SwapchainReturnBlockingWait {
+    ld: types::SharedLogicalDevice,
+    value: crate::timeline::TimelineValue,
+}
+
+impl crate::backend::TimelineBlockingWait for Dx12SwapchainReturnBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.dx12.swapchain_return.wait");
+        self.ld.submission_worker.flush()?;
+        let horizon = crate::backend::submission_worker::submission_horizon(&self.ld.timeline_next);
+        if self.value <= horizon {
+            self.ld.submission_worker.wait_submitted(self.value)?;
+        }
+        self.ld.submission_worker.check_error()?;
+        utils::wait_for_fence(&self.ld.fence, self.value)?;
+        Ok(())
+    }
 }
 
 struct Dx12ContextTimelineReader {

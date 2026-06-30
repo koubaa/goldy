@@ -1506,6 +1506,27 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
 
+    /// Oldest flip-model return fence still holding an acquire slot, if any.
+    fn peek_oldest_pending_swapchain_return(&self, surface: SurfaceHandle) -> Option<crate::timeline::TimelineValue> {
+        let _ = surface;
+        None
+    }
+
+    /// Blocking wait for a swapchain return fence without holding the backend lock.
+    ///
+    /// Return-fence values are stamped on the device sync fence (DX12 present copy) or the
+    /// context timeline (Vulkan). Backends that release acquire slots immediately (Metal, mock)
+    /// return `None` and callers fall back to polling.
+    fn take_swapchain_return_blocking_wait(
+        &self,
+        surface: SurfaceHandle,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn TimelineBlockingWait>>> {
+        let _ = (surface, ctx, value);
+        Ok(None)
+    }
+
     fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         if let Some(wait) = self.take_timeline_blocking_wait(ctx, value)? {
             wait.block()?;

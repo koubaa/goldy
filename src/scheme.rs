@@ -1371,6 +1371,7 @@ impl Scheme {
         compute_tv: TimelineValue,
         surface_frames: &mut [Mutex<Option<crate::surface::Frame>>],
     ) -> Result<(Vec<Option<TimelineValue>>, Vec<Mutex<Option<crate::backend::FrameToken>>>), GoldyError> {
+        let _tz = crate::tracy_zone!("scheme.submit.schedule_present_on_worker");
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         if !backend.schedules_present_on_submit_worker() {
             let n = surface_frames.len();
@@ -1382,6 +1383,7 @@ impl Scheme {
         let mut tvs = Vec::with_capacity(surface_frames.len());
         let mut tokens = Vec::with_capacity(surface_frames.len());
         for frame_mutex in surface_frames.iter() {
+            let _tz = crate::tracy_zone!("scheme.submit.schedule_present_on_worker.frame");
             let mut slot = frame_mutex.lock().unwrap();
             let mut frame = slot
                 .take()

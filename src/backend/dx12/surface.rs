@@ -757,67 +757,85 @@ impl Dx12PresentPlan {
             return Ok((Vec::new(), 0));
         }
 
-        let _tz = crate::tracy_zone!("dx12.present.copy_to_backbuffer");
-        unsafe { self.cmd_alloc.Reset() }.context("Failed to reset command allocator for present copy")?;
+        let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy");
+        {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.reset");
+            unsafe { self.cmd_alloc.Reset() }.context("Failed to reset command allocator for present copy")?;
+            let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
+            unsafe { cmd_gfx.Reset(&self.cmd_alloc, None) }.context("Failed to reset command list for present copy")?;
+            unsafe { cmd_gfx.DiscardResource(&self.backbuffer, None) };
+        }
+
+        {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.prep_barriers");
+            let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
+            let mut prep_barriers = vec![
+                barriers::texture_barrier_full(
+                    &self.scratch_res,
+                    D3D12_BARRIER_SYNC_ALL,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                ),
+                barriers::texture_barrier_full(
+                    &self.backbuffer,
+                    D3D12_BARRIER_SYNC_NONE,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_NO_ACCESS,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    D3D12_BARRIER_LAYOUT_UNDEFINED,
+                    D3D12_BARRIER_LAYOUT_COPY_DEST,
+                ),
+            ];
+            unsafe { barriers::barrier_textures(&self.cmd7, &prep_barriers) };
+            unsafe { barriers::drop_texture_barriers(&mut prep_barriers) };
+        }
+
+        {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.copy");
+            let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
+            unsafe { cmd_gfx.CopyResource(&self.backbuffer, &self.scratch_res) };
+        }
+
+        {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.post_barriers");
+            let mut post_barriers = vec![
+                barriers::texture_barrier_full(
+                    &self.backbuffer,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_NONE,
+                    D3D12_BARRIER_ACCESS_COPY_DEST,
+                    D3D12_BARRIER_ACCESS_NO_ACCESS,
+                    D3D12_BARRIER_LAYOUT_COPY_DEST,
+                    D3D12_BARRIER_LAYOUT_PRESENT,
+                ),
+                barriers::texture_barrier_full(
+                    &self.scratch_res,
+                    D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                    D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                ),
+            ];
+            unsafe { barriers::barrier_textures(&self.cmd7, &post_barriers) };
+            unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
+        }
+
         let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
-        unsafe { cmd_gfx.Reset(&self.cmd_alloc, None) }.context("Failed to reset command list for present copy")?;
-
-        unsafe { cmd_gfx.DiscardResource(&self.backbuffer, None) };
-
-        let mut prep_barriers = vec![
-            barriers::texture_barrier_full(
-                &self.scratch_res,
-                D3D12_BARRIER_SYNC_ALL,
-                D3D12_BARRIER_SYNC_COPY,
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
-                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-            ),
-            barriers::texture_barrier_full(
-                &self.backbuffer,
-                D3D12_BARRIER_SYNC_NONE,
-                D3D12_BARRIER_SYNC_COPY,
-                D3D12_BARRIER_ACCESS_NO_ACCESS,
-                D3D12_BARRIER_ACCESS_COPY_DEST,
-                D3D12_BARRIER_LAYOUT_UNDEFINED,
-                D3D12_BARRIER_LAYOUT_COPY_DEST,
-            ),
-        ];
-        unsafe { barriers::barrier_textures(&self.cmd7, &prep_barriers) };
-        unsafe { barriers::drop_texture_barriers(&mut prep_barriers) };
-
-        unsafe { cmd_gfx.CopyResource(&self.backbuffer, &self.scratch_res) };
-
-        let mut post_barriers = vec![
-            barriers::texture_barrier_full(
-                &self.backbuffer,
-                D3D12_BARRIER_SYNC_COPY,
-                D3D12_BARRIER_SYNC_NONE,
-                D3D12_BARRIER_ACCESS_COPY_DEST,
-                D3D12_BARRIER_ACCESS_NO_ACCESS,
-                D3D12_BARRIER_LAYOUT_COPY_DEST,
-                D3D12_BARRIER_LAYOUT_PRESENT,
-            ),
-            barriers::texture_barrier_full(
-                &self.scratch_res,
-                D3D12_BARRIER_SYNC_COPY,
-                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-                D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-                D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
-            ),
-        ];
-        unsafe { barriers::barrier_textures(&self.cmd7, &post_barriers) };
-        unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
-
-        unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
+        {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.close");
+            unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
+        }
 
         let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-        // Pre-allocated on the render thread; enqueued on the FIFO worker after compute partitions.
-        // GPU ordering vs prior compute relies on single-queue FIFO submission (no explicit Wait).
-        let copy_tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
+        let copy_tv = {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.allocate_tv");
+            crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next)
+        };
         Ok((vec![Some(cmd_list)], copy_tv))
     }
 
@@ -850,6 +868,7 @@ impl Dx12PresentPlan {
 }
 
 fn prepare_present_plan(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<Dx12PresentPlan> {
+    let _tz = crate::tracy_zone!("goldy.dx12.prepare_present_plan");
     let surface_handle = frame.surface;
     let image_index = frame.image as usize;
     let present_slot = frame.present_slot as usize;
@@ -913,6 +932,7 @@ pub(super) fn schedule_present_on_submission_worker(
     frame: crate::backend::FrameToken,
     _submit_tv: u64,
 ) -> Result<u64> {
+    let _tz = crate::tracy_zone!("goldy.dx12.schedule_present_on_submission_worker");
     let plan = prepare_present_plan(state, frame)?;
     let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
     let (command_lists, copy_tv) = plan.record_present_copy()?;
@@ -925,18 +945,21 @@ pub(super) fn schedule_present_on_submission_worker(
         .unwrap()
         .get(&frame.context)
         .map(|(_, fence)| fence.clone());
-    let present_tv = super::pending_submit::enqueue_scheduled_present(
-        &plan.logical_device,
-        command_lists,
-        copy_tv,
-        ctx_fence,
-        return_fence,
-        plan.swapchain,
-        plan.present_mode,
-        plan.allow_tearing,
-        finish,
-        pending_finishes,
-    )?;
+    let present_tv = {
+        let _tz = crate::tracy_zone!("goldy.dx12.present.enqueue_scheduled_present");
+        super::pending_submit::enqueue_scheduled_present(
+            &plan.logical_device,
+            command_lists,
+            copy_tv,
+            ctx_fence,
+            return_fence,
+            plan.swapchain,
+            plan.present_mode,
+            plan.allow_tearing,
+            finish,
+            pending_finishes,
+        )?
+    };
     Ok(present_tv)
 }
 

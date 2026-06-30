@@ -158,12 +158,29 @@ impl SwapchainPool {
     /// Block until an acquire slot would succeed (`pending_acquire_count` `<` [`depth`](Self::depth)).
     ///
     /// On flip-model backends (DX12/Vulkan) present ack alone is insufficient: the drawable
-    /// stays counted until its return fence retires. Poll `ctx` so
-    /// [`Context::poll_signals_and_service`] can process deferred returns.
+    /// stays counted until its return fence retires. Blocks on the device sync fence when
+    /// a pending return is registered, then polls `ctx` once to process deferred returns.
     pub fn wait_for_acquire_capacity(&self, ctx: &crate::Context) {
         while self.pending_acquire_count() >= self.depth() {
+            let return_fence = {
+                let surface = self.inner.surface.read().unwrap();
+                surface.peek_oldest_pending_swapchain_return()
+            };
+            if let Some(return_fence) = return_fence {
+                let _tz = crate::tracy_zone!("goldy.swapchain_pool.blocking_return_wait");
+                let surface = self.inner.surface.read().unwrap();
+                if let Err(e) = surface.blocking_wait_swapchain_return(ctx, return_fence) {
+                    tracing::warn!(
+                        target: "goldy::swapchain_pool",
+                        ?return_fence,
+                        error = %e,
+                        "blocking swapchain return wait failed; falling back to poll"
+                    );
+                }
+            } else {
+                std::thread::yield_now();
+            }
             ctx.poll_signals_and_service();
-            std::thread::yield_now();
         }
     }
 

@@ -1389,6 +1389,25 @@ impl GpuBackend for VulkanBackend {
             .unwrap_or(0)
     }
 
+    fn peek_oldest_pending_swapchain_return(&self, surface: SurfaceHandle) -> Option<crate::timeline::TimelineValue> {
+        self.state
+            .surfaces
+            .get(&surface)?
+            .pending_swapchain_returns
+            .iter()
+            .map(|&(_, tv)| tv)
+            .min()
+    }
+
+    fn take_swapchain_return_blocking_wait(
+        &self,
+        _surface: SurfaceHandle,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        self.take_timeline_blocking_wait(ctx, value)
+    }
+
     fn wait_until_timeout(
         &mut self,
         ctx: ContextHandle,
