@@ -368,6 +368,15 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
             compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
         }
         if let Some(ld) = self.state.devices.get(&device_handle) {
+            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
+                pending_submit::vulkan_drain_context_deletion_up_to(
+                    ld,
+                    &self.state.contexts,
+                    device_handle,
+                    sc_arc,
+                    value,
+                );
+            }
             let drain_to = value.min(retired);
             let drained = {
                 let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
@@ -1417,6 +1426,15 @@ impl GpuBackend for VulkanBackend {
                 let retired = context::device_retired(&self.state, device_handle);
                 compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
+                    if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
+                        pending_submit::vulkan_drain_context_deletion_up_to(
+                            ld,
+                            &self.state.contexts,
+                            device_handle,
+                            sc_arc,
+                            value,
+                        );
+                    }
                     let drained = ld.deletion_queue.lock().unwrap().drain_up_to(value.min(retired));
                     let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                     let mut registry = descriptors_arc.lock().unwrap();

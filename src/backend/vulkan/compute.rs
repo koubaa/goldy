@@ -522,6 +522,46 @@ pub(super) fn ctx_completed_value(
     }
 }
 
+fn enqueue_vulkan_compute_with_housekeeping(
+    scope: &super::submit_session::VulkanSubmitScope<'_>,
+    device_handle: super::DeviceHandle,
+    timeline_sem: ash::vk::Semaphore,
+    signal_value: crate::timeline::TimelineValue,
+    cmd: Option<ash::vk::CommandBuffer>,
+    sync: Option<&crate::backend::SubmitSync>,
+    staging_belt_finish: bool,
+    texture_staging_entries: Vec<super::staging::TextureStagingEntry>,
+    gpu_profile: Option<super::pending_submit::VulkanGpuProfileWork>,
+) -> Result<()> {
+    let view = &scope.view;
+    let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
+    let completed = scope.completed_timeline_value();
+    super::pending_submit::vulkan_drain_context_deletion_up_to(
+        ld,
+        view.contexts,
+        device_handle,
+        &scope.sc,
+        completed,
+    );
+    super::pending_submit::enqueue_vulkan_submit(
+        ld,
+        view.contexts,
+        sync,
+        timeline_sem,
+        signal_value,
+        cmd,
+        gpu_profile,
+        Arc::clone(view.device_lost),
+    )?;
+    super::pending_submit::vulkan_finish_staging_after_enqueue(
+        &scope.sc,
+        signal_value,
+        staging_belt_finish,
+        texture_staging_entries,
+    );
+    Ok(())
+}
+
 /// Reap fences that have already signaled from the compute fence pool.
 ///
 /// Without this, every `submit_graph` that doesn't have a paired `wait_fence`
@@ -759,11 +799,9 @@ pub(super) fn submit_with_scope(
         {
             scope.sc.lock().unwrap().last_submitted_seq = signal_value;
         }
-        super::pending_submit::enqueue_vulkan_submit(
-            ld,
-            view.contexts,
+        enqueue_vulkan_compute_with_housekeeping(
+            scope,
             device_handle,
-            &scope.sc,
             timeline_sem,
             signal_value,
             None,
@@ -771,7 +809,6 @@ pub(super) fn submit_with_scope(
             false,
             Vec::new(),
             None,
-            Arc::clone(view.device_lost),
         )?;
         return Ok(signal_value);
     }
@@ -1536,11 +1573,9 @@ pub(super) fn submit_with_scope(
         prof,
     });
 
-    super::pending_submit::enqueue_vulkan_submit(
-        ld,
-        view.contexts,
+    enqueue_vulkan_compute_with_housekeeping(
+        scope,
         device_handle,
-        &scope.sc,
         timeline_sem,
         signal_value,
         Some(cmd),
@@ -1548,7 +1583,6 @@ pub(super) fn submit_with_scope(
         true,
         texture_entries,
         gpu_profile_work,
-        Arc::clone(view.device_lost),
     )?;
 
     Ok(signal_value)
@@ -2564,11 +2598,9 @@ pub(super) fn submit_graph_with_scope(
         prof,
     });
 
-    super::pending_submit::enqueue_vulkan_submit(
-        ld,
-        view.contexts,
+    enqueue_vulkan_compute_with_housekeeping(
+        scope,
         device_handle,
-        &scope.sc,
         timeline_sem,
         signal_value,
         Some(cmd),
@@ -2576,7 +2608,6 @@ pub(super) fn submit_graph_with_scope(
         true,
         texture_entries,
         gpu_profile_work,
-        Arc::clone(view.device_lost),
     )?;
 
     // Mark rendered targets
@@ -2659,11 +2690,9 @@ pub(super) fn try_resubmit_retained_with_scope(
         sc.last_submitted_seq = signal_value;
     }
 
-    super::pending_submit::enqueue_vulkan_submit(
-        ld,
-        view.contexts,
+    enqueue_vulkan_compute_with_housekeeping(
+        scope,
         device_handle,
-        &scope.sc,
         timeline_sem,
         signal_value,
         Some(cmd),
@@ -2671,7 +2700,6 @@ pub(super) fn try_resubmit_retained_with_scope(
         false,
         Vec::new(),
         None,
-        Arc::clone(view.device_lost),
     )?;
 
     Ok(Some(signal_value))
