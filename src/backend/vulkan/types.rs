@@ -820,6 +820,8 @@ pub(crate) struct SubmissionContext {
     pub deletion_queue: DeletionQueue,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
     pub frame_table: SharedContextFrameTable,
+    /// GPU profile readbacks deferred until the context timeline retires each submit TV.
+    pub pending_gpu_profiles: Vec<(u64, super::pending_submit::VulkanGpuProfileWork)>,
 }
 
 /// Which timeline semaphore must reach a device-global submission value before that

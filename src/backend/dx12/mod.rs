@@ -506,6 +506,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                 let mut sc = sc_arc.lock().unwrap();
                 context::drain_context_deletion_queue_up_to(ld, &mut sc, drain_to);
+                context::drain_pending_gpu_profiles_up_to(ld, &mut sc, completed);
             }
             ld.process_deletion_queue_up_to(&self.state.context_fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
@@ -1096,6 +1097,7 @@ impl GpuBackend for Dx12Backend {
                 if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                     let mut sc = sc_arc.lock().unwrap();
                     context::drain_context_deletion_queue_up_to(dev, &mut sc, drain_to);
+                    context::drain_pending_gpu_profiles_up_to(dev, &mut sc, completed);
                 }
                 dev.process_deletion_queue_up_to(&self.state.context_fences);
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);

@@ -186,6 +186,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
             frame_table,
+            pending_gpu_profiles: Vec::new(),
         })),
     );
     Ok(id)
@@ -285,6 +286,12 @@ pub(super) fn teardown_submission_context(
         for (_, retained) in sc.retained_compute_cbs.drain() {
             registry.unpin_retained_slots(retained.used_slots);
         }
+        let profile_completed = if sc.last_submitted_seq > 0 {
+            sc.last_submitted_seq
+        } else {
+            completed
+        };
+        super::pending_submit::vulkan_drain_pending_gpu_profiles_up_to(ld, &mut sc, profile_completed);
     }
 
     unsafe {

@@ -432,14 +432,12 @@ fn dx12_decode_duration_ns(start: u64, end: u64, freq: u64) -> u64 {
     ((delta as f64 / freq as f64) * 1e9) as u64
 }
 
-pub(super) fn dx12_finish_gpu_profile(
-    ctx_fence: &ID3D12Fence,
+pub(super) fn dx12_readback_gpu_profile(
     command_queue: &ID3D12CommandQueue,
     fence_value: u64,
     profile: Dx12GpuProfileResources,
 ) -> Result<()> {
     use crate::gpu_profiler::{self, DispatchGpuNs};
-    super::utils::wait_for_fence(ctx_fence, fence_value)?;
 
     let freq = unsafe { command_queue.GetTimestampFrequency() }.context("GetTimestampFrequency")?;
 
@@ -470,6 +468,16 @@ pub(super) fn dx12_finish_gpu_profile(
     }
 
     Ok(())
+}
+
+pub(super) fn dx12_finish_gpu_profile(
+    ctx_fence: &ID3D12Fence,
+    command_queue: &ID3D12CommandQueue,
+    fence_value: u64,
+    profile: Dx12GpuProfileResources,
+) -> Result<()> {
+    super::utils::wait_for_fence(ctx_fence, fence_value)?;
+    dx12_readback_gpu_profile(command_queue, fence_value, profile)
 }
 
 /// Drain any pending debug-layer messages for this device into a single
@@ -1823,11 +1831,13 @@ fn execute_signal_and_finish(
     {
         let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
         let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+        let mut sc_guard = scope.sc.lock().unwrap();
         super::context::drain_context_deletion_queue_up_to(
             logical_device,
-            &mut scope.sc.lock().unwrap(),
+            &mut sc_guard,
             ctx_completed,
         );
+        super::context::drain_pending_gpu_profiles_up_to(logical_device, &mut sc_guard, ctx_completed);
     }
 
     let staged_texture_entries = staged_texture_uploads
@@ -1850,8 +1860,11 @@ fn execute_signal_and_finish(
         vec![Some(cmd_list)],
         sync,
         fence_value,
-        gpu_profile,
     )?;
+
+    if let Some(prof) = gpu_profile {
+        scope.sc.lock().unwrap().pending_gpu_profiles.push((fence_value, prof));
+    }
 
     {
         let _tz = crate::tracy_zone!("goldy.submit.dx12.staging_finish");

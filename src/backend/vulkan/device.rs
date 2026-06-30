@@ -592,6 +592,7 @@ fn create_device_owner_context(
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: types::DeletionQueue::new(),
             frame_table: super::frame_table::device_owner_frame_table_stub(),
+            pending_gpu_profiles: Vec::new(),
         })),
     );
     state.device_owner_handles.insert(device_handle, owner_id);

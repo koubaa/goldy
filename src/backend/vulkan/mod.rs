@@ -362,6 +362,11 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                     sc_arc,
                     value,
                 );
+                pending_submit::vulkan_drain_pending_gpu_profiles_up_to(
+                    ld,
+                    &mut sc_arc.lock().unwrap(),
+                    value,
+                );
             }
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
@@ -1351,6 +1356,11 @@ impl GpuBackend for VulkanBackend {
                             &self.state.contexts,
                             device_handle,
                             sc_arc,
+                            value,
+                        );
+                        pending_submit::vulkan_drain_pending_gpu_profiles_up_to(
+                            ld,
+                            &mut sc_arc.lock().unwrap(),
                             value,
                         );
                     }

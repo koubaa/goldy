@@ -117,6 +117,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             deletion_queue: super::types::DeletionQueue::new(),
             frame_table,
             reclamation_context: None,
+            pending_gpu_profiles: Vec::new(),
         })),
     );
     if super::api_log::enabled() {
@@ -371,6 +372,8 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
         }
     }
 
+    super::context::drain_pending_gpu_profiles_up_to(&ld, &mut sc, completed);
+
     super::frame_table::destroy_context_resources(&buffers, &ld, &sc.frame_table);
 
     if super::api_log::enabled() {
@@ -393,6 +396,28 @@ pub(super) fn drain_context_deletion_queue_up_to(
         // Per-context queue entries are already gated on this context's fence; no
         // cross-context requirement set is attached at enqueue time.
         super::types::destroy_pending_deletion(ld, &mut registry, resource, Vec::new());
+    }
+}
+
+/// Read back deferred GPU profile results once `completed` covers each submit TV.
+pub(super) fn drain_pending_gpu_profiles_up_to(
+    ld: &super::types::LogicalDevice,
+    sc: &mut super::types::Dx12SubmissionContext,
+    completed: u64,
+) {
+    if sc.pending_gpu_profiles.is_empty() {
+        return;
+    }
+    let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
+    let (ready, pending): (Vec<_>, Vec<_>) = sc
+        .pending_gpu_profiles
+        .drain(..)
+        .partition(|(tv, _)| *tv <= completed);
+    sc.pending_gpu_profiles = pending;
+    for (tv, prof) in ready {
+        if let Err(e) = super::compute::dx12_readback_gpu_profile(&ld.command_queue, tv, prof) {
+            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
+        }
     }
 }
 

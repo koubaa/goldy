@@ -592,6 +592,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
     pub frame_table: SharedContextFrameTable,
+    /// GPU profile readbacks deferred until the context timeline retires each submit TV.
+    pub pending_gpu_profiles: Vec<(u64, super::compute::Dx12GpuProfileResources)>,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.

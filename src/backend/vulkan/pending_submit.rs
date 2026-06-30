@@ -95,6 +95,31 @@ pub(super) fn vulkan_drain_context_deletion_up_to(
     vulkan_post_signal_cleanup(ld, contexts, device_handle, sc, completed);
 }
 
+/// Read back deferred GPU profile results once `completed` covers each submit TV.
+pub(super) fn vulkan_drain_pending_gpu_profiles_up_to(
+    ld: &types::LogicalDevice,
+    sc: &mut types::SubmissionContext,
+    completed: u64,
+) {
+    if sc.pending_gpu_profiles.is_empty() {
+        return;
+    }
+    let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
+    let (ready, pending): (Vec<_>, Vec<_>) = sc
+        .pending_gpu_profiles
+        .drain(..)
+        .partition(|(tv, _)| *tv <= completed);
+    sc.pending_gpu_profiles = pending;
+    for (tv, prof) in ready {
+        if let Err(e) =
+            unsafe { super::compute::vulkan_readback_gpu_profile(&ld.device, tv, prof.prof) }
+        {
+            tracing::warn!("GOLDY_GPU_PROFILE: Vulkan readback failed: {e}");
+        }
+        let _ = (prof.ctx, prof.cmd);
+    }
+}
+
 pub(super) fn vulkan_finish_staging_after_enqueue(
     sc: &SharedSubmissionContext,
     signal_value: TimelineValue,
@@ -125,8 +150,6 @@ pub(super) struct VulkanQueueSubmitPending {
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
     wait_semaphores: Vec<(vk::Semaphore, u64)>,
-    gpu_profile: Option<VulkanGpuProfileWork>,
-    device_lost: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(super) struct VulkanGpuProfileWork {
@@ -196,21 +219,6 @@ impl PendingSubmit for VulkanQueueSubmitPending {
             }
         };
         queue_submit_result.context("Failed queue_submit2 on submission worker")?;
-
-        if let Some(prof) = self.gpu_profile {
-            let _tz = crate::tracy_zone!("goldy.submit_worker.vk.gpu_profile_readback");
-            unsafe {
-                super::compute::vulkan_finish_gpu_profile_pending(
-                    prof.ctx,
-                    &self.ld.device,
-                    self.timeline_sem,
-                    self.signal_value,
-                    prof.cmd,
-                    prof.prof,
-                    &self.device_lost,
-                )?;
-            }
-        }
         Ok(())
     }
 }
@@ -226,8 +234,6 @@ pub(super) fn enqueue_vulkan_submit(
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
     sync: Option<&SubmitSync>,
-    gpu_profile: Option<VulkanGpuProfileWork>,
-    device_lost: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     ld.submission_worker.check_error()?;
     apply_cpu_epoch_waits(ld, contexts, sync)?;
@@ -243,8 +249,6 @@ pub(super) fn enqueue_vulkan_submit(
             signal_semaphore_infos,
             cmd,
             wait_semaphores,
-            gpu_profile,
-            device_lost,
         }),
     )
 }

@@ -1,6 +1,5 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
-use super::compute::Dx12GpuProfileResources;
 use super::types::{ContextFenceEntry, LogicalDevice, SharedLogicalDevice};
 use super::ContextHandle;
 use crate::backend::submission_worker::PendingSubmit;
@@ -38,7 +37,6 @@ pub(super) struct Dx12ComputePendingSubmit {
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
     fence_value: TimelineValue,
-    gpu_profile: Option<Dx12GpuProfileResources>,
 }
 
 impl PendingSubmit for Dx12ComputePendingSubmit {
@@ -52,16 +50,7 @@ impl PendingSubmit for Dx12ComputePendingSubmit {
             &self.command_lists,
             &self.queue_waits,
             self.fence_value,
-        )?;
-        if let Some(prof) = self.gpu_profile {
-            let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.gpu_profile_readback");
-            if let Err(e) =
-                super::compute::dx12_finish_gpu_profile(&self.ctx_fence, &self.queue, self.fence_value, prof)
-            {
-                tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
-            }
-        }
-        Ok(())
+        )
     }
 }
 
@@ -100,7 +89,6 @@ pub(super) fn enqueue_compute_submit(
     command_lists: Vec<Option<ID3D12CommandList>>,
     sync: Option<&SubmitSync>,
     fence_value: TimelineValue,
-    gpu_profile: Option<Dx12GpuProfileResources>,
 ) -> Result<()> {
     logical_device.submission_worker.check_error()?;
     let queue_waits = resolve_queue_waits(logical_device, context_fences, sync)?;
@@ -114,7 +102,6 @@ pub(super) fn enqueue_compute_submit(
             command_lists,
             queue_waits,
             fence_value,
-            gpu_profile,
         }),
     )
 }
