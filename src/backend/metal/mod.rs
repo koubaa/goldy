@@ -195,6 +195,29 @@ impl Drop for MetalBackend {
 }
 
 impl crate::backend::GpuBackendTimelineWait for MetalBackend {
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<crate::backend::submission_worker::SubmissionEpochWait>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device = self.context_device(ctx);
+        let Some(ld) = self.state.devices.get(&device) else {
+            return Ok(None);
+        };
+        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
+            std::sync::Arc::clone(&ld.submission_worker),
+            value,
+            horizon,
+        )))
+    }
+
     fn take_timeline_blocking_wait(
         &self,
         ctx: ContextHandle,
@@ -208,14 +231,6 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
 
         if self.gpu_progress(ctx) >= value {
             return Ok(None);
-        }
-
-        let device = self.context_device(ctx);
-        if let Some(ld) = self.state.devices.get(&device) {
-            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            ld.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
-            ld.submission_worker.check_error()?;
         }
 
         let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
@@ -316,6 +331,13 @@ impl crate::backend::GpuBackendPresentSplit for MetalBackend {
         outcome: crate::backend::ScheduledPresentWaitOutcome,
     ) -> Result<()> {
         surface::apply_scheduled_present_bookkeeping(&mut self.state, outcome)
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+impl MetalBackend {
+    pub(crate) fn test_register_stub_surface(&mut self, device: DeviceHandle) -> Result<SurfaceHandle> {
+        surface::register_stub_surface_for_test(&mut self.state, device)
     }
 }
 

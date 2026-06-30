@@ -358,6 +358,29 @@ fn slot_access_from_push_constant_slot_kinds(
 }
 
 impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<crate::backend::submission_worker::SubmissionEpochWait>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device_handle = context::context_device(&self.state, ctx);
+        let Some(ld) = self.state.devices.get(&device_handle) else {
+            return Ok(None);
+        };
+        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
+            std::sync::Arc::clone(&ld.submission_worker),
+            value,
+            horizon,
+        )))
+    }
+
     fn take_timeline_blocking_wait(
         &self,
         ctx: ContextHandle,
@@ -365,12 +388,6 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
     ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
         if self.gpu_progress(ctx) >= value {
             return Ok(None);
-        }
-        let device_handle = context::context_device(&self.state, ctx);
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            ld.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
         }
         let fence = self
             .state

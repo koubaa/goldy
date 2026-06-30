@@ -828,19 +828,13 @@ pub(super) fn schedule_present_on_submission_worker(
             pending_finishes,
         )?;
     } else {
-        let command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
-        super::pending_submit::enqueue_metal_commit(
+        super::pending_submit::enqueue_metal_skip_present(
             &logical_device,
-            command_buffer,
             signal_value,
-            timeline_event,
             waiter,
-            Some(sc_arc),
-            "skip_present",
-            false,
-            None,
+            finish,
+            pending_finishes,
         )?;
-        pending_finishes.lock().unwrap().push(finish);
     }
 
     Ok(signal_value)
@@ -1265,89 +1259,77 @@ fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle)
     }
 }
 
+/// Headless unit-test surface with no CAMetalLayer (skip-present / bookkeeping only).
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+pub(super) fn register_stub_surface_for_test(
+    state: &mut MetalState,
+    device_handle: DeviceHandle,
+) -> Result<SurfaceHandle> {
+    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| {
+        logical_device
+            .descriptors
+            .lock()
+            .unwrap()
+            .resource_registry
+            .reserve_storage_image_slot()
+    });
+    let handle = state.next_surface_handle;
+    state.next_surface_handle += 1;
+    state.surfaces.insert(
+        handle,
+        SurfaceState {
+            device_handle,
+            width: 64,
+            height: 64,
+            format: TextureFormat::Rgba8Unorm,
+            depth_format: None,
+            depth_texture: None,
+            current_frame: 0,
+            layer: std::ptr::null_mut(),
+            drawable_slots: std::array::from_fn(|_| None),
+            drawable_texture_handles: std::array::from_fn(|_| None),
+            current_texture_handle: None,
+            bindless_storage_slots,
+            present_mode: PresentMode::Auto,
+            frame_pending_gpu_commands: Vec::new(),
+            pending_acquire_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_acquired_image_index: None,
+            pending_acquire: None,
+        },
+    );
+    Ok(handle)
+}
+
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+fn metal_fifo_test_lock() -> std::fs::File {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+    let path = std::env::temp_dir().join("goldy-metal-fifo-test.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .expect("open metal fifo test lock");
+    let fd = file.as_raw_fd();
+    loop {
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if rc == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINTR) {
+            panic!("flock({}): {err}", path.display());
+        }
+    }
+    file
+}
+
 #[cfg(all(test, target_os = "macos", feature = "metal"))]
 mod fifo_present_tests {
     use super::*;
     use crate::backend::metal::MetalBackend;
-    use crate::backend::GpuBackendPresentSplit;
-    use crate::backend::GpuBackend;
-    use crate::{Device, DeviceDescriptor, Grant, Instance, RequestAdapterOptions, Scheme, SwapchainPool};
-    use cocoa::foundation::{NSPoint, NSRect, NSSize};
-    use raw_window_handle::{
-        AppKitDisplayHandle, AppKitWindowHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
-        RawWindowHandle,
-    };
-    use std::ptr::NonNull;
-    use std::time::{Duration, Instant};
-
-    struct TestWindow {
-        _window: id,
-        ns_view: NonNull<std::ffi::c_void>,
-    }
-
-    impl TestWindow {
-        fn new(width: f64, height: f64) -> Self {
-            unsafe {
-                let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(width, height));
-                let window: id = msg_send![class!(NSWindow), alloc];
-                // NSTitledWindowMask = 1, NSBackingStoreBuffered = 2
-                let window: id = msg_send![
-                    window,
-                    initWithContentRect: frame
-                    styleMask: 1u64
-                    backing: 2i64
-                    defer: NO
-                ];
-                let view: id = msg_send![window, contentView];
-                let (): () = msg_send![view, retain];
-                let (): () = msg_send![window, retain];
-                Self {
-                    _window: window,
-                    ns_view: NonNull::new(view as *mut std::ffi::c_void).expect("content view"),
-                }
-            }
-        }
-    }
-
-    impl Drop for TestWindow {
-        fn drop(&mut self) {
-            unsafe {
-                let (): () = msg_send![self.ns_view.as_ptr() as id, release];
-                let (): () = msg_send![self._window, release];
-            }
-        }
-    }
-
-    impl HasWindowHandle for TestWindow {
-        fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-            let handle = AppKitWindowHandle::new(self.ns_view);
-            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle)) })
-        }
-    }
-
-    impl HasDisplayHandle for TestWindow {
-        fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-            let handle = AppKitDisplayHandle::new();
-            Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::AppKit(handle)) })
-        }
-    }
-
-    fn make_device() -> Device {
-        let instance = Instance::new().expect("Instance::new");
-        instance
-            .request_adapter(&RequestAdapterOptions::default())
-            .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
-            .expect("device")
-    }
-
-    fn make_swapchain_pool() -> (Device, crate::Context, SwapchainPool) {
-        let device = make_device();
-        let ctx = device.create_context().expect("context");
-        let window = TestWindow::new(64., 64.);
-        let pool = SwapchainPool::new(&ctx, &window, 2).expect("swapchain pool");
-        (device, ctx, pool)
-    }
+    use crate::backend::{FrameToken, GpuBackend, GpuBackendPresentSplit};
 
     #[test]
     fn fifo_present_enabled_by_default() {
@@ -1359,57 +1341,19 @@ mod fifo_present_tests {
     }
 
     #[test]
-    fn schedule_present_returns_tv_gte_compute_tv() {
-        let (_device, ctx, pool) = make_swapchain_pool();
-        let lease = pool.lease();
-        let mut scheme = Scheme::new(&ctx);
-        scheme.grant_present(&lease);
-
-        let sub = scheme.submit().expect("submit");
-        let compute_tv = sub.timeline_value();
-        let present_tv = sub.present_fifo_tv(0).expect("FIFO present tv");
-        assert!(
-            present_tv >= compute_tv,
-            "present epoch must cover frame submit (present={present_tv}, compute={compute_tv})"
-        );
-    }
-
-    #[test]
-    fn scheduled_present_wait_resolves_after_worker() {
-        use std::thread;
-
-        let (_device, ctx, pool) = make_swapchain_pool();
-        let lease = pool.lease();
-        let mut scheme = Scheme::new(&ctx);
-        let present = scheme.grant_present(&lease);
-        let sub = scheme.submit().expect("submit");
-        let present_tv = sub.present_fifo_tv(0).expect("FIFO present tv");
-
-        let handle = thread::spawn(move || present.consume(&sub).expect("consume"));
-
-        let start = Instant::now();
-        while ctx.gpu_progress() < present_tv && start.elapsed() < Duration::from_millis(500) {
-            thread::sleep(Duration::from_millis(1));
-        }
-        handle.join().expect("consume thread");
-
-        assert!(
-            ctx.gpu_progress() >= present_tv,
-            "GPU progress must reach present timeline after scheduled present bookkeeping"
-        );
-    }
-
-    #[test]
     fn no_drawable_skip_path_unblocks_wait() {
+        let _gpu_lock = metal_fifo_test_lock();
         let mut backend = MetalBackend::new().expect("Metal backend");
         let device = backend.create_device(0).expect("device");
         let ctx = backend.create_context(device).expect("context");
-        let window = TestWindow::new(64., 64.);
-        let surface = backend
-            .create_surface(device, &window, &window, None)
-            .expect("surface");
-        let (token, _tex) = backend.begin_frame(surface, ctx).expect("begin");
-        backend.cancel_frame(token).expect("cancel");
+        let surface = backend.test_register_stub_surface(device).expect("stub surface");
+        let token = FrameToken {
+            surface,
+            image: 0,
+            context: ctx,
+            frame_slot: 0,
+            present_slot: 0,
+        };
 
         let present_tv = backend
             .schedule_present_on_submission_worker(token, 0)

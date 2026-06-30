@@ -19,6 +19,24 @@ enum WorkerMessage {
 
 pub(crate) const SUBMISSION_QUEUE_CAPACITY: usize = 128;
 
+/// Wait for a pre-scheduled submission epoch without holding the backend mutex.
+pub(crate) struct SubmissionEpochWait {
+    worker: std::sync::Arc<SubmissionWorker>,
+    tv: u64,
+    horizon: u64,
+}
+
+impl SubmissionEpochWait {
+    pub fn new(worker: std::sync::Arc<SubmissionWorker>, tv: u64, horizon: u64) -> Self {
+        Self { worker, tv, horizon }
+    }
+
+    pub fn wait(self) -> Result<()> {
+        self.worker.wait_submitted_if_scheduled(self.tv, self.horizon)?;
+        self.worker.check_error()
+    }
+}
+
 pub(crate) struct SubmissionWorker {
     submitted_epoch: Arc<AtomicU64>,
     latched_error: Arc<Mutex<Option<anyhow::Error>>>,

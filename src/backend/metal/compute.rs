@@ -1217,6 +1217,24 @@ pub(super) fn submit(
         None
     };
 
+    if commands.is_empty() && prologue_row.is_none() {
+        let ld = state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?
+            .clone();
+        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
+        let waiter = sc_arc.lock().unwrap().timeline_waiter.clone();
+        let signal_value = super::pending_submit::preallocate_device_timeline(&ld);
+        super::pending_submit::enqueue_metal_timeline_signal(&ld, signal_value, waiter)?;
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            sc.last_committed_timeline = Some(signal_value);
+            sc.last_submitted_seq = signal_value;
+        }
+        return Ok(signal_value);
+    }
+
     let owned_command_buffer = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         ld.command_queue.new_command_buffer().to_owned()

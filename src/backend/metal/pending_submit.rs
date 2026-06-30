@@ -307,6 +307,74 @@ impl PendingSubmit for MetalScheduledPresentPendingSubmit {
     }
 }
 
+struct MetalSkipPresentPendingSubmit {
+    signal_value: TimelineValue,
+    waiter: TimelineWaiter,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+}
+
+/// CPU-only timeline bump when there is no GPU work to encode (empty command list).
+struct MetalTimelineSignalPendingSubmit {
+    signal_value: TimelineValue,
+    waiter: TimelineWaiter,
+}
+
+impl PendingSubmit for MetalTimelineSignalPendingSubmit {
+    fn execute(self: Box<Self>) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.timeline_signal");
+        self.waiter.signal(self.signal_value);
+        Ok(())
+    }
+}
+
+/// Enqueue a CPU-only timeline signal (no `MTLCommandBuffer::commit`).
+pub(super) fn enqueue_metal_timeline_signal(
+    ld: &SharedLogicalDevice,
+    signal_value: TimelineValue,
+    waiter: TimelineWaiter,
+) -> Result<()> {
+    ld.timeline_scheduled_max.fetch_max(signal_value, Ordering::Relaxed);
+    ld.submission_worker.check_error()?;
+    ld.submission_worker.enqueue(
+        signal_value,
+        Box::new(MetalTimelineSignalPendingSubmit {
+            signal_value,
+            waiter,
+        }),
+    )
+}
+
+impl PendingSubmit for MetalSkipPresentPendingSubmit {
+    fn execute(self: Box<Self>) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.skip_present");
+        self.waiter.signal(self.signal_value);
+        self.pending_finishes.lock().unwrap().push(self.finish);
+        Ok(())
+    }
+}
+
+/// CPU-only present slot when no drawable is available (cancelled frame, acquire failure).
+pub(super) fn enqueue_metal_skip_present(
+    ld: &SharedLogicalDevice,
+    signal_value: TimelineValue,
+    waiter: TimelineWaiter,
+    finish: crate::backend::PresentFinishState,
+    pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+) -> Result<()> {
+    ld.timeline_scheduled_max.fetch_max(signal_value, Ordering::Relaxed);
+    ld.submission_worker.check_error()?;
+    ld.submission_worker.enqueue(
+        signal_value,
+        Box::new(MetalSkipPresentPendingSubmit {
+            signal_value,
+            waiter,
+            finish,
+            pending_finishes,
+        }),
+    )
+}
+
 /// Present job enqueued at scheme submit time (FIFO ordering with compute partitions).
 pub(super) fn enqueue_metal_scheduled_present(
     ld: &SharedLogicalDevice,
