@@ -1,8 +1,7 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
 use super::compute::Dx12GpuProfileResources;
-use super::staging::TextureStagingEntry;
-use super::types::{self, LogicalDevice, SharedLogicalDevice, SharedSubmissionContext};
+use super::types::{LogicalDevice, SharedLogicalDevice};
 use super::{ContextHandle, DeviceHandle};
 use crate::backend::submission_worker::PendingSubmit;
 use crate::backend::SubmitSync;
@@ -31,68 +30,13 @@ pub(super) fn resolve_queue_waits(
     Ok(waits)
 }
 
-pub(super) fn dx12_post_signal_cleanup(
-    logical_device: &LogicalDevice,
-    sc: &SharedSubmissionContext,
-    context_fences: &Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
-    ctx_fence: &ID3D12Fence,
-    fence_value: TimelineValue,
-    gpu_profile: Option<Dx12GpuProfileResources>,
-    staged_texture_entries: Vec<TextureStagingEntry>,
-) -> Result<()> {
-    if let Some(prof) = gpu_profile {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.gpu_profile_readback");
-        if let Err(e) = super::compute::dx12_finish_gpu_profile(
-            ctx_fence,
-            &logical_device.command_queue,
-            fence_value,
-            prof,
-        ) {
-            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
-        }
-    }
-
-    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    let ctx_del_batch = {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.deletion_drain");
-        sc.lock().unwrap().deletion_queue.drain_up_to_completed(ctx_completed)
-    };
-    {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.slot_reclamation");
-        let descriptors_arc = Arc::clone(&logical_device.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for resource in ctx_del_batch {
-            types::destroy_pending_deletion(logical_device, &mut registry, resource);
-        }
-        let fences = context_fences.read().unwrap();
-        registry.drain_ready_slot_reclamations(&fences);
-    }
-
-    {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.staging_finish");
-        sc.lock().unwrap().staging_belt.finish(fence_value);
-    }
-
-    if !staged_texture_entries.is_empty() {
-        sc.lock()
-            .unwrap()
-            .texture_staging_pool
-            .release(fence_value, staged_texture_entries);
-    }
-
-    Ok(())
-}
-
 pub(super) struct Dx12ComputePendingSubmit {
     logical_device: SharedLogicalDevice,
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
-    sc: SharedSubmissionContext,
-    context_fences: Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
     fence_value: TimelineValue,
     gpu_profile: Option<Dx12GpuProfileResources>,
-    staged_texture_entries: Vec<TextureStagingEntry>,
 }
 
 impl PendingSubmit for Dx12ComputePendingSubmit {
@@ -105,15 +49,18 @@ impl PendingSubmit for Dx12ComputePendingSubmit {
             &self.queue_waits,
             self.fence_value,
         )?;
-        dx12_post_signal_cleanup(
-            &self.logical_device,
-            &self.sc,
-            &self.context_fences,
-            &self.ctx_fence,
-            self.fence_value,
-            self.gpu_profile,
-            self.staged_texture_entries,
-        )
+        if let Some(prof) = self.gpu_profile {
+            let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.gpu_profile_readback");
+            if let Err(e) = super::compute::dx12_finish_gpu_profile(
+                &self.ctx_fence,
+                &self.logical_device.command_queue,
+                self.fence_value,
+                prof,
+            ) {
+                tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -122,8 +69,6 @@ pub(super) struct Dx12RetainedResubmitPending {
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
-    sc: SharedSubmissionContext,
-    context_fences: Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
     fence_value: TimelineValue,
 }
 
@@ -136,31 +81,7 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
             &self.command_lists,
             &self.queue_waits,
             self.fence_value,
-        )?;
-        // Read completed value immediately after Signal without blocking: the GPU has not
-        // finished this submission yet, so we only drain deletions retired by prior work.
-        // Waiting for `fence_value` here would stall the submission worker on every resubmit.
-        let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
-        let retained_del_batch = {
-            let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.deletion_drain");
-            self.sc
-                .lock()
-                .unwrap()
-                .deletion_queue
-                .drain_up_to_completed(ctx_completed)
-        };
-        {
-            let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.slot_reclamation");
-            let dev = &self.logical_device;
-            let descriptors_arc = Arc::clone(&dev.descriptors);
-            let mut registry = descriptors_arc.lock().unwrap();
-            for resource in retained_del_batch {
-                types::destroy_pending_deletion(dev, &mut registry, resource);
-            }
-            let fences = self.context_fences.read().unwrap();
-            registry.drain_ready_slot_reclamations(&fences);
-        }
-        Ok(())
+        )
     }
 }
 
@@ -183,6 +104,8 @@ pub(super) struct Dx12ScheduledPresentPendingSubmit {
     command_lists: Vec<Option<ID3D12CommandList>>,
     copy_tv: u64,
     enqueue_tv: u64,
+    ctx_fence: Option<ID3D12Fence>,
+    sync_tv: u64,
     swapchain: windows::Win32::Graphics::Dxgi::IDXGISwapChain3,
     present_mode: crate::types::PresentMode,
     allow_tearing: bool,
@@ -218,6 +141,18 @@ impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
             }
         }
 
+        if let Some(ctx_fence) = self.ctx_fence {
+            if self.sync_tv > 0 {
+                let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.ctx_fence_sync");
+                super::utils::sync_context_fence_after_device_retire(
+                    &self.logical_device,
+                    &self.logical_device.fence,
+                    &ctx_fence,
+                    self.sync_tv,
+                )?;
+            }
+        }
+
         self.pending_finishes.lock().unwrap().push(self.finish);
         Ok(())
     }
@@ -227,6 +162,8 @@ pub(super) fn enqueue_scheduled_present(
     logical_device: &SharedLogicalDevice,
     command_lists: Vec<Option<ID3D12CommandList>>,
     copy_tv: u64,
+    ctx_fence: Option<ID3D12Fence>,
+    sync_tv: u64,
     swapchain: windows::Win32::Graphics::Dxgi::IDXGISwapChain3,
     present_mode: crate::types::PresentMode,
     allow_tearing: bool,
@@ -246,6 +183,8 @@ pub(super) fn enqueue_scheduled_present(
             command_lists,
             copy_tv,
             enqueue_tv,
+            ctx_fence,
+            sync_tv,
             swapchain,
             present_mode,
             allow_tearing,
@@ -278,10 +217,8 @@ pub(super) fn enqueue_compute_submit(
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     sync: Option<&SubmitSync>,
-    sc: SharedSubmissionContext,
     fence_value: TimelineValue,
     gpu_profile: Option<Dx12GpuProfileResources>,
-    staged_texture_entries: Vec<TextureStagingEntry>,
 ) -> Result<()> {
     logical_device.submission_worker.check_error()?;
     let queue_waits = resolve_queue_waits(logical_device, context_fences, sync)?;
@@ -292,11 +229,8 @@ pub(super) fn enqueue_compute_submit(
             ctx_fence,
             command_lists,
             queue_waits,
-            sc,
-            context_fences: Arc::clone(context_fences),
             fence_value,
             gpu_profile,
-            staged_texture_entries,
         }),
     )
 }
@@ -307,7 +241,6 @@ pub(super) fn enqueue_retained_resubmit(
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     sync: Option<&SubmitSync>,
-    sc: SharedSubmissionContext,
     fence_value: TimelineValue,
 ) -> Result<()> {
     logical_device.submission_worker.check_error()?;
@@ -319,8 +252,6 @@ pub(super) fn enqueue_retained_resubmit(
             ctx_fence,
             command_lists,
             queue_waits,
-            sc,
-            context_fences: Arc::clone(context_fences),
             fence_value,
         }),
     )

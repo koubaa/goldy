@@ -429,6 +429,13 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         }
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get(&device_handle) {
+            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
+                context::drain_context_deletion_queue_up_to(
+                    ld,
+                    &mut sc_arc.lock().unwrap(),
+                    completed,
+                );
+            }
             ld.process_deletion_queue_up_to(value.min(retired));
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             let fences = self.state.context_fences.read().unwrap();
@@ -1040,6 +1047,13 @@ impl GpuBackend for Dx12Backend {
             }
             let retired = context::device_retired(&self.state, device_handle);
             if let Some(dev) = self.state.devices.get(&device_handle) {
+                if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
+                    context::drain_context_deletion_queue_up_to(
+                        dev,
+                        &mut sc_arc.lock().unwrap(),
+                        completed,
+                    );
+                }
                 dev.process_deletion_queue_up_to(value.min(retired));
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
                 let fences = self.state.context_fences.read().unwrap();

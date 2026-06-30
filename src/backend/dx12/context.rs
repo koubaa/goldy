@@ -176,6 +176,22 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     }
 }
 
+/// Drain per-context deferred deletions retired up to `completed` on the render/wait thread.
+pub(super) fn drain_context_deletion_queue_up_to(
+    ld: &super::types::LogicalDevice,
+    sc: &mut super::types::Dx12SubmissionContext,
+    completed: u64,
+) {
+    let batch = sc.deletion_queue.drain_up_to_completed(completed);
+    if batch.is_empty() {
+        return;
+    }
+    let mut registry = ld.descriptors.lock().unwrap();
+    for resource in batch {
+        super::types::destroy_pending_deletion(ld, &mut registry, resource);
+    }
+}
+
 pub(super) fn context_device(state: &Dx12State, ctx: ContextHandle) -> DeviceHandle {
     state
         .contexts

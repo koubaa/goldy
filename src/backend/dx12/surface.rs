@@ -919,10 +919,18 @@ pub(super) fn schedule_present_on_submission_worker(
     let return_fence = if copy_tv > 0 { copy_tv } else { plan.existing_fence };
     let scratch_layout_updated = copy_tv > 0;
     let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
+    let ctx_fence = state
+        .context_fences
+        .read()
+        .unwrap()
+        .get(&frame.context)
+        .map(|(_, fence)| fence.clone());
     let present_tv = super::pending_submit::enqueue_scheduled_present(
         &plan.logical_device,
         command_lists,
         copy_tv,
+        ctx_fence,
+        return_fence,
         plan.swapchain,
         plan.present_mode,
         plan.allow_tearing,
@@ -1003,18 +1011,11 @@ pub(super) fn take_scheduled_present_blocking_wait(
         .context("Surface's device is invalid")?
         .clone();
     let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
-    let ctx_fence = state
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&frame.context)
-        .map(|(_, fence)| fence.clone());
     Ok(Some(Box::new(Dx12ScheduledPresentWait {
         logical_device,
         pending_finishes,
         frame,
         present_tv,
-        ctx_fence,
     })))
 }
 
@@ -1023,7 +1024,6 @@ struct Dx12ScheduledPresentWait {
     pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
     frame: crate::backend::FrameToken,
     present_tv: u64,
-    ctx_fence: Option<ID3D12Fence>,
 }
 
 impl crate::backend::ScheduledPresentBlockingWait for Dx12ScheduledPresentWait {
@@ -1044,17 +1044,8 @@ impl crate::backend::ScheduledPresentBlockingWait for Dx12ScheduledPresentWait {
                 .map(|idx| pending.remove(idx))
         };
         let return_fence = finish.as_ref().map(|f| f.return_fence).unwrap_or(0);
-        if return_fence > 0 {
-            super::utils::wait_for_fence(&self.logical_device.fence, return_fence)?;
-            if let Some(ctx_fence) = &self.ctx_fence {
-                super::utils::sync_context_fence_after_device_retire(
-                    &self.logical_device,
-                    &self.logical_device.fence,
-                    ctx_fence,
-                    return_fence,
-                )?;
-            }
-        }
+        // ctx_fence sync runs on the submission worker after Present (see pending_submit.rs).
+        // No CPU fence wait here: swapchain returns flush when device_retired() catches up.
         Ok(crate::backend::ScheduledPresentWaitOutcome {
             frame: self.frame,
             present_tv: self.present_tv,
@@ -1087,12 +1078,22 @@ pub(super) fn apply_scheduled_present_bookkeeping(
     let ctx = finish.frame.context;
     finish_present(state, finish, outcome.present_tv)?;
     if return_fence > 0 {
-        flush_swapchain_returns_to_progress(state, surface_handle, ctx, return_fence);
+        // Must use actual GPU-retired progress, not the target return_fence value.
+        // Passing return_fence here only worked when TID_PRESENT blocked on
+        // wait_for_fence(return_fence) first; without that wait it released slots
+        // before the copy blit retired and broke flip-model acquire pacing.
+        let device_handle = state
+            .surfaces
+            .get(&surface_handle)
+            .map(|s| s.device_handle)
+            .unwrap_or_else(|| super::context::context_device(state, ctx));
+        let retire_progress = super::context::device_retired(state, device_handle);
+        flush_swapchain_returns_to_progress(state, surface_handle, ctx, retire_progress);
     }
     Ok(())
 }
 
-/// Release flip-model acquire slots once `return_fence` has retired on the device fence.
+/// Release flip-model acquire slots once `retire_progress` (GPU-completed device timeline) reaches each pending return fence.
 fn flush_swapchain_returns_to_progress(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
