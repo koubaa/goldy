@@ -89,6 +89,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
+            pending_gpu_profiles: Vec::new(),
         })),
     );
     Ok(id)
@@ -153,6 +154,8 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
                 super::types::destroy_pending_deletion(ld, &mut registry, r);
             }
         }
+        let profile_completed = if last_seq > 0 { last_seq } else { completed };
+        super::pending_submit::vulkan_drain_pending_gpu_profiles_up_to(ld, &mut sc, profile_completed);
     }
 
     let Some(ld) = state.devices.get(&device) else {

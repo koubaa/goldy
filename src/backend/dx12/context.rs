@@ -83,6 +83,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
+            pending_gpu_profiles: Vec::new(),
         })),
     );
     Ok(id)
@@ -174,6 +175,10 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
             }
         }
     }
+
+    if let Some(ld) = state.devices.get(&device) {
+        super::context::drain_pending_gpu_profiles_up_to(ld, &mut sc, completed);
+    }
 }
 
 /// Drain per-context deferred deletions retired up to `completed` on the render/wait thread.
@@ -189,6 +194,28 @@ pub(super) fn drain_context_deletion_queue_up_to(
     let mut registry = ld.descriptors.lock().unwrap();
     for resource in batch {
         super::types::destroy_pending_deletion(ld, &mut registry, resource);
+    }
+}
+
+/// Read back deferred GPU profile results once `completed` covers each submit TV.
+pub(super) fn drain_pending_gpu_profiles_up_to(
+    ld: &super::types::LogicalDevice,
+    sc: &mut super::types::Dx12SubmissionContext,
+    completed: u64,
+) {
+    if sc.pending_gpu_profiles.is_empty() {
+        return;
+    }
+    let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
+    let (ready, pending): (Vec<_>, Vec<_>) = sc
+        .pending_gpu_profiles
+        .drain(..)
+        .partition(|(tv, _)| *tv <= completed);
+    sc.pending_gpu_profiles = pending;
+    for (tv, prof) in ready {
+        if let Err(e) = super::compute::dx12_readback_gpu_profile(&ld.command_queue, tv, prof) {
+            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
+        }
     }
 }
 

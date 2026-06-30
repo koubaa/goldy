@@ -486,22 +486,11 @@ pub(super) fn take_scheduled_present_blocking_wait(
         .context("Surface's device is invalid")?
         .clone();
     let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
-    let timeline_sem = state
-        .contexts
-        .read()
-        .unwrap()
-        .get(&frame.context)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_semaphore;
     Ok(Some(Box::new(VulkanScheduledPresentWait {
         logical_device,
         pending_finishes,
         frame,
         present_tv,
-        timeline_sem,
-        device_lost: std::sync::Arc::clone(&state.device_lost),
     })))
 }
 
@@ -510,8 +499,6 @@ struct VulkanScheduledPresentWait {
     pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
     frame: crate::backend::FrameToken,
     present_tv: u64,
-    timeline_sem: vk::Semaphore,
-    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl crate::backend::ScheduledPresentBlockingWait for VulkanScheduledPresentWait {
@@ -532,18 +519,7 @@ impl crate::backend::ScheduledPresentBlockingWait for VulkanScheduledPresentWait
                 .map(|idx| pending.remove(idx))
         };
         let return_fence = finish.as_ref().map(|f| f.return_fence).unwrap_or(0);
-        if return_fence > 0 {
-            let wait = vk::SemaphoreWaitInfo::default()
-                .semaphores(std::slice::from_ref(&self.timeline_sem))
-                .values(std::slice::from_ref(&return_fence));
-            if let Err(e) = unsafe { self.logical_device.device.wait_semaphores(&wait, u64::MAX) } {
-                if e == vk::Result::ERROR_DEVICE_LOST {
-                    self.device_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                anyhow::bail!("wait_semaphores after scheduled present: {:?}", e);
-            }
-        }
+        // Copy-fence wait removed: swapchain returns flush via poll_signals when GPU progress catches up.
         Ok(crate::backend::ScheduledPresentWaitOutcome {
             frame: self.frame,
             present_tv: self.present_tv,

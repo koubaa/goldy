@@ -617,6 +617,8 @@ pub(crate) struct SubmissionContext {
     /// surface acquire).  As a result the submit hot path no longer touches the
     /// device-level queue at all, which is required for Phase 5 (lock-free submit).
     pub deletion_queue: DeletionQueue,
+    /// GPU profile readbacks deferred until the context timeline retires each submit TV.
+    pub pending_gpu_profiles: Vec<(u64, super::pending_submit::VulkanGpuProfileWork)>,
 }
 
 /// A logical Vulkan device with associated resources.

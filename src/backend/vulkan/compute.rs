@@ -389,28 +389,11 @@ fn vulkan_decode_duration_ns(start: u64, end: u64, valid_bits: u32, period_ns: f
     }
 }
 
-pub(super) unsafe fn vulkan_finish_gpu_profile_pending(
-    _ctx: super::ContextHandle,
+pub(super) unsafe fn vulkan_readback_gpu_profile(
     device: &ash::Device,
-    timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
-    cmd: vk::CommandBuffer,
     profile: VulkanGpuProfilePool,
-    device_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-    let wait = vk::SemaphoreWaitInfo::default()
-        .semaphores(std::slice::from_ref(&timeline_sem))
-        .values(std::slice::from_ref(&signal_value));
-    if let Err(e) = device.wait_semaphores(&wait, u64::MAX) {
-        unsafe {
-            device.destroy_query_pool(profile.pool, None);
-        }
-        if e == vk::Result::ERROR_DEVICE_LOST {
-            device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        return Err(anyhow::anyhow!("wait_semaphores (gpu profiling): {:?}", e));
-    }
-
     let mut raw = vec![0u64; profile.query_count as usize];
     if let Err(e) = device.get_query_pool_results(
         profile.pool,
@@ -440,6 +423,32 @@ pub(super) unsafe fn vulkan_finish_gpu_profile_pending(
     }
 
     device.destroy_query_pool(profile.pool, None);
+    Ok(())
+}
+
+pub(super) unsafe fn vulkan_finish_gpu_profile_pending(
+    _ctx: super::ContextHandle,
+    device: &ash::Device,
+    timeline_sem: vk::Semaphore,
+    signal_value: TimelineValue,
+    cmd: vk::CommandBuffer,
+    profile: VulkanGpuProfilePool,
+    device_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    let wait = vk::SemaphoreWaitInfo::default()
+        .semaphores(std::slice::from_ref(&timeline_sem))
+        .values(std::slice::from_ref(&signal_value));
+    if let Err(e) = device.wait_semaphores(&wait, u64::MAX) {
+        unsafe {
+            device.destroy_query_pool(profile.pool, None);
+        }
+        if e == vk::Result::ERROR_DEVICE_LOST {
+            device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        return Err(anyhow::anyhow!("wait_semaphores (gpu profiling): {:?}", e));
+    }
+
+    unsafe { vulkan_readback_gpu_profile(device, signal_value, profile) }?;
     let _ = cmd;
     Ok(())
 }
@@ -543,6 +552,10 @@ fn enqueue_vulkan_compute_with_housekeeping(
         &scope.sc,
         completed,
     );
+    {
+        let mut sc_guard = scope.sc.lock().unwrap();
+        super::pending_submit::vulkan_drain_pending_gpu_profiles_up_to(ld, &mut sc_guard, completed);
+    }
     super::pending_submit::enqueue_vulkan_submit(
         ld,
         view.contexts,
@@ -550,9 +563,10 @@ fn enqueue_vulkan_compute_with_housekeeping(
         timeline_sem,
         signal_value,
         cmd,
-        gpu_profile,
-        Arc::clone(view.device_lost),
     )?;
+    if let Some(prof) = gpu_profile {
+        scope.sc.lock().unwrap().pending_gpu_profiles.push((signal_value, prof));
+    }
     super::pending_submit::vulkan_finish_staging_after_enqueue(
         &scope.sc,
         signal_value,

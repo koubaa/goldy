@@ -481,6 +481,8 @@ pub(crate) struct Dx12SubmissionContext {
     /// context's timeline (e.g. temporary dispatch-batch arg buffers).  Drained at each
     /// submit by this context's own completed fence value, never by `device_retired`.
     pub deletion_queue: DeletionQueue,
+    /// GPU profile readbacks deferred until the context timeline retires each submit TV.
+    pub pending_gpu_profiles: Vec<(u64, super::compute::Dx12GpuProfileResources)>,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
