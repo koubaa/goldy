@@ -1345,6 +1345,9 @@ impl GpuBackend for VulkanBackend {
         progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
+        // Present copy is signaled on the context timeline; caller `progress` alone can
+        // lag behind pending_swapchain_returns entries queued before the GPU retires copy.
+        let swapchain_retire_progress = progress.max(self.gpu_progress(ctx));
         let signal_queue = self
             .state
             .contexts
@@ -1360,7 +1363,7 @@ impl GpuBackend for VulkanBackend {
                 continue;
             }
             surface.pending_swapchain_returns.retain(|&(idx, tv)| {
-                if progress >= tv {
+                if swapchain_retire_progress >= tv {
                     signal_queue.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
                     false

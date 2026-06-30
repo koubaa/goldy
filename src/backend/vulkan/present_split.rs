@@ -519,7 +519,8 @@ impl crate::backend::ScheduledPresentBlockingWait for VulkanScheduledPresentWait
                 .map(|idx| pending.remove(idx))
         };
         let return_fence = finish.as_ref().map(|f| f.return_fence).unwrap_or(0);
-        // Copy-fence wait removed: swapchain returns flush via poll_signals when GPU progress catches up.
+        // No CPU timeline wait here: swapchain returns flush when the context timeline
+        // catches up (see apply_scheduled_present_bookkeeping + poll_signals).
         Ok(crate::backend::ScheduledPresentWaitOutcome {
             frame: self.frame,
             present_tv: self.present_tv,
@@ -553,8 +554,63 @@ pub(super) fn apply_scheduled_present_bookkeeping(
             synthesize_scheduled_present_finish(state, outcome.frame, outcome.present_tv)?
         }
     };
+    let surface_handle = finish.frame.surface;
+    let ctx = finish.frame.context;
+    let needs_swapchain_flush = finish.copy_timeline.is_some();
     finish_present(state, finish)?;
+    if needs_swapchain_flush {
+        // Must use actual GPU-retired progress, not the target copy timeline value.
+        // Passing the target value only worked when TID_PRESENT blocked on
+        // wait_semaphores(copy_tv) first; without that wait it released slots before
+        // the copy blit retired and broke flip-model acquire pacing.
+        //
+        // This is the only call site for flush_swapchain_returns_to_progress. If the
+        // copy blit has not retired yet, entries remain in pending_swapchain_returns;
+        // poll_signals (mod.rs) is the recovery path — it re-scans those entries against
+        // max(caller progress, live context timeline counter) on every acquire poll.
+        let retire_progress = context_timeline_retired(state, ctx);
+        flush_swapchain_returns_to_progress(state, surface_handle, ctx, retire_progress);
+    }
     Ok(())
+}
+
+/// Completed value on the presenting context's timeline semaphore.
+fn context_timeline_retired(state: &VulkanState, ctx: super::ContextHandle) -> u64 {
+    let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx).cloned() else {
+        return 0;
+    };
+    let sc = sc_arc.lock().unwrap();
+    let Some(ld) = state.devices.get(&sc.device) else {
+        return 0;
+    };
+    unsafe { ld.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0)
+}
+
+/// Release flip-model acquire slots once `retire_progress` reaches each pending return timeline.
+fn flush_swapchain_returns_to_progress(
+    state: &mut VulkanState,
+    surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
+    retire_progress: u64,
+) {
+    let contexts = state.contexts.read().unwrap();
+    let Some(sc_arc) = contexts.get(&ctx) else {
+        return;
+    };
+    let mut sc = sc_arc.lock().unwrap();
+    let Some(surf) = state.surfaces.get_mut(&surface_handle) else {
+        return;
+    };
+    surf.pending_swapchain_returns.retain(|&(idx, tv)| {
+        if retire_progress >= tv {
+            sc.signal_queue
+                .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+            surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
+            false
+        } else {
+            true
+        }
+    });
 }
 
 pub(super) fn finish_present(state: &mut VulkanState, finish: crate::backend::PresentFinishState) -> Result<u64> {
