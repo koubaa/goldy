@@ -292,13 +292,6 @@ pub fn net_access_for_waves_into(out: &mut HashMap<ResourceKey, NetAccess>, ir: 
     }
 }
 
-/// Union each resource's access across the nodes in `waves` (one submit partition).
-pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> HashMap<ResourceKey, NetAccess> {
-    let mut net = HashMap::new();
-    net_access_for_waves_into(&mut net, ir, waves);
-    net
-}
-
 fn absorb_node_net_access(net: &mut HashMap<ResourceKey, NetAccess>, node: &super::ir::TaskNode) {
     if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
         return;
@@ -428,6 +421,50 @@ pub fn compute_cross_submit_sync(
     result
 }
 
+/// Registration-time index of buffer-scoped [`ResourceKey`]s for alias discovery.
+///
+/// Built once when parcels register; avoids scanning all `resource_stamps` on every
+/// partition when building a ledger snapshot (buffer/range aliasing is parent-local).
+#[derive(Debug, Default)]
+pub(crate) struct BufferStampIndex {
+    by_parent: HashMap<BufferHandle, Vec<ResourceKey>>,
+}
+
+impl BufferStampIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a newly registered buffer or buffer-range key.
+    pub fn register(&mut self, key: ResourceKey) {
+        let parent = match key {
+            ResourceKey::Buffer(h) => h,
+            ResourceKey::BufferRange { parent, .. } => parent,
+            ResourceKey::Texture(_) => return,
+        };
+        let bucket = self.by_parent.entry(parent).or_default();
+        if !bucket.contains(&key) {
+            bucket.push(key);
+        }
+    }
+
+    /// Candidate keys that might alias `query_key` (same buffer parent only).
+    pub fn candidates_for(&self, query_key: ResourceKey) -> Option<&[ResourceKey]> {
+        let parent = match query_key {
+            ResourceKey::Buffer(h) => h,
+            ResourceKey::BufferRange { parent, .. } => parent,
+            ResourceKey::Texture(_) => return None,
+        };
+        self.by_parent.get(&parent).map(|v| v.as_slice())
+    }
+}
+
+fn insert_ledger_entry(out: &mut LedgerSnapshot, stamp_key: ResourceKey, stamp: &Arc<ParcelStamp>) {
+    out.entry(stamp_key).or_insert_with(|| LedgerEntry {
+        sync: stamp.sync.lock().unwrap().clone(),
+    });
+}
+
 /// Build a ledger snapshot for cross-submit planning: one entry per [`NetAccess`] key
 /// in `net` that has a registered stamp, plus any registered stamps whose keys alias
 /// a net key (partitioned buffer ranges).
@@ -435,22 +472,39 @@ pub fn build_ledger_snapshot_for_net_into(
     out: &mut LedgerSnapshot,
     net: &HashMap<ResourceKey, NetAccess>,
     resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    buffer_index: Option<&BufferStampIndex>,
 ) {
     out.clear();
     for &query_key in net.keys() {
         if let Some(stamp) = resource_stamps.get(&query_key) {
-            out.entry(query_key).or_insert_with(|| LedgerEntry {
-                sync: stamp.sync.lock().unwrap().clone(),
-            });
+            insert_ledger_entry(out, query_key, stamp);
+        }
+        // Textures and other non-buffer keys only alias on exact match (handled above).
+        if !matches!(
+            query_key,
+            ResourceKey::Buffer(_) | ResourceKey::BufferRange { .. }
+        ) {
+            continue;
+        }
+        if let Some(candidates) = buffer_index.and_then(|index| index.candidates_for(query_key)) {
+            for &stamp_key in candidates {
+                if stamp_key == query_key {
+                    continue;
+                }
+                if resource_keys_alias(stamp_key, query_key) {
+                    if let Some(stamp) = resource_stamps.get(&stamp_key) {
+                        insert_ledger_entry(out, stamp_key, stamp);
+                    }
+                }
+            }
+            continue;
         }
         for (&stamp_key, stamp) in resource_stamps {
             if stamp_key == query_key {
                 continue;
             }
             if resource_keys_alias(stamp_key, query_key) {
-                out.entry(stamp_key).or_insert_with(|| LedgerEntry {
-                    sync: stamp.sync.lock().unwrap().clone(),
-                });
+                insert_ledger_entry(out, stamp_key, stamp);
             }
         }
     }
@@ -543,6 +597,15 @@ impl CrossSubmitScratch {
         Self::default()
     }
 
+    /// Net access for the waves last passed to [`Self::plan`].
+    ///
+    /// Stale (or empty) when `plan` was not called for the current partition — callers must
+    /// only rely on this when they know the underlying `resource_stamps` is non-empty, since
+    /// in that case a stale/empty `net` is harmless (lookups against an empty map are no-ops).
+    pub fn net(&self) -> &HashMap<ResourceKey, NetAccess> {
+        &self.net
+    }
+
     fn clear(&mut self) {
         self.net.clear();
         self.ledger.clear();
@@ -558,6 +621,7 @@ impl CrossSubmitScratch {
         &mut self,
         ir: &GraphIR,
         resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+        buffer_index: Option<&BufferStampIndex>,
         submitting_ctx: ContextHandle,
         waves: &[super::ir::Wave],
     ) -> &SubmitSync {
@@ -568,7 +632,7 @@ impl CrossSubmitScratch {
         }
         {
             let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot");
-            build_ledger_snapshot_for_net_into(&mut self.ledger, &self.net, resource_stamps);
+            build_ledger_snapshot_for_net_into(&mut self.ledger, &self.net, resource_stamps, buffer_index);
         }
         {
             let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
@@ -1455,5 +1519,58 @@ mod tests {
             sync.waits.is_empty(),
             "non-overlapping producers must not contribute waits"
         );
+    }
+
+    #[test]
+    fn buffer_stamp_index_produces_same_ledger_as_full_scan() {
+        let parent: BufferHandle = 10;
+        let whole = ResourceKey::Buffer(parent);
+        let range_a = ResourceKey::BufferRange {
+            parent,
+            offset: 0,
+            len: 32,
+        };
+        let range_b = ResourceKey::BufferRange {
+            parent,
+            offset: 64,
+            len: 32,
+        };
+        let unrelated = ResourceKey::Buffer(99);
+
+        let mut resource_stamps = HashMap::new();
+        resource_stamps.insert(whole, empty_stamp());
+        resource_stamps.insert(range_a, empty_stamp());
+        resource_stamps.insert(range_b, empty_stamp());
+        resource_stamps.insert(unrelated, empty_stamp());
+
+        let mut index = BufferStampIndex::new();
+        for key in [whole, range_a, range_b, unrelated] {
+            index.register(key);
+        }
+
+        let query = ResourceKey::BufferRange {
+            parent,
+            offset: 16,
+            len: 64,
+        };
+        let mut net = HashMap::new();
+        net.insert(
+            query,
+            NetAccess {
+                reads: true,
+                ..Default::default()
+            },
+        );
+
+        let mut with_index = LedgerSnapshot::new();
+        build_ledger_snapshot_for_net_into(&mut with_index, &net, &resource_stamps, Some(&index));
+
+        let mut full_scan = LedgerSnapshot::new();
+        build_ledger_snapshot_for_net_into(&mut full_scan, &net, &resource_stamps, None);
+
+        assert_eq!(with_index.len(), full_scan.len());
+        for key in with_index.keys() {
+            assert!(full_scan.contains_key(key), "missing key {key:?} in full-scan ledger");
+        }
     }
 }

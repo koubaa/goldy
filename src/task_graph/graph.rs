@@ -2,8 +2,8 @@
 
 use super::analysis;
 use super::cross_submit::{
-    apply_resource_sync_updates, apply_stamp_targets_legacy, net_access_for_waves, prepend_prologue,
-    CrossSubmitScratch, ResourceKey,
+    apply_resource_sync_updates, apply_stamp_targets_legacy, prepend_prologue, BufferStampIndex,
+    CrossSubmitScratch, NetAccess, ResourceKey,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
@@ -308,7 +308,10 @@ fn record_merged_partition_last_tvs(entry: &mut CompiledCacheEntry, part_idx: us
 }
 
 /// Re-record allocates a fresh CB/allocator; backends must not reuse in-flight retained storage.
-fn ensure_partition_retired_before_rerecord(context: &crate::Context, prev_tv: Option<TimelineValue>) -> Result<()> {
+fn ensure_partition_retired_before_rerecord(
+    context: &crate::Context,
+    prev_tv: Option<TimelineValue>,
+) -> Result<()> {
     if let Some(prev_tv) = prev_tv {
         if context.gpu_progress() < prev_tv {
             context.wait_until(prev_tv)?;
@@ -331,17 +334,22 @@ fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
 }
 
 /// Stamp parcel epochs for resources touched in one partition at that partition's timeline value.
+///
+/// `net` should be the [`NetAccess`] map already computed for `waves` (e.g. by
+/// [`CrossSubmitScratch::plan`] for this same partition) to avoid re-walking every node/binding.
+/// When `resource_stamps` is empty this is a no-op regardless of `net`'s contents, so a stale
+/// `net` (left over from a prior partition because `plan` short-circuited) is harmless.
 fn apply_partition_epoch_stamps(
     resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
     stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
     ctx: crate::backend::ContextHandle,
     ir: &GraphIR,
     waves: &[Wave],
+    net: &HashMap<ResourceKey, NetAccess>,
     tv: TimelineValue,
 ) {
-    let net = net_access_for_waves(ir, waves);
-    if !net.is_empty() {
-        apply_resource_sync_updates(&net, resource_stamps, ctx, tv);
+    if !resource_stamps.is_empty() && !net.is_empty() {
+        apply_resource_sync_updates(net, resource_stamps, ctx, tv);
     }
     if !stamp_targets.is_empty() && partition_has_unkeyed_bindings(ir, waves) {
         apply_stamp_targets_legacy(stamp_targets, ctx, tv);
@@ -753,7 +761,14 @@ pub(crate) fn submit_resolved_ir(
         let sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &schedule.waves);
         let tv = backend_submit_graph(session, ctx, &g, sync)?;
         if let Some(state) = submit_state {
-            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &schedule.waves, tv);
+            state.apply_partition_reference_stamps(
+                ctx,
+                &context.device().inner,
+                ir,
+                &schedule.waves,
+                cross_scratch.net(),
+                tv,
+            );
         }
         return Ok(tv);
     }
@@ -779,7 +794,14 @@ pub(crate) fn submit_resolved_ir(
             last_tv = backend_submit_standalone(session, ctx, cmds, sync)?;
         }
         if let Some(state) = submit_state {
-            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+            state.apply_partition_reference_stamps(
+                ctx,
+                &context.device().inner,
+                ir,
+                &waves,
+                cross_scratch.net(),
+                last_tv,
+            );
         }
     }
     Ok(last_tv)
@@ -788,6 +810,7 @@ pub(crate) fn submit_resolved_ir(
 fn cross_sync_for_stamps<'a>(
     scratch: &'a mut CrossSubmitScratch,
     resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    buffer_index: Option<&BufferStampIndex>,
     ir: &GraphIR,
     submitting_ctx: crate::backend::ContextHandle,
     waves: &[Wave],
@@ -795,7 +818,7 @@ fn cross_sync_for_stamps<'a>(
     if resource_stamps.is_empty() {
         return None;
     }
-    Some(scratch.plan(ir, resource_stamps, submitting_ctx, waves))
+    Some(scratch.plan(ir, resource_stamps, buffer_index, submitting_ctx, waves))
 }
 
 fn cross_sync_for_ir<'a>(
@@ -807,7 +830,14 @@ fn cross_sync_for_ir<'a>(
 ) -> Option<&'a SubmitSync> {
     let _tz = crate::tracy_zone!("goldy.cross_sync_for_ir");
     let state = submit_state?;
-    cross_sync_for_stamps(scratch, &state.resource_stamps, ir, submitting_ctx, waves)
+    cross_sync_for_stamps(
+        scratch,
+        &state.resource_stamps,
+        Some(&state.buffer_stamp_index),
+        ir,
+        submitting_ctx,
+        waves,
+    )
 }
 
 /// Outcome of [`submit_resolved_ir_and_retain`]: how many partitions were re-recorded
@@ -920,6 +950,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                             &context.device().inner,
                             ir,
                             &merged_waves,
+                            cross_scratch.net(),
                             last_tv,
                         );
                     }
@@ -933,7 +964,10 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-            ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
+            ensure_partition_retired_before_rerecord(
+                context,
+                cache.as_ref().unwrap().partition_last_tv[part_idx],
+            )?;
             last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, sync)?;
             {
                 let entry = cache.as_mut().unwrap();
@@ -943,7 +977,14 @@ pub(crate) fn submit_resolved_ir_and_retain(
             }
             result.records += 1;
             if let Some(state) = submit_state {
-                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &merged_waves, last_tv);
+                state.apply_partition_reference_stamps(
+                    ctx,
+                    &context.device().inner,
+                    ir,
+                    &merged_waves,
+                    cross_scratch.net(),
+                    last_tv,
+                );
             }
             part_idx += 2;
             continue;
@@ -971,7 +1012,14 @@ pub(crate) fn submit_resolved_ir_and_retain(
             last_tv = backend_submit_standalone(session, ctx, &cmds, sync)?;
             record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
             if let Some(state) = submit_state {
-                state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+                state.apply_partition_reference_stamps(
+                    ctx,
+                    &context.device().inner,
+                    ir,
+                    &waves,
+                    cross_scratch.net(),
+                    last_tv,
+                );
             }
             part_idx += 1;
             continue;
@@ -985,7 +1033,14 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 result.resubmit_hits += 1;
                 record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                 if let Some(state) = submit_state {
-                    state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+                    state.apply_partition_reference_stamps(
+                        ctx,
+                        &context.device().inner,
+                        ir,
+                        &waves,
+                        cross_scratch.net(),
+                        last_tv,
+                    );
                 }
                 part_idx += 1;
                 continue;
@@ -999,7 +1054,10 @@ pub(crate) fn submit_resolved_ir_and_retain(
             partition_graph_commands_for_retain(ir, cache_entry, &waves, part_idx, has_render, None)
         };
         let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-        ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
+        ensure_partition_retired_before_rerecord(
+            context,
+            cache.as_ref().unwrap().partition_last_tv[part_idx],
+        )?;
         last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync)?;
         {
             let entry = cache.as_mut().unwrap();
@@ -1008,7 +1066,14 @@ pub(crate) fn submit_resolved_ir_and_retain(
         }
         result.records += 1;
         if let Some(state) = submit_state {
-            state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &waves, last_tv);
+            state.apply_partition_reference_stamps(
+                ctx,
+                &context.device().inner,
+                ir,
+                &waves,
+                cross_scratch.net(),
+                last_tv,
+            );
         }
         part_idx += 1;
     }
@@ -1024,14 +1089,6 @@ pub(crate) struct ResolvedPresentSlot {
     pub uav_index: u32,
 }
 
-/// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir_and_retain_with_presents`].
-pub(crate) struct PresentSubmitOptions<'a> {
-    pub present_slots: &'a [ResolvedPresentSlot],
-    pub resource_stamps: &'a HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
-    pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
-    pub ir_clean: bool,
-}
-
 /// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
 /// bindings through `present_slots` and retains present-touching partitions per
 /// backing slot (immutable CB per swapchain image index).
@@ -1041,16 +1098,13 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     context: &crate::Context,
     session: &dyn crate::backend::ContextSubmitSession,
     ir: &GraphIR,
-    options: &PresentSubmitOptions<'_>,
+    present_slots: &[ResolvedPresentSlot],
+    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    buffer_stamp_index: Option<&BufferStampIndex>,
+    stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
+    ir_clean: bool,
 ) -> Result<(TimelineValue, PartitionSubmitResult)> {
     use super::{ResolvedSwapchain, SlotResolver};
-
-    let &PresentSubmitOptions {
-        present_slots,
-        resource_stamps,
-        stamp_targets,
-        ir_clean,
-    } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_with_presents");
 
@@ -1150,7 +1204,14 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 };
                 let sync = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                    cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &merged_waves)
+                    cross_sync_for_stamps(
+                        &mut cross_scratch,
+                        resource_stamps,
+                        buffer_stamp_index,
+                        ir,
+                        ctx,
+                        &merged_waves,
+                    )
                 };
                 let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
@@ -1160,7 +1221,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
-                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                        apply_partition_epoch_stamps(
+                            resource_stamps,
+                            stamp_targets,
+                            ctx,
+                            ir,
+                            &merged_waves,
+                            cross_scratch.net(),
+                            last_tv,
+                        );
                         part_idx += 2;
                         continue;
                     }
@@ -1171,7 +1240,10 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-                ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
+                ensure_partition_retired_before_rerecord(
+                    context,
+                    cache.as_ref().unwrap().partition_last_tv[part_idx],
+                )?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, sync)?;
                 {
                     let entry = cache.as_mut().unwrap();
@@ -1180,7 +1252,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     record_merged_partition_last_tvs(entry, part_idx, last_tv);
                 }
                 result.records += 1;
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                apply_partition_epoch_stamps(
+                    resource_stamps,
+                    stamp_targets,
+                    ctx,
+                    ir,
+                    &merged_waves,
+                    cross_scratch.net(),
+                    last_tv,
+                );
                 part_idx += 2;
                 continue;
             }
@@ -1193,7 +1273,14 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let has_present = analysis::partition_waves_have_present(ir, &waves);
             let sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &waves)
+                cross_sync_for_stamps(
+                    &mut cross_scratch,
+                    resource_stamps,
+                    buffer_stamp_index,
+                    ir,
+                    ctx,
+                    &waves,
+                )
             };
 
             if !can_retain {
@@ -1213,7 +1300,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
                 last_tv = backend_submit_standalone(session, ctx, &cmds, sync)?;
                 record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                apply_partition_epoch_stamps(
+                    resource_stamps,
+                    stamp_targets,
+                    ctx,
+                    ir,
+                    &waves,
+                    cross_scratch.net(),
+                    last_tv,
+                );
                 part_idx += 1;
                 continue;
             }
@@ -1242,7 +1337,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
                     last_tv = backend_submit_standalone(session, ctx, &cmds, sync)?;
                     record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                    apply_partition_epoch_stamps(
+                        resource_stamps,
+                        stamp_targets,
+                        ctx,
+                        ir,
+                        &waves,
+                        cross_scratch.net(),
+                        last_tv,
+                    );
                     part_idx += 1;
                     continue;
                 }
@@ -1271,7 +1374,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                        apply_partition_epoch_stamps(
+                            resource_stamps,
+                            stamp_targets,
+                            ctx,
+                            ir,
+                            &waves,
+                            cross_scratch.net(),
+                            last_tv,
+                        );
                         part_idx += 1;
                         continue;
                     }
@@ -1289,7 +1400,10 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
-                ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
+                ensure_partition_retired_before_rerecord(
+                    context,
+                    cache.as_ref().unwrap().partition_last_tv[part_idx],
+                )?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, sync)?;
                 {
                     let entry = cache.as_mut().unwrap();
@@ -1301,7 +1415,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     record_partition_last_tv(entry, part_idx, last_tv);
                 }
                 result.records += 1;
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                apply_partition_epoch_stamps(
+                    resource_stamps,
+                    stamp_targets,
+                    ctx,
+                    ir,
+                    &waves,
+                    cross_scratch.net(),
+                    last_tv,
+                );
                 part_idx += 1;
                 continue;
             }
@@ -1312,8 +1434,22 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, sync)? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
-                    record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                    {
+                        let _tz = crate::tracy_zone!("goldy.resubmit.partition.record_last_tv");
+                        record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
+                    }
+                    {
+                        let _tz = crate::tracy_zone!("goldy.resubmit.partition.epoch_stamps");
+                        apply_partition_epoch_stamps(
+                            resource_stamps,
+                            stamp_targets,
+                            ctx,
+                            ir,
+                            &waves,
+                            cross_scratch.net(),
+                            last_tv,
+                        );
+                    }
                     part_idx += 1;
                     continue;
                 }
@@ -1324,7 +1460,10 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-            ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
+            ensure_partition_retired_before_rerecord(
+                context,
+                cache.as_ref().unwrap().partition_last_tv[part_idx],
+            )?;
             last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync)?;
             {
                 let entry = cache.as_mut().unwrap();
@@ -1332,7 +1471,15 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 record_partition_last_tv(entry, part_idx, last_tv);
             }
             result.records += 1;
-            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+            apply_partition_epoch_stamps(
+                resource_stamps,
+                stamp_targets,
+                ctx,
+                ir,
+                &waves,
+                cross_scratch.net(),
+                last_tv,
+            );
             part_idx += 1;
         }
     }
@@ -1347,6 +1494,7 @@ pub(crate) struct IrSubmitState {
     schedule_cache: Option<CompiledCacheEntry>,
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
     resource_stamps: HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    buffer_stamp_index: BufferStampIndex,
 }
 
 impl IrSubmitState {
@@ -1355,6 +1503,7 @@ impl IrSubmitState {
             schedule_cache: None,
             stamp_targets: Vec::new(),
             resource_stamps: HashMap::new(),
+            buffer_stamp_index: BufferStampIndex::new(),
         }
     }
 
@@ -1366,6 +1515,7 @@ impl IrSubmitState {
         stamp.mark_scheme_registered(); // in practice - `register_stamp_parts` is only used by Scheme.
         if let Some(key) = ResourceKey::from_resource_id(resource_id) {
             self.resource_stamps.insert(key, stamp);
+            self.buffer_stamp_index.register(key);
         } else {
             self.stamp_targets.push(stamp);
         }
@@ -1389,6 +1539,7 @@ impl IrSubmitState {
         submit_device: &std::sync::Arc<crate::device::DeviceInner>,
         ir: &GraphIR,
         waves: &[Wave],
+        net: &HashMap<ResourceKey, NetAccess>,
         tv: TimelineValue,
     ) {
         for stamp in self.resource_stamps.values() {
@@ -1407,7 +1558,7 @@ impl IrSubmitState {
                 );
             }
         }
-        apply_partition_epoch_stamps(&self.resource_stamps, &self.stamp_targets, ctx, ir, waves, tv);
+        apply_partition_epoch_stamps(&self.resource_stamps, &self.stamp_targets, ctx, ir, waves, net, tv);
     }
 
     /// Drop cached retention keys so the next submit re-records retained partitions.
@@ -1478,12 +1629,11 @@ impl IrSubmitState {
             ctx,
             ctx.submit_session(),
             ir,
-            &PresentSubmitOptions {
-                present_slots,
-                resource_stamps: &self.resource_stamps,
-                stamp_targets: &self.stamp_targets,
-                ir_clean,
-            },
+            present_slots,
+            &self.resource_stamps,
+            Some(&self.buffer_stamp_index),
+            &self.stamp_targets,
+            ir_clean,
         )
     }
 }
