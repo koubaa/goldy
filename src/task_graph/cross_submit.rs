@@ -96,17 +96,14 @@ pub(crate) fn resource_keys_alias(a: ResourceKey, b: ResourceKey) -> bool {
     }
 }
 
-/// Find and merge all ledger entries that alias `key`.
+/// Merge all ledger entries that alias `key` when there is no exact ledger key.
 ///
-/// Returns an owned, merged [`LedgerEntry`] so that a range read against several
-/// independently-tracked producer ranges (e.g. both fields of a partitioned buffer)
-/// contributes barriers/waits from every producer, not just the first one found.
-fn find_ledger_entry(ledger: &LedgerSnapshot, key: ResourceKey) -> Option<LedgerEntry> {
-    // Fast path: exact match — clone once and return.
-    if let Some(entry) = ledger.get(&key) {
-        return Some(entry.clone());
+/// Returns `None` when `key` is present exactly (callers should use [`LedgerSnapshot::get`])
+/// or when no aliasing entries exist.
+fn merge_aliased_ledger_entries(ledger: &LedgerSnapshot, key: ResourceKey) -> Option<LedgerEntry> {
+    if ledger.contains_key(&key) {
+        return None;
     }
-    // Fallback: merge every aliasing entry so no producer is silently dropped.
     let mut merged: Option<LedgerEntry> = None;
     for (ledger_key, entry) in ledger {
         if !resource_keys_alias(*ledger_key, key) {
@@ -137,6 +134,81 @@ fn find_ledger_entry(ledger: &LedgerSnapshot, key: ResourceKey) -> Option<Ledger
         }
     }
     merged
+}
+
+fn apply_cross_submit_hazards_for_resource(
+    key: ResourceKey,
+    access: NetAccess,
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    prologue: &mut BarrierSet,
+    wait_map: &mut HashMap<ContextHandle, u64>,
+) {
+    // RAW: this reads -> hazard vs last_write
+    if access.reads {
+        for (&ctx, &tv) in &sync.last_write {
+            if ctx == submitting_ctx {
+                let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                    *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                );
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(NodeAccess::Write, prev_write_kinds);
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+            } else {
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+    }
+
+    // WAW + WAR: this writes -> hazard vs last_write and last_reads
+    if access.writes {
+        for (&ctx, &tv) in &sync.last_write {
+            if ctx == submitting_ctx {
+                let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                    *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                );
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(NodeAccess::Write, prev_write_kinds);
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Write, access.write_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+            } else {
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+        for (&ctx, &tv) in &sync.last_reads {
+            // Cross-context WAR still needs an explicit queue wait.
+            //
+            // Same-context WAR is skipped when the read hazard is covered by FIFO
+            // single-queue ordering (intra-submit handoffs and present work enqueued
+            // on the submission worker at submit). Legacy present easement reads
+            // (`war_read_epochs`) still emit a live wait because present GPU work may
+            // be enqueued after the next frame's compute partitions.
+            if ctx != submitting_ctx {
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            } else if sync.war_read_epochs.get(&ctx).copied().unwrap_or(0) >= tv {
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+    }
 }
 
 /// Snapshot of one resource's epoch ledger at submit time.
@@ -307,75 +379,24 @@ pub fn compute_cross_submit_sync_into(
     wait_map.clear();
 
     for (key, access) in net {
-        let Some(entry) = find_ledger_entry(ledger, *key) else {
-            continue;
-        };
-        let sync = &entry.sync;
-
-        // RAW: this reads -> hazard vs last_write
-        if access.reads {
-            for (&ctx, &tv) in &sync.last_write {
-                if ctx == submitting_ctx {
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                    );
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(NodeAccess::Write, prev_write_kinds);
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(prologue, *key, usage);
-                } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-        }
-
-        // WAW + WAR: this writes -> hazard vs last_write and last_reads
-        if access.writes {
-            for (&ctx, &tv) in &sync.last_write {
-                if ctx == submitting_ctx {
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                    );
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(NodeAccess::Write, prev_write_kinds);
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Write, access.write_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(prologue, *key, usage);
-                } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-            for (&ctx, &tv) in &sync.last_reads {
-                // Cross-context WAR still needs an explicit queue wait.
-                //
-                // Same-context WAR is skipped when the read hazard is covered by FIFO
-                // single-queue ordering (intra-submit handoffs and present work enqueued
-                // on the submission worker at submit). Legacy present easement reads
-                // (`war_read_epochs`) still emit a live wait because present GPU work may
-                // be enqueued after the next frame's compute partitions.
-                if ctx != submitting_ctx {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                } else if sync.war_read_epochs.get(&ctx).copied().unwrap_or(0) >= tv {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
+        if let Some(entry) = ledger.get(key) {
+            apply_cross_submit_hazards_for_resource(
+                *key,
+                *access,
+                &entry.sync,
+                submitting_ctx,
+                prologue,
+                wait_map,
+            );
+        } else if let Some(entry) = merge_aliased_ledger_entries(ledger, *key) {
+            apply_cross_submit_hazards_for_resource(
+                *key,
+                *access,
+                &entry.sync,
+                submitting_ctx,
+                prologue,
+                wait_map,
+            );
         }
     }
 
@@ -405,6 +426,34 @@ pub fn compute_cross_submit_sync(
         submitting_ctx,
     );
     result
+}
+
+/// Build a ledger snapshot for cross-submit planning: one entry per [`NetAccess`] key
+/// in `net` that has a registered stamp, plus any registered stamps whose keys alias
+/// a net key (partitioned buffer ranges).
+pub fn build_ledger_snapshot_for_net_into(
+    out: &mut LedgerSnapshot,
+    net: &HashMap<ResourceKey, NetAccess>,
+    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+) {
+    out.clear();
+    for &query_key in net.keys() {
+        if let Some(stamp) = resource_stamps.get(&query_key) {
+            out.entry(query_key).or_insert_with(|| LedgerEntry {
+                sync: stamp.sync.lock().unwrap().clone(),
+            });
+        }
+        for (&stamp_key, stamp) in resource_stamps {
+            if stamp_key == query_key {
+                continue;
+            }
+            if resource_keys_alias(stamp_key, query_key) {
+                out.entry(stamp_key).or_insert_with(|| LedgerEntry {
+                    sync: stamp.sync.lock().unwrap().clone(),
+                });
+            }
+        }
+    }
 }
 
 /// Build a ledger snapshot from registered stamp bindings.
@@ -473,8 +522,6 @@ pub fn resource_stamps_from_ir(
 /// repeated HashMap/Vec/HashSet allocations.
 pub(crate) struct CrossSubmitScratch {
     net: HashMap<ResourceKey, NetAccess>,
-    registry: Vec<(ResourceKey, Arc<ParcelStamp>)>,
-    seen: HashSet<ResourceKey>,
     ledger: LedgerSnapshot,
     wait_map: HashMap<ContextHandle, u64>,
     submit_sync: SubmitSync,
@@ -484,8 +531,6 @@ impl Default for CrossSubmitScratch {
     fn default() -> Self {
         Self {
             net: HashMap::with_capacity(32),
-            registry: Vec::with_capacity(32),
-            seen: HashSet::with_capacity(32),
             ledger: HashMap::with_capacity(32),
             wait_map: HashMap::with_capacity(4),
             submit_sync: SubmitSync::default(),
@@ -500,8 +545,6 @@ impl CrossSubmitScratch {
 
     fn clear(&mut self) {
         self.net.clear();
-        self.registry.clear();
-        self.seen.clear();
         self.ledger.clear();
         self.wait_map.clear();
         self.submit_sync.prologue.buffers.clear();
@@ -524,12 +567,8 @@ impl CrossSubmitScratch {
             net_access_for_waves_into(&mut self.net, ir, waves);
         }
         {
-            let _tz = crate::tracy_zone!("goldy.cross_sync.stamp_registry");
-            resource_stamps_from_ir_into(&mut self.registry, &mut self.seen, ir, resource_stamps);
-        }
-        {
             let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot");
-            build_ledger_snapshot_into(&mut self.ledger, &self.registry);
+            build_ledger_snapshot_for_net_into(&mut self.ledger, &self.net, resource_stamps);
         }
         {
             let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
@@ -1143,11 +1182,11 @@ mod tests {
         assert_eq!(sync.prologue.buffers.len(), 0, "disjoint buffer ranges must not hazard");
     }
 
-    // ---- find_ledger_entry: multi-producer aliasing -------------------------
+    // ---- merge_aliased_ledger_entries: multi-producer aliasing -------------------------
     //
-    // The following tests guard the fix to find_ledger_entry: when a queried
-    // key aliases *several* ledger entries, all of them must contribute to the
-    // hazard analysis, not just the first one encountered.
+    // The following tests guard the alias-merge path: when a queried key aliases
+    // *several* ledger entries, all of them must contribute to the hazard analysis,
+    // not just the first one encountered.
 
     fn range_ledger_with_two_writes(
         parent: BufferHandle,
@@ -1365,7 +1404,7 @@ mod tests {
     }
 
     /// Regression guard: the existing disjoint-range no-hazard property must be
-    /// preserved — find_ledger_entry must not accidentally merge entries whose ranges
+    /// preserved — the alias-merge path must not accidentally merge entries whose ranges
     /// do not alias the queried key.
     #[test]
     fn non_overlapping_range_in_multi_producer_ledger_not_merged() {
