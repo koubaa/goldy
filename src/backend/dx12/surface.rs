@@ -1105,6 +1105,11 @@ pub(super) fn apply_scheduled_present_bookkeeping(
         // Passing return_fence here only worked when TID_PRESENT blocked on
         // wait_for_fence(return_fence) first; without that wait it released slots
         // before the copy blit retired and broke flip-model acquire pacing.
+        //
+        // This is the only call site for flush_swapchain_returns_to_progress. If the
+        // copy blit has not retired yet, entries remain in pending_swapchain_returns;
+        // poll_signals (mod.rs) is the recovery path — it re-scans those entries against
+        // max(context progress, device_retired()) on every wait_for_acquire_capacity poll.
         let device_handle = state
             .surfaces
             .get(&surface_handle)
