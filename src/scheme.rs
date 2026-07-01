@@ -377,16 +377,29 @@ impl Grant for PresentGrant {
         }
 
         if self.pool.speculative_acquire || validation_env::speculative_present_acquire_enabled() {
-            let _tz = crate::tracy_zone!("scheme.grant_present.speculative_acquire");
-            let spec_result = crate::swapchain_pool::SwapchainPool::acquire_slot(&self.pool);
-            match spec_result {
-                Ok(slot) => crate::swapchain_pool::SwapchainPool::stash_speculative_acquire(&self.pool, slot),
-                Err(e) => {
-                    tracing::debug!(
-                        target: "goldy::scheme",
-                        error = %e,
-                        "speculative present acquire failed; submit will acquire synchronously"
-                    );
+            let lazy_present = {
+                let b = submission.data.backend.lock().unwrap();
+                b.supports_lazy_present_finish()
+            };
+            if lazy_present {
+                // Velato enables speculative_acquire on DX12 because the blocking
+                // scheduled-present wait guaranteed `Present()` had returned before
+                // `GetCurrentBackBufferIndex`. With lazy finish that wait is gone; acquiring
+                // here races the in-flight present job on TID_SUBMIT.
+            } else {
+                let _tz = crate::tracy_zone!("scheme.grant_present.speculative_acquire");
+                let spec_result = crate::swapchain_pool::SwapchainPool::acquire_slot(&self.pool);
+                match spec_result {
+                    Ok(slot) => {
+                        crate::swapchain_pool::SwapchainPool::stash_speculative_acquire(&self.pool, slot)
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "goldy::scheme",
+                            error = %e,
+                            "speculative present acquire failed; submit will acquire synchronously"
+                        );
+                    }
                 }
             }
         }
@@ -489,6 +502,25 @@ fn complete_scheduled_present(
     frame: crate::backend::FrameToken,
     present_tv: TimelineValue,
 ) -> Result<(), GoldyError> {
+    let lazy = {
+        let b = backend.lock().unwrap();
+        b.supports_lazy_present_finish()
+    };
+    if lazy {
+        // The correctness-critical part of scheduled-present bookkeeping (the
+        // allocator-reuse fence `acquire()` gates its `Reset()` on) was already stamped
+        // eagerly and synchronously when the present job was enqueued at submit time —
+        // see `GpuBackendPresentSplit::schedule_present_on_submission_worker`'s DX12
+        // implementation. What's left (swapchain slot release, scratch layout flip) is
+        // capacity-only and is drained non-blockingly by `GpuBackend::poll_signals`, so
+        // there is nothing here that needs a CPU wait for the present job to execute.
+        let _tz = crate::tracy_zone!("scheme.grant_present.complete_scheduled_present.lazy");
+        let _ = (frame, present_tv);
+        // FIFO scheduled present bypasses `Frame::present()` → `apply_frame_bookkeeping`,
+        // which is where the legacy path emits Tracy's main frame boundary.
+        tracy_frame_mark!();
+        return Ok(());
+    }
     let wait = {
         let b = backend.lock().unwrap();
         b.take_scheduled_present_blocking_wait(frame, present_tv)

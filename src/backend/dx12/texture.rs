@@ -161,7 +161,7 @@ pub(super) fn create(
     let initial_state = D3D12_RESOURCE_STATE_COMMON;
 
     let mut resource: Option<ID3D12Resource> = None;
-    let hr = unsafe {
+    let create_result = unsafe {
         logical_device.device.CreateCommittedResource(
             &heap_properties,
             D3D12_HEAP_FLAG_NONE,
@@ -171,13 +171,20 @@ pub(super) fn create(
             &mut resource,
         )
     };
-    if hr.is_err() {
-        crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
-            reason: crate::signal::OversubscribedReason::TextureHeap,
-            size_hint: (width as u64) * (height as u64) * 4,
-        });
+    if create_result.is_err() {
+        if !super::utils::is_device_removed(&logical_device.device) {
+            crate::signal::push_sync_signal(crate::signal::Signal::Oversubscribed {
+                reason: crate::signal::OversubscribedReason::TextureHeap,
+                size_hint: (width as u64) * (height as u64) * 4,
+            });
+        }
+        return Err(super::utils::map_d3d12_windows_error(
+            &logical_device.device,
+            &state.device_removed,
+            create_result.unwrap_err(),
+            "Failed to create texture",
+        ));
     }
-    hr.context("Failed to create texture")?;
     let resource = resource.context("CreateCommittedResource returned null")?;
 
     // Get texture handle first (needed for registry)

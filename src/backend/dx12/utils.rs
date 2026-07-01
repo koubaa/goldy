@@ -325,3 +325,67 @@ pub(super) fn wait_for_fence_timeout(fence: &ID3D12Fence, value: u64, timeout_ms
     // WAIT_OBJECT_0 when signaled, WAIT_TIMEOUT when timeout elapses
     Ok(result == WAIT_OBJECT_0)
 }
+
+/// Returns `true` when the D3D12 device is in the removed state.
+pub fn is_device_removed(device: &Direct3D12::ID3D12Device10) -> bool {
+    unsafe { device.GetDeviceRemovedReason().is_err() }
+}
+
+fn log_and_format_device_removed(
+    device: &Direct3D12::ID3D12Device10,
+    device_removed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    operation: &str,
+    failing_hr: Option<windows_core::HRESULT>,
+) -> anyhow::Error {
+    device_removed.store(true, std::sync::atomic::Ordering::Relaxed);
+    let reason = unsafe { device.GetDeviceRemovedReason() };
+    super::diagnostic::log_dred_on_device_removed(device);
+    tracing::error!(
+        target: "goldy::dx12",
+        operation,
+        ?failing_hr,
+        ?reason,
+        "GPU device removed"
+    );
+    anyhow::anyhow!(
+        "{operation}: GPU device removed (GetDeviceRemovedReason={reason:?}, failing_hr={failing_hr:?})"
+    )
+}
+
+/// Map a failing D3D12 HRESULT to an enriched error. When the device is removed, logs DRED
+/// breadcrumbs, sets `device_removed`, and returns a TDR-specific message instead of a generic
+/// resource-creation failure (distinguishes Failure 1 vs Failure 2 in the user's logs).
+pub fn map_d3d12_hresult_failure(
+    device: &Direct3D12::ID3D12Device10,
+    device_removed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hr: windows_core::HRESULT,
+    operation: &str,
+) -> anyhow::Error {
+    if is_device_removed(device) {
+        return log_and_format_device_removed(device, device_removed, operation, Some(hr));
+    }
+    anyhow::anyhow!("{operation}: HRESULT {hr:?}")
+}
+
+/// Map a failing `windows_core::Result` from a D3D12/DXGI call.
+pub fn map_d3d12_windows_error(
+    device: &Direct3D12::ID3D12Device10,
+    device_removed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    err: windows_core::Error,
+    operation: &str,
+) -> anyhow::Error {
+    if is_device_removed(device) {
+        return log_and_format_device_removed(device, device_removed, operation, Some(err.code()));
+    }
+    anyhow::anyhow!("{operation}: {err:?}")
+}
+
+/// Like [`map_d3d12_windows_error`] but returns `Ok(())` on success.
+pub fn check_d3d12_windows_result(
+    device: &Direct3D12::ID3D12Device10,
+    device_removed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    result: windows_core::Result<()>,
+    operation: &str,
+) -> Result<()> {
+    result.map_err(|e| map_d3d12_windows_error(device, device_removed, e, operation))
+}

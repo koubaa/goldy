@@ -115,6 +115,7 @@ pub(super) struct Dx12ScheduledPresentPendingSubmit {
     allow_tearing: bool,
     finish: crate::backend::PresentFinishState,
     pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+    device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
@@ -140,7 +141,12 @@ impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
             let (sync_interval, present_flags) = super::surface::present_args(self.present_mode, self.allow_tearing);
             let hr = unsafe { self.swapchain.Present(sync_interval, present_flags) };
             if hr.is_err() {
-                anyhow::bail!("Present failed with HRESULT: {:?}", hr);
+                return Err(super::utils::map_d3d12_hresult_failure(
+                    &self.logical_device.device,
+                    &self.device_removed,
+                    hr,
+                    "Present failed",
+                ));
             }
         }
 
@@ -173,6 +179,7 @@ pub(super) fn enqueue_scheduled_present(
     allow_tearing: bool,
     finish: crate::backend::PresentFinishState,
     pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
+    device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<u64> {
     logical_device.submission_worker.check_error()?;
     let enqueue_tv = if copy_tv > 0 {
@@ -194,6 +201,7 @@ pub(super) fn enqueue_scheduled_present(
             allow_tearing,
             finish,
             pending_finishes,
+            device_removed,
         }),
     )?;
     Ok(enqueue_tv)

@@ -1014,6 +1014,18 @@ pub(crate) trait GpuBackendPresentSplit {
         Ok(())
     }
 
+    /// When true, the correctness-critical part of scheduled-present bookkeeping (the
+    /// allocator-reuse fence target that [`GpuBackendPresentSplit::schedule_present_on_submission_worker`]
+    /// stamps) is applied eagerly and synchronously at enqueue time, not after a blocking
+    /// wait for the present job to execute. Callers of [`Scheme::grant_present`](crate::Scheme::grant_present)
+    /// consumption may skip [`GpuBackendPresentSplit::take_scheduled_present_blocking_wait`]
+    /// entirely for such backends: the remaining bookkeeping (swapchain slot release,
+    /// scratch layout flip) is capacity-only and safe to drain non-blockingly via
+    /// [`GpuBackend::poll_signals`].
+    fn supports_lazy_present_finish(&self) -> bool {
+        false
+    }
+
     /// Apply deferred present bookkeeping after a present job scheduled at submit time.
     #[expect(dead_code, reason = "convenience wrapper; callers use split present hooks directly")]
     fn finish_scheduled_present(

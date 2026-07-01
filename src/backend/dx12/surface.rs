@@ -78,58 +78,17 @@ pub(super) fn create(
     let width = (rect.right - rect.left) as u32;
     let height = (rect.bottom - rect.top) as u32;
 
-    // Create swapchain (render-target usage only).
-    // DXGI/D3D12 rejects `DXGI_USAGE_UNORDERED_ACCESS` on flip-model swapchain buffers;
-    // `CreateSwapChainForHwnd` fails (e.g. HRESULT 0x887A698F). Compute-to-surface must
-    // use an intermediate UAV texture + copy, not a UAV on the swapchain image.
-    let swap_chain_flags = {
-        let mut flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-        if state.allow_tearing {
-            flags = DXGI_SWAP_CHAIN_FLAG(flags.0 | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0);
-        }
-        flags
-    };
-    let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
-        Width: width,
-        Height: height,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: MAX_FRAMES_IN_FLIGHT as u32,
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-        AlphaMode: DXGI_ALPHA_MODE_UNSPECIFIED,
-        Flags: swap_chain_flags.0 as u32,
-    };
-
-    let swapchain: IDXGISwapChain1 = unsafe {
-        state
-            .factory
-            .CreateSwapChainForHwnd(&logical_device.command_queue, hwnd, &swap_chain_desc, None, None)
-    }
-    .context("Failed to create swapchain")?;
-
-    let swapchain: IDXGISwapChain3 = swapchain
-        .cast()
-        .context("Failed to cast swapchain to IDXGISwapChain3")?;
-
-    // Set up the frame-latency waitable object so that acquire() blocks on DXGI
-    // readiness rather than stalling the CPU with an explicit fence inside present().
-    let frame_latency_waitable: Option<SendSyncHandle> = {
-        let sc2: IDXGISwapChain2 = swapchain
-            .cast()
-            .context("Failed to cast swapchain to IDXGISwapChain2")?;
-        unsafe { sc2.SetMaximumFrameLatency(MAX_FRAMES_IN_FLIGHT as u32) }
-            .context("Failed to set swapchain maximum frame latency")?;
-        let handle = unsafe { sc2.GetFrameLatencyWaitableObject() };
-        if handle.0.is_null() {
-            tracing::warn!("GetFrameLatencyWaitableObject returned null; waitable disabled");
-            None
-        } else {
-            Some(SendSyncHandle(handle))
-        }
-    };
+    let surface_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    let swapchain = create_swapchain3(
+        state,
+        logical_device,
+        device_handle,
+        hwnd,
+        width,
+        height,
+        surface_format,
+    )?;
+    let frame_latency_waitable = setup_frame_latency_waitable(&swapchain, device_is_warp(state, device_handle))?;
 
     // Get swapchain buffers and create RTVs
     let mut render_targets = Vec::new();
@@ -190,7 +149,7 @@ pub(super) fn create(
         };
 
         let mut depth_tex: Option<ID3D12Resource> = None;
-        unsafe {
+        let create_result = unsafe {
             logical_device.device.CreateCommittedResource(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
@@ -199,8 +158,13 @@ pub(super) fn create(
                 Some(&depth_clear),
                 &mut depth_tex,
             )
-        }
-        .context("Failed to create surface depth buffer")?;
+        };
+        super::utils::check_d3d12_windows_result(
+            &logical_device.device,
+            &state.device_removed,
+            create_result,
+            "Failed to create surface depth buffer",
+        )?;
         let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
 
         let dsv_off = state.next_dsv_offset;
@@ -257,7 +221,7 @@ pub(super) fn create(
         handle,
         SurfaceState {
             device_handle,
-            swapchain,
+            swapchain: Some(swapchain),
             render_targets,
             rtv_offsets,
             width,
@@ -392,7 +356,13 @@ pub(super) fn acquire(
     surface.frame_sync[present_slot].render_pass_submitted = false;
     surface.pending_frame_compute.clear();
 
-    let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
+    let image_index = unsafe {
+        surface
+            .swapchain
+            .as_ref()
+            .context("Surface has no swapchain")?
+            .GetCurrentBackBufferIndex()
+    };
     surface.current_image_index = Some(image_index);
 
     let width = surface.width;
@@ -888,16 +858,31 @@ fn prepare_present_plan(state: &mut Dx12State, frame: crate::backend::FrameToken
         .copied()
         .flatten()
         .context("No scratch texture for swapchain image")?;
-    let render_pass_submitted = surface.frame_sync[present_slot].render_pass_submitted;
+    let render_pass_submitted = surface
+        .frame_sync
+        .get(present_slot)
+        .map(|fs| fs.render_pass_submitted)
+        .context("Invalid present slot for surface")?;
+    let backbuffer = surface
+        .render_targets
+        .get(image_index)
+        .cloned()
+        .context("Swapchain render target missing (surface may be mid-resize)")?;
     let device_handle = surface.device_handle;
-    let backbuffer = surface.render_targets[image_index].clone();
     let (cmd7, cmd_alloc) = {
-        let frame_sync = &surface.frame_sync[present_slot];
+        let frame_sync = surface
+            .frame_sync
+            .get(present_slot)
+            .context("Invalid present slot for surface")?;
         (frame_sync.command_list.clone(), frame_sync.command_allocator.clone())
     };
-    let swapchain = surface.swapchain.clone();
+    let swapchain = surface
+        .swapchain
+        .as_ref()
+        .context("Surface has no swapchain")?
+        .clone();
     let present_mode = surface.present_mode;
-    let allow_tearing = state.allow_tearing;
+    let allow_tearing = surface_allow_tearing(state, device_handle);
     let logical_device = state
         .devices
         .get(&device_handle)
@@ -942,6 +927,45 @@ pub(super) fn schedule_present_on_submission_worker(
     let (command_lists, copy_tv) = plan.record_present_copy()?;
     let return_fence = if copy_tv > 0 { copy_tv } else { plan.existing_fence };
     let scratch_layout_updated = copy_tv > 0;
+
+    // Eagerly stamp the allocator-reuse fence target now, synchronously, instead of
+    // waiting for the async present job's completion to flow back through
+    // `finish_present`. `acquire()` reads this value as `prev_fence` (this present_slot's
+    // `frame_sync[..].fence_value`) to gate resetting this slot's command allocator. The
+    // target value is already fully determined here — it does not depend on the present
+    // job having *executed* yet, only on it having been enqueued with this target — so
+    // recording it eagerly means `acquire()` always waits on the correct, fresh target
+    // rather than racing a value that only gets refreshed once the job (on TID_SUBMIT)
+    // happens to have finished and bookkeeping happens to have run.
+    if return_fence > 0 {
+        if let Some(surf) = state.surfaces.get_mut(&frame.surface) {
+            let slot = &mut surf.frame_sync[frame.present_slot as usize];
+            let prev_fence = slot.fence_value;
+            debug_assert!(
+                return_fence >= prev_fence,
+                "present_slot {} allocator-reuse fence target regressed: {} -> {} \
+                 (would let acquire() Reset() a still-in-use command allocator)",
+                frame.present_slot,
+                prev_fence,
+                return_fence,
+            );
+            slot.fence_value = return_fence;
+            // Eagerly register the flip-slot return so `wait_for_acquire_capacity` can
+            // block on the device fence immediately. Without this, lazy bookkeeping only
+            // pushes the entry after the submission worker executes Present(), leaving a
+            // window where `pending_acquire_count >= depth` but
+            // `peek_oldest_pending_swapchain_return()` is None → busy-spin freeze.
+            let image_index = frame.image as u32;
+            if !surf
+                .pending_swapchain_returns
+                .iter()
+                .any(|&(idx, tv)| idx == image_index && tv == return_fence)
+            {
+                surf.pending_swapchain_returns.push((image_index, return_fence));
+            }
+        }
+    }
+
     let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
     let ctx_fence = state
         .context_fences
@@ -962,6 +986,7 @@ pub(super) fn schedule_present_on_submission_worker(
             plan.allow_tearing,
             finish,
             pending_finishes,
+            std::sync::Arc::clone(&state.device_removed),
         )?
     };
     Ok(present_tv)
@@ -1125,6 +1150,33 @@ pub(super) fn apply_scheduled_present_bookkeeping(
     Ok(())
 }
 
+/// Drain present jobs the submission worker has already executed (non-blocking).
+///
+/// An entry only appears in `pending_present_finishes` after `Dx12ScheduledPresentPendingSubmit::execute`
+/// has already called `Present()` on `TID_SUBMIT` (see `pending_submit.rs`), so presence in
+/// this queue is itself the "already finished" signal — there is no partial/in-flight state
+/// to race against here (unlike the allocator-reuse fence, which is stamped eagerly at
+/// enqueue time in `schedule_present_on_submission_worker` for exactly that reason). This
+/// only applies the *remaining*, capacity-only bookkeeping: swapchain slot release
+/// (`pending_swapchain_returns`), scratch layout flip, and `last_presented_image_index`.
+pub(super) fn drain_pending_present_finishes(state: &mut Dx12State) {
+    let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
+    let ready: Vec<crate::backend::PresentFinishState> = {
+        let mut guard = pending_finishes.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+    for finish in ready {
+        let present_tv = finish.present_timeline;
+        if let Err(e) = finish_present(state, finish, present_tv) {
+            tracing::warn!(
+                target: "goldy::dx12",
+                error = %e,
+                "failed to apply lazy present-finish bookkeeping"
+            );
+        }
+    }
+}
+
 /// Release flip-model acquire slots once `retire_progress` (GPU-completed device timeline) reaches each pending return fence.
 fn flush_swapchain_returns_to_progress(
     state: &mut Dx12State,
@@ -1164,7 +1216,10 @@ pub(super) fn finish_present(
 
     if finish.return_fence > 0 {
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.frame_sync[present_slot].fence_value = finish.return_fence;
+            let prev_fence = surf.frame_sync[present_slot].fence_value;
+            if finish.return_fence > prev_fence {
+                surf.frame_sync[present_slot].fence_value = finish.return_fence;
+            }
         }
     }
 
@@ -1183,7 +1238,13 @@ pub(super) fn finish_present(
     let return_fence = finish.return_fence;
     if return_fence > 0 {
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.pending_swapchain_returns.push((image_index, return_fence));
+            if !surf
+                .pending_swapchain_returns
+                .iter()
+                .any(|&(idx, tv)| idx == image_index && tv == return_fence)
+            {
+                surf.pending_swapchain_returns.push((image_index, return_fence));
+            }
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
         surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
@@ -1360,13 +1421,14 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     };
 
     // Wait for GPU
-    {
+    let dx12_device = {
         let logical_device = state
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
         let _ = wait_for_gpu(logical_device);
-    }
+        logical_device.device.clone()
+    };
 
     let scratch_destroy: Vec<TextureHandle> = {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
@@ -1393,27 +1455,55 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
         }
         surface.render_targets.clear();
         surface.depth_texture = None;
-        let df = surface.depth_format;
+        surface.depth_format
+    };
 
-        let resize_flags = {
-            let mut flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-            if state.allow_tearing {
-                flags = DXGI_SWAP_CHAIN_FLAG(flags.0 | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0);
-            }
-            flags
+    let is_warp = device_is_warp(state, device_handle);
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?;
+    if is_warp {
+        logical_device.submission_worker.flush()?;
+    }
+
+    let swapchain = state
+        .surfaces
+        .get(&surface_handle)
+        .context("Invalid surface handle")?
+        .swapchain
+        .as_ref()
+        .context("Surface has no swapchain")?
+        .clone();
+    let resize_flags = swapchain_flags(state, device_handle);
+
+    if is_warp {
+        let release_result = unsafe {
+            swapchain.ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, 0, 0, surface_format, resize_flags)
         };
-        // Resize swapchain
-        unsafe {
-            surface
-                .swapchain
-                .ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, width, height, surface_format, resize_flags)
-        }
-        .context("Failed to resize swapchain")?;
+        super::utils::check_d3d12_windows_result(
+            &dx12_device,
+            &state.device_removed,
+            release_result,
+            "Failed to release WARP swapchain buffers",
+        )?;
+    }
 
+    let resize_result = unsafe {
+        swapchain.ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, width, height, surface_format, resize_flags)
+    };
+    super::utils::check_d3d12_windows_result(
+        &dx12_device,
+        &state.device_removed,
+        resize_result,
+        "Failed to resize swapchain",
+    )?;
+
+    {
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
         surface.width = width;
         surface.height = height;
-        df
-    };
+    }
 
     // Get device info for creating RTVs
     let (rtv_heap, rtv_descriptor_size, device) = {
@@ -1431,8 +1521,14 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     // Recreate render targets
     for i in 0..MAX_FRAMES_IN_FLIGHT {
         let surface = state.surfaces.get(&surface_handle).unwrap();
-        let buffer: ID3D12Resource =
-            unsafe { surface.swapchain.GetBuffer(i as u32) }.context("Failed to get swapchain buffer")?;
+        let buffer: ID3D12Resource = unsafe {
+            surface
+                .swapchain
+                .as_ref()
+                .context("Surface has no swapchain")?
+                .GetBuffer(i as u32)
+        }
+        .context("Failed to get swapchain buffer")?;
 
         let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
             let off = state.next_rtv_offset;
@@ -1493,7 +1589,7 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
         };
 
         let mut depth_tex: Option<ID3D12Resource> = None;
-        unsafe {
+        let create_result = unsafe {
             logical_device.device.CreateCommittedResource(
                 &heap_properties,
                 D3D12_HEAP_FLAG_NONE,
@@ -1502,8 +1598,13 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
                 Some(&depth_clear),
                 &mut depth_tex,
             )
-        }
-        .context("Failed to create surface depth buffer on resize")?;
+        };
+        super::utils::check_d3d12_windows_result(
+            &logical_device.device,
+            &state.device_removed,
+            create_result,
+            "Failed to create surface depth buffer on resize",
+        )?;
         let depth_tex = depth_tex.context("CreateCommittedResource returned null for depth")?;
 
         let dsv_off = state.free_dsv_offsets.pop().unwrap_or_else(|| {
@@ -1614,6 +1715,84 @@ pub(super) fn format(state: &Dx12State, surface_handle: SurfaceHandle) -> Textur
 }
 
 // Helper functions
+
+fn device_is_warp(state: &Dx12State, device_handle: DeviceHandle) -> bool {
+    state
+        .devices
+        .get(&device_handle)
+        .is_some_and(|d| d.adapter_id == super::WARP_ADAPTER_ID)
+}
+
+/// Flip-model swapchain flags. WARP uses no special flags: `ALLOW_TEARING` and
+/// `FRAME_LATENCY_WAITABLE_OBJECT` both trigger native crashes in `ResizeBuffers`
+/// during rapid window resize.
+fn swapchain_flags(state: &Dx12State, device_handle: DeviceHandle) -> DXGI_SWAP_CHAIN_FLAG {
+    if device_is_warp(state, device_handle) {
+        return DXGI_SWAP_CHAIN_FLAG(0);
+    }
+    let mut flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    if state.allow_tearing {
+        flags = DXGI_SWAP_CHAIN_FLAG(flags.0 | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0);
+    }
+    flags
+}
+
+fn surface_allow_tearing(state: &Dx12State, device_handle: DeviceHandle) -> bool {
+    state.allow_tearing && !device_is_warp(state, device_handle)
+}
+
+fn create_swapchain3(
+    state: &Dx12State,
+    logical_device: &LogicalDevice,
+    device_handle: DeviceHandle,
+    hwnd: HWND,
+    width: u32,
+    height: u32,
+    format: DXGI_FORMAT,
+) -> Result<IDXGISwapChain3> {
+    let swap_chain_flags = swapchain_flags(state, device_handle);
+    let swap_chain_desc = DXGI_SWAP_CHAIN_DESC1 {
+        Width: width,
+        Height: height,
+        Format: format,
+        Stereo: false.into(),
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: MAX_FRAMES_IN_FLIGHT as u32,
+        Scaling: DXGI_SCALING_STRETCH,
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        AlphaMode: DXGI_ALPHA_MODE_UNSPECIFIED,
+        Flags: swap_chain_flags.0 as u32,
+    };
+    let swapchain: IDXGISwapChain1 = unsafe {
+        state
+            .factory
+            .CreateSwapChainForHwnd(&logical_device.command_queue, hwnd, &swap_chain_desc, None, None)
+    }
+    .context("Failed to create swapchain")?;
+    swapchain.cast().context("Failed to cast swapchain to IDXGISwapChain3")
+}
+
+fn setup_frame_latency_waitable(
+    swapchain: &IDXGISwapChain3,
+    is_warp: bool,
+) -> Result<Option<SendSyncHandle>> {
+    if is_warp {
+        return Ok(None);
+    }
+    let sc2: IDXGISwapChain2 = swapchain
+        .cast()
+        .context("Failed to cast swapchain to IDXGISwapChain2")?;
+    unsafe { sc2.SetMaximumFrameLatency(MAX_FRAMES_IN_FLIGHT as u32) }
+        .context("Failed to set swapchain maximum frame latency")?;
+    let handle = unsafe { sc2.GetFrameLatencyWaitableObject() };
+    if handle.0.is_null() {
+        tracing::warn!("GetFrameLatencyWaitableObject returned null; waitable disabled");
+        Ok(None)
+    } else {
+        Ok(Some(SendSyncHandle(handle)))
+    }
+}
 
 fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;

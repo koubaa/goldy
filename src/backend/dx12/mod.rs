@@ -135,6 +135,23 @@ pub fn is_debug_mode() -> bool {
     !no_debug && (cfg!(debug_assertions) || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true"))
 }
 
+/// GPU-Based Validation: opt-in via `GOLDY_DX12_GBV=1` (requires the debug layer).
+/// GBV is intentionally off by default — it can crash or hang inside `ResizeBuffers` and other
+/// presentation paths when combined with the debug layer.
+pub(crate) fn env_enable_gbv() -> bool {
+    std::env::var("GOLDY_DX12_GBV").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// DRED auto-breadcrumbs + page-fault capture: on by default in [`is_debug_mode`]; opt out with
+/// `GOLDY_DX12_NO_DRED=1`, or force in release with `GOLDY_DX12_DRED=1` (requires the debug layer).
+pub(crate) fn env_enable_dred() -> bool {
+    if std::env::var("GOLDY_DX12_NO_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        return false;
+    }
+    is_debug_mode()
+        || std::env::var("GOLDY_DX12_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Get or create a DX12 backend for one [`crate::Instance`].
 ///
 /// Each instance owns independent `Dx12State` (resource tables, contexts, devices) so
@@ -184,7 +201,7 @@ impl Dx12Backend {
             next_dsv_offset: 0,
             free_dsv_offsets: Vec::new(),
             slang_compiler,
-            device_removed: std::sync::atomic::AtomicBool::new(false),
+            device_removed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_tables: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_present_finishes: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
@@ -486,6 +503,10 @@ impl crate::backend::GpuBackendPresentSplit for Dx12Backend {
     ) -> Result<()> {
         surface::apply_scheduled_present_bookkeeping(&mut self.state, outcome)
     }
+
+    fn supports_lazy_present_finish(&self) -> bool {
+        true
+    }
 }
 
 impl GpuBackend for Dx12Backend {
@@ -531,6 +552,7 @@ impl GpuBackend for Dx12Backend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
+        logical_device.submission_worker.flush()?;
         self.wait_for_gpu(logical_device)
     }
 
@@ -953,6 +975,12 @@ impl GpuBackend for Dx12Backend {
         progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
+        // Drain any present jobs the submission worker has already executed. This is
+        // what lets `supports_lazy_present_finish` skip the blocking wait in
+        // `Scheme::grant_present` consumption: the correctness-critical allocator-reuse
+        // fence is stamped eagerly at enqueue time (see `schedule_present_on_submission_worker`),
+        // so this drain only needs to keep the capacity-only bookkeeping moving.
+        surface::drain_pending_present_finishes(&mut self.state);
         // Present copy/signal uses the device sync fence; per-context `progress` alone
         // can lag behind `return_fence` values stored in pending_swapchain_returns.
         let swapchain_retire_progress = progress.max(context::device_retired(&self.state, device_handle));

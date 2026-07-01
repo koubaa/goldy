@@ -161,7 +161,37 @@ impl SwapchainPool {
     /// stays counted until its return fence retires. Blocks on the device sync fence when
     /// a pending return is registered, then polls `ctx` once to process deferred returns.
     pub fn wait_for_acquire_capacity(&self, ctx: &crate::Context) {
-        while self.pending_acquire_count() >= self.depth() {
+        self.wait_until_pending_below(self.depth(), ctx);
+    }
+
+    /// Block until every acquired drawable has been returned (`pending_acquire_count == 0`).
+    ///
+    /// Required before swapchain rebuild when speculative acquire or depth>1 may leave
+    /// drawables counted even though the present ack has already been consumed.
+    fn wait_for_all_drawables_returned(&self, ctx: &crate::Context) {
+        self.wait_until_pending_below(1, ctx);
+    }
+
+    /// Drain speculative stash and wait for all pending swapchain returns.
+    pub fn sync_before_rebuild(&self, ctx: &crate::Context) {
+        Self::drain_speculative_acquire(&self.inner);
+        let device = ctx.device();
+        if let Err(e) = {
+            let mut backend = device.inner.backend.lock().unwrap();
+            backend.device_wait_idle(device.inner.handle)
+        } {
+            tracing::warn!(
+                target: "goldy::swapchain_pool",
+                error = %e,
+                "device_wait_idle before swapchain rebuild failed"
+            );
+        }
+        ctx.poll_signals_and_service();
+        self.wait_for_all_drawables_returned(ctx);
+    }
+
+    fn wait_until_pending_below(&self, threshold: u32, ctx: &crate::Context) {
+        while self.pending_acquire_count() >= threshold {
             let return_fence = {
                 let surface = self.inner.surface.read().unwrap();
                 surface.peek_oldest_pending_swapchain_return()

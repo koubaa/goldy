@@ -7,7 +7,7 @@
 
 use super::device;
 use super::types::DxgiAdapterInfo;
-use super::{env_allow_warp, is_debug_mode, WARP_ADAPTER_ID};
+use super::{env_allow_warp, env_enable_dred, env_enable_gbv, is_debug_mode, WARP_ADAPTER_ID};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Once, OnceLock};
 use windows::core::Interface;
@@ -37,15 +37,22 @@ pub(crate) fn process_shared() -> Result<Arc<Dx12ProcessShared>> {
 fn init_process_shared() -> Result<Dx12ProcessShared> {
     DEBUG_LAYER_INIT.call_once(|| {
         if is_debug_mode() {
+            // Must be set before the first D3D12 DLL load (including GetDebugInterface).
+            if env_enable_dred() {
+                super::diagnostic::prepare_dred_env();
+            }
+
             let mut debug_interface: Option<ID3D12Debug> = None;
             if unsafe { D3D12GetDebugInterface(&mut debug_interface) }.is_ok() {
                 if let Some(d) = debug_interface {
                     unsafe { d.EnableDebugLayer() };
                     tracing::info!("D3D12 debug layer enabled");
 
-                    let enable_gbv =
-                        std::env::var("GOLDY_DX12_GBV").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-                    if enable_gbv {
+                    if env_enable_dred() {
+                        super::diagnostic::enable_dred_settings();
+                    }
+
+                    if env_enable_gbv() {
                         if let Ok(debug1) = d.cast::<ID3D12Debug1>() {
                             unsafe { debug1.SetEnableGPUBasedValidation(true) };
                             tracing::info!("D3D12 GPU-Based Validation (GBV) enabled");

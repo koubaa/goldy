@@ -1117,7 +1117,7 @@ pub(crate) struct FrameSync {
 /// Surface (swapchain) state for window presentation.
 pub(crate) struct SurfaceState {
     pub device_handle: DeviceHandle,
-    pub swapchain: Dxgi::IDXGISwapChain3,
+    pub swapchain: Option<Dxgi::IDXGISwapChain3>,
     pub render_targets: Vec<Direct3D12::ID3D12Resource>,
     pub rtv_offsets: Vec<u32>,
     pub width: u32,
@@ -1248,7 +1248,7 @@ pub(super) struct Dx12State {
     /// Set to `true` when a TDR / device-removal is detected (fence completed with `u64::MAX`
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
-    pub device_removed: std::sync::atomic::AtomicBool,
+    pub device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Per-device frame-table GPU resources (reserved bindless slots 0/1).
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     pub frame_tables: SharedFrameTableMap,
