@@ -460,6 +460,10 @@ pub(crate) struct ComputeAllocatorSlot {
     /// When `true`, this slot holds a retained command list that must not be reset
     /// until the caller explicitly releases it via `evict_retained`.
     pub retained: bool,
+    /// Allocator and command list were reset on the submission worker and are ready to record.
+    pub pre_reset: bool,
+    /// Render thread holds this slot open for recording until the matching submit executes.
+    pub in_recording: bool,
 }
 
 /// Per-context async submission stream (fence, poller, compute allocator pool).

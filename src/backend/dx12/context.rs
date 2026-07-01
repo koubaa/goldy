@@ -43,6 +43,8 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         fence_value: 0,
         command_list: None,
         retained: false,
+        pre_reset: false,
+        in_recording: false,
     }];
 
     let signal_queue = std::sync::Arc::new(crate::signal::SignalQueue::new());
@@ -157,6 +159,8 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
         }
         if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
             slot.retained = false;
+            slot.pre_reset = false;
+            slot.in_recording = false;
         }
     }
 

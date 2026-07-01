@@ -1,6 +1,6 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
-use super::types::{LogicalDevice, SharedLogicalDevice};
+use super::types::{LogicalDevice, SharedLogicalDevice, SharedSubmissionContext};
 use super::{ContextHandle, DeviceHandle};
 use crate::backend::submission_worker::PendingSubmit;
 use crate::backend::SubmitSync;
@@ -31,7 +31,9 @@ pub(super) fn resolve_queue_waits(
 
 pub(super) struct Dx12ComputePendingSubmit {
     logical_device: SharedLogicalDevice,
+    sc: SharedSubmissionContext,
     ctx_fence: ID3D12Fence,
+    slot_idx: usize,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
     fence_value: TimelineValue,
@@ -40,13 +42,29 @@ pub(super) struct Dx12ComputePendingSubmit {
 impl PendingSubmit for Dx12ComputePendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.compute");
+        {
+            let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.before");
+            let mut sc = self.sc.lock().unwrap();
+            super::compute::pre_reset_retired_compute_slots(&self.logical_device, &mut sc, &self.ctx_fence)?;
+        }
         super::utils::execute_preallocated_context_submit(
             &self.logical_device,
             &self.ctx_fence,
             &self.command_lists,
             &self.queue_waits,
             self.fence_value,
-        )
+        )?;
+        {
+            let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.after");
+            let mut sc = self.sc.lock().unwrap();
+            super::compute::finish_compute_slot_submit(
+                &self.logical_device,
+                &mut sc,
+                &self.ctx_fence,
+                self.slot_idx,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -200,7 +218,9 @@ pub(super) fn enqueue_present_copy(
 pub(super) fn enqueue_compute_submit(
     logical_device: &SharedLogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    sc: SharedSubmissionContext,
     ctx_fence: ID3D12Fence,
+    slot_idx: usize,
     command_lists: Vec<Option<ID3D12CommandList>>,
     sync: Option<&SubmitSync>,
     fence_value: TimelineValue,
@@ -211,7 +231,9 @@ pub(super) fn enqueue_compute_submit(
         fence_value,
         Box::new(Dx12ComputePendingSubmit {
             logical_device: Arc::clone(logical_device),
+            sc,
             ctx_fence,
+            slot_idx,
             command_lists,
             queue_waits,
             fence_value,

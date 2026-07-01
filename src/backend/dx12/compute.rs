@@ -692,11 +692,64 @@ fn find_recyclable_allocator_slot(
     for offset in 0..len {
         let idx = (start + offset) % len;
         let slot = &pool[idx];
-        if completed >= slot.fence_value && !slot.retained {
+        if completed >= slot.fence_value && !slot.retained && !slot.in_recording {
             return Some(idx);
         }
     }
     None
+}
+
+fn reset_compute_allocator_slot(
+    logical_device: &types::LogicalDevice,
+    slot: &mut ComputeAllocatorSlot,
+) -> Result<()> {
+    let _tz = tracy_zone!("dx12.submit_worker.reset_compute_slot");
+    unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
+    if let Some(ref existing) = slot.command_list {
+        unsafe { existing.Reset(&slot.allocator, None) }.context("Failed to reset command list")?;
+    } else {
+        let new_list: ID3D12GraphicsCommandList = unsafe {
+            logical_device
+                .device
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &slot.allocator, None)
+        }
+        .context("Failed to create command list")?;
+        slot.command_list = Some(new_list);
+    }
+    slot.pre_reset = true;
+    Ok(())
+}
+
+/// Clear the recording guard and reset any retired pool slots on the submission worker.
+pub(super) fn finish_compute_slot_submit(
+    logical_device: &types::LogicalDevice,
+    sc: &mut types::Dx12SubmissionContext,
+    ctx_fence: &ID3D12Fence,
+    slot_idx: usize,
+) -> Result<()> {
+    if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
+        slot.in_recording = false;
+    }
+    pre_reset_retired_compute_slots(logical_device, sc, ctx_fence)
+}
+
+/// Reset pool slots whose GPU work has retired so the render thread can skip `Reset` on acquire.
+pub(super) fn pre_reset_retired_compute_slots(
+    logical_device: &types::LogicalDevice,
+    sc: &mut types::Dx12SubmissionContext,
+    ctx_fence: &ID3D12Fence,
+) -> Result<()> {
+    let _tz = tracy_zone!("dx12.submit_worker.pre_reset_slots");
+    let completed = unsafe { ctx_fence.GetCompletedValue() };
+    for slot in &mut sc.compute_allocator_pool {
+        if slot.retained || slot.pre_reset || slot.in_recording || slot.fence_value == 0 {
+            continue;
+        }
+        if completed >= slot.fence_value {
+            reset_compute_allocator_slot(logical_device, slot)?;
+        }
+    }
+    Ok(())
 }
 
 fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
@@ -728,13 +781,22 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
     let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
         let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse");
         let slot = &mut pool[idx];
-        {
-            let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.reset_alloc");
-            unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
-        }
-        let list = if let Some(ref existing) = slot.command_list {
-            let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.reset_list");
-            unsafe { existing.Reset(&slot.allocator, None) }.context("Failed to reset command list")?;
+        let list = if slot.pre_reset {
+            let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.pre_reset");
+            slot.pre_reset = false;
+            slot.command_list
+                .as_ref()
+                .context("pre_reset slot missing command list")?
+                .clone()
+        } else if let Some(ref existing) = slot.command_list {
+            {
+                let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.reset_alloc");
+                unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
+            }
+            {
+                let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.reset_list");
+                unsafe { existing.Reset(&slot.allocator, None) }.context("Failed to reset command list")?;
+            }
             existing.clone()
         } else {
             let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse.create_list");
@@ -747,6 +809,7 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
             slot.command_list = Some(new_list.clone());
             new_list
         };
+        slot.in_recording = true;
         sc.allocator_recycle_hint = (idx + 1) % pool.len();
         (list, idx)
     } else {
@@ -774,6 +837,8 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
             fence_value: 0,
             command_list: Some(new_list.clone()),
             retained: false,
+            pre_reset: false,
+            in_recording: true,
         });
         let idx = pool.len() - 1;
         sc.allocator_recycle_hint = (idx + 1) % pool.len();
@@ -1738,6 +1803,8 @@ fn execute_signal_and_finish(
                 }
                 if let Some(old_slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                     old_slot.retained = false;
+                    old_slot.pre_reset = false;
+                    old_slot.in_recording = false;
                 }
             }
             let frame_table_row = frame_table_staging
@@ -1752,6 +1819,8 @@ fn execute_signal_and_finish(
                 .and_then(|s| s.command_list.clone())
             {
                 sc.compute_allocator_pool[slot_idx].retained = true;
+                sc.compute_allocator_pool[slot_idx].pre_reset = false;
+                // in_recording cleared on the submit worker after ExecuteCommandLists.
                 sc.retained_graphs.insert(
                     key,
                     types::RetainedGraph {
@@ -1788,14 +1857,21 @@ fn execute_signal_and_finish(
         })
         .collect::<Vec<_>>();
 
-    super::pending_submit::enqueue_compute_submit(
+    if let Err(err) = super::pending_submit::enqueue_compute_submit(
         logical_device,
         scope.context_fences,
+        scope.sc.clone(),
         ctx_fence,
+        slot_idx,
         vec![Some(cmd_list)],
         sync,
         fence_value,
-    )?;
+    ) {
+        if let Some(slot) = scope.sc.lock().unwrap().compute_allocator_pool.get_mut(slot_idx) {
+            slot.in_recording = false;
+        }
+        return Err(err);
+    }
 
     if let Some(prof) = gpu_profile {
         scope.sc.lock().unwrap().pending_gpu_profiles.push((fence_value, prof));
@@ -2018,6 +2094,7 @@ pub(super) fn submit_with_scope(
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
+        let _tz_query_data = tracy_zone!("dx12.submit.resolve_query_data");
         unsafe {
             command_list.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
             command_list.ResolveQueryData(
@@ -2031,6 +2108,7 @@ pub(super) fn submit_with_scope(
         }
     }
 
+    let _tz_query_data = tracy_zone!("dx12.submit.finish");
     let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &scope.buffers().read().unwrap().entries);
     let tv = execute_signal_and_finish(
         scope,
@@ -2498,6 +2576,8 @@ fn evict_retained_on_context(
             }
             if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;
+                slot.pre_reset = false;
+                slot.in_recording = false;
             }
         }
     }
