@@ -925,8 +925,20 @@ pub(super) fn schedule_present_on_submission_worker(
     let plan = prepare_present_plan(state, frame)?;
     let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
     let (command_lists, copy_tv) = plan.record_present_copy()?;
-    let return_fence = if copy_tv > 0 { copy_tv } else { plan.existing_fence };
     let scratch_layout_updated = copy_tv > 0;
+    // Copy path: `return_fence` is the copy blit signal (GPU retires before `Present()`).
+    // Skip-copy (render-pass-direct): no blit; allocate a present-only queue signal that
+    // the submission worker issues immediately before `Present()`. Using `existing_fence`
+    // here would only cover prior render-pass work, not the in-flight present job — and
+    // with lazy finish there is no blocking wait at consume to restore ordering.
+    let (return_fence, preallocated_present_tv) = if copy_tv > 0 {
+        (copy_tv, None)
+    } else {
+        let present_only_tv = crate::backend::submission_worker::allocate_timeline_value(
+            &plan.logical_device.timeline_next,
+        );
+        (present_only_tv, Some(present_only_tv))
+    };
 
     // Eagerly stamp the allocator-reuse fence target now, synchronously, instead of
     // waiting for the async present job's completion to flow back through
@@ -987,6 +999,7 @@ pub(super) fn schedule_present_on_submission_worker(
             finish,
             pending_finishes,
             std::sync::Arc::clone(&state.device_removed),
+            preallocated_present_tv,
         )?
     };
     Ok(present_tv)
@@ -1010,11 +1023,8 @@ fn synthesize_scheduled_present_finish(
         .flatten()
         .with_context(|| format!("No scratch texture for swapchain image {image_index}"))?;
     let render_pass_submitted = surface.frame_sync[present_slot].render_pass_submitted;
-    let return_fence = if render_pass_submitted {
-        surface.frame_sync[present_slot].fence_value
-    } else {
-        present_tv
-    };
+    // `present_tv` is the enqueued present job timeline (copy blit or present-only signal).
+    let return_fence = present_tv;
     let scratch_layout_updated = !render_pass_submitted;
     let present_timeline = if scratch_layout_updated {
         return_fence

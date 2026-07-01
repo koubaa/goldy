@@ -386,6 +386,10 @@ impl Grant for PresentGrant {
                 // scheduled-present wait guaranteed `Present()` had returned before
                 // `GetCurrentBackBufferIndex`. With lazy finish that wait is gone; acquiring
                 // here races the in-flight present job on TID_SUBMIT.
+                tracing::debug!(
+                    target: "goldy::scheme",
+                    "speculative present acquire skipped: backend uses lazy present finish"
+                );
             } else {
                 let _tz = crate::tracy_zone!("scheme.grant_present.speculative_acquire");
                 let spec_result = crate::swapchain_pool::SwapchainPool::acquire_slot(&self.pool);
@@ -507,13 +511,9 @@ fn complete_scheduled_present(
         b.supports_lazy_present_finish()
     };
     if lazy {
-        // The correctness-critical part of scheduled-present bookkeeping (the
-        // allocator-reuse fence `acquire()` gates its `Reset()` on) was already stamped
-        // eagerly and synchronously when the present job was enqueued at submit time —
-        // see `GpuBackendPresentSplit::schedule_present_on_submission_worker`'s DX12
-        // implementation. What's left (swapchain slot release, scratch layout flip) is
-        // capacity-only and is drained non-blockingly by `GpuBackend::poll_signals`, so
-        // there is nothing here that needs a CPU wait for the present job to execute.
+        // Allocator-reuse fence and flip-slot return were stamped eagerly at enqueue
+        // (see DX12 `schedule_present_on_submission_worker`). Remaining bookkeeping
+        // is drained non-blockingly by `GpuBackend::poll_signals`.
         let _tz = crate::tracy_zone!("scheme.grant_present.complete_scheduled_present.lazy");
         let _ = (frame, present_tv);
         // FIFO scheduled present bypasses `Frame::present()` → `apply_frame_bookkeeping`,

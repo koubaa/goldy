@@ -1014,14 +1014,13 @@ pub(crate) trait GpuBackendPresentSplit {
         Ok(())
     }
 
-    /// When true, the correctness-critical part of scheduled-present bookkeeping (the
-    /// allocator-reuse fence target that [`GpuBackendPresentSplit::schedule_present_on_submission_worker`]
-    /// stamps) is applied eagerly and synchronously at enqueue time, not after a blocking
-    /// wait for the present job to execute. Callers of [`Scheme::grant_present`](crate::Scheme::grant_present)
-    /// consumption may skip [`GpuBackendPresentSplit::take_scheduled_present_blocking_wait`]
-    /// entirely for such backends: the remaining bookkeeping (swapchain slot release,
-    /// scratch layout flip) is capacity-only and safe to drain non-blockingly via
-    /// [`GpuBackend::poll_signals`].
+    /// When true, scheduled-present consumption may skip
+    /// [`GpuBackendPresentSplit::take_scheduled_present_blocking_wait`]: the
+    /// allocator-reuse fence and flip-slot return are stamped eagerly at enqueue
+    /// time (copy blit signal for scratch→backbuffer presents; a dedicated
+    /// present-only queue signal for render-pass-direct / skip-copy). Remaining
+    /// bookkeeping (scratch layout flip, `last_presented_image_index`) is
+    /// capacity-only and drained non-blockingly via [`GpuBackend::poll_signals`].
     fn supports_lazy_present_finish(&self) -> bool {
         false
     }

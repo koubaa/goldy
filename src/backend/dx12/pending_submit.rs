@@ -180,12 +180,17 @@ pub(super) fn enqueue_scheduled_present(
     finish: crate::backend::PresentFinishState,
     pending_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
     device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // When `copy_tv == 0` (skip-copy / render-pass-direct), the caller must pre-allocate
+    // the present-only queue signal so eager bookkeeping and enqueue share one timeline value.
+    preallocated_present_tv: Option<u64>,
 ) -> Result<u64> {
     logical_device.submission_worker.check_error()?;
     let enqueue_tv = if copy_tv > 0 {
         copy_tv
     } else {
-        crate::backend::submission_worker::allocate_timeline_value(&logical_device.timeline_next)
+        preallocated_present_tv.unwrap_or_else(|| {
+            crate::backend::submission_worker::allocate_timeline_value(&logical_device.timeline_next)
+        })
     };
     logical_device.submission_worker.enqueue(
         enqueue_tv,
