@@ -284,6 +284,71 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
     }
 }
 
+/// Block until DXGI's next backbuffer index is not still listed in `pending_swapchain_returns`.
+///
+/// Lazy present finish eagerly stamps returns at schedule time; without this gate the render
+/// thread can acquire an index whose prior present is still queued or executing on the
+/// submission worker, leading to duplicate presents to the same flip-model buffer.
+fn wait_until_swapchain_index_available(
+    state: &mut Dx12State,
+    surface_handle: SurfaceHandle,
+    ctx: super::ContextHandle,
+    device_handle: super::DeviceHandle,
+) -> Result<u32> {
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Surface's device is invalid")?
+        .clone();
+
+    loop {
+        drain_pending_present_finishes(state);
+
+        let image_index = {
+            let surface = state
+                .surfaces
+                .get(&surface_handle)
+                .context("Invalid surface handle")?;
+            unsafe {
+                surface
+                    .swapchain
+                    .as_ref()
+                    .context("Surface has no swapchain")?
+                    .GetCurrentBackBufferIndex()
+            }
+        };
+
+        let blocking_fence = state.surfaces.get(&surface_handle).and_then(|surf| {
+            surf.pending_swapchain_returns
+                .iter()
+                .filter(|&&(idx, _)| idx == image_index)
+                .map(|&(_, tv)| tv)
+                .max()
+        });
+
+        let Some(blocking_fence) = blocking_fence else {
+            return Ok(image_index);
+        };
+
+        {
+            let _tz = crate::tracy_zone!("surface.acquire.in_flight_index_wait");
+            logical_device.submission_worker.flush()?;
+            let horizon =
+                crate::backend::submission_worker::submission_horizon(&logical_device.timeline_next);
+            if blocking_fence <= horizon {
+                logical_device
+                    .submission_worker
+                    .wait_submitted(blocking_fence)?;
+            }
+            logical_device.submission_worker.check_error()?;
+            wait_for_fence(&logical_device.fence, blocking_fence)?;
+        }
+
+        let retire_progress = super::context::device_retired(state, device_handle);
+        flush_swapchain_returns_to_progress(state, surface_handle, ctx, retire_progress);
+    }
+}
+
 /// Acquire the next swapchain image.
 ///
 /// Binds a per-buffer **compute scratch** texture (UAV-capable) for `frame.texture()`.
@@ -348,21 +413,22 @@ pub(super) fn acquire(
         device.process_deletion_queue_up_to(retired);
     }
 
+    {
+        let surface = state
+            .surfaces
+            .get_mut(&surface_handle)
+            .context("Invalid surface handle")?;
+        surface.frame_sync[present_slot].render_pass_submitted = false;
+        surface.pending_frame_compute.clear();
+    }
+
+    let image_index =
+        wait_until_swapchain_index_available(state, surface_handle, ctx, device_handle)?;
+
     let surface = state
         .surfaces
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
-
-    surface.frame_sync[present_slot].render_pass_submitted = false;
-    surface.pending_frame_compute.clear();
-
-    let image_index = unsafe {
-        surface
-            .swapchain
-            .as_ref()
-            .context("Surface has no swapchain")?
-            .GetCurrentBackBufferIndex()
-    };
     surface.current_image_index = Some(image_index);
 
     let width = surface.width;
@@ -1266,6 +1332,7 @@ pub(super) fn finish_present(
                 .push(crate::signal::Signal::SwapchainReturned { image_index });
         }
     }
+
 
     Ok(finish.present_timeline)
 }
