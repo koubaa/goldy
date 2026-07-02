@@ -418,6 +418,15 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         Ok(Some(Box::new(Dx12TimelineBlockingWait { fence, value })))
     }
 
+    fn check_submission_worker_for_context(&self, ctx: ContextHandle) -> Result<()> {
+        let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            ld.submission_worker.check_error()
+        } else {
+            Ok(())
+        }
+    }
+
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get(&device_handle) {
@@ -485,7 +494,7 @@ impl crate::backend::GpuBackendPresentSplit for Dx12Backend {
         &mut self,
         frame: FrameToken,
         submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
+    ) -> Result<crate::backend::SchedulePresentOnWorkerResult> {
         surface::schedule_present_on_submission_worker(&mut self.state, frame, submit_tv)
     }
 

@@ -841,6 +841,41 @@ pub(crate) trait ScheduledPresentBlockingWait: Send {
     fn run(self: Box<Self>) -> Result<ScheduledPresentWaitOutcome>;
 }
 
+/// Hooks invoked by [`ScheduledPresentJob::run`] at present-easement consumption time.
+pub(crate) struct PresentConsumeHooks {
+    /// Called after the copy submit epoch is reached, immediately before WSI `Present`.
+    pub on_present_began: Option<Box<dyn FnOnce() + Send>>,
+    /// Called after WSI `Present` returns and post-present sync completes.
+    pub on_present_completed: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl PresentConsumeHooks {
+    #[allow(dead_code, reason = "non-lazy / test backends")]
+    pub fn empty() -> Self {
+        Self {
+            on_present_began: None,
+            on_present_completed: None,
+        }
+    }
+}
+
+/// Deferred WSI present work for lazy-finish backends: copy blit is enqueued on the
+/// submission worker at scheme submit; [`ScheduledPresentJob::run`] waits for that epoch
+/// and executes `Present` outside the global backend lock.
+pub(crate) trait ScheduledPresentJob: Send {
+    /// Submission-worker epoch covering copy `ExecuteCommandLists` + `Signal`.
+    #[allow(dead_code, reason = "diagnostic / future ledger admission gates")]
+    fn copy_tv(&self) -> crate::timeline::TimelineValue;
+    fn run(self: Box<Self>, hooks: PresentConsumeHooks) -> Result<()>;
+}
+
+/// Outcome of enqueuing present copy work on the submission worker at scheme submit.
+pub(crate) struct SchedulePresentOnWorkerResult {
+    pub present_tv: crate::timeline::TimelineValue,
+    /// When set, WSI present runs in [`PresentGrant::consume`] instead of on the worker.
+    pub consume_job: Option<Box<dyn ScheduledPresentJob>>,
+}
+
 /// Result of a blocking swapchain acquire call run outside the global backend lock.
 #[allow(dead_code)]
 pub struct SurfaceAcquireDrawable {
@@ -1019,12 +1054,13 @@ pub(crate) trait GpuBackendPresentSplit {
     }
 
     /// Enqueue present GPU work on the submission worker during scheme submit.
-    /// Returns the pre-allocated present easement timeline value.
+    /// Returns the pre-allocated present easement timeline value and, on lazy-finish
+    /// backends, a job whose WSI present runs at grant consumption.
     fn schedule_present_on_submission_worker(
         &mut self,
         frame: FrameToken,
         submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
+    ) -> Result<SchedulePresentOnWorkerResult> {
         let _ = (frame, submit_tv);
         anyhow::bail!("schedule_present_on_submission_worker not implemented for this backend")
     }
@@ -1090,6 +1126,11 @@ pub(crate) trait GpuBackendTimelineWait {
     ) -> Result<Option<Box<dyn TimelineBlockingWait>>>;
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
+
+    /// Fail fast when the device's submission worker latched an execute error.
+    fn check_submission_worker_for_context(&self, _ctx: ContextHandle) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.

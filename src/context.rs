@@ -231,6 +231,13 @@ impl Context {
                     .map_err(|e| self.classify(e))?
             };
             if let Some(wait) = blocking {
+                {
+                    let _lock = crate::tracy_zone!("context.wait_until.lock");
+                    let backend = backend_mutex.lock().unwrap();
+                    backend
+                        .check_submission_worker_for_context(ctx)
+                        .map_err(|e| self.classify(e))?;
+                }
                 let _block = crate::tracy_zone!("context.wait_until.block");
                 wait.block().map_err(|e| self.classify(e))?;
             }

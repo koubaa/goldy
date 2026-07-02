@@ -355,6 +355,15 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
         })))
     }
 
+    fn check_submission_worker_for_context(&self, ctx: ContextHandle) -> Result<()> {
+        let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            ld.submission_worker.check_error()
+        } else {
+            Ok(())
+        }
+    }
+
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         if let Some(ld) = self.state.devices.get(&device_handle) {
@@ -422,8 +431,12 @@ impl crate::backend::GpuBackendPresentSplit for VulkanBackend {
         &mut self,
         frame: FrameToken,
         submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
-        present_split::schedule_present_on_submission_worker(&mut self.state, frame, submit_tv)
+    ) -> Result<crate::backend::SchedulePresentOnWorkerResult> {
+        let present_tv = present_split::schedule_present_on_submission_worker(&mut self.state, frame, submit_tv)?;
+        Ok(crate::backend::SchedulePresentOnWorkerResult {
+            present_tv,
+            consume_job: None,
+        })
     }
 
     fn take_scheduled_present_blocking_wait(

@@ -1362,9 +1362,10 @@ mod fifo_present_tests {
             present_slot: 0,
         };
 
-        let present_tv = backend
+        let scheduled = backend
             .schedule_present_on_submission_worker(token, 0)
             .expect("schedule skip present");
+        let present_tv = scheduled.present_tv;
         let wait = backend
             .take_scheduled_present_blocking_wait(token, present_tv)
             .expect("take wait")

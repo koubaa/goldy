@@ -525,6 +525,15 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
         Ok(None)
     }
 
+    fn check_submission_worker_for_context(&self, ctx: ContextHandle) -> Result<()> {
+        let device = self.context_device(ctx);
+        if let Some(dev) = self.devices.get(&device) {
+            dev.submission_worker.check_error()
+        } else {
+            Ok(())
+        }
+    }
+
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device = self.context_device(ctx);
         if let Some(dev) = self.devices.get(&device) {
@@ -600,7 +609,7 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         &mut self,
         frame: FrameToken,
         _submit_tv: crate::timeline::TimelineValue,
-    ) -> Result<crate::timeline::TimelineValue> {
+    ) -> Result<crate::backend::SchedulePresentOnWorkerResult> {
         if let Some(tex_handle) = self
             .surfaces
             .get_mut(&frame.surface)
@@ -621,7 +630,10 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
             .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
         let tv = crate::backend::submission_worker::allocate_timeline_value(&dev.timeline_next);
         self.enqueue_mock_submit_deferred(frame.context, tv)?;
-        Ok(tv)
+        Ok(crate::backend::SchedulePresentOnWorkerResult {
+            present_tv: tv,
+            consume_job: None,
+        })
     }
 
     fn take_scheduled_present_blocking_wait(

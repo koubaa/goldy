@@ -1037,12 +1037,12 @@ fn prepare_present_plan(state: &mut Dx12State, frame: crate::backend::FrameToken
     })
 }
 
-/// Enqueue present copy + DXGI Present on the submission worker during scheme submit.
+/// Enqueue present copy on the submission worker during scheme submit; WSI present runs at consume.
 pub(super) fn schedule_present_on_submission_worker(
     state: &mut Dx12State,
     frame: crate::backend::FrameToken,
     _submit_tv: u64,
-) -> Result<u64> {
+) -> Result<crate::backend::SchedulePresentOnWorkerResult> {
     let _tz = crate::tracy_zone!("goldy.dx12.schedule_present_on_submission_worker");
     let plan = prepare_present_plan(state, frame)?;
     let pending_finishes = std::sync::Arc::clone(&state.pending_present_finishes);
@@ -1107,7 +1107,7 @@ pub(super) fn schedule_present_on_submission_worker(
         .unwrap()
         .get(&frame.context)
         .map(|(_, fence)| fence.clone());
-    let present_tv = {
+    let result = {
         let _tz = crate::tracy_zone!("goldy.dx12.present.enqueue_scheduled_present");
         super::pending_submit::enqueue_scheduled_present(
             &plan.logical_device,
@@ -1124,7 +1124,7 @@ pub(super) fn schedule_present_on_submission_worker(
             preallocated_present_tv,
         )?
     };
-    Ok(present_tv)
+    Ok(result)
 }
 
 fn synthesize_scheduled_present_finish(

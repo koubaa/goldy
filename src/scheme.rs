@@ -42,6 +42,7 @@ use std::sync::{Arc, Mutex};
 type SchedulePresentWorkerOutcome = (
     Vec<Option<TimelineValue>>,
     Vec<Mutex<Option<crate::backend::FrameToken>>>,
+    Vec<Mutex<Option<Box<dyn crate::backend::ScheduledPresentJob>>>>,
 );
 
 static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
@@ -192,6 +193,8 @@ struct SubmissionData {
     present_fifo_tvs: Vec<Option<TimelineValue>>,
     /// Frame tokens for grants whose present was scheduled on the worker (no GPU work at consume).
     present_fifo_tokens: Vec<Mutex<Option<crate::backend::FrameToken>>>,
+    /// Deferred WSI present jobs for lazy-finish backends (DX12); consumed on TID_PRESENT.
+    present_fifo_jobs: Vec<Mutex<Option<Box<dyn crate::backend::ScheduledPresentJob>>>>,
 }
 
 impl Drop for SubmissionData {
@@ -204,6 +207,14 @@ impl Drop for SubmissionData {
         }
         let mut pending_finishes: Vec<(crate::backend::FrameToken, TimelineValue)> = Vec::new();
         for (idx, tv) in self.present_fifo_tvs.iter().enumerate() {
+            if self
+                .present_fifo_jobs
+                .get(idx)
+                .and_then(|m| m.lock().unwrap().take())
+                .is_some()
+            {
+                continue;
+            }
             if let (Some(tv), Some(token)) = (
                 tv,
                 self.present_fifo_tokens.get(idx).and_then(|m| m.lock().unwrap().take()),
@@ -357,10 +368,37 @@ impl Grant for PresentGrant {
                     submission.data.present_resolvers.len()
                 ))
             })?;
-            if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                resolver.resolve(present_tv);
+            let resolver = resolver_mutex
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            let consume_job = submission
+                .data
+                .present_fifo_jobs
+                .get(idx)
+                .and_then(|m| m.lock().unwrap_or_else(|e| e.into_inner()).take());
+            if let Some(job) = consume_job {
+                let pool = Arc::clone(&self.pool);
+                let hooks = crate::backend::PresentConsumeHooks {
+                    on_present_began: Some(Box::new(move || {
+                        crate::swapchain_pool::SwapchainPool::publish_present_began(&pool);
+                    })),
+                    on_present_completed: Some(Box::new({
+                        let pool = Arc::clone(&self.pool);
+                        move || crate::swapchain_pool::SwapchainPool::publish_present_completed(&pool)
+                    })),
+                };
+                job.run(hooks).map_err(GoldyError::Backend)?;
+                if let Some(resolver) = resolver {
+                    resolver.resolve(present_tv);
+                }
+                tracy_frame_mark!();
+            } else {
+                if let Some(resolver) = resolver {
+                    resolver.resolve(present_tv);
+                }
+                complete_scheduled_present(&submission.data.backend, token, present_tv)?;
             }
-            complete_scheduled_present(&submission.data.backend, token, present_tv)?;
         } else {
             let frame_mutex = submission.data.present_frames.get(idx).ok_or_else(|| {
                 GoldyError::Backend(anyhow::anyhow!(
@@ -1371,7 +1409,7 @@ impl Scheme {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
             backend.schedules_present_on_submit_worker()
         };
-        let (present_fifo_tvs, present_fifo_tokens) =
+        let (present_fifo_tvs, present_fifo_tokens, present_fifo_jobs) =
             Self::schedule_presents_on_worker_if_supported(&self.ctx, tv, &mut surface_frames)?;
         configure_present_easement_stamps(
             &self.ir,
@@ -1387,6 +1425,7 @@ impl Scheme {
             present_resolvers,
             present_fifo_tvs,
             present_fifo_tokens,
+            present_fifo_jobs,
         )?;
         Ok(submission)
     }
@@ -1400,10 +1439,15 @@ impl Scheme {
         let mut backend = ctx.device().inner.backend.lock().unwrap();
         if !backend.schedules_present_on_submit_worker() {
             let n = surface_frames.len();
-            return Ok((vec![None; n], (0..n).map(|_| Mutex::new(None)).collect()));
+            return Ok((
+                vec![None; n],
+                (0..n).map(|_| Mutex::new(None)).collect(),
+                (0..n).map(|_| Mutex::new(None)).collect(),
+            ));
         }
         let mut tvs = Vec::with_capacity(surface_frames.len());
         let mut tokens = Vec::with_capacity(surface_frames.len());
+        let mut jobs = Vec::with_capacity(surface_frames.len());
         for frame_mutex in surface_frames.iter() {
             let _tz = crate::tracy_zone!("scheme.submit.schedule_present_on_worker.frame");
             let mut slot = frame_mutex.lock().unwrap();
@@ -1413,14 +1457,15 @@ impl Scheme {
             let token = frame.frame_token();
             frame.mark_present_scheduled_on_worker();
             drop(frame);
-            let present_tv = backend
+            let scheduled = backend
                 .schedule_present_on_submission_worker(token, compute_tv)
                 .map_err(|e| ctx.classify(e))?;
-            ctx.advance_high_water_timeline(present_tv);
-            tvs.push(Some(present_tv));
+            ctx.advance_high_water_timeline(scheduled.present_tv);
+            tvs.push(Some(scheduled.present_tv));
             tokens.push(Mutex::new(Some(token)));
+            jobs.push(Mutex::new(scheduled.consume_job));
         }
-        Ok((tvs, tokens))
+        Ok((tvs, tokens, jobs))
     }
 
     fn finish_submit_frame(
@@ -1430,6 +1475,7 @@ impl Scheme {
         present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
         present_fifo_tvs: Vec<Option<TimelineValue>>,
         present_fifo_tokens: Vec<Mutex<Option<crate::backend::FrameToken>>>,
+        present_fifo_jobs: Vec<Mutex<Option<Box<dyn crate::backend::ScheduledPresentJob>>>>,
     ) -> Result<Submission, GoldyError> {
         let backend = Arc::clone(&self.ctx.device().inner.backend);
         if self.grants.is_empty() {
@@ -1444,6 +1490,7 @@ impl Scheme {
                     present_resolvers,
                     present_fifo_tvs,
                     present_fifo_tokens,
+                    present_fifo_jobs,
                 }),
             });
         }
@@ -1518,6 +1565,7 @@ impl Scheme {
                 present_resolvers,
                 present_fifo_tvs,
                 present_fifo_tokens,
+                present_fifo_jobs,
             }),
         })
     }
@@ -3858,6 +3906,47 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let (w, h) = spool.size();
         spool.resize(w, h).expect("resize clears rebuild flag");
+    }
+
+    #[test]
+    fn render_thread_early_acquire_stashes_when_ready() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let spool = crate::swapchain_pool::SwapchainPool::new_with_options(
+            &ctx,
+            &MockWindow,
+            crate::swapchain_pool::SwapchainPoolOptions {
+                depth: 2,
+                ..Default::default()
+            },
+        )
+        .expect("swapchain pool");
+        let lease = spool.lease();
+        let pool = Arc::clone(&lease.pool);
+
+        assert!(spool.ready_for_acquire(0));
+        assert!(spool.try_early_acquire(0).expect("early acquire"));
+        assert!(
+            SwapchainPool::has_speculative_acquire(&pool),
+            "early acquire should stash for resolve_present_slot"
+        );
+    }
+
+    #[test]
+    fn present_lifecycle_began_unblocks_wait() {
+        let device = mock_device();
+        let ctx = device.create_context().unwrap();
+        let spool = crate::swapchain_pool::SwapchainPool::new(&ctx, &MockWindow, 2).expect("pool");
+        let waiter_pool = spool.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_pool.wait_present_began(1);
+            waiter_pool.presents_begun()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        spool.test_signal_present_began();
+        assert_eq!(waiter.join().expect("waiter"), 1);
+        spool.test_signal_present_completed();
+        assert_eq!(spool.presents_completed(), 1);
     }
 
     #[test]

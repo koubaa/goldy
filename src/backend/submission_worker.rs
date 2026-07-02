@@ -73,8 +73,8 @@ impl SubmissionWorker {
     }
 
     pub fn check_error(&self) -> Result<()> {
-        if let Some(err) = self.latched_error.lock().unwrap().take() {
-            return Err(err);
+        if let Some(err) = self.latched_error.lock().unwrap().as_ref() {
+            return Err(anyhow::anyhow!("{err:#}"));
         }
         Ok(())
     }
@@ -202,11 +202,9 @@ fn wait_for_submitted_epoch(
     tv: u64,
     deadline: Option<Instant>,
 ) -> Result<bool> {
-    'wait: while submitted_epoch.load(Ordering::Acquire) < tv {
-        if latched_error.lock().unwrap().is_some() {
-            if let Some(err) = latched_error.lock().unwrap().take() {
-                return Err(err);
-            }
+    while submitted_epoch.load(Ordering::Acquire) < tv {
+        if let Some(err) = latched_error.lock().unwrap().as_ref() {
+            return Err(anyhow::anyhow!("{err:#}"));
         }
         if let Some(d) = deadline {
             if Instant::now() >= d {
@@ -215,12 +213,9 @@ fn wait_for_submitted_epoch(
         }
         let mut guard = wait_notify.0.lock().unwrap();
         while submitted_epoch.load(Ordering::Acquire) < tv {
-            if latched_error.lock().unwrap().is_some() {
+            if let Some(err) = latched_error.lock().unwrap().as_ref() {
                 drop(guard);
-                if let Some(err) = latched_error.lock().unwrap().take() {
-                    return Err(err);
-                }
-                continue 'wait;
+                return Err(anyhow::anyhow!("{err:#}"));
             }
             if let Some(d) = deadline {
                 if Instant::now() >= d {

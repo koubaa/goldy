@@ -16,8 +16,8 @@ use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 /// Resolved present slot: slot id, acquired frame, UAV index, texture handle.
 pub(crate) type ResolvedPresentSlotData = (u32, SurfaceFrame, u32, TextureHandle);
@@ -41,6 +41,11 @@ pub(crate) struct SwapchainPoolInner {
     /// Swapchain rebuild in progress — blocks post-ack speculative acquire on TID_PRESENT
     /// and aborts in-flight `Surface::begin()` blocking waits (DX12 resize deadlock).
     rebuilding: Arc<AtomicBool>,
+    /// Monotonic count of present easements whose WSI handoff has begun (after copy epoch).
+    presents_begun: AtomicU64,
+    /// Monotonic count of present easements whose WSI handoff has completed.
+    presents_completed: AtomicU64,
+    present_lifecycle_notify: Arc<(Mutex<()>, Condvar)>,
 }
 
 /// Construction options for [`SwapchainPool`].
@@ -71,6 +76,14 @@ impl Default for SwapchainPoolOptions {
 /// [`PresentLease`] identity for scheme recording.
 pub struct SwapchainPool {
     inner: Arc<SwapchainPoolInner>,
+}
+
+impl Clone for SwapchainPool {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 /// Stable scheme-scoped name for a swapchain drawable lease.
@@ -126,6 +139,9 @@ impl SwapchainPool {
                 pending_acquire_reservations: AtomicU32::new(0),
                 speculative_acquire_slot: Mutex::new(None),
                 rebuilding: Arc::new(AtomicBool::new(false)),
+                presents_begun: AtomicU64::new(0),
+                presents_completed: AtomicU64::new(0),
+                present_lifecycle_notify: Arc::new((Mutex::new(()), Condvar::new())),
             }),
         })
     }
@@ -168,6 +184,105 @@ impl SwapchainPool {
         surface.pending_acquire_count()
     }
 
+    /// Present easements whose WSI handoff has begun (after copy submit epoch).
+    pub fn presents_begun(&self) -> u64 {
+        self.inner.presents_begun.load(Ordering::Acquire)
+    }
+
+    /// Present easements whose WSI handoff has completed.
+    pub fn presents_completed(&self) -> u64 {
+        self.inner.presents_completed.load(Ordering::Acquire)
+    }
+
+    /// Block until at least `count` present easements have begun WSI handoff.
+    pub fn wait_present_began(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        Self::wait_lifecycle_counter(&self.inner.presents_begun, &self.inner.present_lifecycle_notify, count);
+    }
+
+    /// Block until at least `count` present easements have completed WSI handoff.
+    pub fn wait_present_completed(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        Self::wait_lifecycle_counter(
+            &self.inner.presents_completed,
+            &self.inner.present_lifecycle_notify,
+            count,
+        );
+    }
+
+    fn wait_lifecycle_counter(counter: &AtomicU64, notify: &Arc<(Mutex<()>, Condvar)>, target: u64) {
+        while counter.load(Ordering::Acquire) < target {
+            let mut guard = notify.0.lock().unwrap();
+            while counter.load(Ordering::Acquire) < target {
+                guard = notify.1.wait(guard).unwrap();
+            }
+        }
+    }
+
+    pub(crate) fn publish_present_began(pool: &Arc<SwapchainPoolInner>) {
+        pool.presents_begun.fetch_add(1, Ordering::Release);
+        let guard = pool.present_lifecycle_notify.0.lock().unwrap();
+        pool.present_lifecycle_notify.1.notify_all();
+        drop(guard);
+    }
+
+    pub(crate) fn publish_present_completed(pool: &Arc<SwapchainPoolInner>) {
+        pool.presents_completed.fetch_add(1, Ordering::Release);
+        let guard = pool.present_lifecycle_notify.0.lock().unwrap();
+        pool.present_lifecycle_notify.1.notify_all();
+        drop(guard);
+    }
+
+    /// Non-blocking check whether a render-thread early acquire is likely cheap.
+    ///
+    /// When `min_present_began > 0`, returns false until at least that many present easements
+    /// have begun WSI handoff — avoids blocking `Surface::begin()` on flip-index waits before
+    /// the previous frame's present has started on TID_PRESENT.
+    pub fn ready_for_acquire(&self, min_present_began: u64) -> bool {
+        if min_present_began > 0 && self.presents_begun() < min_present_began {
+            return false;
+        }
+        !Self::rebuilding(&self.inner) && Self::has_acquire_capacity(&self.inner)
+    }
+
+    /// Acquire and stash the next drawable when [`Self::ready_for_acquire`] is true.
+    pub fn try_early_acquire(&self, min_present_began: u64) -> Result<bool> {
+        if !self.ready_for_acquire(min_present_began) {
+            return Ok(false);
+        }
+        if Self::rebuilding(&self.inner) {
+            return Ok(false);
+        }
+        match Self::acquire_slot(&self.inner) {
+            Ok(slot) => {
+                Self::stash_speculative_acquire(&self.inner, slot);
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "goldy::swapchain_pool",
+                    error = %e,
+                    "early acquire skipped"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_signal_present_began(&self) {
+        Self::publish_present_began(&self.inner);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_signal_present_completed(&self) {
+        Self::publish_present_completed(&self.inner);
+    }
+
     /// Block until an acquire slot would succeed (effective in-flight `<` [`depth`](Self::depth)).
     ///
     /// Includes in-progress `Surface::begin()` reservations. On flip-model backends (DX12/Vulkan)
@@ -192,6 +307,10 @@ impl SwapchainPool {
     /// cannot stash a drawable after this drain.
     pub fn sync_before_rebuild(&self, ctx: &crate::Context) {
         let _tz = crate::tracy_zone!("goldy.swapchain_pool.sync_before_rebuild");
+        let completed_target = self.inner.presents_begun.load(Ordering::Acquire);
+        if completed_target > 0 {
+            self.wait_present_completed(completed_target);
+        }
         Self::begin_rebuild_quiesce(&self.inner);
         let device = ctx.device();
         if let Err(e) = {
@@ -282,7 +401,7 @@ impl SwapchainPool {
         // outside `acquire_mutex` so the render thread is not serialized behind TID_PRESENT.
         let begin_result = {
             let surface = pool.surface.read().unwrap();
-            surface.begin_interruptible(&pool.rebuilding)
+            surface.begin()
         };
         pool.pending_acquire_reservations.fetch_sub(1, Ordering::Release);
         let frame = begin_result?;

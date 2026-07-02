@@ -47,6 +47,20 @@ pub(super) fn resolve_host_observed_waits(
     Ok(waits)
 }
 
+fn validate_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[DeferredHostWrite]) -> Result<()> {
+    if deferred_writes.is_empty() {
+        return Ok(());
+    }
+    let buffers_read = buffers.read().unwrap();
+    for w in deferred_writes {
+        buffers_read
+            .entries
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+    }
+    Ok(())
+}
+
 fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[DeferredHostWrite]) -> Result<()> {
     for w in deferred_writes {
         let buffers_read = buffers.read().unwrap();
@@ -159,25 +173,39 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
     }
 }
 
-struct Dx12PresentCopyPendingSubmit {
+/// Copy blit (optional) + queue signal enqueued at scheme submit. WSI present runs at
+/// grant consumption via [`Dx12ScheduledPresentJob`].
+pub(super) struct Dx12PresentCopyPendingSubmit {
     logical_device: SharedLogicalDevice,
     command_lists: Vec<Option<ID3D12CommandList>>,
-    tv: u64,
+    copy_tv: u64,
+    /// When zero, signals `present_only_tv` instead of executing command lists.
+    present_only_tv: u64,
 }
 
 impl PendingSubmit for Dx12PresentCopyPendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.present_copy");
-        super::utils::signal_preallocated_device(&self.logical_device, &self.command_lists, self.tv)
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.scheduled_present_copy");
+        if !self.command_lists.is_empty() {
+            super::utils::signal_preallocated_device(&self.logical_device, &self.command_lists, self.copy_tv)?;
+        } else if self.present_only_tv > 0 {
+            super::utils::with_queue_lock(&self.logical_device, || {
+                unsafe {
+                    self.logical_device
+                        .command_queue
+                        .Signal(&self.logical_device.fence, self.present_only_tv)
+                }
+                .context("Failed to signal device fence for scheduled present copy epoch")
+            })?;
+        }
+        Ok(())
     }
 }
 
-/// Full present job (optional scratch→backbuffer copy + DXGI Present) enqueued at scheme submit.
-pub(super) struct Dx12ScheduledPresentPendingSubmit {
+/// WSI present deferred to [`PresentGrant::consume`] on TID_PRESENT.
+pub(super) struct Dx12ScheduledPresentJob {
     logical_device: SharedLogicalDevice,
-    command_lists: Vec<Option<ID3D12CommandList>>,
     copy_tv: u64,
-    enqueue_tv: u64,
     ctx_fence: Option<ID3D12Fence>,
     sync_tv: u64,
     swapchain: windows::Win32::Graphics::Dxgi::IDXGISwapChain3,
@@ -188,27 +216,27 @@ pub(super) struct Dx12ScheduledPresentPendingSubmit {
     device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
-    fn execute(self: Box<Self>) -> Result<()> {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.scheduled_present");
-        if !self.command_lists.is_empty() {
-            super::utils::signal_preallocated_device(&self.logical_device, &self.command_lists, self.copy_tv)?;
-        } else {
-            super::utils::with_queue_lock(&self.logical_device, || {
-                unsafe {
-                    self.logical_device
-                        .command_queue
-                        .Signal(&self.logical_device.fence, self.enqueue_tv)
-                }
-                .context("Failed to signal device fence for scheduled present")
-            })?;
+impl crate::backend::ScheduledPresentJob for Dx12ScheduledPresentJob {
+    fn copy_tv(&self) -> TimelineValue {
+        self.copy_tv
+    }
+
+    fn run(self: Box<Self>, hooks: crate::backend::PresentConsumeHooks) -> Result<()> {
+        let _tz = crate::tracy_zone!("goldy.dx12.scheduled_present_job.run");
+        self.logical_device
+            .submission_worker
+            .wait_submitted(self.copy_tv)
+            .context("scheduled present job: copy submit epoch wait failed")?;
+        self.logical_device.submission_worker.check_error()?;
+
+        if let Some(on_began) = hooks.on_present_began {
+            on_began();
         }
 
         {
             let _tz = crate::tracy_zone!("dx12.present.swapchain_present");
-            // SAFETY: flip-model `Present` with `DXGI_SWAP_EFFECT_FLIP_DISCARD` is valid from any
-            // thread; the submission worker serializes queue access via `queue_lock`.
-            let (sync_interval, present_flags) = super::surface::present_args(self.present_mode, self.allow_tearing);
+            let (sync_interval, present_flags) =
+                super::surface::present_args(self.present_mode, self.allow_tearing);
             let hr = unsafe { self.swapchain.Present(sync_interval, present_flags) };
             if hr.is_err() {
                 return Err(super::utils::map_d3d12_hresult_failure(
@@ -232,6 +260,10 @@ impl PendingSubmit for Dx12ScheduledPresentPendingSubmit {
             }
         }
 
+        if let Some(on_completed) = hooks.on_present_completed {
+            on_completed();
+        }
+
         self.pending_finishes.lock().unwrap().push(self.finish);
         Ok(())
     }
@@ -253,7 +285,7 @@ pub(super) fn enqueue_scheduled_present(
     // When `copy_tv == 0` (skip-copy / render-pass-direct), the caller must pre-allocate
     // the present-only queue signal so eager bookkeeping and enqueue share one timeline value.
     preallocated_present_tv: Option<u64>,
-) -> Result<u64> {
+) -> Result<crate::backend::SchedulePresentOnWorkerResult> {
     logical_device.submission_worker.check_error()?;
     let enqueue_tv = if copy_tv > 0 {
         copy_tv
@@ -262,24 +294,32 @@ pub(super) fn enqueue_scheduled_present(
             crate::backend::submission_worker::allocate_timeline_value(&logical_device.timeline_next)
         })
     };
+    let copy_epoch = if copy_tv > 0 { copy_tv } else { enqueue_tv };
     logical_device.submission_worker.enqueue(
         enqueue_tv,
-        Box::new(Dx12ScheduledPresentPendingSubmit {
+        Box::new(Dx12PresentCopyPendingSubmit {
             logical_device: Arc::clone(logical_device),
             command_lists,
             copy_tv,
-            enqueue_tv,
-            ctx_fence,
-            sync_tv,
-            swapchain,
-            present_mode,
-            allow_tearing,
-            finish,
-            pending_finishes,
-            device_removed,
+            present_only_tv: if copy_tv > 0 { 0 } else { enqueue_tv },
         }),
     )?;
-    Ok(enqueue_tv)
+    let consume_job: Box<dyn crate::backend::ScheduledPresentJob> = Box::new(Dx12ScheduledPresentJob {
+        logical_device: Arc::clone(logical_device),
+        copy_tv: copy_epoch,
+        ctx_fence,
+        sync_tv,
+        swapchain,
+        present_mode,
+        allow_tearing,
+        finish,
+        pending_finishes,
+        device_removed,
+    });
+    Ok(crate::backend::SchedulePresentOnWorkerResult {
+        present_tv: enqueue_tv,
+        consume_job: Some(consume_job),
+    })
 }
 
 pub(super) fn enqueue_present_copy(
@@ -293,7 +333,8 @@ pub(super) fn enqueue_present_copy(
         Box::new(Dx12PresentCopyPendingSubmit {
             logical_device: Arc::clone(logical_device),
             command_lists,
-            tv,
+            copy_tv: tv,
+            present_only_tv: 0,
         }),
     )
 }
@@ -313,6 +354,7 @@ pub(super) fn enqueue_compute_submit(
     let queue_waits = resolve_queue_waits(logical_device, context_fences, sync)?;
     let host_observed_waits = resolve_host_observed_waits(context_fences, sync)?;
     let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
+    validate_deferred_host_writes(buffers, &deferred_host_writes)?;
     logical_device.submission_worker.enqueue(
         fence_value,
         Box::new(Dx12ComputePendingSubmit {
@@ -343,6 +385,7 @@ pub(super) fn enqueue_retained_resubmit(
     let queue_waits = resolve_queue_waits(logical_device, context_fences, sync)?;
     let host_observed_waits = resolve_host_observed_waits(context_fences, sync)?;
     let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
+    validate_deferred_host_writes(buffers, &deferred_host_writes)?;
     logical_device.submission_worker.enqueue(
         fence_value,
         Box::new(Dx12RetainedResubmitPending {
