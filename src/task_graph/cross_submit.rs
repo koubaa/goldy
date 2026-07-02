@@ -477,7 +477,6 @@ pub fn compute_cross_submit_sync_into(
         let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards");
         for (key, access) in net {
             if let Some(entry) = ledger.get(key) {
-                let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards.exact");
                 apply_cross_submit_hazards_for_resource(
                     *key,
                     *access,
@@ -584,7 +583,6 @@ impl BufferStampIndex {
 
 fn insert_ledger_entry(out: &mut LedgerSnapshot, stamp_key: ResourceKey, stamp: &Arc<ParcelStamp>) {
     out.entry(stamp_key).or_insert_with(|| {
-        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.lock_clone");
         LedgerEntry {
             sync: stamp.sync.lock().clone(),
         }
@@ -604,7 +602,6 @@ fn collect_ledger_aliases_for_key(
         return;
     }
     if let Some(candidates) = buffer_index.and_then(|index| index.candidates_for(query_key)) {
-        let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot.alias_index");
         for &stamp_key in candidates {
             if stamp_key == query_key {
                 continue;
