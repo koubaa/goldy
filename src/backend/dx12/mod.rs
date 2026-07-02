@@ -863,6 +863,16 @@ impl GpuBackend for Dx12Backend {
         surface::destroy(&mut self.state, surface_handle);
     }
 
+    fn set_surface_acquire_abort(
+        &mut self,
+        surface_handle: SurfaceHandle,
+        abort: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        if let Some(surface) = self.state.surfaces.get_mut(&surface_handle) {
+            surface.acquire_abort = abort;
+        }
+    }
+
     fn begin_frame(
         &mut self,
         surface_handle: SurfaceHandle,

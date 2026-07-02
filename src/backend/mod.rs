@@ -1510,6 +1510,15 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         PresentMode::Auto
     }
 
+    /// When set, DX12 surface acquire polls this flag during blocking waits and bails out
+    /// if it becomes true (swapchain rebuild quiesce). Cleared by [`Surface::begin_interruptible`].
+    fn set_surface_acquire_abort(
+        &mut self,
+        _surface: SurfaceHandle,
+        _abort: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+    }
+
     // --- Timeline + explicit frame bracket ---
 
     /// Latest GPU completion point on this context's timeline (`value` is done when

@@ -40,7 +40,7 @@ use raw_window_handle::RawWindowHandle;
 use windows::{
     core::Interface,
     Win32::{
-        Foundation::{CloseHandle, HWND, RECT},
+        Foundation::{CloseHandle, HWND, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Graphics::{
             Direct3D12::*,
             Dxgi::{Common::*, *},
@@ -240,6 +240,7 @@ pub(super) fn create(
             pending_frame_compute: Vec::new(),
             pending_acquire_count: 0,
             pending_swapchain_returns: Vec::new(),
+            acquire_abort: None,
         },
     );
 
@@ -284,6 +285,40 @@ pub(super) fn destroy(state: &mut Dx12State, surface_handle: SurfaceHandle) {
     }
 }
 
+/// Poll interval for interruptible acquire waits (DX12 resize deadlock avoidance).
+const ACQUIRE_ABORT_POLL_MS: u32 = 2;
+
+fn acquire_aborted(state: &Dx12State, surface_handle: SurfaceHandle) -> bool {
+    state
+        .surfaces
+        .get(&surface_handle)
+        .and_then(|s| s.acquire_abort.as_ref())
+        .is_some_and(|abort| abort.load(std::sync::atomic::Ordering::Acquire))
+}
+
+fn bail_if_acquire_aborted(state: &Dx12State, surface_handle: SurfaceHandle) -> Result<()> {
+    if acquire_aborted(state, surface_handle) {
+        anyhow::bail!("swapchain acquire aborted (rebuild in progress)");
+    }
+    Ok(())
+}
+
+fn wait_for_waitable_interruptible(
+    waitable_handle: windows::Win32::Foundation::HANDLE,
+    state: &Dx12State,
+    surface_handle: SurfaceHandle,
+) -> Result<()> {
+    loop {
+        bail_if_acquire_aborted(state, surface_handle)?;
+        let result = unsafe { WaitForSingleObject(waitable_handle, ACQUIRE_ABORT_POLL_MS) };
+        match result {
+            WAIT_OBJECT_0 => return Ok(()),
+            WAIT_TIMEOUT => continue,
+            _ => anyhow::bail!("WaitForSingleObject on frame-latency waitable failed"),
+        }
+    }
+}
+
 /// Block until DXGI's next backbuffer index is not still listed in `pending_swapchain_returns`.
 ///
 /// Lazy present finish eagerly stamps returns at schedule time; without this gate the render
@@ -302,6 +337,7 @@ fn wait_until_swapchain_index_available(
         .clone();
 
     loop {
+        bail_if_acquire_aborted(state, surface_handle)?;
         drain_pending_present_finishes(state);
 
         let image_index = {
@@ -333,15 +369,26 @@ fn wait_until_swapchain_index_available(
         {
             let _tz = crate::tracy_zone!("surface.acquire.in_flight_index_wait");
             logical_device.submission_worker.flush()?;
+            bail_if_acquire_aborted(state, surface_handle)?;
             let horizon =
                 crate::backend::submission_worker::submission_horizon(&logical_device.timeline_next);
             if blocking_fence <= horizon {
-                logical_device
-                    .submission_worker
-                    .wait_submitted(blocking_fence)?;
+                loop {
+                    bail_if_acquire_aborted(state, surface_handle)?;
+                    if logical_device
+                        .submission_worker
+                        .wait_submitted_timeout(blocking_fence, ACQUIRE_ABORT_POLL_MS)?
+                    {
+                        break;
+                    }
+                }
             }
             logical_device.submission_worker.check_error()?;
-            wait_for_fence(&logical_device.fence, blocking_fence)?;
+            if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
+                wait_for_fence_interruptible(&logical_device.fence, blocking_fence, state, surface_handle)?;
+            } else {
+                wait_for_fence(&logical_device.fence, blocking_fence)?;
+            }
         }
 
         let retire_progress = super::context::device_retired(state, device_handle);
@@ -359,6 +406,7 @@ pub(super) fn acquire(
     surface_handle: SurfaceHandle,
     ctx: super::ContextHandle,
 ) -> Result<(SwapchainImageHandle, u32)> {
+    bail_if_acquire_aborted(state, surface_handle)?;
     if state
         .surfaces
         .get(&surface_handle)
@@ -385,7 +433,11 @@ pub(super) fn acquire(
     // ad-hoc fence stall that previously occurred inside present().
     if let Some(SendSyncHandle(waitable_handle)) = waitable {
         let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
-        unsafe { WaitForSingleObject(waitable_handle, INFINITE) };
+        if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
+            wait_for_waitable_interruptible(waitable_handle, state, surface_handle)?;
+        } else {
+            unsafe { WaitForSingleObject(waitable_handle, INFINITE) };
+        }
     }
 
     // Fix 1: Ensure this slot's command allocator and scratch texture are no
@@ -399,7 +451,11 @@ pub(super) fn acquire(
                 .devices
                 .get(&device_handle)
                 .context("Surface's device is invalid")?;
-            wait_for_fence(&logical_device.fence, prev_fence)?;
+            if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
+                wait_for_fence_interruptible(&logical_device.fence, prev_fence, state, surface_handle)?;
+            } else {
+                wait_for_fence(&logical_device.fence, prev_fence)?;
+            }
         }
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
             surf.frame_sync[present_slot].fence_value = 0;
@@ -1481,11 +1537,18 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     // emit duplicate Resized events during window drag).
     if let Some(surface) = state.surfaces.get(&surface_handle) {
         if surface.width == width && surface.height == height {
+            let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+            // Pool rebuild quiesce drains the speculative stash and sync waits for
+            // `pending_acquire_count == 0`; do not zero the count here — a stashed drawable
+            // cancelled after this reset would hit "pending_acquire_count was already 0".
+            surface.pending_swapchain_returns.clear();
+            surface.current_texture_handle = None;
+            surface.current_image_index = None;
             tracing::trace!(
                 surface = surface_handle,
                 width,
                 height,
-                "dx12::surface::resize skipped (unchanged)"
+                "dx12::surface::resize skipped (unchanged); reset pending acquire accounting"
             );
             return Ok(());
         }
@@ -1877,6 +1940,29 @@ fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     unsafe { WaitForSingleObject(event, INFINITE) };
     unsafe { CloseHandle(event) }.ok();
     Ok(())
+}
+
+fn wait_for_fence_interruptible(
+    fence: &ID3D12Fence,
+    value: u64,
+    state: &Dx12State,
+    surface_handle: SurfaceHandle,
+) -> Result<()> {
+    loop {
+        bail_if_acquire_aborted(state, surface_handle)?;
+        if unsafe { fence.GetCompletedValue() } >= value {
+            return Ok(());
+        }
+        let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
+        unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
+        let result = unsafe { WaitForSingleObject(event, ACQUIRE_ABORT_POLL_MS) };
+        unsafe { CloseHandle(event) }.ok();
+        match result {
+            WAIT_OBJECT_0 => return Ok(()),
+            WAIT_TIMEOUT => continue,
+            _ => anyhow::bail!("WaitForSingleObject on acquire fence failed"),
+        }
+    }
 }
 
 fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {

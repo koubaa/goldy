@@ -76,6 +76,8 @@ pub struct MockBackend {
     pub default_surface_format: TextureFormat,
     /// When true, [`Scheme::submit`] enqueues present on the per-device submission worker.
     schedules_present_on_submit_worker: bool,
+    /// When true, [`GpuBackend::supports_lazy_present_finish`] returns true (DX12-style).
+    lazy_present_finish: bool,
     /// Device-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     surface_pending_acquire: HashMap<SurfaceHandle, u32>,
@@ -268,6 +270,7 @@ impl MockBackend {
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             schedules_present_on_submit_worker: true,
+            lazy_present_finish: false,
             device_retired_floor: HashMap::new(),
             surface_pending_acquire: HashMap::new(),
             contexts: HashMap::new(),
@@ -395,6 +398,11 @@ impl MockBackend {
     /// Control whether [`crate::Scheme::submit`] schedules present on the submission worker.
     pub fn set_schedules_present_on_submit_worker(&mut self, enabled: bool) {
         self.schedules_present_on_submit_worker = enabled;
+    }
+
+    /// Control whether the mock reports lazy present finish (DX12-style speculative acquire path).
+    pub fn set_lazy_present_finish(&mut self, enabled: bool) {
+        self.lazy_present_finish = enabled;
     }
 
     /// Number of live retained command lists (test introspection).
@@ -582,6 +590,10 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
 
     fn schedules_present_on_submit_worker(&self) -> bool {
         self.schedules_present_on_submit_worker
+    }
+
+    fn supports_lazy_present_finish(&self) -> bool {
+        self.lazy_present_finish
     }
 
     fn schedule_present_on_submission_worker(

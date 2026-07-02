@@ -118,12 +118,43 @@ impl Surface {
 
     /// Begin the next frame (acquire swapchain image and open the frame bracket).
     pub fn begin(&self) -> Result<Frame> {
+        self.begin_inner(None)
+    }
+
+    /// Like [`Self::begin`], but polls `abort` during backend blocking acquire waits so
+    /// swapchain rebuild can abandon an in-progress acquire (no drawable bound yet).
+    pub fn begin_interruptible(&self, abort: &Arc<std::sync::atomic::AtomicBool>) -> Result<Frame> {
+        self.begin_inner(Some(Arc::clone(abort)))
+    }
+
+    fn begin_inner(&self, abort: Option<Arc<std::sync::atomic::AtomicBool>>) -> Result<Frame> {
         let _tz = tracy_zone!("surface.begin");
         let backend_arc = Arc::clone(&self.backend);
         let surface_handle = self.handle;
         let ctx_handle = self.ctx_handle;
 
+        struct ClearAbort {
+            backend: Arc<Mutex<Box<dyn GpuBackend>>>,
+            handle: SurfaceHandle,
+        }
+        impl Drop for ClearAbort {
+            fn drop(&mut self) {
+                let mut backend = self.backend.lock().unwrap();
+                backend.set_surface_acquire_abort(self.handle, None);
+            }
+        }
+
         let (token, texture_handle, w, h, format) = {
+            let _clear = if let Some(abort) = abort.as_ref() {
+                let mut backend = self.backend.lock().unwrap();
+                backend.set_surface_acquire_abort(self.handle, Some(Arc::clone(abort)));
+                Some(ClearAbort {
+                    backend: Arc::clone(&self.backend),
+                    handle: self.handle,
+                })
+            } else {
+                None
+            };
             let acquire_work = {
                 let mut backend = backend_arc.lock().unwrap();
                 backend.take_surface_acquire_work(surface_handle, ctx_handle)?

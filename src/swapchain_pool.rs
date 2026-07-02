@@ -5,9 +5,10 @@
 //! records the lease once; each [`crate::Scheme::submit`] acquires the next
 //! drawable and resolves it through the present partition retention path.
 //!
-//! When [`SwapchainPoolOptions::speculative_acquire`] is set, [`crate::Grant::consume`] on a
-//! [`crate::PresentGrant`] may stash the next drawable on the pool so the render thread's subsequent
-//! `submit` avoids a synchronous acquire.
+//! When [`SwapchainPoolOptions::speculative_acquire`] is set, the host calls
+//! [`crate::PresentGrant::speculate_next_acquire_after_present`] after present scanout
+//! (and after any async present ack) so the render thread's subsequent `submit` avoids a
+//! synchronous acquire.
 
 use crate::backend::TextureHandle;
 use crate::context::Context;
@@ -15,22 +16,31 @@ use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Resolved present slot: slot id, acquired frame, UAV index, texture handle.
 pub(crate) type ResolvedPresentSlotData = (u32, SurfaceFrame, u32, TextureHandle);
 
 pub(crate) struct SwapchainPoolInner {
+    /// Context for acquire-capacity waits on TID_PRESENT (tech debt: pool should own this policy).
+    ctx: Context,
     surface: RwLock<Surface>,
     /// Client-stated max in-flight drawables (present pipeline depth).
     depth: u32,
-    /// When true, [`crate::Grant::consume`] on a [`crate::PresentGrant`] may acquire the next drawable
-    /// for the following submit.
+    /// When true, [`crate::PresentGrant::speculate_next_acquire_after_present`] may acquire
+    /// the next drawable for the following submit.
     pub(crate) speculative_acquire: bool,
-    /// Serializes depth checks and synchronous acquires (render + present threads).
+    /// Serializes depth checks and in-flight acquire reservations (render + present threads).
     acquire_mutex: Mutex<()>,
-    /// Drawable acquired speculatively by [`crate::Grant::consume`] on a [`crate::PresentGrant`] for the next submit.
+    /// Acquires that passed the depth gate but have not finished `Surface::begin()` yet.
+    /// Counted in capacity checks so `begin()` blocking waits do not need to hold `acquire_mutex`.
+    pending_acquire_reservations: AtomicU32,
+    /// Drawable acquired speculatively after present for the next submit.
     speculative_acquire_slot: Mutex<Option<ResolvedPresentSlotData>>,
+    /// Swapchain rebuild in progress — blocks post-ack speculative acquire on TID_PRESENT
+    /// and aborts in-flight `Surface::begin()` blocking waits (DX12 resize deadlock).
+    rebuilding: Arc<AtomicBool>,
 }
 
 /// Construction options for [`SwapchainPool`].
@@ -108,11 +118,14 @@ impl SwapchainPool {
         let surface = Surface::new_with_config(ctx, window, options.config)?;
         Ok(Self {
             inner: Arc::new(SwapchainPoolInner {
+                ctx: ctx.clone(),
                 surface: RwLock::new(surface),
                 depth: options.depth.max(1),
                 speculative_acquire: options.speculative_acquire,
                 acquire_mutex: Mutex::new(()),
+                pending_acquire_reservations: AtomicU32::new(0),
                 speculative_acquire_slot: Mutex::new(None),
+                rebuilding: Arc::new(AtomicBool::new(false)),
             }),
         })
     }
@@ -155,9 +168,9 @@ impl SwapchainPool {
         surface.pending_acquire_count()
     }
 
-    /// Block until an acquire slot would succeed (`pending_acquire_count` `<` [`depth`](Self::depth)).
+    /// Block until an acquire slot would succeed (effective in-flight `<` [`depth`](Self::depth)).
     ///
-    /// On flip-model backends (DX12/Vulkan) present ack alone is insufficient: the drawable
+    /// Includes in-progress `Surface::begin()` reservations. On flip-model backends (DX12/Vulkan)
     /// stays counted until its return fence retires. Blocks on the device sync fence when
     /// a pending return is registered, then polls `ctx` once to process deferred returns.
     pub fn wait_for_acquire_capacity(&self, ctx: &crate::Context) {
@@ -172,9 +185,14 @@ impl SwapchainPool {
         self.wait_until_pending_below(1, ctx);
     }
 
-    /// Drain speculative stash and wait for all pending swapchain returns.
+    /// Quiesce drawables and wait for GPU returns before swapchain rebuild.
+    ///
+    /// Leaves [`SwapchainPoolInner::rebuilding`] set until [`Self::resize`] or
+    /// [`Self::set_present_mode`] completes so a post-ack speculative acquire on TID_PRESENT
+    /// cannot stash a drawable after this drain.
     pub fn sync_before_rebuild(&self, ctx: &crate::Context) {
-        Self::drain_speculative_acquire(&self.inner);
+        let _tz = crate::tracy_zone!("goldy.swapchain_pool.sync_before_rebuild");
+        Self::begin_rebuild_quiesce(&self.inner);
         let device = ctx.device();
         if let Err(e) = {
             let mut backend = device.inner.backend.lock().unwrap();
@@ -191,49 +209,60 @@ impl SwapchainPool {
     }
 
     fn wait_until_pending_below(&self, threshold: u32, ctx: &crate::Context) {
-        while self.pending_acquire_count() >= threshold {
-            let return_fence = {
-                let surface = self.inner.surface.read().unwrap();
-                surface.peek_oldest_pending_swapchain_return()
-            };
-            if let Some(return_fence) = return_fence {
-                let _tz = crate::tracy_zone!("goldy.swapchain_pool.blocking_return_wait");
-                let surface = self.inner.surface.read().unwrap();
-                if let Err(e) = surface.blocking_wait_swapchain_return(ctx, return_fence) {
-                    tracing::warn!(
-                        target: "goldy::swapchain_pool",
-                        ?return_fence,
-                        error = %e,
-                        "blocking swapchain return wait failed; falling back to poll"
-                    );
-                }
-            } else {
-                std::thread::yield_now();
-            }
-            ctx.poll_signals_and_service();
-        }
+        Self::wait_until_pending_below_inner(&self.inner, threshold, ctx);
     }
 
     /// Resize the underlying swapchain (structural edit — rebuild scheme nodes).
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
-        Self::drain_speculative_acquire(&self.inner);
-        let mut surface = self.inner.surface.write().unwrap();
-        surface.resize(width, height)
+        Self::begin_rebuild_quiesce(&self.inner);
+        let result = {
+            let mut surface = self.inner.surface.write().unwrap();
+            surface.resize(width, height)
+        };
+        Self::end_rebuild(&self.inner);
+        result
     }
 
     pub fn set_present_mode(&self, mode: crate::types::PresentMode) -> Result<()> {
-        Self::drain_speculative_acquire(&self.inner);
-        let mut surface = self.inner.surface.write().unwrap();
-        surface.set_present_mode(mode)
+        Self::begin_rebuild_quiesce(&self.inner);
+        let result = {
+            let mut surface = self.inner.surface.write().unwrap();
+            surface.set_present_mode(mode)
+        };
+        Self::end_rebuild(&self.inner);
+        result
+    }
+
+    /// Block speculative acquire, wait for an in-flight acquire, and drain the stash.
+    fn begin_rebuild_quiesce(pool: &Arc<SwapchainPoolInner>) {
+        pool.rebuilding.store(true, Ordering::Release);
+        let _guard = pool.acquire_mutex.lock().unwrap();
+        while pool.pending_acquire_reservations.load(Ordering::Acquire) > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Self::drain_speculative_acquire(pool);
+    }
+
+    fn end_rebuild(pool: &Arc<SwapchainPoolInner>) {
+        pool.rebuilding.store(false, Ordering::Release);
+    }
+
+    fn rebuilding(pool: &Arc<SwapchainPoolInner>) -> bool {
+        pool.rebuilding.load(Ordering::Acquire)
+    }
+
+    fn effective_pending_acquire_count(pool: &SwapchainPoolInner) -> u32 {
+        let surface = pool.surface.read().unwrap();
+        surface.pending_acquire_count() + pool.pending_acquire_reservations.load(Ordering::Acquire)
     }
 
     pub(crate) fn acquire_slot(pool: &Arc<SwapchainPoolInner>) -> Result<ResolvedPresentSlotData> {
-        let _guard = pool.acquire_mutex.lock().unwrap();
-        // Read lock only: `begin()` may block on swapchain image availability without
-        // preventing concurrent queries or stalling resize on a held write lock.
         {
-            let surface = pool.surface.read().unwrap();
-            let in_flight = surface.pending_acquire_count();
+            let _guard = pool.acquire_mutex.lock().unwrap();
+            if Self::rebuilding(pool) {
+                anyhow::bail!("swapchain pool rebuild in progress");
+            }
+            let in_flight = Self::effective_pending_acquire_count(pool);
             if in_flight >= pool.depth {
                 anyhow::bail!(
                     "swapchain pool at present depth {} ({} drawable(s) acquired, not yet returned)",
@@ -241,11 +270,22 @@ impl SwapchainPool {
                     in_flight
                 );
             }
+            pool.pending_acquire_reservations.fetch_add(1, Ordering::Release);
         }
-        let frame = {
+
+        if Self::rebuilding(pool) {
+            pool.pending_acquire_reservations.fetch_sub(1, Ordering::Release);
+            anyhow::bail!("swapchain pool rebuild in progress");
+        }
+
+        // `begin()` may block on DXGI waitable / fence / flip-model index waits; keep that
+        // outside `acquire_mutex` so the render thread is not serialized behind TID_PRESENT.
+        let begin_result = {
             let surface = pool.surface.read().unwrap();
-            surface.begin()?
+            surface.begin_interruptible(&pool.rebuilding)
         };
+        pool.pending_acquire_reservations.fetch_sub(1, Ordering::Release);
+        let frame = begin_result?;
         let slot_id = frame.frame_slot();
         let (handle, uav_index) = {
             let tex = frame.texture();
@@ -265,7 +305,80 @@ impl SwapchainPool {
         Self::acquire_slot(pool)
     }
 
-    /// Stash a drawable acquired during [`crate::Grant::consume`] on a [`crate::PresentGrant`] for the next submit.
+    /// After present on TID_PRESENT: try to acquire and stash for the next submit.
+    ///
+    /// Non-blocking on pool capacity: if `pending_acquire_count >= depth`, returns immediately
+    /// and the render thread acquires synchronously on the next submit. Never blocks on the
+    /// capacity spin loop — TID_PRESENT must return to its present channel promptly.
+    pub(crate) fn speculative_acquire_after_present(pool: &Arc<SwapchainPoolInner>) {
+        let _tz = crate::tracy_zone!("goldy.swapchain_pool.speculative_acquire_after_present");
+        if Self::rebuilding(pool) {
+            return;
+        }
+        if !Self::has_acquire_capacity(pool) {
+            tracing::debug!(
+                target: "goldy::swapchain_pool",
+                pending = Self::effective_pending_acquire_count(pool),
+                depth = pool.depth,
+                "speculative present acquire skipped: pool at capacity"
+            );
+            return;
+        }
+        if Self::rebuilding(pool) {
+            return;
+        }
+        match Self::acquire_slot(pool) {
+            Ok(slot) => {
+                if Self::rebuilding(pool) {
+                    slot.1.cancel();
+                    return;
+                }
+                Self::stash_speculative_acquire(pool, slot);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "goldy::swapchain_pool",
+                    error = %e,
+                    "speculative present acquire failed; submit will acquire synchronously"
+                );
+            }
+        }
+    }
+
+    fn has_acquire_capacity(pool: &Arc<SwapchainPoolInner>) -> bool {
+        Self::effective_pending_acquire_count(pool) < pool.depth
+    }
+
+    #[allow(dead_code, reason = "render-thread rebuild waits; speculate uses has_acquire_capacity")]
+    fn wait_for_acquire_capacity_inner(pool: &Arc<SwapchainPoolInner>) {
+        Self::wait_until_pending_below_inner(pool, pool.depth, &pool.ctx);
+    }
+
+    fn wait_until_pending_below_inner(pool: &Arc<SwapchainPoolInner>, threshold: u32, ctx: &Context) {
+        while Self::effective_pending_acquire_count(pool) >= threshold {
+            let return_fence = {
+                let surface = pool.surface.read().unwrap();
+                surface.peek_oldest_pending_swapchain_return()
+            };
+            if let Some(return_fence) = return_fence {
+                let _tz = crate::tracy_zone!("goldy.swapchain_pool.blocking_return_wait");
+                let surface = pool.surface.read().unwrap();
+                if let Err(e) = surface.blocking_wait_swapchain_return(ctx, return_fence) {
+                    tracing::warn!(
+                        target: "goldy::swapchain_pool",
+                        ?return_fence,
+                        error = %e,
+                        "blocking swapchain return wait failed; falling back to poll"
+                    );
+                }
+            } else {
+                std::thread::yield_now();
+            }
+            ctx.poll_signals_and_service();
+        }
+    }
+
+    /// Stash a drawable acquired after present for the next submit.
     pub(crate) fn stash_speculative_acquire(pool: &Arc<SwapchainPoolInner>, slot: ResolvedPresentSlotData) {
         let mut guard = pool.speculative_acquire_slot.lock().unwrap();
         if let Some((_, old_frame, _, _)) = guard.take() {

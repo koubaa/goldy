@@ -1152,6 +1152,8 @@ pub(crate) struct SurfaceState {
     pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
     pub pending_acquire_count: u32,
     pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
+    /// When set, [`surface::acquire`] polls this during blocking waits and bails if true.
+    pub acquire_abort: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Map plus monotonic handle allocator for a single resource kind.
