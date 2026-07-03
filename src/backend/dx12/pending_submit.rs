@@ -115,10 +115,6 @@ impl PendingSubmit for Dx12ComputePendingSubmit {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.compute");
         apply_host_sidecar_before_gpu(&self.host_observed_waits, &self.buffers, &self.deferred_host_writes)?;
-        let frame_table = {
-            let sc_guard = self.sc.lock().unwrap();
-            std::sync::Arc::clone(&sc_guard.frame_table)
-        };
         {
             let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.before");
             let mut sc = self.sc.lock().unwrap();
@@ -169,13 +165,11 @@ pub(super) struct Dx12RetainedResubmitPending {
 
 impl PendingSubmit for Dx12RetainedResubmitPending {
     fn execute(self: Box<Self>) -> Result<()> {
+        // Hold the submission context until this job completes (retained graphs reference it).
+        let _sc = &self.sc;
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.retained_resubmit");
         apply_host_sidecar_before_gpu(&self.host_observed_waits, &self.buffers, &self.deferred_host_writes)?;
         {
-            let frame_table = {
-                let sc_guard = self.sc.lock().unwrap();
-                std::sync::Arc::clone(&sc_guard.frame_table)
-            };
             let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
             let device_completed = unsafe { self.logical_device.fence.GetCompletedValue() };
             if ctx_completed == u64::MAX || device_completed == u64::MAX {

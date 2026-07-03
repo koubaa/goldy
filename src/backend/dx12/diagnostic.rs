@@ -107,6 +107,13 @@ pub(crate) fn first_touch_device_removed(
         )
         .is_ok()
     {
+        tracing::error!(
+            target: "goldy::dx12::dred",
+            location,
+            wait_value,
+            completed,
+            "GPU device removed"
+        );
         log_dred_on_device_removed(device);
     }
 }

@@ -450,7 +450,6 @@ fn enqueue_vulkan_compute_with_housekeeping(
         ld,
         view.contexts,
         sync,
-        std::sync::Arc::clone(&scope.frame_table),
         view.buffers,
         timeline_sem,
         signal_value,

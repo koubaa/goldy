@@ -573,7 +573,9 @@ pub(crate) struct PendingSlotReclamation {
 
 /// GPU buffer resources held until bindless slot requirements retire.
 pub(crate) struct PendingBufferGpuRelease {
+    #[allow(dead_code)]
     pub buffer_handle: BufferHandle,
+    #[allow(dead_code)]
     pub requirements: Vec<(super::ContextHandle, u64)>,
     pub resource: Direct3D12::ID3D12Resource,
     pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
@@ -932,12 +934,11 @@ impl LogicalDevice {
 
 fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelease) {
     let PendingBufferGpuRelease {
-        buffer_handle,
-        requirements,
         resource,
         upload_buffer,
         coherent_readback,
         reserved_tiles,
+        ..
     } = entry;
     if let Some(tiles) = reserved_tiles {
         let mut pool = ld.tile_heap_pool.lock().unwrap();

@@ -182,7 +182,6 @@ pub(super) fn vulkan_finish_staging_after_enqueue(
 pub(super) struct VulkanQueueSubmitPending {
     ld: SharedLogicalDevice,
     contexts: SharedContextMap,
-    frame_table: super::types::SharedFrameTableDevice,
     buffers: SharedBufferTable,
     timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
@@ -290,7 +289,6 @@ pub(super) fn enqueue_vulkan_submit(
     ld: &SharedLogicalDevice,
     contexts: &SharedContextMap,
     sync: Option<&SubmitSync>,
-    frame_table: super::types::SharedFrameTableDevice,
     buffers: &SharedBufferTable,
     timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
@@ -306,7 +304,6 @@ pub(super) fn enqueue_vulkan_submit(
         Box::new(VulkanQueueSubmitPending {
             ld: Arc::clone(ld),
             contexts: Arc::clone(contexts),
-            frame_table,
             buffers: Arc::clone(buffers),
             timeline_sem,
             signal_value,

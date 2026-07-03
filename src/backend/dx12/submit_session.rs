@@ -46,6 +46,11 @@ pub(crate) struct Dx12SubmitScope<'a> {
 }
 
 impl<'a> Dx12SubmitScope<'a> {
+    /// Session methods pass a redundant `ctx`; must match the scope's bound context.
+    pub(crate) fn assert_ctx(&self, ctx: ContextHandle) {
+        debug_assert_eq!(self.ctx, ctx, "ContextSubmitSession invoked with wrong context handle");
+    }
+
     pub fn ld(&self) -> &'a SharedLogicalDevice {
         self.record.ld
     }
@@ -240,7 +245,9 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
-        compute::submit_with_scope(&self.scope(), ctx, commands, sync)
+        let scope = self.scope();
+        scope.assert_ctx(ctx);
+        compute::submit_with_scope(&scope, scope.ctx, commands, sync)
     }
 
     fn submit_graph(
@@ -249,7 +256,9 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
-        compute::submit_graph_with_scope(&self.scope(), ctx, commands, None, sync)
+        let scope = self.scope();
+        scope.assert_ctx(ctx);
+        compute::submit_graph_with_scope(&scope, scope.ctx, commands, None, sync)
     }
 
     fn submit_graph_and_retain(
@@ -259,8 +268,10 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<TimelineValue> {
-        compute::evict_retained_with_scope(&self.scope(), ctx, key);
-        compute::submit_graph_with_scope(&self.scope(), ctx, commands, Some(key), sync)
+        let scope = self.scope();
+        scope.assert_ctx(ctx);
+        compute::evict_retained_with_scope(&scope, scope.ctx, key);
+        compute::submit_graph_with_scope(&scope, scope.ctx, commands, Some(key), sync)
     }
 
     fn try_resubmit_retained(
@@ -269,10 +280,14 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<TimelineValue>> {
-        compute::try_resubmit_retained_with_scope(&self.scope(), ctx, key, sync)
+        let scope = self.scope();
+        scope.assert_ctx(ctx);
+        compute::try_resubmit_retained_with_scope(&scope, scope.ctx, key, sync)
     }
 
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {
-        compute::evict_retained_with_scope(&self.scope(), ctx, key);
+        let scope = self.scope();
+        scope.assert_ctx(ctx);
+        compute::evict_retained_with_scope(&scope, scope.ctx, key);
     }
 }

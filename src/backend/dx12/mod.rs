@@ -1412,61 +1412,23 @@ impl GpuBackend for Dx12Backend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device_handle);
-        let device_pending_before = self
-            .state
-            .devices
-            .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
-            .unwrap_or(0);
-        let ctx_pending_before = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .get(&ctx)
-            .map(|sc| sc.lock().unwrap().deletion_queue.pending_len())
-            .unwrap_or(0);
         if let Some(ld) = self.state.devices.get(&device_handle) {
             let fences = self.state.context_fences.read().unwrap();
             ld.process_deletion_queue_up_to(retired, &fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
-        let device_pending_after = self
-            .state
-            .devices
-            .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
-            .unwrap_or(0);
-        let ctx_pending_after = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .get(&ctx)
-            .map(|sc| sc.lock().unwrap().deletion_queue.pending_len())
-            .unwrap_or(0);
     }
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
-        let device_handle = self.context_device(ctx);
-        let device_pending = self
-            .state
-            .devices
-            .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
-            .unwrap_or(0);
-        let ctx_pending = self
+        self
             .state
             .contexts
             .read()
             .unwrap()
             .get(&ctx)
             .map(|sc| sc.lock().unwrap().deletion_queue.pending_len())
-            .unwrap_or(0);
-        // Per-context count only: device-global queue holds foreign/legacy destroys
-        // and must not pollute this context's reclaim horizon (see scheme_two_contexts_reclaim_independently).
-        ctx_pending
+            .unwrap_or(0)
     }
 }
 

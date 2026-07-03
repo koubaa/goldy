@@ -306,6 +306,15 @@ pub(super) fn wait_for_fence_on_device(
 ) -> Result<()> {
     let completed = unsafe { fence.GetCompletedValue() };
     if completed == u64::MAX {
+        if let Some(ld) = ld {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &ld.device_removed,
+                "wait_for_fence_on_device",
+                value,
+                completed,
+            );
+        }
         anyhow::bail!("GPU device removed while waiting for fence value {value}");
     }
     if completed < value {
@@ -318,6 +327,15 @@ pub(super) fn wait_for_fence_on_device(
     }
     let completed_after = unsafe { fence.GetCompletedValue() };
     if completed_after == u64::MAX {
+        if let Some(ld) = ld {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &ld.device_removed,
+                "wait_for_fence_on_device",
+                value,
+                completed_after,
+            );
+        }
         anyhow::bail!("GPU device removed after waiting for fence value {value}");
     }
     Ok(())

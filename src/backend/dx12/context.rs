@@ -117,7 +117,6 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 /// unrelated, concurrently-running tests' in-flight GPU waits (see issue: `cargo test`
 /// runs tests in parallel by default, each with its own `Device`/contexts).
 fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHandle> {
-    let total_contexts = state.context_fences.read().unwrap().len();
     let result: Vec<ContextHandle> = state
         .context_fences
         .read()
@@ -180,16 +179,7 @@ pub(super) fn reclamation_barrier(state: &Dx12State, device: DeviceHandle) -> u6
     state
         .devices
         .get(&device)
-        .map(|d| {
-            let timeline_next = d.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
-            let submitted = d
-                .submission_worker
-                .submitted_epoch()
-                .load(std::sync::atomic::Ordering::Acquire);
-            let retired = device_retired(state, device);
-            let barrier = timeline_next.saturating_sub(1);
-            barrier
-        })
+        .map(|d| d.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1))
         .unwrap_or(0)
 }
 

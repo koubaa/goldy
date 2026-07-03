@@ -1359,15 +1359,7 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
 
     if buffer.is_view {
         let deletion = super::types::PendingDeletion::BufferView { buffer_handle };
-        queue_pending_deletion(
-            state,
-            device,
-            buffer.device_handle,
-            ctx_h,
-            last_fence,
-            deletion,
-            buffer_handle,
-        );
+        queue_pending_deletion(state, device, ctx_h, last_fence, deletion);
         return;
     }
 
@@ -1395,44 +1387,23 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             None
         },
     };
-    queue_pending_deletion(
-        state,
-        device,
-        buffer.device_handle,
-        ctx_h,
-        last_fence,
-        deletion,
-        buffer_handle,
-    );
+    queue_pending_deletion(state, device, ctx_h, last_fence, deletion);
 }
 
 fn queue_pending_deletion(
     state: &Dx12State,
     device: &super::types::LogicalDevice,
-    device_handle: super::DeviceHandle,
     ctx_h: Option<super::ContextHandle>,
     last_fence: u64,
     deletion: super::types::PendingDeletion,
-    buffer_handle: BufferHandle,
 ) {
-    let routed_ctx = if let Some(ctx_h) = ctx_h {
+    if let Some(ctx_h) = ctx_h {
         if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx_h) {
             sc_arc.lock().unwrap().deletion_queue.queue(last_fence, deletion);
-            Some(ctx_h)
-        } else {
-            device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
-            None
+            return;
         }
-    } else {
-        device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
-        None
-    };
-    let submitted = device
-        .submission_worker
-        .submitted_epoch()
-        .load(std::sync::atomic::Ordering::Acquire);
-    let device_retired = super::context::device_retired(state, device_handle);
-    let timeline_next = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
 }
 
 /// Hint unused reserved tiles at/above `offset` (bytes).
