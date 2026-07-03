@@ -37,6 +37,7 @@ mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod frame_table;
+mod host_wait;
 mod pending_submit;
 mod pipeline;
 mod process_shared;

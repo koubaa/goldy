@@ -1,5 +1,6 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
+use super::host_wait::HostWait;
 use super::types::{LogicalDevice, SharedBufferTable, SharedLogicalDevice, SharedSubmissionContext};
 use super::{ContextHandle, DeviceHandle};
 use crate::backend::submission_worker::PendingSubmit;
@@ -32,7 +33,7 @@ pub(super) fn resolve_queue_waits(
 pub(super) fn resolve_host_observed_waits(
     context_fences: &Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
     sync: Option<&SubmitSync>,
-) -> Result<Vec<(ID3D12Fence, u64)>> {
+) -> Result<Vec<HostWait>> {
     let Some(s) = sync else {
         return Ok(Vec::new());
     };
@@ -42,7 +43,10 @@ pub(super) fn resolve_host_observed_waits(
         let (_, producer_fence) = fences
             .get(&epoch.context)
             .with_context(|| format!("host-observed wait: unknown context {:?}", epoch.context))?;
-        waits.push((producer_fence.clone(), epoch.value));
+        waits.push(HostWait::Fence {
+            fence: producer_fence.clone(),
+            value: epoch.value,
+        });
     }
     Ok(waits)
 }
@@ -87,12 +91,13 @@ fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[De
 }
 
 fn apply_host_sidecar_before_gpu(
-    host_observed_waits: &[(ID3D12Fence, u64)],
+    host_observed_waits: &[HostWait],
     buffers: &SharedBufferTable,
     deferred_writes: &[DeferredHostWrite],
 ) -> Result<()> {
-    for (fence, value) in host_observed_waits {
-        super::utils::wait_for_fence(fence, *value)?;
+    let _tz = crate::tracy_zone!("goldy.dx12.pending_submit.apply_host_sidecar_before_gpu");
+    for wait in host_observed_waits {
+        wait.wait()?;
     }
     apply_deferred_host_writes(buffers, deferred_writes)
 }
@@ -104,7 +109,7 @@ pub(super) struct Dx12ComputePendingSubmit {
     slot_idx: usize,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
-    host_observed_waits: Vec<(ID3D12Fence, u64)>,
+    host_observed_waits: Vec<HostWait>,
     deferred_host_writes: Vec<DeferredHostWrite>,
     buffers: SharedBufferTable,
     fence_value: TimelineValue,
@@ -149,7 +154,7 @@ pub(super) struct Dx12RetainedResubmitPending {
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
-    host_observed_waits: Vec<(ID3D12Fence, u64)>,
+    host_observed_waits: Vec<HostWait>,
     deferred_host_writes: Vec<DeferredHostWrite>,
     buffers: SharedBufferTable,
     fence_value: TimelineValue,
