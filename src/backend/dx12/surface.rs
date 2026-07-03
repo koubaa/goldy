@@ -505,11 +505,18 @@ pub(super) fn acquire(
     let height = surface.height;
     let dxgi_format = surface.format;
     let goldy_format = dxgi_to_format(dxgi_format).unwrap_or(TextureFormat::Bgra8Unorm);
-    let idx = image_index as usize;
 
     let tex_handle = {
         let _tz = crate::tracy_zone!("surface.acquire.ensure_scratch");
-        ensure_compute_scratch_texture(state, surface_handle, idx, width, height, goldy_format, device_handle)?
+        ensure_compute_scratch_texture(
+            state,
+            surface_handle,
+            present_slot,
+            width,
+            height,
+            goldy_format,
+            device_handle,
+        )?
     };
 
     {
@@ -990,10 +997,10 @@ fn prepare_present_plan(state: &mut Dx12State, frame: crate::backend::FrameToken
     let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
     let scratch_handle = surface
         .compute_scratch_textures
-        .get(image_index)
+        .get(present_slot)
         .copied()
         .flatten()
-        .context("No scratch texture for swapchain image")?;
+        .with_context(|| format!("No scratch texture for rotation slot {present_slot}"))?;
     let render_pass_submitted = surface
         .frame_sync
         .get(present_slot)
@@ -1187,14 +1194,13 @@ fn synthesize_scheduled_present_finish(
         .surfaces
         .get(&frame.surface)
         .with_context(|| format!("Invalid surface handle {:?}", frame.surface))?;
-    let image_index = frame.image as usize;
     let present_slot = frame.present_slot as usize;
     let scratch_handle = surface
         .compute_scratch_textures
-        .get(image_index)
+        .get(present_slot)
         .copied()
         .flatten()
-        .with_context(|| format!("No scratch texture for swapchain image {image_index}"))?;
+        .with_context(|| format!("No scratch texture for rotation slot {present_slot}"))?;
     let render_pass_submitted = surface.frame_sync[present_slot].render_pass_submitted;
     // `present_tv` is the enqueued present job timeline (copy blit or present-only signal).
     let return_fence = present_tv;
@@ -1843,7 +1849,7 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     Ok(())
 }
 
-/// Ensure a UAV scratch texture exists for swapchain buffer index `idx`.
+/// Ensure a UAV scratch texture exists for rotation slot `idx` (`present_slot` / `current_frame`).
 fn ensure_compute_scratch_texture(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,

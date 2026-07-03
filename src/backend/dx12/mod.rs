@@ -892,7 +892,7 @@ impl GpuBackend for Dx12Backend {
                 surface: surface_handle,
                 image,
                 context: ctx,
-                frame_slot: image as u32,
+                frame_slot: present_slot,
                 present_slot,
             },
             tex,

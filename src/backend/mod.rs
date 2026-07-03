@@ -383,7 +383,7 @@ pub struct FrameToken {
     ///
     /// Used for present-lease retention keys: must match the physical backing that
     /// shader dispatches and copies target, not necessarily [`Self::image`].
-    /// On Vulkan this is `current_frame`; on DX12 it equals the swapchain image index.
+    /// On Vulkan and DX12 this is the rotating in-flight slot (`present_slot` at acquire).
     pub frame_slot: u32,
     /// Command-allocator / frame-sync slot claimed at acquire for this frame.
     ///
@@ -391,8 +391,8 @@ pub struct FrameToken {
     /// this token only — not from single-valued surface fields — so the next acquire
     /// can overlap an in-flight present.
     ///
-    /// On Vulkan this equals [`Self::frame_slot`]. On DX12 it is the rotating
-    /// `current_frame` index (distinct from [`Self::image`]).
+    /// Equals [`Self::frame_slot`] on Vulkan and DX12. [`Self::image`] is the WSI
+    /// swapchain image index used only for the final present copy.
     pub present_slot: u32,
 }
 

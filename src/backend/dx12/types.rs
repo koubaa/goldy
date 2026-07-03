@@ -1147,8 +1147,9 @@ pub(crate) struct SurfaceState {
     /// registered in the bindless descriptor heap as a UAV so compute shaders
     /// can write directly to the swapchain image.
     pub current_texture_handle: Option<super::TextureHandle>,
-    /// Per swapchain buffer index: persistent UAV texture for compute; results are
-    /// copied to the real back buffer in `present` (swapchain images cannot be UAVs).
+    /// Per rotation slot (`present_slot` / `current_frame`): persistent UAV scratch for
+    /// compute; results are copied to the real back buffer in `present` (swapchain
+    /// images cannot be UAVs). Indexed by rotation slot, not DXGI image index.
     pub compute_scratch_textures: Vec<Option<super::TextureHandle>>,
     /// Presentation mode (vsync strategy).
     pub present_mode: crate::types::PresentMode,
