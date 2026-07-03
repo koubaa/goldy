@@ -93,6 +93,44 @@ pub fn fill_frame_table_dispatch(layout: &mut PushLayout, dispatch_base: u32, us
     }
 }
 
+/// `PushLayout._reserved` word carrying the submitting context's selector
+/// bindless slot (`_rs1` in generated shader wrappers).
+pub const FRAME_TABLE_SELECTOR_SLOT_WORD: usize = 1;
+/// `PushLayout._reserved` word carrying the submitting context's table
+/// bindless slot (`_rs2` in generated shader wrappers).
+pub const FRAME_TABLE_TABLE_SLOT_WORD: usize = 2;
+
+/// Record-time fill of the submitting context's per-context frame-table
+/// bindless slots (`_rs1`/`_rs2`).
+///
+/// Context-agnostic lowering (task-graph analysis) leaves these words zero;
+/// each backend sets them when recording for a known context so concurrent
+/// contexts on one device never share mutable descriptor slots.
+#[inline]
+pub fn set_frame_table_slots(layout: &mut PushLayout, selector_slot: u32, table_slot: u32) {
+    layout._reserved[FRAME_TABLE_SELECTOR_SLOT_WORD] = selector_slot;
+    layout._reserved[FRAME_TABLE_TABLE_SLOT_WORD] = table_slot;
+}
+
+/// Patch the frame-table slot words of every entry in a `DispatchBatch`
+/// argument blob (entries are `DISPATCH_BATCH_STRIDE` bytes apart).
+///
+/// `DispatchBatch` arg data is built during context-agnostic lowering with the
+/// slot words zeroed; backends call this at record time for the submitting
+/// context.
+pub fn patch_dispatch_batch_frame_table_slots(arg_data: &mut [u8], count: usize, selector_slot: u32, table_slot: u32) {
+    let sel_off = (MAX_BINDLESS_SLOTS * 2) + (MAX_USER_SLOTS * 4) + FRAME_TABLE_SELECTOR_SLOT_WORD * 4;
+    let tab_off = (MAX_BINDLESS_SLOTS * 2) + (MAX_USER_SLOTS * 4) + FRAME_TABLE_TABLE_SLOT_WORD * 4;
+    for i in 0..count {
+        let base = i * DISPATCH_BATCH_STRIDE;
+        if base + TOTAL_PUSH_BYTES > arg_data.len() {
+            break;
+        }
+        arg_data[base + sel_off..base + sel_off + 4].copy_from_slice(&selector_slot.to_ne_bytes());
+        arg_data[base + tab_off..base + tab_off + 4].copy_from_slice(&table_slot.to_ne_bytes());
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Slot allocator
 // ──────────────────────────────────────────────────────────────────────────────

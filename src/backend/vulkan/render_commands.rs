@@ -18,6 +18,7 @@ pub(super) fn record(
     pipelines: &std::collections::HashMap<PipelineHandle, types::PipelineState>,
     buffers: &std::collections::HashMap<BufferHandle, types::BufferState>,
     current_pipeline: &mut Option<PipelineHandle>,
+    frame_table_slots: (u32, u32),
 ) -> anyhow::Result<()> {
     for command in commands {
         match command {
@@ -79,6 +80,7 @@ pub(super) fn record(
                 if let Some(pipeline) = current_pipeline.and_then(|p| pipelines.get(&p)) {
                     let mut layout = PushLayout::default();
                     shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                    shared::set_frame_table_slots(&mut layout, frame_table_slots.0, frame_table_slots.1);
                     unsafe {
                         logical_device.device.cmd_push_constants(
                             cmd,

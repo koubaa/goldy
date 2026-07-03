@@ -1,10 +1,10 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
 
-use super::types::{self, SharedContextMap, SharedLogicalDevice, SharedSubmissionContext};
+use super::types::{self, SharedBufferTable, SharedContextMap, SharedLogicalDevice, SharedSubmissionContext};
 use super::{ContextHandle, DeviceHandle};
 use crate::backend::submission_worker::PendingSubmit;
-use crate::backend::SubmitSync;
-use crate::timeline::TimelineValue;
+use crate::backend::{DeferredHostWrite, SubmitSync};
+use crate::timeline::{Epoch, TimelineValue};
 use anyhow::{Context as _, Result};
 use ash::vk;
 use std::sync::Arc;
@@ -29,6 +29,81 @@ pub(super) fn resolve_cross_submit_waits(
         waits.push((sem, epoch.value));
     }
     Ok(waits)
+}
+
+fn wait_host_observed_epochs(ld: &types::LogicalDevice, contexts: &SharedContextMap, epochs: &[Epoch]) -> Result<()> {
+    if epochs.is_empty() {
+        return Ok(());
+    }
+    let _tz = crate::tracy_zone!("goldy.vk.pending_submit.wait_host_observed_epochs");
+    for epoch in epochs {
+        let sem = contexts
+            .read()
+            .unwrap()
+            .get(&epoch.context)
+            .with_context(|| format!("host-observed wait: invalid producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_semaphore;
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&sem))
+            .values(std::slice::from_ref(&epoch.value));
+        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }.context("host-observed vkWaitSemaphores")?;
+    }
+    Ok(())
+}
+
+fn validate_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[DeferredHostWrite]) -> Result<()> {
+    if deferred_writes.is_empty() {
+        return Ok(());
+    }
+    let buffers_read = buffers.read().unwrap();
+    for w in deferred_writes {
+        buffers_read
+            .entries
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+    }
+    Ok(())
+}
+
+fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[DeferredHostWrite]) -> Result<()> {
+    let _tz = crate::tracy_zone!("goldy.vk.pending_submit.apply_deferred_host_writes");
+    for w in deferred_writes {
+        let buffers_read = buffers.read().unwrap();
+        let buffer = buffers_read
+            .entries
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+        if let Some(base) = buffer.host_mapped {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    w.data.as_ptr(),
+                    (base as *mut u8).add(w.offset as usize),
+                    w.data.len(),
+                );
+            }
+        } else {
+            anyhow::bail!(
+                "deferred host write requires CPU-writable mapped buffer (handle={})",
+                w.buffer
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_host_sidecar_before_gpu(
+    ld: &types::LogicalDevice,
+    contexts: &SharedContextMap,
+    host_observed_waits: &[Epoch],
+    buffers: &SharedBufferTable,
+    deferred_writes: &[DeferredHostWrite],
+) -> Result<()> {
+    let _tz = crate::tracy_zone!("goldy.vk.pending_submit.apply_host_sidecar_before_gpu");
+    wait_host_observed_epochs(ld, contexts, host_observed_waits)?;
+    apply_deferred_host_writes(buffers, deferred_writes)?;
+    Ok(())
 }
 
 pub(super) fn vulkan_post_signal_cleanup(
@@ -110,10 +185,15 @@ pub(super) fn vulkan_finish_staging_after_enqueue(
 
 pub(super) struct VulkanQueueSubmitPending {
     ld: SharedLogicalDevice,
+    contexts: SharedContextMap,
+    frame_table: super::types::SharedFrameTableDevice,
+    buffers: SharedBufferTable,
     timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
     cmd: Option<vk::CommandBuffer>,
     wait_semaphores: Vec<(vk::Semaphore, u64)>,
+    host_observed_waits: Vec<Epoch>,
+    deferred_host_writes: Vec<DeferredHostWrite>,
 }
 
 pub(super) struct VulkanGpuProfileWork {
@@ -125,6 +205,15 @@ pub(super) struct VulkanGpuProfileWork {
 impl PendingSubmit for VulkanQueueSubmitPending {
     fn execute(self: Box<Self>) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit");
+        apply_host_sidecar_before_gpu(
+            &self.ld,
+            &self.contexts,
+            &self.host_observed_waits,
+            &self.buffers,
+            &self.deferred_host_writes,
+        )?;
+        // Per-context frame-table slots are bound once at context init; no
+        // per-submit rebinding needed.
         let queue_lock = Arc::clone(&self.ld.queue_lock);
         let wait_infos: Vec<vk::SemaphoreSubmitInfo> = self
             .wait_semaphores
@@ -205,20 +294,30 @@ pub(super) fn enqueue_vulkan_submit(
     ld: &SharedLogicalDevice,
     contexts: &SharedContextMap,
     sync: Option<&SubmitSync>,
+    frame_table: super::types::SharedFrameTableDevice,
+    buffers: &SharedBufferTable,
     timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
     cmd: Option<vk::CommandBuffer>,
 ) -> Result<()> {
     ld.submission_worker.check_error()?;
     let wait_semaphores = resolve_cross_submit_waits(contexts, sync)?;
+    let host_observed_waits = sync.map(|s| s.host_observed_waits.clone()).unwrap_or_default();
+    let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
+    validate_deferred_host_writes(buffers, &deferred_host_writes)?;
     ld.submission_worker.enqueue(
         signal_value,
         Box::new(VulkanQueueSubmitPending {
             ld: Arc::clone(ld),
+            contexts: Arc::clone(contexts),
+            frame_table,
+            buffers: Arc::clone(buffers),
             timeline_sem,
             signal_value,
             cmd,
             wait_semaphores,
+            host_observed_waits,
+            deferred_host_writes,
         }),
     )
 }

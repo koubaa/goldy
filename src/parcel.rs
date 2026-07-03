@@ -938,7 +938,8 @@ impl Init {
     /// Reserve zero-initialized space for `count` elements of type `T`.
     pub fn zeros<T: StructuredBufferElement>(count: u64) -> Self {
         let stride = std::mem::size_of::<T>() as u32;
-        let bytes = vec![0u8; (count * stride as u64) as usize];
+        let bytes_len = count.saturating_mul(stride as u64);
+        let bytes = vec![0u8; bytes_len as usize];
         Self::Data { bytes, count, stride }
     }
 }

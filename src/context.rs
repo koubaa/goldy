@@ -198,7 +198,8 @@ impl Context {
 
     /// Block until the timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
-        self.wait_until_context(self.inner.handle, value)
+        let result = self.wait_until_context(self.inner.handle, value);
+        result
     }
 
     fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {

@@ -485,12 +485,16 @@ pub(crate) struct Dx12SubmissionContext {
     pub staging_belt: super::staging::StagingBelt,
     /// Pool that recycles texture-upload staging buffers across frames on this context.
     pub texture_staging_pool: super::staging::TextureStagingPool,
-    /// Per-context deferred deletion queue — only resources exclusively bound to this
-    /// context's timeline (e.g. temporary dispatch-batch arg buffers).  Drained at each
-    /// submit by this context's own completed fence value, never by `device_retired`.
+    /// Per-context deferred deletion queue — resources whose lifetime is bounded by this
+    /// context's timeline (dispatch-batch arg buffers, user buffers destroyed with context
+    /// attribution). Drained by this context's own completed fence value.
     pub deletion_queue: DeletionQueue,
+    /// Thread-scoped reclamation epoch from [`ContextReclamationScope::set_epoch`].
+    pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// GPU profile readbacks deferred until the context timeline retires each submit TV.
     pub pending_gpu_profiles: Vec<(u64, super::compute::Dx12GpuProfileResources)>,
+    /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
+    pub frame_table: SharedFrameTableDevice,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
@@ -565,6 +569,27 @@ pub(crate) struct PendingSlotReclamation {
     pub slot: DeferredSlot,
     /// `(context_handle, min_seq_that_must_retire)`
     pub requirements: Vec<(super::ContextHandle, u64)>,
+}
+
+/// GPU buffer resources held until bindless slot requirements retire.
+pub(crate) struct PendingBufferGpuRelease {
+    pub buffer_handle: BufferHandle,
+    pub requirements: Vec<(super::ContextHandle, u64)>,
+    pub resource: Direct3D12::ID3D12Resource,
+    pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
+    pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
+    pub reserved_tiles: Option<Vec<Option<(Direct3D12::ID3D12Heap, u64)>>>,
+}
+
+fn slot_requirements_met(
+    requirements: &[(super::ContextHandle, u64)],
+    context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+) -> bool {
+    requirements.iter().all(|(ctx_id, required_seq)| {
+        context_fences
+            .get(ctx_id)
+            .is_none_or(|(_, fence)| unsafe { fence.GetCompletedValue() >= *required_seq })
+    })
 }
 
 /// Deferred deletion queue for a DX12 device.
@@ -652,6 +677,31 @@ impl DescriptorRegistry {
         }
     }
 
+    /// Union of per-context last-seen seqs for all bindless slots owned by `handle`.
+    /// Must be called before [`Self::reclaim_buffer_slots`] removes `slot_last_seen` entries.
+    pub(crate) fn snapshot_buffer_slot_requirements(&self, handle: BufferHandle) -> Vec<(super::ContextHandle, u64)> {
+        let rr = &self.resource_registry;
+        let mut merged: FxHashMap<super::ContextHandle, u64> = FxHashMap::default();
+        let mut slots = Vec::new();
+        if let Some(&offset) = rr.buffer_offsets.get(&handle) {
+            slots.push(offset);
+        }
+        if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
+            slots.push(offset);
+        }
+        for slot in slots {
+            if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
+                for (ctx, seq) in map.iter() {
+                    merged
+                        .entry(ctx)
+                        .and_modify(|v| *v = (*v).max(seq))
+                        .or_insert(seq);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
     /// Reclaim all descriptor slots for a destroyed buffer handle.
     pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) {
         let slots = self.resource_registry.extract_buffer_slots(handle);
@@ -687,14 +737,7 @@ impl DescriptorRegistry {
     ) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
-            let ready = self.pending_slot_reclamations[i]
-                .requirements
-                .iter()
-                .all(|(ctx_id, required_seq)| {
-                    context_fences
-                        .get(ctx_id)
-                        .is_none_or(|(_, fence)| unsafe { fence.GetCompletedValue() >= *required_seq })
-                });
+            let ready = slot_requirements_met(&self.pending_slot_reclamations[i].requirements, context_fences);
             if ready {
                 let entry = self.pending_slot_reclamations.swap_remove(i);
                 self.resource_registry.free_deferred_slot(entry.slot);
@@ -702,6 +745,30 @@ impl DescriptorRegistry {
                 i += 1;
             }
         }
+    }
+
+    /// Minimum context timeline value that must retire before a buffer's GPU resource can be
+    /// released. Extends the thread-local [`reclamation_barrier`] with every live
+    /// `slot_last_seen` entry for this buffer's bindless slots so cross-context shader access
+    /// cannot outlive the D3D12 resource.
+    pub(crate) fn bindless_retirement_fence_for_buffer(&self, handle: BufferHandle, barrier: u64) -> u64 {
+        let rr = &self.resource_registry;
+        let mut fence = barrier;
+        let mut slots = Vec::new();
+        if let Some(&offset) = rr.buffer_offsets.get(&handle) {
+            slots.push(offset);
+        }
+        if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
+            slots.push(offset);
+        }
+        for slot in slots {
+            if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
+                for (_, seq) in map.iter() {
+                    fence = fence.max(seq);
+                }
+            }
+        }
+        fence
     }
 }
 
@@ -773,6 +840,10 @@ pub(crate) struct LogicalDevice {
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: Mutex<DeletionQueue>,
+    /// Buffer GPU memory held until bindless slot `slot_last_seen` requirements retire.
+    pub pending_buffer_gpu_releases: Mutex<Vec<PendingBufferGpuRelease>>,
+    /// Shared with [`Dx12State::device_removed`] — first `u64::MAX` fence triggers DRED once.
+    pub device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Descriptor registry: `ResourceRegistry` + slot reference-tracking.
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
@@ -788,6 +859,8 @@ pub(crate) struct LogicalDevice {
     pub queue_lock: Arc<Mutex<()>>,
     /// Async FIFO worker for `ExecuteCommandLists` + `Signal` (render thread enqueues, worker runs).
     pub submission_worker: std::sync::Arc<super::super::submission_worker::SubmissionWorker>,
+    /// Frame table for legacy `render_to_target` (no submission context).
+    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
@@ -801,16 +874,18 @@ pub(crate) type SharedSubmissionContext = Arc<Mutex<Dx12SubmissionContext>>;
 /// graphs without the global backend mutex.
 pub(crate) type SharedContextMap = Arc<std::sync::RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
 
-/// Per-device frame-table GPU state — shared via `Arc` for lock-free submit recording.
+/// Per-context frame-table GPU state — cloned into submit sessions at context creation.
 pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
 
-/// Frame tables keyed by device — cloned into [`super::submit_session::Dx12SubmitSession`].
-pub(crate) type SharedFrameTableMap = Arc<std::sync::RwLock<HashMap<super::DeviceHandle, SharedFrameTableDevice>>>;
-
 impl LogicalDevice {
-    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+    pub(crate) fn process_deletion_queue_up_to(
+        &self,
+        completed: u64,
+        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+    ) {
         let batch = self.deletion_queue.lock().unwrap().drain_up_to_completed(completed);
         if batch.is_empty() {
+            self.drain_pending_buffer_gpu_releases(context_fences);
             return;
         }
         let descriptors_arc = Arc::clone(&self.descriptors);
@@ -818,9 +893,31 @@ impl LogicalDevice {
         for resource in batch {
             destroy_pending_deletion(self, &mut registry, resource);
         }
+        drop(registry);
+        self.drain_pending_buffer_gpu_releases(context_fences);
     }
 
-    pub(crate) fn flush_deletion_queue(&self) {
+    /// Drop deferred buffer GPU memory once every referencing context has retired.
+    pub(crate) fn drain_pending_buffer_gpu_releases(
+        &self,
+        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+    ) {
+        let mut pending = self.pending_buffer_gpu_releases.lock().unwrap();
+        let mut i = 0;
+        while i < pending.len() {
+            if slot_requirements_met(&pending[i].requirements, context_fences) {
+                let entry = pending.swap_remove(i);
+                release_buffer_gpu_resources(self, entry);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn flush_deletion_queue(
+        &self,
+        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+    ) {
         // Called only at device teardown, after wait_for_gpu ensures all GPU work has
         // completed. Slots queued here via reclaim_*_slots will have empty requirements
         // (slot_last_seen was cleared as contexts were destroyed before the device) and
@@ -836,7 +933,35 @@ impl LogicalDevice {
         for resource in batch {
             destroy_pending_deletion(self, &mut registry, resource);
         }
+        drop(registry);
+        self.drain_pending_buffer_gpu_releases(context_fences);
     }
+}
+
+fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelease) {
+    let PendingBufferGpuRelease {
+        buffer_handle,
+        requirements,
+        resource,
+        upload_buffer,
+        coherent_readback,
+        reserved_tiles,
+    } = entry;
+    if let Some(tiles) = reserved_tiles {
+        let mut pool = ld.tile_heap_pool.lock().unwrap();
+        super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
+    }
+    let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+    let signaled = super::utils::with_queue_lock(ld, || {
+        unsafe { ld.command_queue.Signal(&ld.fence, fv) }
+            .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
+    });
+    if signaled.is_ok() {
+        let _ = super::utils::wait_for_fence_on_device(&ld.fence, fv, Some(ld));
+    }
+    drop(resource);
+    drop(upload_buffer);
+    drop(coherent_readback);
 }
 
 pub(crate) fn destroy_pending_deletion(
@@ -852,24 +977,24 @@ pub(crate) fn destroy_pending_deletion(
             coherent_readback,
             reserved_tiles,
         } => {
+            let requirements = registry.snapshot_buffer_slot_requirements(buffer_handle);
             registry.reclaim_buffer_slots(buffer_handle);
-            if let Some(tiles) = reserved_tiles {
-                let mut pool = ld.tile_heap_pool.lock().unwrap();
-                super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
+            let release = PendingBufferGpuRelease {
+                buffer_handle,
+                requirements: requirements.clone(),
+                resource,
+                upload_buffer,
+                coherent_readback,
+                reserved_tiles,
+            };
+            if requirements.is_empty() {
+                release_buffer_gpu_resources(ld, release);
+            } else {
+                ld.pending_buffer_gpu_releases
+                    .lock()
+                    .unwrap()
+                    .push(release);
             }
-            // Flush the queue so the unmap is processed before releasing the resource.
-            // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            let signaled = super::utils::with_queue_lock(ld, || {
-                unsafe { ld.command_queue.Signal(&ld.fence, fv) }
-                    .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
-            });
-            if signaled.is_ok() {
-                let _ = super::utils::wait_for_fence(&ld.fence, fv);
-            }
-            drop(resource);
-            drop(upload_buffer);
-            drop(coherent_readback);
         }
         PendingDeletion::BufferView { buffer_handle } => {
             registry.reclaim_buffer_slots(buffer_handle);
@@ -1261,9 +1386,6 @@ pub(super) struct Dx12State {
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Per-device frame-table GPU resources (reserved bindless slots 0/1).
-    #[cfg(all(feature = "dx12", target_os = "windows"))]
-    pub frame_tables: SharedFrameTableMap,
     /// Bookkeeping from present jobs enqueued on the submission worker at scheme submit.
     pub pending_present_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
 }

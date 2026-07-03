@@ -619,6 +619,8 @@ pub(crate) struct SubmissionContext {
     pub deletion_queue: DeletionQueue,
     /// GPU profile readbacks deferred until the context timeline retires each submit TV.
     pub pending_gpu_profiles: Vec<(u64, super::pending_submit::VulkanGpuProfileWork)>,
+    /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
+    pub frame_table: SharedFrameTableDevice,
 }
 
 /// A logical Vulkan device with associated resources.
@@ -703,6 +705,8 @@ pub(crate) struct LogicalDevice {
 
     /// Async FIFO worker for `vkQueueSubmit2` (render thread enqueues, worker runs).
     pub submission_worker: Arc<super::super::submission_worker::SubmissionWorker>,
+    /// Frame table for legacy `render_to_target` (no submission context).
+    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
 }
 
 /// A Vulkan command buffer retained for resubmission.
@@ -1393,11 +1397,8 @@ pub(super) type SharedComputeFencePool = Arc<ComputeFencePool>;
 /// Per-context map — read/write independently of the global backend mutex (Phase 5b-iii).
 pub(crate) type SharedContextMap = Arc<RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
 
-/// Per-device frame-table GPU resources — cloned into submit sessions.
+/// Per-context frame-table GPU resources — cloned into submit sessions at context creation.
 pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
-
-/// Frame tables keyed by device — cloned into [`super::submit_session::VulkanSubmitSession`].
-pub(crate) type SharedFrameTableMap = Arc<RwLock<HashMap<DeviceHandle, SharedFrameTableDevice>>>;
 
 /// Map plus monotonic handle allocator for a single resource kind.
 ///
@@ -1478,8 +1479,6 @@ pub(super) struct VulkanState {
     /// `true` when `VK_EXT_debug_utils` was loaded (i.e. validation layers are
     /// active).  Guards `set_texture_debug_name` so we never call a null fp.
     pub enable_validation: bool,
-    /// Per-device frame-table GPU resources (selector, device table, upload staging).
-    pub frame_tables: SharedFrameTableMap,
     /// Present bookkeeping queued by the submission worker after scheduled present jobs.
     pub pending_present_finishes: std::sync::Arc<std::sync::Mutex<Vec<crate::backend::PresentFinishState>>>,
 }

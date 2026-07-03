@@ -2094,7 +2094,9 @@ impl TaskGraph {
         );
 
         let tv = submit_resolved_ir(&mut self.schedule_cache, context, session, &self.ir, None)?;
-        if wait_for_transient_completion && self.needs_transient_gpu_wait() {
+        let needs_wait = wait_for_transient_completion
+            && (self.needs_transient_gpu_wait() || self.has_render_passes());
+        if needs_wait {
             context.wait_until(tv).map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(tv)
@@ -2239,7 +2241,9 @@ impl TaskGraph {
         if has_render {
             let g = analysis::emit_graph_commands(&self.ir, schedule, Some(resolver));
             let tv = session.submit_graph(context.backend_handle(), &g, None)?;
-            if wait_for_transient_completion && self.needs_transient_gpu_wait() {
+            let needs_wait = wait_for_transient_completion
+                && (self.needs_transient_gpu_wait() || self.has_render_passes());
+            if needs_wait {
                 context.wait_until(tv).map_err(|e| anyhow::anyhow!(e))?;
             }
             return Ok(tv);

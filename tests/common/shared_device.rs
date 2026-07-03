@@ -2,15 +2,13 @@
 //! `VkInstance`/`VkDevice` per test (avoids validation-layer teardown races under
 //! parallel `cargo test`).
 //!
-//! Tests that share the device must also take [`test_lock`] for the duration of
-//! the test body so cross-submit / retention state does not leak between parallel
-//! threads.
+//! Each test should create its own [`Context`]; the device itself is safe to use
+//! concurrently across parallel tests.
 
 use goldy::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 static SHARED_DEVICE: OnceLock<Arc<Device>> = OnceLock::new();
-static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// One logical GPU device for the process. Each test should create its own [`Context`].
 pub fn shared_device() -> Arc<Device> {
@@ -24,12 +22,4 @@ pub fn shared_device() -> Arc<Device> {
                 .expect("device"),
         )
     }))
-}
-
-/// Serialize tests that borrow [`shared_device`]. Hold the guard for the whole test.
-pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
 }

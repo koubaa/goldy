@@ -295,6 +295,15 @@ pub(super) fn signal_preallocated_device(
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
+    wait_for_fence_on_device(fence, value, None)
+}
+
+/// Like [`wait_for_fence`] but logs DRED on first `u64::MAX` when `ld` is provided.
+pub(super) fn wait_for_fence_on_device(
+    fence: &ID3D12Fence,
+    value: u64,
+    ld: Option<&super::types::LogicalDevice>,
+) -> Result<()> {
     let completed = unsafe { fence.GetCompletedValue() };
     if completed == u64::MAX {
         anyhow::bail!("GPU device removed while waiting for fence value {value}");
@@ -306,6 +315,10 @@ pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
 
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe { CloseHandle(event) }.ok();
+    }
+    let completed_after = unsafe { fence.GetCompletedValue() };
+    if completed_after == u64::MAX {
+        anyhow::bail!("GPU device removed after waiting for fence value {value}");
     }
     Ok(())
 }

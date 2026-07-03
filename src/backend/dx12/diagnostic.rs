@@ -87,6 +87,40 @@ pub(crate) fn enable_dred_settings() {
 #[cfg(not(windows))]
 pub(crate) fn enable_dred_settings() {}
 
+/// First detection of fence `u64::MAX` / device removal: log DRED once and dump the del ring.
+pub(crate) fn first_touch_device_removed(
+    device: &windows::Win32::Graphics::Direct3D12::ID3D12Device10,
+    device_removed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    location: &str,
+    wait_value: u64,
+    completed: u64,
+) {
+    if completed != u64::MAX {
+        return;
+    }
+    if device_removed
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        log_dred_on_device_removed(device);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn first_touch_device_removed(
+    _device: &(),
+    _device_removed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _location: &str,
+    _wait_value: u64,
+    _completed: u64,
+) {
+}
+
 /// Log safe, scalar DRED metadata after device removal (TDR/hang).
 ///
 /// Does **not** walk DRED linked-list pointers — those can be stale immediately after removal
@@ -99,6 +133,7 @@ pub(crate) fn log_dred_on_device_removed(device: &windows::Win32::Graphics::Dire
 
     let reason = unsafe { device.GetDeviceRemovedReason() };
     tracing::error!(target: "goldy::dx12::dred", ?reason, "GetDeviceRemovedReason");
+
 
     if let Ok(dred) = device.cast::<ID3D12DeviceRemovedExtendedData2>() {
         let state = unsafe { dred.GetDeviceState() };
@@ -114,6 +149,7 @@ pub(crate) fn log_dred_on_device_removed(device: &windows::Win32::Graphics::Dire
             );
         }
     }
+
 
     tracing::error!(
         target: "goldy::dx12::dred",

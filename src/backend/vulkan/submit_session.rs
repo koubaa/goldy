@@ -6,8 +6,8 @@
 use super::compute;
 use super::types::{
     SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextMap, SharedFrameTableDevice,
-    SharedFrameTableMap, SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext,
-    SharedTextureTable, VulkanState,
+    SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext, SharedTextureTable,
+    VulkanState,
 };
 use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
 use crate::timeline::TimelineValue;
@@ -26,7 +26,6 @@ pub(crate) struct VulkanSubmitView<'a> {
     pub render_targets: &'a SharedRenderTargetTable,
     pub textures: &'a SharedTextureTable,
     pub compute_fence_pool: &'a SharedComputeFencePool,
-    pub frame_tables: &'a SharedFrameTableMap,
 }
 
 impl VulkanState {
@@ -41,7 +40,6 @@ impl VulkanState {
             render_targets: &self.render_targets,
             textures: &self.textures,
             compute_fence_pool: &self.compute_fence_pool,
-            frame_tables: &self.frame_tables,
         }
     }
 }
@@ -85,7 +83,6 @@ pub(crate) struct VulkanSubmitSession {
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
     compute_fence_pool: SharedComputeFencePool,
-    frame_tables: SharedFrameTableMap,
 }
 
 impl VulkanSubmitSession {
@@ -98,15 +95,10 @@ impl VulkanSubmitSession {
                 .get(&ctx)
                 .with_context(|| format!("Invalid context handle {ctx}"))?,
         );
-        let device_handle = sc.lock().unwrap().device;
-        let frame_table = Arc::clone(
-            state
-                .frame_tables
-                .read()
-                .unwrap()
-                .get(&device_handle)
-                .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
-        );
+        let (device_handle, frame_table) = {
+            let sc_guard = sc.lock().unwrap();
+            (sc_guard.device, Arc::clone(&sc_guard.frame_table))
+        };
         let devices: HashMap<DeviceHandle, SharedLogicalDevice> = state
             .devices
             .iter()
@@ -126,7 +118,6 @@ impl VulkanSubmitSession {
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
             compute_fence_pool: Arc::clone(&state.compute_fence_pool),
-            frame_tables: Arc::clone(&state.frame_tables),
         }))
     }
 
@@ -145,7 +136,6 @@ impl VulkanSubmitSession {
                 render_targets: &self.render_targets,
                 textures: &self.textures,
                 compute_fence_pool: &self.compute_fence_pool,
-                frame_tables: &self.frame_tables,
             },
             frame_table: Arc::clone(&self.frame_table),
         }
@@ -166,15 +156,10 @@ pub(crate) fn scope_from_state(state: &VulkanState, ctx: ContextHandle) -> Resul
             .get(&ctx)
             .with_context(|| format!("Invalid context handle {ctx}"))?,
     );
-    let device_handle = sc.lock().unwrap().device;
-    let frame_table = Arc::clone(
-        state
-            .frame_tables
-            .read()
-            .unwrap()
-            .get(&device_handle)
-            .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
-    );
+    let (device_handle, frame_table) = {
+        let sc_guard = sc.lock().unwrap();
+        (sc_guard.device, Arc::clone(&sc_guard.frame_table))
+    };
     Ok(VulkanSubmitScope {
         ctx,
         device_handle,

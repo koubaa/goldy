@@ -1191,21 +1191,15 @@ pub(super) fn resize(
 /// index for deferred deletion after in-flight GPU work completes.
 /// For views, only the descriptor index is deferred — the underlying VkBuffer/memory
 /// belongs to the parent and is not freed.
-pub(super) fn destroy(
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &SharedBufferTable,
-    buffer_handle: BufferHandle,
-) {
-    if let Some(buffer) = buffers.write().unwrap().entries.remove(&buffer_handle) {
-        if let Some(device) = devices.get(&buffer.device_handle) {
-            let barrier = device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+pub(super) fn destroy(state: &super::types::VulkanState, buffer_handle: BufferHandle) {
+    if let Some(buffer) = state.buffers.write().unwrap().entries.remove(&buffer_handle) {
+        if let Some(device) = state.devices.get(&buffer.device_handle) {
+            let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
+            let barrier = super::context::reclamation_barrier(state, buffer.device_handle, ctx_h);
 
             if buffer.is_view {
-                device
-                    .deletion_queue
-                    .lock()
-                    .unwrap()
-                    .queue(barrier, types::PendingDeletion::BufferView { buffer_handle });
+                let deletion = types::PendingDeletion::BufferView { buffer_handle };
+                queue_pending_deletion(state, device, ctx_h, barrier, deletion);
                 return;
             }
 
@@ -1230,23 +1224,37 @@ pub(super) fn destroy(
             } else {
                 None
             };
-            device.deletion_queue.lock().unwrap().queue(
-                barrier,
-                types::PendingDeletion::Buffer {
-                    buffer_handle,
-                    buffer: buffer.buffer,
-                    memory: if buffer.is_sparse {
-                        vk::DeviceMemory::null()
-                    } else {
-                        buffer.memory
-                    },
-                    staging_buffer: buffer.staging_buffer,
-                    staging_memory: buffer.staging_memory,
-                    sparse_teardown,
+            let deletion = types::PendingDeletion::Buffer {
+                buffer_handle,
+                buffer: buffer.buffer,
+                memory: if buffer.is_sparse {
+                    vk::DeviceMemory::null()
+                } else {
+                    buffer.memory
                 },
-            );
+                staging_buffer: buffer.staging_buffer,
+                staging_memory: buffer.staging_memory,
+                sparse_teardown,
+            };
+            queue_pending_deletion(state, device, ctx_h, barrier, deletion);
         }
     }
+}
+
+fn queue_pending_deletion(
+    state: &super::types::VulkanState,
+    device: &types::SharedLogicalDevice,
+    ctx_h: Option<super::ContextHandle>,
+    barrier: u64,
+    deletion: types::PendingDeletion,
+) {
+    if let Some(ctx_h) = ctx_h {
+        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx_h) {
+            sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
+            return;
+        }
+    }
+    device.deletion_queue.lock().unwrap().queue(barrier, deletion);
 }
 
 /// Create a view into a sub-region of an existing buffer.

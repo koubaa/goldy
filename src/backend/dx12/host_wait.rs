@@ -11,8 +11,8 @@ pub(super) enum HostWait {
 
 impl HostWait {
     pub(super) fn wait(&self) -> Result<()> {
-        match self {
-            HostWait::Fence { fence, value } => super::utils::wait_for_fence(fence, *value),
-        }
+        let HostWait::Fence { fence, value } = self;
+        let result = super::utils::wait_for_fence(fence, *value);
+        result
     }
 }

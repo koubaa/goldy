@@ -123,10 +123,29 @@ impl PendingSubmit for Dx12ComputePendingSubmit {
             &self.buffers,
             &self.deferred_host_writes,
         )?;
+        let frame_table = {
+            let sc_guard = self.sc.lock().unwrap();
+            std::sync::Arc::clone(&sc_guard.frame_table)
+        };
         {
             let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.before");
             let mut sc = self.sc.lock().unwrap();
             super::compute::pre_reset_retired_compute_slots(&self.logical_device, &mut sc, &self.ctx_fence)?;
+        }
+        {
+            let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
+            let device_completed = unsafe { self.logical_device.fence.GetCompletedValue() };
+            if ctx_completed == u64::MAX || device_completed == u64::MAX {
+                let completed = ctx_completed.max(device_completed);
+                super::diagnostic::first_touch_device_removed(
+                    &self.logical_device.device,
+                    &self.logical_device.device_removed,
+                    "dx12::Dx12ComputePendingSubmit::execute",
+                    self.fence_value,
+                    completed,
+                );
+                anyhow::bail!("GPU device removed before compute submit tv={}", self.fence_value);
+            }
         }
         super::utils::execute_preallocated_context_submit(
             &self.logical_device,
@@ -151,6 +170,7 @@ impl PendingSubmit for Dx12ComputePendingSubmit {
 
 pub(super) struct Dx12RetainedResubmitPending {
     logical_device: SharedLogicalDevice,
+    sc: SharedSubmissionContext,
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     queue_waits: Vec<(ID3D12Fence, u64)>,
@@ -168,13 +188,33 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
             &self.buffers,
             &self.deferred_host_writes,
         )?;
-        super::utils::execute_preallocated_context_submit(
+        {
+            let frame_table = {
+                let sc_guard = self.sc.lock().unwrap();
+                std::sync::Arc::clone(&sc_guard.frame_table)
+            };
+            let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
+            let device_completed = unsafe { self.logical_device.fence.GetCompletedValue() };
+            if ctx_completed == u64::MAX || device_completed == u64::MAX {
+                let completed = ctx_completed.max(device_completed);
+                super::diagnostic::first_touch_device_removed(
+                    &self.logical_device.device,
+                    &self.logical_device.device_removed,
+                    "dx12::Dx12RetainedResubmitPending::execute",
+                    self.fence_value,
+                    completed,
+                );
+                anyhow::bail!("GPU device removed before retained resubmit tv={}", self.fence_value);
+            }
+        }
+        let result = super::utils::execute_preallocated_context_submit(
             &self.logical_device,
             &self.ctx_fence,
             &self.command_lists,
             &self.queue_waits,
             self.fence_value,
-        )
+        );
+        result
     }
 }
 
@@ -439,6 +479,7 @@ pub(super) fn enqueue_retained_resubmit(
     logical_device: &SharedLogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
     buffers: &SharedBufferTable,
+    sc: SharedSubmissionContext,
     ctx_fence: ID3D12Fence,
     command_lists: Vec<Option<ID3D12CommandList>>,
     sync: Option<&SubmitSync>,
@@ -453,6 +494,7 @@ pub(super) fn enqueue_retained_resubmit(
         fence_value,
         Box::new(Dx12RetainedResubmitPending {
             logical_device: Arc::clone(logical_device),
+            sc,
             ctx_fence,
             command_lists,
             queue_waits,

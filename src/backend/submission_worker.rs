@@ -295,6 +295,9 @@ fn wait_for_submitted_epoch(
     tv: u64,
     deadline: Option<Instant>,
 ) -> Result<bool> {
+    let initial = submitted_epoch.load(Ordering::Acquire);
+    if initial < tv {
+    }
     while submitted_epoch.load(Ordering::Acquire) < tv {
         if let Some(err) = latched_error.lock().unwrap().as_ref() {
             return Err(anyhow::anyhow!("{err:#}"));

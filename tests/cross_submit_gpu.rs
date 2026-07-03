@@ -4,7 +4,7 @@
 //!
 //! Uses a process-wide [`Device`] so parallel tests do not each create and destroy
 //! a Vulkan instance (which races with validation-layer global state at teardown).
-//! Each test takes [`test_lock`] so cross-submit ledger state stays isolated.
+//! Each test creates its own [`Context`].
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 
 #[path = "common/shared_device.rs"]
@@ -18,7 +18,7 @@ use goldy::{
     BackendType, BufferKind, ComputePipeline, Context, Device, Grant, NodeAccess, Parcel, ReadGrant, RetainedPool,
     Scheme, ShaderModule, Submission,
 };
-use shared_device::{shared_device, test_lock};
+use shared_device::shared_device;
 use submission::submission_context;
 
 const INC_SHADER: &str = r#"
@@ -60,7 +60,6 @@ fn read_u32(grant: &ReadGrant<goldy::GrantBuffer>, submission: &Submission) -> u
 
 #[test]
 fn saxpy_style_chain_closed_form() {
-    let _guard = test_lock();
     let device = shared_device();
     let shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
     let pipe = ComputePipeline::new(&device, &shader).expect("pipe");
@@ -88,7 +87,6 @@ fn saxpy_style_chain_closed_form() {
 
 #[test]
 fn war_write_after_read_pipelined_overwrite() {
-    let _guard = test_lock();
     let device = shared_device();
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
@@ -154,7 +152,6 @@ fn assert_retained_resubmit_stats(device: &Device, reader: &Scheme, expected_res
 
 #[test]
 fn retained_reader_observes_independent_writer_across_resubmits() {
-    let _guard = test_lock();
     let device = shared_device();
     let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("shader");
     let pipe = ComputePipeline::new(&device, &shader).expect("pipe");
@@ -186,7 +183,6 @@ fn retained_reader_observes_independent_writer_across_resubmits() {
 
 #[test]
 fn retained_waw_overwrites_independent_upload() {
-    let _guard = test_lock();
     let device = shared_device();
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
     let write_pipe = ComputePipeline::new(&device, &write_shader).expect("pipe");
@@ -220,7 +216,6 @@ fn retained_waw_overwrites_independent_upload() {
 
 #[test]
 fn retained_reader_cross_context_observes_independent_writer() {
-    let _guard = test_lock();
     let device = shared_device();
     let ctx_producer = device.create_context().expect("producer ctx");
     let ctx_consumer = device.create_context().expect("consumer ctx");
@@ -253,7 +248,6 @@ fn retained_reader_cross_context_observes_independent_writer() {
 
 #[test]
 fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
-    let _guard = test_lock();
     let device = shared_device();
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
@@ -304,7 +298,6 @@ fn retained_resubmit_not_dirtied_by_unrelated_scheme() {
 
 #[test]
 fn retained_reader_dirtied_once_by_new_writer_then_stable() {
-    let _guard = test_lock();
     let device = shared_device();
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
@@ -359,7 +352,6 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
 
 #[test]
 fn topology_re_record_produces_correct_barriers_and_data() {
-    let _guard = test_lock();
     let device = shared_device();
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
     let write_shader = ShaderModule::from_slang(&device, OVERWRITE_SHADER).expect("shader");
@@ -394,7 +386,6 @@ fn topology_re_record_produces_correct_barriers_and_data() {
 
 #[test]
 fn repeated_resubmit_of_b_never_dirties_a() {
-    let _guard = test_lock();
     let device = shared_device();
     let inc_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");
@@ -450,7 +441,6 @@ fn repeated_resubmit_of_b_never_dirties_a() {
 fn partitioned_buffer_disjoint_ranges_no_cross_submit_hazard() {
     use goldy::{field, Init};
 
-    let _guard = test_lock();
     let device = shared_device();
     let inc_shader = ShaderModule::from_slang(&device, INC_SHADER).expect("shader");
     let read_shader = ShaderModule::from_slang(&device, READ_SHADER).expect("shader");

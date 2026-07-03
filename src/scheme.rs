@@ -266,7 +266,8 @@ impl Submission {
 
     /// Block until this submission's GPU work has completed.
     pub fn wait(&self, ctx: &Context) -> Result<(), GoldyError> {
-        ctx.wait_until(self.data.timeline)
+        ctx.wait_until(self.data.timeline)?;
+        Ok(())
     }
 
     #[cfg(test)]

@@ -1,45 +1,59 @@
 //! DX12 frame-table buffers and prologue (staging upload + device-local copy).
 
-use super::types::{BufferState, Dx12State, LogicalDevice};
+use super::types::{BufferState, Dx12State, LogicalDevice, SharedFrameTableDevice};
 use super::BufferHandle;
 use crate::backend::GpuCommand;
 use crate::frame_table::{
-    FRAME_TABLE_DEVICE_SLOT, FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_SELECTOR_SLOT,
-    FRAME_TABLE_STAGING_BYTES, FRAME_TABLE_TABLE_U32S, FRAME_TABLE_USER_SLOT_BASE,
+    FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_STAGING_BYTES, FRAME_TABLE_TABLE_U32S,
+    FRAME_TABLE_USER_SLOT_BASE,
 };
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
-/// Per-device frame-table GPU resources.
+/// Per-context frame-table GPU resources and ring state.
 pub(crate) struct FrameTableDevice {
     pub selector: BufferHandle,
     pub device_table: BufferHandle,
+    /// Bindless heap slot of this context's selector cell (shader `_rs1`).
+    pub selector_slot: u32,
+    /// Bindless heap slot of this context's device-local table (shader `_rs2`).
+    pub table_slot: u32,
     pub staging: ID3D12Resource,
     pub staging_mapped: usize,
     pub submission_counter: AtomicU32,
     /// Bitmask of rows pinned by retained command lists (must not be overwritten).
     pub pinned_rows: AtomicU32,
-    /// Last `submission_counter` value that wrote each row (ring reuse guard).
-    pub last_sub_for_row: [AtomicU32; FRAME_TABLE_MAX_ROWS as usize],
 }
 
-/// Create frame-table buffers at reserved bindless slots 0 and 1.
-pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHandle, ld: &LogicalDevice) -> Result<()> {
-    let selector = create_scattered_u32_buffer_at_slot(
+/// Reserve user bindless slots once per device (low protocol slots stay unused).
+pub(crate) fn reserve_device_bindless_slots(ld: &LogicalDevice) {
+    ld.descriptors
+        .lock()
+        .unwrap()
+        .resource_registry
+        .ensure_cbv_start(FRAME_TABLE_USER_SLOT_BASE);
+}
+
+/// Create per-context frame-table buffers at per-context bindless slots.
+///
+/// Slots come from the device's descriptor registry (like any other buffer),
+/// so concurrent contexts on one device never share mutable descriptor slots
+/// and no rebinding at execute time is needed. The slot indices reach shaders
+/// via push constants (`_rs1`/`_rs2`).
+pub(crate) fn init_context(
+    state: &mut Dx12State,
+    device_handle: super::DeviceHandle,
+    ld: &LogicalDevice,
+) -> Result<SharedFrameTableDevice> {
+    let (selector, selector_slot) =
+        create_scattered_u32_buffer_registered(state, device_handle, ld, 1, "goldy_frame_table_selector")?;
+    let (device_table, table_slot) = create_scattered_u32_buffer_registered(
         state,
         device_handle,
         ld,
-        FRAME_TABLE_SELECTOR_SLOT,
-        1,
-        "goldy_frame_table_selector",
-    )?;
-    let device_table = create_scattered_u32_buffer_at_slot(
-        state,
-        device_handle,
-        ld,
-        FRAME_TABLE_DEVICE_SLOT,
         FRAME_TABLE_TABLE_U32S as u32,
         "goldy_frame_table_device",
     )?;
@@ -63,29 +77,100 @@ pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHan
         .unwrap()
         .element_stride = Some(4);
 
-    {
-        let dev = state.devices.get(&device_handle).context("init frame table")?;
-        dev.descriptors
-            .lock()
-            .unwrap()
-            .resource_registry
-            .ensure_cbv_start(FRAME_TABLE_USER_SLOT_BASE);
+    let ft = SharedFrameTableDevice::new(FrameTableDevice {
+        selector,
+        device_table,
+        selector_slot,
+        table_slot,
+        staging,
+        staging_mapped,
+        submission_counter: AtomicU32::new(0),
+        pinned_rows: AtomicU32::new(0),
+    });
+
+    let buffers = state.buffers.read().unwrap();
+    bind_to_bindless_heap(ld, &ft, &buffers.entries)?;
+
+    Ok(ft)
+}
+
+/// Lazy-init the device-owned frame table used by legacy `render_to_target`.
+///
+/// Standalone render passes have no submission context; they must not borrow a
+/// live context's ring buffer or advance its `submission_counter`.
+pub(crate) fn ensure_legacy_frame_table(
+    state: &mut Dx12State,
+    device_handle: super::DeviceHandle,
+) -> Result<SharedFrameTableDevice> {
+    let ld = state.devices.get(&device_handle).context("Invalid device handle")?.clone();
+    let mut guard = ld.legacy_frame_table.lock().unwrap();
+    if let Some(ft) = guard.as_ref() {
+        return Ok(std::sync::Arc::clone(ft));
     }
+    let ft = init_context(state, device_handle, &ld)?;
+    *guard = Some(std::sync::Arc::clone(&ft));
+    Ok(ft)
+}
 
-    state.frame_tables.write().unwrap().insert(
-        device_handle,
-        std::sync::Arc::new(FrameTableDevice {
-            selector,
-            device_table,
-            staging,
-            staging_mapped,
-            submission_counter: AtomicU32::new(0),
-            pinned_rows: AtomicU32::new(0),
-            last_sub_for_row: std::array::from_fn(|_| AtomicU32::new(0)),
-        }),
-    );
-
+/// Write this context's selector/table UAV descriptors at its per-context slots.
+///
+/// Called once at context init; the slots are context-private for the context's
+/// lifetime, so no rebinding at execute time is ever needed.
+pub(crate) fn bind_to_bindless_heap(
+    ld: &LogicalDevice,
+    ft: &FrameTableDevice,
+    buffers: &HashMap<BufferHandle, BufferState>,
+) -> Result<()> {
+    let selector = buffers.get(&ft.selector).context("frame table selector")?;
+    let device_table = buffers.get(&ft.device_table).context("frame table device table")?;
+    write_uav_at_slot(ld, ft.selector_slot, &selector.resource, 1)?;
+    write_uav_at_slot(ld, ft.table_slot, &device_table.resource, FRAME_TABLE_TABLE_U32S as u32)?;
     Ok(())
+}
+
+fn write_uav_at_slot(ld: &LogicalDevice, bindless_slot: u32, resource: &ID3D12Resource, num_u32s: u32) -> Result<()> {
+    let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+        Format: DXGI_FORMAT_UNKNOWN,
+        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+            Buffer: D3D12_BUFFER_UAV {
+                FirstElement: 0,
+                NumElements: num_u32s,
+                StructureByteStride: 4,
+                CounterOffsetInBytes: 0,
+                Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+            },
+        },
+    };
+    let cpu_handle = unsafe {
+        let mut h = ld.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (bindless_slot * ld.cbv_srv_uav_descriptor_size) as usize;
+        h
+    };
+    unsafe {
+        ld.device
+            .CreateUnorderedAccessView(resource, None, Some(&uav_desc), cpu_handle);
+    }
+    Ok(())
+}
+
+/// Destroy per-context frame-table resources: staging memory, the selector and
+/// table buffer entries, and their per-context bindless slots.
+///
+/// Caller guarantees the context's GPU work has fully retired.
+pub(crate) fn destroy_context(state: &Dx12State, device_handle: super::DeviceHandle, ft: &FrameTableDevice) {
+    unsafe {
+        ft.staging.Unmap(0, None);
+    }
+    let mut buffers = state.buffers.write().unwrap();
+    buffers.entries.remove(&ft.selector);
+    buffers.entries.remove(&ft.device_table);
+    drop(buffers);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        let mut registry = ld.descriptors.lock().unwrap();
+        registry.reclaim_buffer_slots(ft.selector);
+        registry.reclaim_buffer_slots(ft.device_table);
+    }
 }
 
 fn create_upload_table_buffer(ld: &LogicalDevice) -> Result<(ID3D12Resource, usize)> {
@@ -131,16 +216,14 @@ fn create_upload_table_buffer(ld: &LogicalDevice) -> Result<(ID3D12Resource, usi
     Ok((resource, ptr as usize))
 }
 
-fn create_scattered_u32_buffer_at_slot(
+fn create_scattered_u32_buffer_registered(
     state: &mut Dx12State,
     device_handle: super::DeviceHandle,
     ld: &LogicalDevice,
-    bindless_slot: u32,
     num_u32s: u32,
     debug_name: &str,
-) -> Result<BufferHandle> {
+) -> Result<(BufferHandle, u32)> {
     let logical_size = (num_u32s as u64) * 4;
-    // D3D12 buffer resources require 256-byte alignment for UAV/CBV views on some drivers.
     let size = logical_size.max(256);
     let heap = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_DEFAULT,
@@ -179,30 +262,13 @@ fn create_scattered_u32_buffer_at_slot(
         let _ = unsafe { resource.SetName(&name) };
     }
 
-    let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-        Format: DXGI_FORMAT_UNKNOWN,
-        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-            Buffer: D3D12_BUFFER_UAV {
-                FirstElement: 0,
-                NumElements: num_u32s,
-                StructureByteStride: 4,
-                CounterOffsetInBytes: 0,
-                Flags: D3D12_BUFFER_UAV_FLAG_NONE,
-            },
-        },
-    };
-    let cpu_handle = unsafe {
-        let mut h = ld.cbv_srv_uav_heap.GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (bindless_slot * ld.cbv_srv_uav_descriptor_size) as usize;
-        h
-    };
-    unsafe {
-        ld.device
-            .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), cpu_handle);
-    }
-
     let handle = state.buffers.write().unwrap().alloc_handle();
+    let bindless_slot = ld
+        .descriptors
+        .lock()
+        .unwrap()
+        .resource_registry
+        .register_buffer_uav(handle);
     state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
@@ -230,7 +296,7 @@ fn create_scattered_u32_buffer_at_slot(
             texture_copy_footprint: None,
         },
     );
-    Ok(handle)
+    Ok((handle, bindless_slot))
 }
 
 fn transition_buffer(
@@ -275,56 +341,32 @@ pub(crate) fn unpin_row(ft: &FrameTableDevice, row: u32) {
     ft.pinned_rows.fetch_and(!bit, Ordering::AcqRel);
 }
 
-/// Row used by the most recent prologue (before counter bump on next submission).
-pub(crate) fn last_prologue_row(ft: &FrameTableDevice) -> Option<u32> {
-    let sub = ft.submission_counter.load(Ordering::Relaxed);
-    if sub == 0 {
-        None
-    } else {
-        Some((sub - 1) % FRAME_TABLE_MAX_ROWS)
-    }
-}
-
-fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()> {
-    let pinned = ft.pinned_rows.load(Ordering::Acquire);
-    if pinned & (1 << row) != 0 {
+fn assert_row_available(ft: &FrameTableDevice, row: u32) -> Result<()> {
+    if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         anyhow::bail!(
-            "frame table row {row} is still pinned after evicting retained graphs \
-             (sub={sub}); retained command list lifecycle bug"
+            "frame table row {row} is still pinned after evicting retained graphs; \
+             retained command list lifecycle bug"
         );
-    }
-    if sub >= FRAME_TABLE_MAX_ROWS {
-        let prev = ft.last_sub_for_row[row as usize].load(Ordering::Acquire);
-        let gap = sub - prev;
-        if gap < FRAME_TABLE_MAX_ROWS {
-            anyhow::bail!(
-                "frame table row capacity exceeded: row {row} may still be in flight \
-                 (sub={sub}, last_sub_for_row={prev}, need gap >= {FRAME_TABLE_MAX_ROWS})"
-            );
-        }
     }
     Ok(())
 }
 
-/// CPU staging write before a retained resubmit (row bump + table bytes; GPU copy is in the CB).
+/// CPU staging write before a submission (row bump + table bytes; GPU copy is in the CB).
 pub(crate) fn write_staging_for_submission(
     contexts: &super::types::SharedContextMap,
+    ctx: super::ContextHandle,
     frame_table: &FrameTableDevice,
-    device_handle: super::DeviceHandle,
     data: &[u32],
 ) -> Result<u32> {
     let sub = frame_table.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
-    let row_pinned = frame_table.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0;
-    if row_pinned {
-        super::compute::evict_retained_pinning_row(contexts, frame_table, device_handle, row);
+    if frame_table.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
+        super::compute::evict_retained_pinning_row_for_context(contexts, frame_table, ctx, row);
     }
+    assert_row_available(frame_table, row)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = frame_table.staging_mapped as *mut u32;
-    assert_row_available(frame_table, sub, row)?;
-    frame_table.last_sub_for_row[row as usize].store(sub, Ordering::Release);
-    // Staging selector word `row` always holds the value `row` (matches baked copy offset).
     unsafe {
         let payload_dst =
             staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
@@ -394,17 +436,30 @@ pub(crate) fn sync_table_row_to_device(
     Ok(())
 }
 
-/// CPU staging write + GPU copy prologue.
-pub(crate) fn record_prologue(
-    contexts: &super::types::SharedContextMap,
+/// CPU staging write for legacy standalone render (no context eviction).
+fn write_staging_standalone(frame_table: &FrameTableDevice, data: &[u32]) -> Result<u32> {
+    let sub = frame_table.submission_counter.fetch_add(1, Ordering::Relaxed);
+    let row = sub % FRAME_TABLE_MAX_ROWS;
+    assert_row_available(frame_table, row)?;
+    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
+    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
+    let staging_ptr = frame_table.staging_mapped as *mut u32;
+    unsafe {
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
+        std::ptr::write(staging_ptr.add(row as usize), row);
+    }
+    Ok(row)
+}
+
+fn record_prologue_gpu_copies(
     frame_table: &FrameTableDevice,
-    buffers: &std::collections::HashMap<BufferHandle, BufferState>,
-    device_handle: super::DeviceHandle,
+    buffers: &HashMap<BufferHandle, BufferState>,
     cl: &ID3D12GraphicsCommandList7,
     data: &[u32],
+    row: u32,
 ) -> Result<()> {
-    let row = write_staging_for_submission(contexts, frame_table, device_handle, data)?;
-
     let device_table = buffers.get(&frame_table.device_table).context("device table")?;
     let selector_state = buffers.get(&frame_table.selector).context("selector")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
@@ -462,8 +517,39 @@ pub(crate) fn record_prologue(
         D3D12_RESOURCE_STATE_COPY_SOURCE,
         D3D12_RESOURCE_STATE_GENERIC_READ,
     );
-
     Ok(())
+}
+
+/// CPU staging write + GPU copy prologue for legacy `render_to_target`.
+pub(crate) fn record_prologue_legacy(
+    frame_table: &FrameTableDevice,
+    buffers: &HashMap<BufferHandle, BufferState>,
+    cl: &ID3D12GraphicsCommandList7,
+    data: &[u32],
+) -> Result<u32> {
+    let row = write_staging_standalone(frame_table, data)?;
+    record_prologue_gpu_copies(frame_table, buffers, cl, data, row)?;
+    Ok(row)
+}
+
+/// CPU staging write + GPU copy prologue.
+///
+/// The prologue copies the active row index into this context's selector buffer.
+/// That buffer is shared across all command lists on the context; correctness
+/// assumes every submission for the context runs on the same FIFO queue so
+/// command lists retire in submit order and a later prologue cannot clobber the
+/// selector while an earlier list's dispatches are still executing.
+pub(crate) fn record_prologue(
+    contexts: &super::types::SharedContextMap,
+    ctx: super::ContextHandle,
+    frame_table: &FrameTableDevice,
+    buffers: &HashMap<BufferHandle, BufferState>,
+    cl: &ID3D12GraphicsCommandList7,
+    data: &[u32],
+) -> Result<u32> {
+    let row = write_staging_for_submission(contexts, ctx, frame_table, data)?;
+    record_prologue_gpu_copies(frame_table, buffers, cl, data, row)?;
+    Ok(row)
 }
 
 pub(crate) fn extract_staging_from_commands(commands: &[GpuCommand]) -> Option<std::sync::Arc<[u32]>> {
@@ -553,9 +639,10 @@ pub(crate) fn prepare_render_commands(
 /// Lower render commands and build staging (backend state lookup).
 pub(crate) fn prepare_render_commands_state(
     state: &Dx12State,
+    ctx: super::ContextHandle,
     device_handle: super::DeviceHandle,
     commands: &[crate::backend::RenderCommand],
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
-    let record = super::submit_session::record_state_from_backend(state, device_handle)?;
+    let record = super::submit_session::record_state_from_backend(state, ctx, device_handle)?;
     prepare_render_commands(&record, commands)
 }

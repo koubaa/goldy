@@ -69,6 +69,12 @@ pub(super) fn record(
                     prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
                 let mut layout = PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
+                // Metal's frame table is device-level at fixed arg slots.
+                shared::set_frame_table_slots(
+                    &mut layout,
+                    crate::frame_table::FRAME_TABLE_SELECTOR_SLOT,
+                    crate::frame_table::FRAME_TABLE_DEVICE_SLOT,
+                );
                 let layout_bytes = layout.as_bytes();
                 encoder.set_vertex_bytes(
                     RESOURCE_SLOT_BUFFER,
