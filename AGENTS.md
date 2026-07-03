@@ -12,6 +12,10 @@ There is churn happening now, it is important to keep certain architectural prin
 - There are two kinds of pools associated with a device: "retained" and "transient". These are shared across contexts.
 - We are refactoring in the direction of removing imperative APIs (like read_to_cpu) in favor of scheme submissions as the only way to affect property.
 
+## Threading
+
+Goldy is free-threaded. All operations can happen on any thread.
+
 ## Development
 
 useful precommit commands:

@@ -853,8 +853,6 @@ pub(crate) struct LogicalDevice {
     pub queue_lock: Arc<Mutex<()>>,
     /// Async FIFO worker for `ExecuteCommandLists` + `Signal` (render thread enqueues, worker runs).
     pub submission_worker: std::sync::Arc<super::super::submission_worker::SubmissionWorker>,
-    /// Frame table for legacy `render_to_target` (no submission context).
-    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.

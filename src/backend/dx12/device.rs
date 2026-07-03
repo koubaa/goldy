@@ -427,7 +427,6 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             submission_worker: std::sync::Arc::new(crate::backend::submission_worker::SubmissionWorker::new(
                 crate::backend::submission_worker::SUBMISSION_QUEUE_CAPACITY,
             )),
-            legacy_frame_table: std::sync::Mutex::new(None),
         }),
     );
 

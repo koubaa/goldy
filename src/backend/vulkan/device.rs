@@ -460,7 +460,6 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             submission_worker: Arc::new(crate::backend::submission_worker::SubmissionWorker::new(
                 crate::backend::submission_worker::SUBMISSION_QUEUE_CAPACITY,
             )),
-            legacy_frame_table: Mutex::new(None),
         }),
     );
 
@@ -488,12 +487,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
     );
     if let Some(logical_device) = state.devices.remove(&device_handle) {
         let wait_result = logical_device.synchronized_device_wait_idle();
-
-        if !matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
-            if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
-                super::frame_table::destroy_context(state, &logical_device, &ft);
-            }
-        }
 
         unsafe {
             // When the device is lost, individual Vulkan destroy calls are unsafe

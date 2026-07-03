@@ -232,10 +232,6 @@ impl Dx12Backend {
             let fences = self.state.context_fences.read().unwrap();
             logical_device.flush_deletion_queue(&fences);
 
-            if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
-                frame_table::destroy_context(&self.state, device_handle, &ft);
-            }
-
             let pso_cache = logical_device.pso_cache.read().unwrap();
             if pso_cache.dirty {
                 if let Some(cache_root) = dirs::cache_dir() {
@@ -864,14 +860,6 @@ impl GpuBackend for Dx12Backend {
         render_target::destroy(&mut self.state, target);
     }
 
-    fn render_to_target(
-        &mut self,
-        device_handle: DeviceHandle,
-        target: RenderTargetHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
-        render_target::render(&mut self.state, device_handle, target, commands)
-    }
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
         render_target::read_to_cpu(&mut self.state, target, output)
     }

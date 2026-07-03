@@ -128,29 +128,6 @@ pub(crate) fn record_state_from_backend<'a>(
     })
 }
 
-pub(crate) fn record_state_for_legacy_render<'a>(
-    state: &'a mut Dx12State,
-    device_handle: DeviceHandle,
-) -> Result<Dx12RecordState<'a>> {
-    let frame_table = super::frame_table::ensure_legacy_frame_table(state, device_handle)?;
-    Ok(Dx12RecordState {
-        ld: state
-            .devices
-            .get(&device_handle)
-            .with_context(|| format!("Invalid device {device_handle}"))?,
-        devices: &state.devices,
-        contexts: &state.contexts,
-        frame_table,
-        buffers: &state.buffers,
-        shaders: &state.shaders,
-        pipelines: &state.pipelines,
-        compute_pipelines: &state.compute_pipelines,
-        render_targets: &state.render_targets,
-        textures: &state.textures,
-        samplers: &state.samplers,
-    })
-}
-
 /// Per-context submit session cloned at context creation.
 pub(crate) struct Dx12SubmitSession {
     ctx: ContextHandle,

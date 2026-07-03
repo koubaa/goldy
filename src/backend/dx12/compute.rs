@@ -2394,7 +2394,7 @@ pub(super) fn submit_graph_with_scope(
                     let (touched, prologue_row) = super::render_target::record_render_pass_to_list_with_record(
                         &scope.record,
                         device_handle,
-                        Some(ctx),
+                        ctx,
                         *target,
                         render_cmds,
                         &command_list7,

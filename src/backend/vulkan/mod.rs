@@ -928,42 +928,6 @@ impl GpuBackend for VulkanBackend {
         render_target::destroy(&self.state.devices, &self.state.render_targets, target);
     }
 
-    fn render_to_target(
-        &mut self,
-        device_handle: DeviceHandle,
-        target: RenderTargetHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
-        let instance = self.state.instance.clone();
-        let frame_table = frame_table::ensure_legacy_frame_table(&mut self.state, &instance, device_handle)?;
-        let render_resources = render_target::RenderToResources {
-            devices: &self.state.devices,
-            frame_table: &frame_table,
-            buffers: &self.state.buffers,
-            pipelines: &self.state.pipelines,
-        };
-        render_target::render_to(
-            render_resources,
-            &self.state.render_targets,
-            device_handle,
-            target,
-            commands,
-            |cmd, cmds, logical_device, current_pipeline| {
-                let pipelines_read = self.state.pipelines.read().unwrap();
-                let buffers_read = self.state.buffers.read().unwrap();
-                render_commands::record(
-                    cmd,
-                    cmds,
-                    logical_device,
-                    &pipelines_read.entries,
-                    &buffers_read.entries,
-                    current_pipeline,
-                    (frame_table.selector_slot, frame_table.table_slot),
-                )
-            },
-        )
-    }
-
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
         render_target::read_to_cpu(
             &self.state.instance,

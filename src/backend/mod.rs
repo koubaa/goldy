@@ -1449,12 +1449,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         depth_format: Option<DepthFormat>,
     ) -> Result<RenderTargetHandle>;
     fn destroy_render_target(&mut self, target: RenderTargetHandle);
-    fn render_to_target(
-        &mut self,
-        device: DeviceHandle,
-        target: RenderTargetHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()>;
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()>;
 
     // Texture management
@@ -1648,30 +1642,8 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        let mut batch: Vec<GpuCommand> = Vec::new();
-        let mut last_tv = self.gpu_progress(ctx);
-        for cmd in commands {
-            match cmd {
-                GraphCommand::Compute(c) => batch.push(c.clone()),
-                GraphCommand::Render {
-                    target,
-                    commands: render_cmds,
-                } => {
-                    if !batch.is_empty() {
-                        last_tv = self.submit_standalone(ctx, &batch, sync)?;
-                        self.wait_until(ctx, last_tv)?;
-                        batch.clear();
-                    }
-                    let device = self.context_device(ctx);
-                    self.render_to_target(device, *target, render_cmds)?;
-                    last_tv = self.submit_standalone(ctx, &[], sync)?;
-                }
-            }
-        }
-        if !batch.is_empty() {
-            last_tv = self.submit_standalone(ctx, &batch, sync)?;
-        }
-        Ok(last_tv)
+        let _ = (ctx, commands, sync);
+        anyhow::bail!("submit_graph must be implemented by this backend")
     }
 
     /// Resolve the logical device for a submission context.

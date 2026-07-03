@@ -705,8 +705,6 @@ pub(crate) struct LogicalDevice {
 
     /// Async FIFO worker for `vkQueueSubmit2` (render thread enqueues, worker runs).
     pub submission_worker: Arc<super::super::submission_worker::SubmissionWorker>,
-    /// Frame table for legacy `render_to_target` (no submission context).
-    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
 }
 
 /// A Vulkan command buffer retained for resubmission.

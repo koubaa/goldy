@@ -283,6 +283,54 @@ impl MockBackend {
         self.context_state(ctx)
     }
 
+    fn simulate_render_to_target(
+        &mut self,
+        device: DeviceHandle,
+        target: RenderTargetHandle,
+        commands: &[RenderCommand],
+    ) -> Result<()> {
+        if !self.devices.contains_key(&device) {
+            anyhow::bail!("Invalid device handle");
+        }
+
+        let render_target = self
+            .render_targets
+            .get_mut(&target)
+            .ok_or_else(|| anyhow::anyhow!("Invalid render target handle"))?;
+
+        if render_target.device_handle != device {
+            anyhow::bail!("Render target belongs to a different device");
+        }
+
+        self.recorded_commands.push(commands.to_vec());
+
+        let clear_color = commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Clear(color) => Some(*color),
+                _ => None,
+            })
+            .unwrap_or(Color::BLACK);
+
+        let r = (clear_color.r * 255.0) as u8;
+        let g = (clear_color.g * 255.0) as u8;
+        let b = (clear_color.b * 255.0) as u8;
+        let a = (clear_color.a * 255.0) as u8;
+
+        for i in (0..render_target.data.len()).step_by(4) {
+            if i + 3 < render_target.data.len() {
+                render_target.data[i] = r;
+                render_target.data[i + 1] = g;
+                render_target.data[i + 2] = b;
+                render_target.data[i + 3] = a;
+            }
+        }
+
+        render_target.has_rendered = true;
+
+        Ok(())
+    }
+
     /// Max completed over live contexts on `device`, floored by `retired_floor`.
     fn device_retired(&self, device: DeviceHandle) -> u64 {
         let floor = self
@@ -1340,57 +1388,6 @@ impl GpuBackend for MockBackend {
         self.render_targets.remove(&target);
     }
 
-    fn render_to_target(
-        &mut self,
-        device: DeviceHandle,
-        target: RenderTargetHandle,
-        commands: &[RenderCommand],
-    ) -> Result<()> {
-        if !self.devices.contains_key(&device) {
-            anyhow::bail!("Invalid device handle");
-        }
-
-        let render_target = self
-            .render_targets
-            .get_mut(&target)
-            .ok_or_else(|| anyhow::anyhow!("Invalid render target handle"))?;
-
-        if render_target.device_handle != device {
-            anyhow::bail!("Render target belongs to a different device");
-        }
-
-        // Record commands
-        self.recorded_commands.push(commands.to_vec());
-
-        // Simulate rendering by filling with a pattern based on clear color
-        let clear_color = commands
-            .iter()
-            .find_map(|c| match c {
-                RenderCommand::Clear(color) => Some(*color),
-                _ => None,
-            })
-            .unwrap_or(Color::BLACK);
-
-        // Fill with the clear color
-        let r = (clear_color.r * 255.0) as u8;
-        let g = (clear_color.g * 255.0) as u8;
-        let b = (clear_color.b * 255.0) as u8;
-        let a = (clear_color.a * 255.0) as u8;
-
-        for i in (0..render_target.data.len()).step_by(4) {
-            if i + 3 < render_target.data.len() {
-                render_target.data[i] = r;
-                render_target.data[i + 1] = g;
-                render_target.data[i + 2] = b;
-                render_target.data[i + 3] = a;
-            }
-        }
-
-        render_target.has_rendered = true;
-
-        Ok(())
-    }
-
     fn read_target_to_cpu(&mut self, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
         let render_target = self
             .render_targets
@@ -1885,7 +1882,7 @@ impl GpuBackend for MockBackend {
                         }
                         batch.clear();
                     }
-                    self.render_to_target(device, *target, render_cmds)?;
+                    self.simulate_render_to_target(device, *target, render_cmds)?;
                     last_tv = self.submit_standalone(ctx, &[], sync)?;
                 }
             }
@@ -2037,7 +2034,7 @@ mod tests {
             .unwrap();
 
         let commands = vec![RenderCommand::Clear(Color::RED)];
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend.simulate_render_to_target(device, target, &commands).unwrap();
 
         // No CPU readback should have occurred
         assert_eq!(backend.cpu_readback_count, 0);
@@ -2055,7 +2052,7 @@ mod tests {
             .unwrap();
 
         let commands = vec![RenderCommand::Clear(Color::RED)];
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend.simulate_render_to_target(device, target, &commands).unwrap();
 
         // Now explicitly read back
         let mut output = vec![0u8; 2 * 2 * 4];
@@ -2095,13 +2092,13 @@ mod tests {
 
         // Render multiple times to the same target
         backend
-            .render_to_target(device, target, &[RenderCommand::Clear(Color::RED)])
+            .simulate_render_to_target(device, target, &[RenderCommand::Clear(Color::RED)])
             .unwrap();
         backend
-            .render_to_target(device, target, &[RenderCommand::Clear(Color::GREEN)])
+            .simulate_render_to_target(device, target, &[RenderCommand::Clear(Color::GREEN)])
             .unwrap();
         backend
-            .render_to_target(device, target, &[RenderCommand::Clear(Color::BLUE)])
+            .simulate_render_to_target(device, target, &[RenderCommand::Clear(Color::BLUE)])
             .unwrap();
 
         assert_eq!(backend.recorded_commands.len(), 3);
@@ -2148,7 +2145,7 @@ mod tests {
             },
         ];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend.simulate_render_to_target(device, target, &commands).unwrap();
 
         // Verify commands were recorded
         assert_eq!(backend.recorded_commands.len(), 1);
@@ -2212,7 +2209,7 @@ mod tests {
             },
         ];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend.simulate_render_to_target(device, target, &commands).unwrap();
 
         // Verify the offset and base_vertex were preserved
         match &backend.recorded_commands[0][0] {
@@ -2479,7 +2476,7 @@ mod tests {
             },
         ];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend.simulate_render_to_target(device, target, &commands).unwrap();
 
         assert_eq!(backend.recorded_commands.len(), 1);
         assert_eq!(backend.recorded_commands[0].len(), 2);
@@ -2511,7 +2508,7 @@ mod tests {
             },
         ];
 
-        backend.render_to_target(device, target, &commands).unwrap();
+        backend.simulate_render_to_target(device, target, &commands).unwrap();
 
         assert_eq!(backend.recorded_commands.len(), 1);
         assert_eq!(backend.recorded_commands[0].len(), 2);

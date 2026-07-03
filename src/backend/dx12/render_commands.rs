@@ -1,7 +1,7 @@
 //! Shared render command recording logic.
 //!
 //! This module contains `record` which is used by both
-//! `render_to_target` and `surface_render` to avoid code duplication.
+//! `surface_render` to avoid code duplication.
 
 use super::super::shared;
 use super::submit_session::Dx12RecordState;
@@ -11,7 +11,7 @@ use super::{DeviceHandle, RenderCommand};
 use windows::Win32::Graphics::Direct3D12::*;
 
 /// Record render commands into a command list.
-/// This is shared between render_to_target and surface_render to avoid duplication.
+/// This is shared between offscreen and surface render paths to avoid duplication.
 pub(super) fn record(
     cmd: &ID3D12GraphicsCommandList7,
     commands: &[RenderCommand],

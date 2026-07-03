@@ -1,7 +1,6 @@
 //! Render target management logic.
 
 use super::super::{DeviceHandle, RenderTargetHandle};
-use super::render_commands::{create_render_pass, record};
 use super::types::{MetalState, RenderTargetState};
 use super::utils::format_to_mtl;
 use crate::types::{DepthFormat, TextureFormat};
@@ -79,124 +78,6 @@ pub(super) fn create_with_depth(
 /// Destroy a render target.
 pub(super) fn destroy(state: &mut MetalState, target: RenderTargetHandle) {
     state.render_targets.remove(&target);
-}
-
-/// Render commands to an offscreen render target.
-pub(super) fn render_to(
-    state: &mut MetalState,
-    device_handle: DeviceHandle,
-    target: RenderTargetHandle,
-    commands: &[super::super::RenderCommand],
-) -> Result<()> {
-    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-
-    let (staging_data, lowered_commands, has_bindings) =
-        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, commands)?;
-
-    let completed = super::context::device_retired(state, device_handle);
-    let prologue_row = if has_bindings {
-        Some(super::frame_table::run_prologue_for_device(
-            state,
-            device_handle,
-            logical_device,
-            &staging_data,
-            completed,
-        )?)
-    } else {
-        None
-    };
-
-    let render_target = state.render_targets.get(&target).context("Invalid render target")?;
-
-    let mut clear_color = None;
-    let mut clear_depth = None;
-    for cmd in commands {
-        match cmd {
-            super::super::RenderCommand::Clear(color) => clear_color = Some(*color),
-            super::super::RenderCommand::ClearDepth(depth) => clear_depth = Some(*depth),
-            _ => {}
-        }
-    }
-
-    let render_pass = create_render_pass(
-        &render_target.texture,
-        render_target.depth_texture.as_deref(),
-        clear_color,
-        clear_depth,
-    );
-
-    let command_buffer = logical_device.command_queue.new_command_buffer();
-    let encoder = command_buffer.new_render_command_encoder(render_pass);
-
-    let render_stages = mtl::MTLRenderStages::Vertex | mtl::MTLRenderStages::Fragment;
-    logical_device
-        .heap_allocator
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    logical_device
-        .texture_heap
-        .lock()
-        .unwrap()
-        .use_heaps_for_render(encoder, render_stages);
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == render_target.device_handle {
-            encoder.use_resource_at(
-                &buf_state.buffer,
-                mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write,
-                render_stages,
-            );
-        }
-    }
-    {
-        let ft = logical_device.frame_table.lock().unwrap();
-        encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
-    }
-
-    encoder.set_vertex_buffer(0, Some(&logical_device.argument_buffer), 0);
-    encoder.set_fragment_buffer(0, Some(&logical_device.argument_buffer), 0);
-
-    encoder.set_viewport(mtl::MTLViewport {
-        originX: 0.0,
-        originY: 0.0,
-        width: render_target.width as f64,
-        height: render_target.height as f64,
-        znear: 0.0,
-        zfar: 1.0,
-    });
-    encoder.set_scissor_rect(mtl::MTLScissorRect {
-        x: 0,
-        y: 0,
-        width: render_target.width as u64,
-        height: render_target.height as u64,
-    });
-
-    record(
-        encoder,
-        &lowered_commands,
-        &state.pipelines,
-        &state.buffers,
-        prologue_row,
-    )?;
-
-    encoder.end_encoding();
-    command_buffer.commit();
-    command_buffer.wait_until_completed();
-
-    // GPU is done — record the ring row as retired so the ring guard knows it is
-    // safe to reuse.  We record `completed` (the timeline value at prologue time);
-    // future `wait_required` checks will see tok <= device_retired() and not stall.
-    if let Some(row) = prologue_row {
-        if let Some(ld) = state.devices.get(&device_handle) {
-            super::frame_table::record_submission_for_device(ld, row, completed);
-        }
-    }
-
-    if let Some(rt) = state.render_targets.get_mut(&target) {
-        rt.has_rendered = true;
-    }
-
-    Ok(())
 }
 
 /// Read render target contents back to CPU.

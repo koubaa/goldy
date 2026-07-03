@@ -94,28 +94,6 @@ pub(crate) fn init_context(
     Ok(ft)
 }
 
-/// Lazy-init the device-owned frame table used by legacy `render_to_target`.
-///
-/// Standalone render passes have no submission context; they must not borrow a
-/// live context's ring buffer or advance its `submission_counter`.
-pub(crate) fn ensure_legacy_frame_table(
-    state: &mut Dx12State,
-    device_handle: super::DeviceHandle,
-) -> Result<SharedFrameTableDevice> {
-    let ld = state
-        .devices
-        .get(&device_handle)
-        .context("Invalid device handle")?
-        .clone();
-    let mut guard = ld.legacy_frame_table.lock().unwrap();
-    if let Some(ft) = guard.as_ref() {
-        return Ok(std::sync::Arc::clone(ft));
-    }
-    let ft = init_context(state, device_handle, &ld)?;
-    *guard = Some(std::sync::Arc::clone(&ft));
-    Ok(ft)
-}
-
 /// Write this context's selector/table UAV descriptors at its per-context slots.
 ///
 /// Called once at context init; the slots are context-private for the context's
@@ -440,23 +418,6 @@ pub(crate) fn sync_table_row_to_device(
     Ok(())
 }
 
-/// CPU staging write for legacy standalone render (no context eviction).
-fn write_staging_standalone(frame_table: &FrameTableDevice, data: &[u32]) -> Result<u32> {
-    let sub = frame_table.submission_counter.fetch_add(1, Ordering::Relaxed);
-    let row = sub % FRAME_TABLE_MAX_ROWS;
-    assert_row_available(frame_table, row)?;
-    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
-    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = frame_table.staging_mapped as *mut u32;
-    unsafe {
-        let payload_dst =
-            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
-        std::ptr::write(staging_ptr.add(row as usize), row);
-    }
-    Ok(row)
-}
-
 fn record_prologue_gpu_copies(
     frame_table: &FrameTableDevice,
     buffers: &HashMap<BufferHandle, BufferState>,
@@ -522,18 +483,6 @@ fn record_prologue_gpu_copies(
         D3D12_RESOURCE_STATE_GENERIC_READ,
     );
     Ok(())
-}
-
-/// CPU staging write + GPU copy prologue for legacy `render_to_target`.
-pub(crate) fn record_prologue_legacy(
-    frame_table: &FrameTableDevice,
-    buffers: &HashMap<BufferHandle, BufferState>,
-    cl: &ID3D12GraphicsCommandList7,
-    data: &[u32],
-) -> Result<u32> {
-    let row = write_staging_standalone(frame_table, data)?;
-    record_prologue_gpu_copies(frame_table, buffers, cl, data, row)?;
-    Ok(row)
 }
 
 /// CPU staging write + GPU copy prologue.

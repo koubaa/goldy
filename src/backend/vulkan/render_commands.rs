@@ -1,7 +1,7 @@
 //! Shared render command recording logic.
 //!
 //! This module contains `record_render_commands` which is used by both
-//! `render_to_target` and `surface_render` to avoid code duplication.
+//! `surface_render` to avoid code duplication.
 
 use super::super::shared;
 use super::types::{self, PushLayout};
@@ -10,7 +10,7 @@ use super::{BufferHandle, PipelineHandle, RenderCommand};
 use ash::vk;
 
 /// Record render commands into a command buffer.
-/// This is shared between render_to_target and surface_render to avoid duplication.
+/// This is shared between offscreen and surface render paths to avoid duplication.
 pub(super) fn record(
     cmd: vk::CommandBuffer,
     commands: &[RenderCommand],
