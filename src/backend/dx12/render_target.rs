@@ -5,8 +5,8 @@
 use super::barriers;
 use super::types::RenderTargetState;
 use super::utils::{depth_format_to_dxgi, execute_command_lists_and_signal_device, format_to_dxgi, wait_for_fence};
-use crate::backend::ContextHandle;
 use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
+use crate::backend::ContextHandle;
 use crate::backend::RenderCommand;
 use crate::types::{Color, DepthFormat, TextureFormat};
 use anyhow::{Context, Result};
@@ -619,7 +619,6 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, out
     }
 
     unsafe { staging_buffer.Unmap(0, None) };
-
 
     Ok(())
 }

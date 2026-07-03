@@ -655,10 +655,7 @@ impl DescriptorRegistry {
         slots: impl IntoIterator<Item = DeferredSlot>,
     ) {
         for slot in slots {
-            self.slot_last_seen
-                .entry(slot)
-                .or_default()
-                .mark_max(ctx, seq);
+            self.slot_last_seen.entry(slot).or_default().mark_max(ctx, seq);
         }
     }
 
@@ -692,10 +689,7 @@ impl DescriptorRegistry {
         for slot in slots {
             if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
                 for (ctx, seq) in map.iter() {
-                    merged
-                        .entry(ctx)
-                        .and_modify(|v| *v = (*v).max(seq))
-                        .or_insert(seq);
+                    merged.entry(ctx).and_modify(|v| *v = (*v).max(seq)).or_insert(seq);
                 }
             }
         }
@@ -990,10 +984,7 @@ pub(crate) fn destroy_pending_deletion(
             if requirements.is_empty() {
                 release_buffer_gpu_resources(ld, release);
             } else {
-                ld.pending_buffer_gpu_releases
-                    .lock()
-                    .unwrap()
-                    .push(release);
+                ld.pending_buffer_gpu_releases.lock().unwrap().push(release);
             }
         }
         PendingDeletion::BufferView { buffer_handle } => {

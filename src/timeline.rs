@@ -282,10 +282,7 @@ pub fn is_ready_on(table: &ReferenceTable, ctx: ContextHandle, progress: Timelin
 
 /// Collect `table` entries as [`Epoch`] values.
 pub fn epochs_from(table: &ReferenceTable) -> Vec<Epoch> {
-    table
-        .iter()
-        .map(|(context, value)| Epoch { context, value })
-        .collect()
+    table.iter().map(|(context, value)| Epoch { context, value }).collect()
 }
 
 const PROMISE_PENDING: u64 = 0;

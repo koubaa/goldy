@@ -102,7 +102,11 @@ pub(crate) fn ensure_legacy_frame_table(
     state: &mut Dx12State,
     device_handle: super::DeviceHandle,
 ) -> Result<SharedFrameTableDevice> {
-    let ld = state.devices.get(&device_handle).context("Invalid device handle")?.clone();
+    let ld = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .clone();
     let mut guard = ld.legacy_frame_table.lock().unwrap();
     if let Some(ft) = guard.as_ref() {
         return Ok(std::sync::Arc::clone(ft));

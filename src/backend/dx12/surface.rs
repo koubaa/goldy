@@ -360,10 +360,7 @@ fn wait_until_swapchain_index_available(
         drain_pending_present_finishes(state);
 
         let image_index = {
-            let surface = state
-                .surfaces
-                .get(&surface_handle)
-                .context("Invalid surface handle")?;
+            let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
             unsafe {
                 surface
                     .swapchain
@@ -398,7 +395,12 @@ fn wait_until_swapchain_index_available(
         {
             let _tz = crate::tracy_zone!("surface.acquire.in_flight_index_wait");
             bail_if_acquire_aborted(state, surface_handle)?;
-            if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
+            if state
+                .surfaces
+                .get(&surface_handle)
+                .and_then(|s| s.acquire_abort.as_ref())
+                .is_some()
+            {
                 wait_for_fence_interruptible(&logical_device.fence, blocking_fence, state, surface_handle)?;
             } else {
                 wait_swapchain_return_fence(&logical_device, issue_token, blocking_fence)?;
@@ -447,7 +449,12 @@ pub(super) fn acquire(
     // ad-hoc fence stall that previously occurred inside present().
     if let Some(SendSyncHandle(waitable_handle)) = waitable {
         let _tz = crate::tracy_zone!("surface.acquire.dxgi_wait");
-        if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
+        if state
+            .surfaces
+            .get(&surface_handle)
+            .and_then(|s| s.acquire_abort.as_ref())
+            .is_some()
+        {
             wait_for_waitable_interruptible(waitable_handle, state, surface_handle)?;
         } else {
             unsafe { WaitForSingleObject(waitable_handle, INFINITE) };
@@ -465,7 +472,12 @@ pub(super) fn acquire(
                 .devices
                 .get(&device_handle)
                 .context("Surface's device is invalid")?;
-            if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
+            if state
+                .surfaces
+                .get(&surface_handle)
+                .and_then(|s| s.acquire_abort.as_ref())
+                .is_some()
+            {
                 wait_for_fence_interruptible(&logical_device.fence, prev_fence, state, surface_handle)?;
             } else {
                 wait_for_fence(&logical_device.fence, prev_fence)?;
@@ -493,8 +505,7 @@ pub(super) fn acquire(
         surface.pending_frame_compute.clear();
     }
 
-    let image_index =
-        wait_until_swapchain_index_available(state, surface_handle, ctx, device_handle)?;
+    let image_index = wait_until_swapchain_index_available(state, surface_handle, ctx, device_handle)?;
 
     let surface = state
         .surfaces
@@ -1027,11 +1038,7 @@ fn prepare_present_plan(state: &mut Dx12State, frame: crate::backend::FrameToken
             .context("Invalid present slot for surface")?;
         (frame_sync.command_list.clone(), frame_sync.command_allocator.clone())
     };
-    let swapchain = surface
-        .swapchain
-        .as_ref()
-        .context("Surface has no swapchain")?
-        .clone();
+    let swapchain = surface.swapchain.as_ref().context("Surface has no swapchain")?.clone();
     let present_mode = surface.present_mode;
     let allow_tearing = surface_allow_tearing(state, device_handle);
     let logical_device = state
@@ -1085,9 +1092,8 @@ pub(super) fn schedule_present_on_submission_worker(
     let (return_fence, preallocated_present_tv) = if copy_tv > 0 {
         (copy_tv, None)
     } else {
-        let present_only_tv = crate::backend::submission_worker::allocate_timeline_value(
-            &plan.logical_device.timeline_next,
-        );
+        let present_only_tv =
+            crate::backend::submission_worker::allocate_timeline_value(&plan.logical_device.timeline_next);
         (present_only_tv, Some(present_only_tv))
     };
 
@@ -1391,8 +1397,9 @@ fn flush_swapchain_returns_to_progress(
     };
     surf.pending_swapchain_returns.retain(|r| {
         if retire_progress >= r.return_fence {
-            sc.signal_queue
-                .push(crate::signal::Signal::SwapchainReturned { image_index: r.image_index });
+            sc.signal_queue.push(crate::signal::Signal::SwapchainReturned {
+                image_index: r.image_index,
+            });
             surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
             false
         } else {
@@ -1457,7 +1464,6 @@ pub(super) fn finish_present(
                 .push(crate::signal::Signal::SwapchainReturned { image_index });
         }
     }
-
 
     Ok(finish.present_timeline)
 }
@@ -1687,9 +1693,8 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     let resize_flags = swapchain_flags(state, device_handle);
 
     if is_warp {
-        let release_result = unsafe {
-            swapchain.ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, 0, 0, surface_format, resize_flags)
-        };
+        let release_result =
+            unsafe { swapchain.ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, 0, 0, surface_format, resize_flags) };
         super::utils::check_d3d12_windows_result(
             &dx12_device,
             &state.device_removed,
@@ -1698,9 +1703,8 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
         )?;
     }
 
-    let resize_result = unsafe {
-        swapchain.ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, width, height, surface_format, resize_flags)
-    };
+    let resize_result =
+        unsafe { swapchain.ResizeBuffers(MAX_FRAMES_IN_FLIGHT as u32, width, height, surface_format, resize_flags) };
     super::utils::check_d3d12_windows_result(
         &dx12_device,
         &state.device_removed,
@@ -1982,10 +1986,7 @@ fn create_swapchain3(
     swapchain.cast().context("Failed to cast swapchain to IDXGISwapChain3")
 }
 
-fn setup_frame_latency_waitable(
-    swapchain: &IDXGISwapChain3,
-    is_warp: bool,
-) -> Result<Option<SendSyncHandle>> {
+fn setup_frame_latency_waitable(swapchain: &IDXGISwapChain3, is_warp: bool) -> Result<Option<SendSyncHandle>> {
     if is_warp {
         return Ok(None);
     }

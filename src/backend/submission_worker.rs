@@ -55,9 +55,9 @@ impl SubmissionJobToken {
         }
         match *guard {
             SubmissionJobOutcome::Done => Ok(()),
-            SubmissionJobOutcome::Failed | SubmissionJobOutcome::Abandoned => Err(anyhow::anyhow!(
-                "submission worker job ended with {guard:?}"
-            )),
+            SubmissionJobOutcome::Failed | SubmissionJobOutcome::Abandoned => {
+                Err(anyhow::anyhow!("submission worker job ended with {guard:?}"))
+            }
             SubmissionJobOutcome::Pending => unreachable!(),
         }
     }
@@ -93,7 +93,9 @@ enum WorkerMessage {
         work: Box<dyn PendingSubmit>,
         completion: SubmitJobCompletion,
     },
-    Flush { done: std::sync::mpsc::Sender<Result<()>> },
+    Flush {
+        done: std::sync::mpsc::Sender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -296,8 +298,7 @@ fn wait_for_submitted_epoch(
     deadline: Option<Instant>,
 ) -> Result<bool> {
     let initial = submitted_epoch.load(Ordering::Acquire);
-    if initial < tv {
-    }
+    if initial < tv {}
     while submitted_epoch.load(Ordering::Acquire) < tv {
         if let Some(err) = latched_error.lock().unwrap().as_ref() {
             return Err(anyhow::anyhow!("{err:#}"));

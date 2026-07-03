@@ -1990,12 +1990,16 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
         assert!(result.contains("[shader(\"compute\")]"), "Missing compute attr");
         // cfg at bindless[0] → _bw0 low half.
         assert!(
-            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"),
+            result.contains(
+                "TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"
+            ),
             "Missing broadcast init"
         );
         // data at bindless[1] → _bw0 high half.
         assert!(
-            result.contains("Scattered<uint> data = goldy_scattered<uint>(goldy_frame_table_index(_rs0, 1u, _rs1, _rs2))"),
+            result.contains(
+                "Scattered<uint> data = goldy_scattered<uint>(goldy_frame_table_index(_rs0, 1u, _rs1, _rs2))"
+            ),
             "Missing resource init"
         );
     }
@@ -2014,7 +2018,9 @@ float4 fs_main(TimeUniforms cfg, FullscreenVarying input) : SV_Target {
         let result = transform_virtual_main(src);
         // cfg becomes broadcast (bindless slot 0).
         assert!(
-            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"),
+            result.contains(
+                "TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"
+            ),
             "Missing broadcast init"
         );
         // input is the stage varying (PassThrough) — no bindless slot for it.
@@ -2035,7 +2041,9 @@ VSOutput vs_main(TimeUniforms cfg, VIn input) {
         let result = transform_virtual_main(src);
         // cfg → broadcast at bindless[0].
         assert!(
-            result.contains("TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"),
+            result.contains(
+                "TimeUniforms cfg = goldy_broadcast<TimeUniforms>(goldy_frame_table_index(_rs0, 0u, _rs1, _rs2))"
+            ),
             "Missing broadcast init"
         );
         // VIn input → passthrough (vertex attribute struct).

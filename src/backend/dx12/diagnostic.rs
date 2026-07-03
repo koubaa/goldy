@@ -46,8 +46,8 @@ pub(crate) fn prepare_dred_env() {}
 #[cfg(windows)]
 pub(crate) fn enable_dred_settings() {
     use windows::Win32::Graphics::Direct3D12::{
-        D3D12GetDebugInterface, D3D12_DRED_ENABLEMENT_FORCED_ON, ID3D12DeviceRemovedExtendedDataSettings,
-        ID3D12DeviceRemovedExtendedDataSettings1,
+        D3D12GetDebugInterface, ID3D12DeviceRemovedExtendedDataSettings, ID3D12DeviceRemovedExtendedDataSettings1,
+        D3D12_DRED_ENABLEMENT_FORCED_ON,
     };
 
     let mut settings1: Option<ID3D12DeviceRemovedExtendedDataSettings1> = None;
@@ -134,7 +134,6 @@ pub(crate) fn log_dred_on_device_removed(device: &windows::Win32::Graphics::Dire
     let reason = unsafe { device.GetDeviceRemovedReason() };
     tracing::error!(target: "goldy::dx12::dred", ?reason, "GetDeviceRemovedReason");
 
-
     if let Ok(dred) = device.cast::<ID3D12DeviceRemovedExtendedData2>() {
         let state = unsafe { dred.GetDeviceState() };
         tracing::error!(target: "goldy::dx12::dred", ?state, "DRED device state");
@@ -149,7 +148,6 @@ pub(crate) fn log_dred_on_device_removed(device: &windows::Win32::Graphics::Dire
             );
         }
     }
-
 
     tracing::error!(
         target: "goldy::dx12::dred",

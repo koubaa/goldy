@@ -680,11 +680,7 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
 ///
 /// Returns `(command_list, slot_idx)`.  The slot is taken from the
 /// pool when its fence has already signalled; otherwise a fresh one is created.
-fn find_recyclable_allocator_slot(
-    pool: &[ComputeAllocatorSlot],
-    start: usize,
-    completed: u64,
-) -> Option<usize> {
+fn find_recyclable_allocator_slot(pool: &[ComputeAllocatorSlot], start: usize, completed: u64) -> Option<usize> {
     let len = pool.len();
     if len == 0 {
         return None;
@@ -699,10 +695,7 @@ fn find_recyclable_allocator_slot(
     None
 }
 
-fn reset_compute_allocator_slot(
-    logical_device: &types::LogicalDevice,
-    slot: &mut ComputeAllocatorSlot,
-) -> Result<()> {
+fn reset_compute_allocator_slot(logical_device: &types::LogicalDevice, slot: &mut ComputeAllocatorSlot) -> Result<()> {
     let _tz = tracy_zone!("dx12.submit_worker.reset_compute_slot");
     unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
     if let Some(ref existing) = slot.command_list {

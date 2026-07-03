@@ -1359,7 +1359,15 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
 
     if buffer.is_view {
         let deletion = super::types::PendingDeletion::BufferView { buffer_handle };
-        queue_pending_deletion(state, device, buffer.device_handle, ctx_h, last_fence, deletion, buffer_handle);
+        queue_pending_deletion(
+            state,
+            device,
+            buffer.device_handle,
+            ctx_h,
+            last_fence,
+            deletion,
+            buffer_handle,
+        );
         return;
     }
 
@@ -1387,7 +1395,15 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             None
         },
     };
-    queue_pending_deletion(state, device, buffer.device_handle, ctx_h, last_fence, deletion, buffer_handle);
+    queue_pending_deletion(
+        state,
+        device,
+        buffer.device_handle,
+        ctx_h,
+        last_fence,
+        deletion,
+        buffer_handle,
+    );
 }
 
 fn queue_pending_deletion(
@@ -1416,9 +1432,7 @@ fn queue_pending_deletion(
         .submitted_epoch()
         .load(std::sync::atomic::Ordering::Acquire);
     let device_retired = super::context::device_retired(state, device_handle);
-    let timeline_next = device
-        .timeline_next
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let timeline_next = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Hint unused reserved tiles at/above `offset` (bytes).

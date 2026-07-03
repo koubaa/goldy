@@ -77,11 +77,7 @@ fn apply_deferred_host_writes(buffers: &SharedBufferTable, deferred_writes: &[De
             .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
         if let Some(base) = buffer.host_mapped {
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    w.data.as_ptr(),
-                    (base as *mut u8).add(w.offset as usize),
-                    w.data.len(),
-                );
+                std::ptr::copy_nonoverlapping(w.data.as_ptr(), (base as *mut u8).add(w.offset as usize), w.data.len());
             }
         } else {
             anyhow::bail!(

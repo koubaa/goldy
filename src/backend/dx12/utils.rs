@@ -360,9 +360,7 @@ fn log_and_format_device_removed(
         ?reason,
         "GPU device removed"
     );
-    anyhow::anyhow!(
-        "{operation}: GPU device removed (GetDeviceRemovedReason={reason:?}, failing_hr={failing_hr:?})"
-    )
+    anyhow::anyhow!("{operation}: GPU device removed (GetDeviceRemovedReason={reason:?}, failing_hr={failing_hr:?})")
 }
 
 /// Map a failing D3D12 HRESULT to an enriched error. When the device is removed, logs DRED

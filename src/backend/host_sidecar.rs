@@ -1,7 +1,7 @@
 //! Helpers for relocating reuse waits and deferred host writes to the submission worker.
 
 use crate::backend::{DeferredHostWrite, SubmitSync};
-use crate::timeline::{Epoch, ReferenceTable, mark_reference};
+use crate::timeline::{mark_reference, Epoch, ReferenceTable};
 
 /// Merge `from` into `into`, keeping the maximum timeline value per context.
 pub fn merge_epochs(into: &mut Vec<Epoch>, from: &[Epoch]) {
@@ -30,9 +30,7 @@ pub fn merge_submit_sync_for_partition(
     deferred_writes: Vec<DeferredHostWrite>,
 ) -> Option<SubmitSync> {
     let has_base = base.is_some_and(|s| !s.is_empty() || !s.prologue.is_empty());
-    let has_extra = !extra_queue_epochs.is_empty()
-        || !host_observed.is_empty()
-        || !deferred_writes.is_empty();
+    let has_extra = !extra_queue_epochs.is_empty() || !host_observed.is_empty() || !deferred_writes.is_empty();
     if !has_base && !has_extra {
         return None;
     }
@@ -58,22 +56,10 @@ mod tests {
 
     #[test]
     fn merge_epochs_keeps_max_per_context() {
-        let mut into = vec![Epoch {
-            context: 1,
-            value: 10,
-        }];
+        let mut into = vec![Epoch { context: 1, value: 10 }];
         merge_epochs(
             &mut into,
-            &[
-                Epoch {
-                    context: 1,
-                    value: 8,
-                },
-                Epoch {
-                    context: 2,
-                    value: 3,
-                },
-            ],
+            &[Epoch { context: 1, value: 8 }, Epoch { context: 2, value: 3 }],
         );
         assert_eq!(into.len(), 2);
         assert_eq!(into[0].value, 10);
@@ -83,10 +69,7 @@ mod tests {
     #[test]
     fn merge_submit_sync_attaches_host_writes_once() {
         let base = SubmitSync {
-            waits: vec![Epoch {
-                context: 1,
-                value: 4,
-            }],
+            waits: vec![Epoch { context: 1, value: 4 }],
             ..Default::default()
         };
         let write = DeferredHostWrite {
@@ -96,14 +79,8 @@ mod tests {
         };
         let merged = merge_submit_sync_for_partition(
             Some(&base),
-            &[Epoch {
-                context: 1,
-                value: 7,
-            }],
-            vec![Epoch {
-                context: 2,
-                value: 5,
-            }],
+            &[Epoch { context: 1, value: 7 }],
+            vec![Epoch { context: 2, value: 5 }],
             vec![write.clone()],
         )
         .unwrap();

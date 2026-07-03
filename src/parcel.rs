@@ -9,9 +9,7 @@ use crate::context::Context;
 use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::TextureBacking;
-use crate::timeline::{
-    ReferenceTable, ResourceSync, Settle, TimelineValue, WRITE_KINDS_TRANSFER,
-};
+use crate::timeline::{ReferenceTable, ResourceSync, Settle, TimelineValue, WRITE_KINDS_TRANSFER};
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle, TextureFlags};
 use crate::vram_allocator::ParcelType;
 use std::borrow::Cow;

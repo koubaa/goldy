@@ -16,7 +16,7 @@ use crate::surface::{Frame as SurfaceFrame, Surface};
 use crate::types::{ResourceAccess, SurfaceConfig};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 /// Resolved present slot: slot id, acquired frame, UAV index, texture handle.
@@ -204,11 +204,7 @@ impl SwapchainPool {
         if count == 0 {
             return true;
         }
-        Self::wait_lifecycle_counter(
-            &self.inner,
-            &self.inner.presents_begun,
-            count,
-        )
+        Self::wait_lifecycle_counter(&self.inner, &self.inner.presents_begun, count)
     }
 
     /// Block until at least `count` present easements have completed WSI handoff.
@@ -218,11 +214,7 @@ impl SwapchainPool {
         if count == 0 {
             return true;
         }
-        Self::wait_lifecycle_counter(
-            &self.inner,
-            &self.inner.presents_completed,
-            count,
-        )
+        Self::wait_lifecycle_counter(&self.inner, &self.inner.presents_completed, count)
     }
 
     fn wait_lifecycle_counter(pool: &Arc<SwapchainPoolInner>, counter: &AtomicU64, target: u64) -> bool {
@@ -537,7 +529,10 @@ impl SwapchainPool {
         Self::effective_pending_acquire_count(pool) < pool.depth
     }
 
-    #[allow(dead_code, reason = "render-thread rebuild waits; speculate uses has_acquire_capacity")]
+    #[allow(
+        dead_code,
+        reason = "render-thread rebuild waits; speculate uses has_acquire_capacity"
+    )]
     fn wait_for_acquire_capacity_inner(pool: &Arc<SwapchainPoolInner>) {
         Self::wait_until_pending_below_inner(pool, pool.depth, &pool.ctx);
     }

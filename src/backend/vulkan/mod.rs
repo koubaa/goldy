@@ -935,11 +935,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[RenderCommand],
     ) -> Result<()> {
         let instance = self.state.instance.clone();
-        let frame_table = frame_table::ensure_legacy_frame_table(
-            &mut self.state,
-            &instance,
-            device_handle,
-        )?;
+        let frame_table = frame_table::ensure_legacy_frame_table(&mut self.state, &instance, device_handle)?;
         let render_resources = render_target::RenderToResources {
             devices: &self.state.devices,
             frame_table: &frame_table,

@@ -148,9 +148,7 @@ fn merge_context_wait(waits: &mut Vec<(ContextHandle, u64)>, ctx: ContextHandle,
 }
 
 fn sync_has_foreign_context(sync: &ResourceSync, submitting_ctx: ContextHandle) -> bool {
-    sync.last_write
-        .iter()
-        .any(|(ctx, _)| ctx != submitting_ctx)
+    sync.last_write.iter().any(|(ctx, _)| ctx != submitting_ctx)
         || sync.last_reads.iter().any(|(ctx, _)| ctx != submitting_ctx)
 }
 
@@ -218,14 +216,7 @@ fn apply_cross_submit_hazards_for_resource(
     context_waits: &mut Vec<(ContextHandle, u64)>,
 ) {
     if !sync_has_foreign_context(sync, submitting_ctx) {
-        apply_cross_submit_hazards_single_context(
-            key,
-            access,
-            sync,
-            submitting_ctx,
-            prologue,
-            context_waits,
-        );
+        apply_cross_submit_hazards_single_context(key, access, sync, submitting_ctx, prologue, context_waits);
         return;
     }
 
@@ -488,11 +479,7 @@ pub fn compute_cross_submit_sync_into(
     {
         let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.finalize");
         waits.clear();
-        waits.extend(
-            context_waits
-                .iter()
-                .map(|&(context, value)| Epoch { context, value }),
-        );
+        waits.extend(context_waits.iter().map(|&(context, value)| Epoch { context, value }));
         waits.sort_by_key(|e| (e.context, e.value));
     }
 }
@@ -568,10 +555,8 @@ impl BufferStampIndex {
 }
 
 fn insert_ledger_entry(out: &mut LedgerSnapshot, stamp_key: ResourceKey, stamp: &Arc<ParcelStamp>) {
-    out.entry(stamp_key).or_insert_with(|| {
-        LedgerEntry {
-            sync: stamp.sync.lock().clone(),
-        }
+    out.entry(stamp_key).or_insert_with(|| LedgerEntry {
+        sync: stamp.sync.lock().clone(),
     });
 }
 
@@ -581,10 +566,7 @@ fn collect_ledger_aliases_for_key(
     resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     buffer_index: Option<&BufferStampIndex>,
 ) {
-    if !matches!(
-        query_key,
-        ResourceKey::Buffer(_) | ResourceKey::BufferRange { .. }
-    ) {
+    if !matches!(query_key, ResourceKey::Buffer(_) | ResourceKey::BufferRange { .. }) {
         return;
     }
     if let Some(candidates) = buffer_index.and_then(|index| index.candidates_for(query_key)) {
@@ -804,14 +786,7 @@ impl CrossSubmitScratch {
         if resource_stamps.is_empty() {
             return None;
         }
-        self.plan(
-            ir,
-            resource_stamps,
-            buffer_index,
-            submitting_ctx,
-            waves,
-            cached_net,
-        );
+        self.plan(ir, resource_stamps, buffer_index, submitting_ctx, waves, cached_net);
         Some((self.submit_sync.clone(), self.net.clone()))
     }
 }

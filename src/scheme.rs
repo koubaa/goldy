@@ -4179,7 +4179,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
             let sync = registered.sync.lock();
-            sync.fifo_ordered_reads.get(ctx_handle).expect("fifo_ordered_reads after frame 2 submit")
+            sync.fifo_ordered_reads
+                .get(ctx_handle)
+                .expect("fifo_ordered_reads after frame 2 submit")
         };
         assert!(
             present_read_tv >= present_tv,

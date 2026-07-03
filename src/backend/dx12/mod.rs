@@ -149,8 +149,7 @@ pub(crate) fn env_enable_dred() -> bool {
     if std::env::var("GOLDY_DX12_NO_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
         return false;
     }
-    is_debug_mode()
-        || std::env::var("GOLDY_DX12_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    is_debug_mode() || std::env::var("GOLDY_DX12_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Get or create a DX12 backend for one [`crate::Instance`].
@@ -1102,16 +1101,12 @@ impl GpuBackend for Dx12Backend {
         if device_sync >= value {
             return Ok(None);
         }
-        let issue_token = self
-            .state
-            .surfaces
-            .get(&surface)
-            .and_then(|s| {
-                s.pending_swapchain_returns
-                    .iter()
-                    .find(|r| r.return_fence == value)
-                    .and_then(|r| r.issue_token.clone())
-            });
+        let issue_token = self.state.surfaces.get(&surface).and_then(|s| {
+            s.pending_swapchain_returns
+                .iter()
+                .find(|r| r.return_fence == value)
+                .and_then(|r| r.issue_token.clone())
+        });
         Ok(Some(Box::new(Dx12SwapchainReturnBlockingWait {
             ld,
             value,
@@ -1612,7 +1607,6 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             }
             registry.drain_ready_slot_reclamations(&fences);
         }
-        self.ld
-            .process_deletion_queue_up_to(device_retired, &fences);
+        self.ld.process_deletion_queue_up_to(device_retired, &fences);
     }
 }
