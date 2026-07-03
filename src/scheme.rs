@@ -318,16 +318,6 @@ impl PresentGrant {
     pub fn grant_id(&self) -> u32 {
         self.grant_id
     }
-
-    /// Acquire and stash the next drawable for the following [`Scheme::submit`].
-    ///
-    /// Call after present scanout completes. On async present hosts, call **after** the
-    /// present ack so resize/rebuild paths are not blocked behind acquire-capacity waits.
-    pub fn speculate_next_acquire_after_present(&self) {
-        if self.pool.speculative_acquire || validation_env::speculative_acquire_enabled() {
-            crate::swapchain_pool::SwapchainPool::speculative_acquire_after_present(&self.pool);
-        }
-    }
 }
 
 impl Grant for PresentGrant {
@@ -2429,17 +2419,10 @@ mod tests {
     use crate::task_graph::NodeKind;
     use crate::types::ResourceAccess;
     use crate::BufferKind;
-    use crate::SwapchainPool;
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
-    }
-
-    fn mock_device_lazy_present() -> Arc<Device> {
-        let mut backend = MockBackend::new();
-        backend.set_lazy_present_finish(true);
-        Arc::new(Device::from_backend(Box::new(backend)).expect("mock device"))
     }
 
     fn mock_readback_counts(device: &Device) -> (usize, usize) {
@@ -3710,105 +3693,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn speculative_present_acquire_stashes_for_next_submit() {
-        let device = mock_device();
-        let ctx = device.create_context().unwrap();
-        let pool = crate::swapchain_pool::SwapchainPool::new_with_options(
-            &ctx,
-            &MockWindow,
-            crate::swapchain_pool::SwapchainPoolOptions {
-                depth: 2,
-                speculative_acquire: true,
-                ..Default::default()
-            },
-        )
-        .expect("swapchain pool");
-        let lease = pool.lease();
-        let pool = Arc::clone(&lease.pool);
-
-        let mut scheme = Scheme::new(&ctx);
-        let present = scheme.grant_present(&lease);
-
-        let submission1 = scheme.submit().expect("submit 1");
-        assert!(
-            !SwapchainPool::has_speculative_acquire(&pool),
-            "first submit uses synchronous acquire"
-        );
-
-        present.consume(&submission1).expect("present 1");
-        present.speculate_next_acquire_after_present();
-        assert!(
-            SwapchainPool::has_speculative_acquire(&pool),
-            "consume should stash drawable for next submit"
-        );
-
-        let submission2 = scheme.submit().expect("submit 2");
-        assert!(
-            !SwapchainPool::has_speculative_acquire(&pool),
-            "second submit should consume speculative stash"
-        );
-        present.consume(&submission2).expect("present 2");
-        present.speculate_next_acquire_after_present();
-    }
-
-    #[test]
-    fn speculative_present_acquire_stashes_under_lazy_finish() {
-        let device = mock_device_lazy_present();
-        let ctx = device.create_context().unwrap();
-        let pool = crate::swapchain_pool::SwapchainPool::new_with_options(
-            &ctx,
-            &MockWindow,
-            crate::swapchain_pool::SwapchainPoolOptions {
-                depth: 2,
-                speculative_acquire: true,
-                ..Default::default()
-            },
-        )
-        .expect("swapchain pool");
-        let lease = pool.lease();
-        let pool = Arc::clone(&lease.pool);
-
-        let mut scheme = Scheme::new(&ctx);
-        let present = scheme.grant_present(&lease);
-
-        let submission1 = scheme.submit().expect("submit 1");
-        present.consume(&submission1).expect("present 1");
-        present.speculate_next_acquire_after_present();
-        assert!(
-            SwapchainPool::has_speculative_acquire(&pool),
-            "lazy-finish backend should still stash after post-consume speculate"
-        );
-    }
-
-    #[test]
-    fn speculative_acquire_skipped_during_rebuild() {
-        let device = mock_device();
-        let ctx = device.create_context().unwrap();
-        let spool = crate::swapchain_pool::SwapchainPool::new_with_options(
-            &ctx,
-            &MockWindow,
-            crate::swapchain_pool::SwapchainPoolOptions {
-                depth: 2,
-                speculative_acquire: true,
-                ..Default::default()
-            },
-        )
-        .expect("swapchain pool");
-        let lease = spool.lease();
-        let pool = Arc::clone(&lease.pool);
-
-        spool.sync_before_rebuild(&ctx, 0);
-        crate::swapchain_pool::SwapchainPool::speculative_acquire_after_present(&pool);
-        assert!(
-            !SwapchainPool::has_speculative_acquire(&pool),
-            "speculative acquire must not stash while rebuild is active"
-        );
-
-        let (w, h) = spool.size();
-        spool.resize(w, h).expect("resize clears rebuild flag");
-    }
-
-    #[test]
     fn render_thread_early_acquire_stashes_when_ready() {
         let device = mock_device();
         let ctx = device.create_context().unwrap();
@@ -3821,13 +3705,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             },
         )
         .expect("swapchain pool");
-        let lease = spool.lease();
-        let pool = Arc::clone(&lease.pool);
 
         assert!(spool.ready_for_acquire(0));
         assert!(spool.try_early_acquire(0).expect("early acquire"));
         assert!(
-            SwapchainPool::has_speculative_acquire(&pool),
+            spool.has_stashed_drawable(),
             "early acquire should stash for resolve_present_slot"
         );
     }
@@ -3847,34 +3729,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         assert_eq!(waiter.join().expect("waiter"), 1);
         spool.test_signal_present_completed();
         assert_eq!(spool.presents_completed(), 1);
-    }
-
-    #[test]
-    fn speculative_acquire_skips_when_at_capacity() {
-        let device = mock_device();
-        let ctx = device.create_context().unwrap();
-        let pool = crate::swapchain_pool::SwapchainPool::new_with_options(
-            &ctx,
-            &MockWindow,
-            crate::swapchain_pool::SwapchainPoolOptions {
-                depth: 1,
-                speculative_acquire: true,
-                ..Default::default()
-            },
-        )
-        .expect("swapchain pool");
-        let lease = pool.lease();
-        let pool = Arc::clone(&lease.pool);
-
-        let mut scheme = Scheme::new(&ctx);
-        scheme.grant_present(&lease);
-        let _submission = scheme.submit().expect("submit holds the only depth slot");
-
-        crate::swapchain_pool::SwapchainPool::speculative_acquire_after_present(&pool);
-        assert!(
-            !SwapchainPool::has_speculative_acquire(&pool),
-            "speculative acquire must not block or stash when pool is at capacity"
-        );
     }
 
     #[test]

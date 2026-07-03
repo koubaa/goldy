@@ -440,7 +440,7 @@ impl MockBackend {
         self.default_surface_format = format;
     }
 
-    /// Control whether the mock reports lazy present finish (DX12-style speculative acquire path).
+    /// Control whether the mock reports lazy present finish (DX12-style async present path).
     pub fn set_lazy_present_finish(&mut self, enabled: bool) {
         self.lazy_present_finish = enabled;
     }

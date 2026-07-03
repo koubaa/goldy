@@ -5,10 +5,9 @@
 //! records the lease once; each [`crate::Scheme::submit`] acquires the next
 //! drawable and resolves it through the present partition retention path.
 //!
-//! When [`SwapchainPoolOptions::speculative_acquire`] is set, the host calls
-//! [`crate::PresentGrant::speculate_next_acquire_after_present`] after present scanout
-//! (and after any async present ack) so the render thread's subsequent `submit` avoids a
-//! synchronous acquire.
+//! Hosts may call [`SwapchainPool::try_early_acquire`] during the overlap phase
+//! (while TID_PRESENT presents the previous frame) so the next submit can take a
+//! stashed drawable via [`resolve_present_slot`](SwapchainPool::resolve_present_slot).
 
 use crate::backend::TextureHandle;
 use crate::context::Context;
@@ -23,23 +22,18 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 pub(crate) type ResolvedPresentSlotData = (u32, SurfaceFrame, u32, TextureHandle);
 
 pub(crate) struct SwapchainPoolInner {
-    /// Context for acquire-capacity waits on TID_PRESENT (tech debt: pool should own this policy).
-    ctx: Context,
     surface: RwLock<Surface>,
     /// Client-stated max in-flight drawables (present pipeline depth).
     depth: u32,
-    /// When true, [`crate::PresentGrant::speculate_next_acquire_after_present`] may acquire
-    /// the next drawable for the following submit.
-    pub(crate) speculative_acquire: bool,
     /// Serializes depth checks and in-flight acquire reservations (render + present threads).
     acquire_mutex: Mutex<()>,
     /// Acquires that passed the depth gate but have not finished `Surface::begin()` yet.
     /// Counted in capacity checks so `begin()` blocking waits do not need to hold `acquire_mutex`.
     pending_acquire_reservations: AtomicU32,
-    /// Drawable acquired speculatively after present for the next submit.
-    speculative_acquire_slot: Mutex<Option<ResolvedPresentSlotData>>,
-    /// Swapchain rebuild in progress — blocks post-ack speculative acquire on TID_PRESENT
-    /// and aborts in-flight `Surface::begin()` blocking waits (DX12 resize deadlock).
+    /// Drawable acquired during overlap for the next submit.
+    stashed_drawable_slot: Mutex<Option<ResolvedPresentSlotData>>,
+    /// Swapchain rebuild in progress — blocks overlap early acquire and aborts in-flight
+    /// `Surface::begin()` blocking waits (DX12 resize deadlock).
     rebuilding: Arc<AtomicBool>,
     /// Monotonic count of present easements whose WSI handoff has begun (after copy epoch).
     presents_begun: AtomicU64,
@@ -53,13 +47,10 @@ pub(crate) struct SwapchainPoolInner {
 /// Construction options for [`SwapchainPool`].
 #[derive(Clone, Debug)]
 pub struct SwapchainPoolOptions {
-    /// Max concurrent acquired drawables. Use `2` when [`Self::speculative_acquire`]
-    /// is enabled so one drawable can be in-flight for present while another is
-    /// stashed for the next submit.
+    /// Max concurrent acquired drawables. Use `2` on DXGI/Metal so one drawable can be
+    /// in-flight for present while another is stashed for the next submit.
     pub depth: u32,
     pub config: SurfaceConfig,
-    /// Acquire the next drawable on TID_PRESENT after present, for the following submit.
-    pub speculative_acquire: bool,
 }
 
 impl Default for SwapchainPoolOptions {
@@ -67,7 +58,6 @@ impl Default for SwapchainPoolOptions {
         Self {
             depth: 1,
             config: SurfaceConfig::default(),
-            speculative_acquire: false,
         }
     }
 }
@@ -133,13 +123,11 @@ impl SwapchainPool {
         let surface = Surface::new_with_config(ctx, window, options.config)?;
         Ok(Self {
             inner: Arc::new(SwapchainPoolInner {
-                ctx: ctx.clone(),
                 surface: RwLock::new(surface),
                 depth: options.depth.max(1),
-                speculative_acquire: options.speculative_acquire,
                 acquire_mutex: Mutex::new(()),
                 pending_acquire_reservations: AtomicU32::new(0),
-                speculative_acquire_slot: Mutex::new(None),
+                stashed_drawable_slot: Mutex::new(None),
                 rebuilding: Arc::new(AtomicBool::new(false)),
                 presents_begun: AtomicU64::new(0),
                 presents_completed: AtomicU64::new(0),
@@ -276,7 +264,7 @@ impl SwapchainPool {
 
     /// True when an overlap-phase early acquire stashed a drawable for the next submit.
     pub fn has_stashed_drawable(&self) -> bool {
-        self.inner.speculative_acquire_slot.lock().unwrap().is_some()
+        self.inner.stashed_drawable_slot.lock().unwrap().is_some()
     }
 
     /// Acquire and stash the next drawable when [`Self::ready_for_acquire`] is true.
@@ -294,7 +282,7 @@ impl SwapchainPool {
         }
         match Self::acquire_slot(&self.inner) {
             Ok(slot) => {
-                Self::stash_speculative_acquire(&self.inner, slot);
+                Self::stash_drawable(&self.inner, slot);
                 Ok(true)
             }
             Err(e) => {
@@ -339,8 +327,8 @@ impl SwapchainPool {
 
     /// Block until every acquired drawable has been returned (`pending_acquire_count == 0`).
     ///
-    /// Required before swapchain rebuild when speculative acquire or depth>1 may leave
-    /// drawables counted even though the present ack has already been consumed.
+    /// Required before swapchain rebuild when depth>1 may leave drawables counted even
+    /// though the present ack has already been consumed.
     fn wait_for_all_drawables_returned(&self, ctx: &crate::Context) {
         self.wait_until_pending_below(1, ctx);
     }
@@ -353,8 +341,8 @@ impl SwapchainPool {
     /// present channel, so `ResizeBuffers` does not race an in-flight present.
     ///
     /// Leaves [`SwapchainPoolInner::rebuilding`] set until [`Self::resize`] or
-    /// [`Self::set_present_mode`] completes so a post-ack speculative acquire on TID_PRESENT
-    /// cannot stash a drawable after this drain.
+    /// [`Self::set_present_mode`] completes so overlap early acquire cannot stash a
+    /// drawable after this drain.
     pub fn sync_before_rebuild(&self, ctx: &crate::Context, sent_present_tokens: u64) {
         let _tz = crate::tracy_zone!("goldy.swapchain_pool.sync_before_rebuild");
         if sent_present_tokens > 0 {
@@ -401,7 +389,7 @@ impl SwapchainPool {
         result
     }
 
-    /// Block speculative acquire, wait for an in-flight acquire, and drain the stash.
+    /// Block overlap early acquire, wait for an in-flight acquire, and drain the stash.
     fn begin_rebuild_quiesce(pool: &Arc<SwapchainPoolInner>) {
         pool.present_wait_abort.store(true, Ordering::Release);
         {
@@ -414,7 +402,7 @@ impl SwapchainPool {
         while pool.pending_acquire_reservations.load(Ordering::Acquire) > 0 {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        Self::drain_speculative_acquire(pool);
+        Self::drain_stashed_drawable(pool);
     }
 
     fn end_rebuild(pool: &Arc<SwapchainPoolInner>) {
@@ -477,64 +465,16 @@ impl SwapchainPool {
         Ok((slot_id, frame, uav_index, handle))
     }
 
-    /// Take a speculatively acquired slot, or acquire synchronously.
+    /// Take a stashed drawable from overlap early acquire, or acquire synchronously.
     pub(crate) fn resolve_present_slot(pool: &Arc<SwapchainPoolInner>) -> Result<ResolvedPresentSlotData> {
-        if let Some(slot) = pool.speculative_acquire_slot.lock().unwrap().take() {
+        if let Some(slot) = pool.stashed_drawable_slot.lock().unwrap().take() {
             return Ok(slot);
         }
         Self::acquire_slot(pool)
     }
 
-    /// After present on TID_PRESENT: try to acquire and stash for the next submit.
-    ///
-    /// Non-blocking on pool capacity: if `pending_acquire_count >= depth`, returns immediately
-    /// and the render thread acquires synchronously on the next submit. Never blocks on the
-    /// capacity spin loop — TID_PRESENT must return to its present channel promptly.
-    pub(crate) fn speculative_acquire_after_present(pool: &Arc<SwapchainPoolInner>) {
-        let _tz = crate::tracy_zone!("goldy.swapchain_pool.speculative_acquire_after_present");
-        if Self::rebuilding(pool) {
-            return;
-        }
-        if !Self::has_acquire_capacity(pool) {
-            tracing::debug!(
-                target: "goldy::swapchain_pool",
-                pending = Self::effective_pending_acquire_count(pool),
-                depth = pool.depth,
-                "speculative present acquire skipped: pool at capacity"
-            );
-            return;
-        }
-        if Self::rebuilding(pool) {
-            return;
-        }
-        match Self::acquire_slot(pool) {
-            Ok(slot) => {
-                if Self::rebuilding(pool) {
-                    slot.1.cancel();
-                    return;
-                }
-                Self::stash_speculative_acquire(pool, slot);
-            }
-            Err(e) => {
-                tracing::debug!(
-                    target: "goldy::swapchain_pool",
-                    error = %e,
-                    "speculative present acquire failed; submit will acquire synchronously"
-                );
-            }
-        }
-    }
-
     fn has_acquire_capacity(pool: &Arc<SwapchainPoolInner>) -> bool {
         Self::effective_pending_acquire_count(pool) < pool.depth
-    }
-
-    #[allow(
-        dead_code,
-        reason = "render-thread rebuild waits; speculate uses has_acquire_capacity"
-    )]
-    fn wait_for_acquire_capacity_inner(pool: &Arc<SwapchainPoolInner>) {
-        Self::wait_until_pending_below_inner(pool, pool.depth, &pool.ctx);
     }
 
     fn wait_until_pending_below_inner(pool: &Arc<SwapchainPoolInner>, threshold: u32, ctx: &Context) {
@@ -561,27 +501,22 @@ impl SwapchainPool {
         }
     }
 
-    /// Stash a drawable acquired after present for the next submit.
-    pub(crate) fn stash_speculative_acquire(pool: &Arc<SwapchainPoolInner>, slot: ResolvedPresentSlotData) {
-        let mut guard = pool.speculative_acquire_slot.lock().unwrap();
+    /// Stash a drawable acquired during overlap for the next submit.
+    pub(crate) fn stash_drawable(pool: &Arc<SwapchainPoolInner>, slot: ResolvedPresentSlotData) {
+        let mut guard = pool.stashed_drawable_slot.lock().unwrap();
         if let Some((_, old_frame, _, _)) = guard.take() {
             tracing::warn!(
                 target: "goldy::swapchain_pool",
-                "discarding unconsumed speculative present acquire"
+                "discarding unconsumed stashed drawable"
             );
             old_frame.cancel();
         }
         *guard = Some(slot);
     }
 
-    fn drain_speculative_acquire(pool: &Arc<SwapchainPoolInner>) {
-        if let Some((_, frame, _, _)) = pool.speculative_acquire_slot.lock().unwrap().take() {
+    fn drain_stashed_drawable(pool: &Arc<SwapchainPoolInner>) {
+        if let Some((_, frame, _, _)) = pool.stashed_drawable_slot.lock().unwrap().take() {
             frame.cancel();
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_speculative_acquire(pool: &Arc<SwapchainPoolInner>) -> bool {
-        pool.speculative_acquire_slot.lock().unwrap().is_some()
     }
 }

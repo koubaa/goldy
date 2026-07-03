@@ -123,16 +123,6 @@ pub(crate) fn retained_cb_reuse_disabled() -> bool {
     env_truthy("GOLDY_DISABLE_CB_REUSE") || crate::gpu_profiler::gpu_profile_enabled()
 }
 
-/// When true, [`crate::PresentGrant::speculate_next_acquire_after_present`] acquires the next
-/// swapchain drawable after present and stashes it for the following [`crate::Scheme::submit`].
-///
-/// Opt-in: set `GOLDY_ENABLE_SPECULATIVE_ACQUIRE=1` (or `true` / `yes`), or create the
-/// [`crate::SwapchainPool`] with [`crate::SwapchainPoolOptions::speculative_acquire`].
-#[must_use]
-pub(crate) fn speculative_acquire_enabled() -> bool {
-    env_truthy("GOLDY_ENABLE_SPECULATIVE_ACQUIRE")
-}
-
 #[cfg(test)]
 mod tests {
     use super::parse_validation_list;
