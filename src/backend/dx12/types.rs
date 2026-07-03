@@ -1208,6 +1208,7 @@ fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelea
         upload_buffer,
         coherent_readback,
         reserved_tiles,
+        ..
     } = entry;
     if let Some(tiles) = reserved_tiles {
         {

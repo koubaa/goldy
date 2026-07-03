@@ -157,6 +157,21 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
             &self.buffers,
             &self.deferred_host_writes,
         )?;
+        {
+            let ctx_completed = unsafe { self.ctx_fence.GetCompletedValue() };
+            let device_completed = unsafe { self.logical_device.fence.GetCompletedValue() };
+            if ctx_completed == u64::MAX || device_completed == u64::MAX {
+                let completed = ctx_completed.max(device_completed);
+                super::diagnostic::first_touch_device_removed(
+                    &self.logical_device.device,
+                    &self.logical_device.device_removed,
+                    "dx12::Dx12RetainedResubmitPending::execute",
+                    self.fence_value,
+                    completed,
+                );
+                anyhow::bail!("GPU device removed before retained resubmit tv={}", self.fence_value);
+            }
+        }
         super::utils::execute_preallocated_context_submit(
             &self.logical_device,
             &self.queue,
