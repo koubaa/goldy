@@ -202,6 +202,45 @@ impl PendingSubmit for Dx12PresentCopyPendingSubmit {
     }
 }
 
+/// Ensures present lifecycle hooks fire on every consume attempt, including error paths.
+struct PresentLifecycleGuard {
+    on_began: Option<Box<dyn FnOnce() + Send>>,
+    on_completed: Option<Box<dyn FnOnce() + Send>>,
+    began_published: bool,
+}
+
+impl PresentLifecycleGuard {
+    fn new(hooks: crate::backend::PresentConsumeHooks) -> Self {
+        Self {
+            on_began: hooks.on_present_began,
+            on_completed: hooks.on_present_completed,
+            began_published: false,
+        }
+    }
+
+    fn signal_began(&mut self) {
+        if !self.began_published {
+            if let Some(on_began) = self.on_began.take() {
+                on_began();
+            }
+            self.began_published = true;
+        }
+    }
+}
+
+impl Drop for PresentLifecycleGuard {
+    fn drop(&mut self) {
+        if !self.began_published {
+            if let Some(on_began) = self.on_began.take() {
+                on_began();
+            }
+        }
+        if let Some(on_completed) = self.on_completed.take() {
+            on_completed();
+        }
+    }
+}
+
 /// WSI present deferred to [`PresentGrant::consume`] on TID_PRESENT.
 pub(super) struct Dx12ScheduledPresentJob {
     logical_device: SharedLogicalDevice,
@@ -223,48 +262,54 @@ impl crate::backend::ScheduledPresentJob for Dx12ScheduledPresentJob {
 
     fn run(self: Box<Self>, hooks: crate::backend::PresentConsumeHooks) -> Result<()> {
         let _tz = crate::tracy_zone!("goldy.dx12.scheduled_present_job.run");
-        self.logical_device
-            .submission_worker
-            .wait_submitted(self.copy_tv)
-            .context("scheduled present job: copy submit epoch wait failed")?;
-        self.logical_device.submission_worker.check_error()?;
+        let mut lifecycle = PresentLifecycleGuard::new(hooks);
+        let Dx12ScheduledPresentJob {
+            logical_device,
+            copy_tv,
+            ctx_fence,
+            sync_tv,
+            swapchain,
+            present_mode,
+            allow_tearing,
+            finish,
+            pending_finishes,
+            device_removed,
+        } = *self;
 
-        if let Some(on_began) = hooks.on_present_began {
-            on_began();
-        }
+        logical_device
+            .submission_worker
+            .wait_submitted(copy_tv)
+            .context("scheduled present job: copy submit epoch wait failed")?;
+        logical_device.submission_worker.check_error()?;
+        lifecycle.signal_began();
 
         {
             let _tz = crate::tracy_zone!("dx12.present.swapchain_present");
-            let (sync_interval, present_flags) =
-                super::surface::present_args(self.present_mode, self.allow_tearing);
-            let hr = unsafe { self.swapchain.Present(sync_interval, present_flags) };
+            let (sync_interval, present_flags) = super::surface::present_args(present_mode, allow_tearing);
+            let hr = unsafe { swapchain.Present(sync_interval, present_flags) };
             if hr.is_err() {
                 return Err(super::utils::map_d3d12_hresult_failure(
-                    &self.logical_device.device,
-                    &self.device_removed,
+                    &logical_device.device,
+                    &device_removed,
                     hr,
                     "Present failed",
                 ));
             }
         }
 
-        if let Some(ctx_fence) = self.ctx_fence {
-            if self.sync_tv > 0 {
+        if let Some(ctx_fence) = ctx_fence {
+            if sync_tv > 0 {
                 let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.ctx_fence_sync");
                 super::utils::sync_context_fence_after_device_retire(
-                    &self.logical_device,
-                    &self.logical_device.fence,
+                    &logical_device,
+                    &logical_device.fence,
                     &ctx_fence,
-                    self.sync_tv,
+                    sync_tv,
                 )?;
             }
         }
 
-        if let Some(on_completed) = hooks.on_present_completed {
-            on_completed();
-        }
-
-        self.pending_finishes.lock().unwrap().push(self.finish);
+        pending_finishes.lock().unwrap().push(finish);
         Ok(())
     }
 }

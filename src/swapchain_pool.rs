@@ -46,6 +46,8 @@ pub(crate) struct SwapchainPoolInner {
     /// Monotonic count of present easements whose WSI handoff has completed.
     presents_completed: AtomicU64,
     present_lifecycle_notify: Arc<(Mutex<()>, Condvar)>,
+    /// Set during rebuild quiesce so blocked lifecycle waits can bail out.
+    present_wait_abort: AtomicBool,
 }
 
 /// Construction options for [`SwapchainPool`].
@@ -142,6 +144,7 @@ impl SwapchainPool {
                 presents_begun: AtomicU64::new(0),
                 presents_completed: AtomicU64::new(0),
                 present_lifecycle_notify: Arc::new((Mutex::new(()), Condvar::new())),
+                present_wait_abort: AtomicBool::new(false),
             }),
         })
     }
@@ -195,32 +198,62 @@ impl SwapchainPool {
     }
 
     /// Block until at least `count` present easements have begun WSI handoff.
-    pub fn wait_present_began(&self, count: u64) {
+    ///
+    /// Returns `false` when aborted by an in-progress swapchain rebuild.
+    pub fn wait_present_began(&self, count: u64) -> bool {
         if count == 0 {
-            return;
+            return true;
         }
-        Self::wait_lifecycle_counter(&self.inner.presents_begun, &self.inner.present_lifecycle_notify, count);
+        Self::wait_lifecycle_counter(
+            &self.inner,
+            &self.inner.presents_begun,
+            count,
+        )
     }
 
     /// Block until at least `count` present easements have completed WSI handoff.
-    pub fn wait_present_completed(&self, count: u64) {
+    ///
+    /// Returns `false` when aborted by an in-progress swapchain rebuild.
+    pub fn wait_present_completed(&self, count: u64) -> bool {
         if count == 0 {
-            return;
+            return true;
         }
         Self::wait_lifecycle_counter(
+            &self.inner,
             &self.inner.presents_completed,
-            &self.inner.present_lifecycle_notify,
             count,
-        );
+        )
     }
 
-    fn wait_lifecycle_counter(counter: &AtomicU64, notify: &Arc<(Mutex<()>, Condvar)>, target: u64) {
+    fn wait_lifecycle_counter(pool: &Arc<SwapchainPoolInner>, counter: &AtomicU64, target: u64) -> bool {
+        const POLL_MS: u64 = 2;
         while counter.load(Ordering::Acquire) < target {
-            let mut guard = notify.0.lock().unwrap();
+            if pool.present_wait_abort.load(Ordering::Acquire) {
+                tracing::debug!(
+                    target: "goldy::swapchain_pool",
+                    target,
+                    "present lifecycle wait aborted for rebuild"
+                );
+                return false;
+            }
+            let mut guard = pool.present_lifecycle_notify.0.lock().unwrap();
             while counter.load(Ordering::Acquire) < target {
-                guard = notify.1.wait(guard).unwrap();
+                if pool.present_wait_abort.load(Ordering::Acquire) {
+                    return false;
+                }
+                let (next_guard, timeout) = pool
+                    .present_lifecycle_notify
+                    .1
+                    .wait_timeout(guard, std::time::Duration::from_millis(POLL_MS))
+                    .unwrap();
+                guard = next_guard;
+                if timeout.timed_out() && counter.load(Ordering::Acquire) < target {
+                    drop(guard);
+                    break;
+                }
             }
         }
+        true
     }
 
     pub(crate) fn publish_present_began(pool: &Arc<SwapchainPoolInner>) {
@@ -249,12 +282,22 @@ impl SwapchainPool {
         !Self::rebuilding(&self.inner) && Self::has_acquire_capacity(&self.inner)
     }
 
+    /// True when an overlap-phase early acquire stashed a drawable for the next submit.
+    pub fn has_stashed_drawable(&self) -> bool {
+        self.inner.speculative_acquire_slot.lock().unwrap().is_some()
+    }
+
     /// Acquire and stash the next drawable when [`Self::ready_for_acquire`] is true.
     pub fn try_early_acquire(&self, min_present_began: u64) -> Result<bool> {
         if !self.ready_for_acquire(min_present_began) {
             return Ok(false);
         }
         if Self::rebuilding(&self.inner) {
+            return Ok(false);
+        }
+        // Overlap stash only when no drawable is in flight; otherwise we climb to
+        // pending=2 and DXGI frame-latency wait blocks the next sync acquire.
+        if self.pending_acquire_count() > 0 {
             return Ok(false);
         }
         match Self::acquire_slot(&self.inner) {
@@ -292,6 +335,16 @@ impl SwapchainPool {
         self.wait_until_pending_below(self.depth(), ctx);
     }
 
+    /// Block until the next submit can acquire without wedging DXGI frame latency.
+    ///
+    /// When the submit path will take a stashed drawable, requires `effective < depth`.
+    /// When it must perform a synchronous acquire (no stash), requires all drawables
+    /// returned (`effective == 0`) so `Surface::begin()` does not block after saturation.
+    pub fn wait_for_submit_acquire(&self, ctx: &crate::Context, using_stash: bool) {
+        let threshold = if using_stash { self.depth() } else { 1 };
+        self.wait_until_pending_below(threshold, ctx);
+    }
+
     /// Block until every acquired drawable has been returned (`pending_acquire_count == 0`).
     ///
     /// Required before swapchain rebuild when speculative acquire or depth>1 may leave
@@ -302,14 +355,18 @@ impl SwapchainPool {
 
     /// Quiesce drawables and wait for GPU returns before swapchain rebuild.
     ///
+    /// `sent_present_tokens` is the number of present tokens dispatched to the async
+    /// present host since startup (velato's `present_sent_seq`). Waits until that many
+    /// easements have completed WSI handoff, including tokens still queued on the
+    /// present channel, so `ResizeBuffers` does not race an in-flight present.
+    ///
     /// Leaves [`SwapchainPoolInner::rebuilding`] set until [`Self::resize`] or
     /// [`Self::set_present_mode`] completes so a post-ack speculative acquire on TID_PRESENT
     /// cannot stash a drawable after this drain.
-    pub fn sync_before_rebuild(&self, ctx: &crate::Context) {
+    pub fn sync_before_rebuild(&self, ctx: &crate::Context, sent_present_tokens: u64) {
         let _tz = crate::tracy_zone!("goldy.swapchain_pool.sync_before_rebuild");
-        let completed_target = self.inner.presents_begun.load(Ordering::Acquire);
-        if completed_target > 0 {
-            self.wait_present_completed(completed_target);
+        if sent_present_tokens > 0 {
+            self.wait_present_completed(sent_present_tokens);
         }
         Self::begin_rebuild_quiesce(&self.inner);
         let device = ctx.device();
@@ -354,6 +411,12 @@ impl SwapchainPool {
 
     /// Block speculative acquire, wait for an in-flight acquire, and drain the stash.
     fn begin_rebuild_quiesce(pool: &Arc<SwapchainPoolInner>) {
+        pool.present_wait_abort.store(true, Ordering::Release);
+        {
+            let guard = pool.present_lifecycle_notify.0.lock().unwrap();
+            pool.present_lifecycle_notify.1.notify_all();
+            drop(guard);
+        }
         pool.rebuilding.store(true, Ordering::Release);
         let _guard = pool.acquire_mutex.lock().unwrap();
         while pool.pending_acquire_reservations.load(Ordering::Acquire) > 0 {
@@ -364,6 +427,12 @@ impl SwapchainPool {
 
     fn end_rebuild(pool: &Arc<SwapchainPoolInner>) {
         pool.rebuilding.store(false, Ordering::Release);
+        pool.present_wait_abort.store(false, Ordering::Release);
+        {
+            let guard = pool.present_lifecycle_notify.0.lock().unwrap();
+            pool.present_lifecycle_notify.1.notify_all();
+            drop(guard);
+        }
     }
 
     fn rebuilding(pool: &Arc<SwapchainPoolInner>) -> bool {

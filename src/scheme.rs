@@ -3897,7 +3897,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let lease = spool.lease();
         let pool = Arc::clone(&lease.pool);
 
-        spool.sync_before_rebuild(&ctx);
+        spool.sync_before_rebuild(&ctx, 0);
         crate::swapchain_pool::SwapchainPool::speculative_acquire_after_present(&pool);
         assert!(
             !SwapchainPool::has_speculative_acquire(&pool),
