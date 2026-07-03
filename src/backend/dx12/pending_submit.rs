@@ -245,6 +245,7 @@ impl Drop for PresentLifecycleGuard {
 pub(super) struct Dx12ScheduledPresentJob {
     logical_device: SharedLogicalDevice,
     copy_tv: u64,
+    issue_token: Option<std::sync::Arc<crate::backend::submission_worker::SubmissionJobToken>>,
     ctx_fence: Option<ID3D12Fence>,
     sync_tv: u64,
     swapchain: windows::Win32::Graphics::Dxgi::IDXGISwapChain3,
@@ -266,6 +267,7 @@ impl crate::backend::ScheduledPresentJob for Dx12ScheduledPresentJob {
         let Dx12ScheduledPresentJob {
             logical_device,
             copy_tv,
+            issue_token,
             ctx_fence,
             sync_tv,
             swapchain,
@@ -276,10 +278,18 @@ impl crate::backend::ScheduledPresentJob for Dx12ScheduledPresentJob {
             device_removed,
         } = *self;
 
-        logical_device
-            .submission_worker
-            .wait_submitted(copy_tv)
-            .context("scheduled present job: copy submit epoch wait failed")?;
+        if let Some(token) = issue_token {
+            if !token.is_done() {
+                token
+                    .wait()
+                    .context("scheduled present job: copy submit issue wait failed")?;
+            }
+        } else {
+            logical_device
+                .submission_worker
+                .wait_submitted(copy_tv)
+                .context("scheduled present job: copy submit epoch wait failed")?;
+        }
         logical_device.submission_worker.check_error()?;
         lifecycle.signal_began();
 
@@ -330,6 +340,7 @@ pub(super) fn enqueue_scheduled_present(
     // When `copy_tv == 0` (skip-copy / render-pass-direct), the caller must pre-allocate
     // the present-only queue signal so eager bookkeeping and enqueue share one timeline value.
     preallocated_present_tv: Option<u64>,
+    issue_token: Option<std::sync::Arc<crate::backend::submission_worker::SubmissionJobToken>>,
 ) -> Result<crate::backend::SchedulePresentOnWorkerResult> {
     logical_device.submission_worker.check_error()?;
     let enqueue_tv = if copy_tv > 0 {
@@ -340,7 +351,7 @@ pub(super) fn enqueue_scheduled_present(
         })
     };
     let copy_epoch = if copy_tv > 0 { copy_tv } else { enqueue_tv };
-    logical_device.submission_worker.enqueue(
+    logical_device.submission_worker.enqueue_with_token(
         enqueue_tv,
         Box::new(Dx12PresentCopyPendingSubmit {
             logical_device: Arc::clone(logical_device),
@@ -348,10 +359,12 @@ pub(super) fn enqueue_scheduled_present(
             copy_tv,
             present_only_tv: if copy_tv > 0 { 0 } else { enqueue_tv },
         }),
+        issue_token.clone(),
     )?;
     let consume_job: Box<dyn crate::backend::ScheduledPresentJob> = Box::new(Dx12ScheduledPresentJob {
         logical_device: Arc::clone(logical_device),
         copy_tv: copy_epoch,
+        issue_token,
         ctx_fence,
         sync_tv,
         swapchain,

@@ -11,8 +11,88 @@ pub(crate) trait PendingSubmit: Send {
     fn execute(self: Box<Self>) -> Result<()>;
 }
 
+/// Outcome of one submission-worker job identified by [`SubmissionJobToken`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmissionJobOutcome {
+    Pending,
+    Done,
+    Failed,
+    Abandoned,
+}
+
+/// Per-job completion identity — wait on this token, not queue high-water marks.
+pub(crate) struct SubmissionJobToken {
+    state: Mutex<SubmissionJobOutcome>,
+    cv: Condvar,
+}
+
+impl SubmissionJobToken {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(SubmissionJobOutcome::Pending),
+            cv: Condvar::new(),
+        })
+    }
+
+    pub fn is_done(&self) -> bool {
+        !matches!(*self.state.lock().unwrap(), SubmissionJobOutcome::Pending)
+    }
+
+    fn complete(&self, outcome: SubmissionJobOutcome) {
+        let mut guard = self.state.lock().unwrap();
+        if matches!(*guard, SubmissionJobOutcome::Pending) {
+            *guard = outcome;
+            drop(guard);
+            self.cv.notify_all();
+        }
+    }
+
+    /// Block until this job has finished executing on the worker (issued ECL / signal).
+    pub fn wait(&self) -> Result<()> {
+        let mut guard = self.state.lock().unwrap();
+        while matches!(*guard, SubmissionJobOutcome::Pending) {
+            guard = self.cv.wait(guard).unwrap();
+        }
+        match *guard {
+            SubmissionJobOutcome::Done => Ok(()),
+            SubmissionJobOutcome::Failed | SubmissionJobOutcome::Abandoned => Err(anyhow::anyhow!(
+                "submission worker job ended with {guard:?}"
+            )),
+            SubmissionJobOutcome::Pending => unreachable!(),
+        }
+    }
+}
+
+struct SubmitJobCompletion {
+    token: Option<Arc<SubmissionJobToken>>,
+}
+
+impl SubmitJobCompletion {
+    fn new(token: Option<Arc<SubmissionJobToken>>) -> Self {
+        Self { token }
+    }
+
+    fn finish(&mut self, outcome: SubmissionJobOutcome) {
+        if let Some(token) = self.token.take() {
+            token.complete(outcome);
+        }
+    }
+}
+
+impl Drop for SubmitJobCompletion {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            token.complete(SubmissionJobOutcome::Abandoned);
+        }
+    }
+}
+
 enum WorkerMessage {
-    Submit { tv: u64, work: Box<dyn PendingSubmit> },
+    Submit {
+        tv: u64,
+        work: Box<dyn PendingSubmit>,
+        completion: SubmitJobCompletion,
+    },
     Flush { done: std::sync::mpsc::Sender<Result<()>> },
     Shutdown,
 }
@@ -80,9 +160,22 @@ impl SubmissionWorker {
     }
 
     pub fn enqueue(&self, tv: u64, work: Box<dyn PendingSubmit>) -> Result<()> {
+        self.enqueue_with_token(tv, work, None)
+    }
+
+    pub fn enqueue_with_token(
+        &self,
+        tv: u64,
+        work: Box<dyn PendingSubmit>,
+        token: Option<Arc<SubmissionJobToken>>,
+    ) -> Result<()> {
         self.check_error()?;
         self.sender
-            .send(WorkerMessage::Submit { tv, work })
+            .send(WorkerMessage::Submit {
+                tv,
+                work,
+                completion: SubmitJobCompletion::new(token),
+            })
             .map_err(|e| anyhow::anyhow!("submission worker channel closed: {e}"))
     }
 
@@ -261,20 +354,27 @@ fn worker_loop(
             }
         };
         match msg {
-            WorkerMessage::Submit { tv, work } => {
+            WorkerMessage::Submit {
+                tv,
+                work,
+                mut completion,
+            } => {
                 let _exec = crate::tracy_zone!("goldy.submit_worker.execute");
                 if latched_error.lock().unwrap().is_some() {
                     // Still advance so wait_submitted(last_submitted_seq) cannot block
                     // forever after an earlier execute failure skipped this job.
                     advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
+                    completion.finish(SubmissionJobOutcome::Failed);
                     continue;
                 }
                 match work.execute() {
                     Ok(()) => {
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
+                        completion.finish(SubmissionJobOutcome::Done);
                     }
                     Err(e) => {
                         advance_submitted_epoch(&submitted_epoch, &wait_notify, tv);
+                        completion.finish(SubmissionJobOutcome::Failed);
                         *latched_error.lock().unwrap() = Some(e);
                         notify_waiters(&wait_notify);
                     }
@@ -302,4 +402,30 @@ pub(crate) fn allocate_timeline_value(timeline_next: &AtomicU64) -> u64 {
 #[cfg(any(feature = "vulkan", feature = "dx12"))]
 pub(crate) fn submission_horizon(timeline_next: &AtomicU64) -> u64 {
     timeline_next.load(Ordering::Acquire).saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SignalDone;
+
+    impl PendingSubmit for SignalDone {
+        fn execute(self: Box<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn submission_job_token_waits_for_specific_enqueue() {
+        let worker = SubmissionWorker::new(4);
+        let token = SubmissionJobToken::new();
+        worker
+            .enqueue_with_token(1, Box::new(SignalDone), Some(Arc::clone(&token)))
+            .unwrap();
+        assert!(!token.is_done());
+        token.wait().unwrap();
+        assert!(token.is_done());
+        worker.shutdown();
+    }
 }

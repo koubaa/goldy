@@ -30,7 +30,9 @@
 use super::barriers;
 use super::render_commands;
 use super::texture;
-use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
+use super::types::{
+    FrameSync, LogicalDevice, PendingSwapchainReturn, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT,
+};
 use super::utils::{depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};
@@ -319,6 +321,23 @@ fn wait_for_waitable_interruptible(
     }
 }
 
+/// Wait until the present-copy job for `return_fence` has been issued, then for GPU retirement.
+pub(super) fn wait_swapchain_return_fence(
+    logical_device: &LogicalDevice,
+    issue_token: Option<std::sync::Arc<crate::backend::submission_worker::SubmissionJobToken>>,
+    return_fence: u64,
+) -> Result<()> {
+    if let Some(token) = issue_token {
+        if !token.is_done() {
+            let _tz = crate::tracy_zone!("goldy.dx12.wait_swapchain_return.issue_token");
+            token.wait()?;
+            logical_device.submission_worker.check_error()?;
+        }
+    }
+    let _tz = crate::tracy_zone!("goldy.dx12.wait_swapchain_return.wait_for_fence");
+    super::utils::wait_for_fence(&logical_device.fence, return_fence)
+}
+
 /// Block until DXGI's next backbuffer index is not still listed in `pending_swapchain_returns`.
 ///
 /// Lazy present finish eagerly stamps returns at schedule time; without this gate the render
@@ -354,13 +373,23 @@ fn wait_until_swapchain_index_available(
             }
         };
 
-        let blocking_fence = state.surfaces.get(&surface_handle).and_then(|surf| {
-            surf.pending_swapchain_returns
+        let (blocking_fence, issue_token) = {
+            let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
+            let blocking_fence = surface
+                .pending_swapchain_returns
                 .iter()
-                .filter(|&&(idx, _)| idx == image_index)
-                .map(|&(_, tv)| tv)
-                .max()
-        });
+                .filter(|r| r.image_index == image_index)
+                .map(|r| r.return_fence)
+                .max();
+            let issue_token = blocking_fence.and_then(|fence| {
+                surface
+                    .pending_swapchain_returns
+                    .iter()
+                    .find(|r| r.return_fence == fence)
+                    .and_then(|r| r.issue_token.clone())
+            });
+            (blocking_fence, issue_token)
+        };
 
         let Some(blocking_fence) = blocking_fence else {
             return Ok(image_index);
@@ -368,26 +397,11 @@ fn wait_until_swapchain_index_available(
 
         {
             let _tz = crate::tracy_zone!("surface.acquire.in_flight_index_wait");
-            logical_device.submission_worker.flush()?;
             bail_if_acquire_aborted(state, surface_handle)?;
-            let horizon =
-                crate::backend::submission_worker::submission_horizon(&logical_device.timeline_next);
-            if blocking_fence <= horizon {
-                loop {
-                    bail_if_acquire_aborted(state, surface_handle)?;
-                    if logical_device
-                        .submission_worker
-                        .wait_submitted_timeout(blocking_fence, ACQUIRE_ABORT_POLL_MS)?
-                    {
-                        break;
-                    }
-                }
-            }
-            logical_device.submission_worker.check_error()?;
             if state.surfaces.get(&surface_handle).and_then(|s| s.acquire_abort.as_ref()).is_some() {
                 wait_for_fence_interruptible(&logical_device.fence, blocking_fence, state, surface_handle)?;
             } else {
-                wait_for_fence(&logical_device.fence, blocking_fence)?;
+                wait_swapchain_return_fence(&logical_device, issue_token, blocking_fence)?;
             }
         }
 
@@ -1072,6 +1086,7 @@ pub(super) fn schedule_present_on_submission_worker(
     // rather than racing a value that only gets refreshed once the job (on TID_SUBMIT)
     // happens to have finished and bookkeeping happens to have run.
     if return_fence > 0 {
+        let issue_token = crate::backend::submission_worker::SubmissionJobToken::new();
         if let Some(surf) = state.surfaces.get_mut(&frame.surface) {
             let slot = &mut surf.frame_sync[frame.present_slot as usize];
             let prev_fence = slot.fence_value;
@@ -1090,14 +1105,49 @@ pub(super) fn schedule_present_on_submission_worker(
             // window where `pending_acquire_count >= depth` but
             // `peek_oldest_pending_swapchain_return()` is None → busy-spin freeze.
             let image_index = frame.image as u32;
-            if !surf
+            if let Some(existing) = surf
                 .pending_swapchain_returns
-                .iter()
-                .any(|&(idx, tv)| idx == image_index && tv == return_fence)
+                .iter_mut()
+                .find(|r| r.image_index == image_index && r.return_fence == return_fence)
             {
-                surf.pending_swapchain_returns.push((image_index, return_fence));
+                if existing.issue_token.is_none() {
+                    existing.issue_token = Some(std::sync::Arc::clone(&issue_token));
+                }
+            } else {
+                surf.pending_swapchain_returns.push(PendingSwapchainReturn {
+                    image_index,
+                    return_fence,
+                    issue_token: Some(std::sync::Arc::clone(&issue_token)),
+                });
             }
         }
+
+        let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
+        let ctx_fence = state
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&frame.context)
+            .map(|(_, fence)| fence.clone());
+        let result = {
+            let _tz = crate::tracy_zone!("goldy.dx12.present.enqueue_scheduled_present");
+            super::pending_submit::enqueue_scheduled_present(
+                &plan.logical_device,
+                command_lists,
+                copy_tv,
+                ctx_fence,
+                return_fence,
+                plan.swapchain,
+                plan.present_mode,
+                plan.allow_tearing,
+                finish,
+                pending_finishes,
+                std::sync::Arc::clone(&state.device_removed),
+                preallocated_present_tv,
+                Some(issue_token),
+            )?
+        };
+        return Ok(result);
     }
 
     let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
@@ -1122,6 +1172,7 @@ pub(super) fn schedule_present_on_submission_worker(
             pending_finishes,
             std::sync::Arc::clone(&state.device_removed),
             preallocated_present_tv,
+            None,
         )?
     };
     Ok(result)
@@ -1324,10 +1375,10 @@ fn flush_swapchain_returns_to_progress(
     let Some(surf) = state.surfaces.get_mut(&surface_handle) else {
         return;
     };
-    surf.pending_swapchain_returns.retain(|&(idx, tv)| {
-        if retire_progress >= tv {
+    surf.pending_swapchain_returns.retain(|r| {
+        if retire_progress >= r.return_fence {
             sc.signal_queue
-                .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                .push(crate::signal::Signal::SwapchainReturned { image_index: r.image_index });
             surf.pending_acquire_count = surf.pending_acquire_count.saturating_sub(1);
             false
         } else {
@@ -1373,9 +1424,13 @@ pub(super) fn finish_present(
             if !surf
                 .pending_swapchain_returns
                 .iter()
-                .any(|&(idx, tv)| idx == image_index && tv == return_fence)
+                .any(|r| r.image_index == image_index && r.return_fence == return_fence)
             {
-                surf.pending_swapchain_returns.push((image_index, return_fence));
+                surf.pending_swapchain_returns.push(PendingSwapchainReturn {
+                    image_index,
+                    return_fence,
+                    issue_token: None,
+                });
             }
         }
     } else if let Some(surf) = state.surfaces.get_mut(&surface_handle) {

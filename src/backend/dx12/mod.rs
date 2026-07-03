@@ -1017,9 +1017,11 @@ impl GpuBackend for Dx12Backend {
             if surface.device_handle != device_handle {
                 continue;
             }
-            surface.pending_swapchain_returns.retain(|&(idx, tv)| {
-                if swapchain_retire_progress >= tv {
-                    signal_queue.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+            surface.pending_swapchain_returns.retain(|r| {
+                if swapchain_retire_progress >= r.return_fence {
+                    signal_queue.push(crate::signal::Signal::SwapchainReturned {
+                        image_index: r.image_index,
+                    });
                     surface.pending_acquire_count = surface.pending_acquire_count.saturating_sub(1);
                     false
                 } else {
@@ -1056,7 +1058,7 @@ impl GpuBackend for Dx12Backend {
             .get(&surface)?
             .pending_swapchain_returns
             .iter()
-            .map(|&(_, tv)| tv)
+            .map(|r| r.return_fence)
             .min()
     }
 
@@ -1082,7 +1084,21 @@ impl GpuBackend for Dx12Backend {
         if device_sync >= value {
             return Ok(None);
         }
-        Ok(Some(Box::new(Dx12SwapchainReturnBlockingWait { ld, value })))
+        let issue_token = self
+            .state
+            .surfaces
+            .get(&surface)
+            .and_then(|s| {
+                s.pending_swapchain_returns
+                    .iter()
+                    .find(|r| r.return_fence == value)
+                    .and_then(|r| r.issue_token.clone())
+            });
+        Ok(Some(Box::new(Dx12SwapchainReturnBlockingWait {
+            ld,
+            value,
+            issue_token,
+        })))
     }
 
     fn wait_until_timeout(
@@ -1425,21 +1441,24 @@ struct Dx12TimelineBlockingWait {
     value: crate::timeline::TimelineValue,
 }
 
-/// Blocks on the device sync fence for a flip-model present-copy return fence.
+/// Blocks until the present-copy job for a flip-model return fence has issued and retired.
 struct Dx12SwapchainReturnBlockingWait {
     ld: types::SharedLogicalDevice,
     value: crate::timeline::TimelineValue,
+    issue_token: Option<std::sync::Arc<crate::backend::submission_worker::SubmissionJobToken>>,
 }
 
 impl crate::backend::TimelineBlockingWait for Dx12SwapchainReturnBlockingWait {
     fn block(self: Box<Self>) -> Result<()> {
-        let _tz = crate::tracy_zone!("goldy.dx12.swapchain_return.wait");
-        self.ld.submission_worker.flush()?;
-        let horizon = crate::backend::submission_worker::submission_horizon(&self.ld.timeline_next);
-        if self.value <= horizon {
-            self.ld.submission_worker.wait_submitted(self.value)?;
+        let _tz = crate::tracy_zone!("goldy.dx12.Dx12SwapchainReturnBlockingWait.block");
+        if let Some(token) = self.issue_token {
+            if !token.is_done() {
+                let _tz_issue = crate::tracy_zone!("goldy.dx12.Dx12SwapchainReturnBlockingWait.issue_token");
+                token.wait()?;
+                self.ld.submission_worker.check_error()?;
+            }
         }
-        self.ld.submission_worker.check_error()?;
+        let _tz_fence = crate::tracy_zone!("goldy.dx12.Dx12SwapchainReturnBlockingWait.wait_for_fence");
         utils::wait_for_fence(&self.ld.fence, self.value)?;
         Ok(())
     }

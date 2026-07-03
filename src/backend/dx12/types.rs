@@ -1114,6 +1114,15 @@ pub(crate) struct FrameSync {
     pub render_pass_submitted: bool,
 }
 
+/// Swapchain image pending return after present-copy submission (flip-model pacing).
+#[derive(Clone)]
+pub(crate) struct PendingSwapchainReturn {
+    pub image_index: u32,
+    pub return_fence: crate::timeline::TimelineValue,
+    /// Set when the present-copy job was enqueued on the submission worker.
+    pub issue_token: Option<std::sync::Arc<crate::backend::submission_worker::SubmissionJobToken>>,
+}
+
 /// Surface (swapchain) state for window presentation.
 pub(crate) struct SurfaceState {
     pub device_handle: DeviceHandle,
@@ -1151,7 +1160,7 @@ pub(crate) struct SurfaceState {
     /// Compute commands recorded between `begin_frame` and `end_frame` / `present`.
     pub pending_frame_compute: Vec<crate::backend::GpuCommand>,
     pub pending_acquire_count: u32,
-    pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
+    pub pending_swapchain_returns: Vec<PendingSwapchainReturn>,
     /// When set, [`surface::acquire`] polls this during blocking waits and bails if true.
     pub acquire_abort: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
