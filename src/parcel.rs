@@ -10,7 +10,7 @@ use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::TextureBacking;
 use crate::timeline::{
-    PromiseState, ReferenceTable, ResourceSync, Settle, TimelinePromise, TimelineValue, WRITE_KINDS_TRANSFER,
+    ReferenceTable, ResourceSync, Settle, TimelineValue, WRITE_KINDS_TRANSFER,
 };
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle, TextureFlags};
 use crate::vram_allocator::ParcelType;
@@ -44,7 +44,6 @@ pub(crate) type InteractionSet = Vec<InteractionEdge>;
 pub(crate) struct ParcelStamp {
     pub(crate) sync: Arc<ParkingMutex<ResourceSync>>,
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
-    pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
 
     /// Set when this stamp is registered for scheme/task-graph hazard tracking.
@@ -57,7 +56,6 @@ impl ParcelStamp {
         Self {
             sync: Arc::new(ParkingMutex::new(ResourceSync::default())),
             interaction_set: Arc::new(Mutex::new(Vec::new())),
-            pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
             scheme_registered: Arc::new(AtomicBool::new(false)),
         }
@@ -67,7 +65,6 @@ impl ParcelStamp {
         Self {
             sync: Arc::clone(&self.sync),
             interaction_set: Arc::clone(&self.interaction_set),
-            pending: Arc::clone(&self.pending),
             home_device: self.home_device.clone(),
             scheme_registered: Arc::clone(&self.scheme_registered),
         }
@@ -87,81 +84,8 @@ impl ParcelStamp {
         self.sync.lock().merged()
     }
 
-    pub(crate) fn push_pending(&self, promise: TimelinePromise) {
-        self.pending.lock().unwrap().push(promise);
-    }
-
-    /// Submission-order gate: block until every pending promise is resolved or abandoned,
-    /// folding resolved values into [`ResourceSync::last_reads`]. This is not a GPU-completion wait.
-    ///
-    /// # Threading contract (strict — do not violate)
-    ///
-    /// This function **blocks the calling thread** until all pending easement promises
-    /// on this stamp are settled. It is therefore a hard requirement that the thread
-    /// resolving those promises (`PromiseResolver::resolve`, typically TID_PRESENT) is
-    /// **never** the same thread that calls `submit()` (which calls this function).
-    /// Violating this invariant causes an unrecoverable deadlock: submit waits for
-    /// present-consume, while present-consume is stuck behind submit completing.
-    ///
-    /// The expected call topology is:
-    ///   - Render/submit thread: `scheme.submit()` → `drain_pending_for_submit_gate`
-    ///   - TID_PRESENT: `grant.consume()` → `resolver.resolve(present_tv)`
-    ///
-    /// Do not fold the two roles onto one thread, even in fallback or teardown paths.
-    pub(crate) fn drain_pending_for_submit_gate(&self, ctx: ContextHandle) {
-        loop {
-            let snapshot: Vec<TimelinePromise> = self.pending.lock().unwrap().clone();
-            if snapshot.is_empty() {
-                return;
-            }
-            for promise in &snapshot {
-                if matches!(promise.poll(), PromiseState::Pending) {
-                    promise.block();
-                }
-            }
-            let mut pending = self.pending.lock().unwrap();
-            let mut sync = self.sync.lock();
-            pending.retain(|promise| match promise.poll() {
-                PromiseState::Pending => true,
-                PromiseState::Resolved(tv) => {
-                    sync.record_read(ctx, tv);
-                    false
-                }
-                PromiseState::Abandoned => false,
-            });
-            if pending.is_empty() {
-                return;
-            }
-        }
-    }
-
-    fn lazy_gc_pending(&self, ctx: ContextHandle) -> bool {
-        let mut pending = self.pending.lock().unwrap();
-        if pending.is_empty() {
-            return false;
-        }
-        let mut sync = self.sync.lock();
-        let mut any_pending = false;
-        pending.retain(|promise| match promise.poll() {
-            PromiseState::Pending => {
-                any_pending = true;
-                true
-            }
-            PromiseState::Resolved(tv) => {
-                sync.record_read(ctx, tv);
-                false
-            }
-            PromiseState::Abandoned => false,
-        });
-        any_pending
-    }
-
-    /// Reuse-gate state for this stamp on `ctx`, including outstanding timeline promises.
+    /// Reuse-gate state for this stamp on `ctx`.
     pub(crate) fn settle_on_context(&self, ctx: &Context) -> Settle {
-        let ctx_handle = ctx.backend_handle();
-        if self.lazy_gc_pending(ctx_handle) {
-            return Settle::Pending;
-        }
         let merged = self.sync.lock().merged();
         if merged.is_empty() {
             return Settle::Ready;
@@ -1127,7 +1051,7 @@ mod tests {
     use crate::backend::mock::MockBackend;
     use crate::device::Device;
     use crate::retained_pool::RetainedPool;
-    use crate::timeline::{PromiseState, Settle, TimelinePromise};
+    use crate::timeline::Settle;
     use std::sync::Arc;
 
     fn mock_device() -> Arc<Device> {
@@ -1152,18 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn settle_pending_with_unresolved_promise() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let parcel = mock_parcel(&device, &mut pool);
-        let (promise, _resolver) = TimelinePromise::new();
-        parcel.stamp_handle().push_pending(promise);
-        assert_eq!(parcel.settle(&ctx), Settle::Pending);
-        assert!(!parcel.is_settled(&ctx));
-    }
-
-    #[test]
     fn settle_waiting_when_epoch_unreached() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
@@ -1172,40 +1084,5 @@ mod tests {
         parcel.mark_referenced(ctx.backend_handle(), 50);
         assert_eq!(parcel.settle(&ctx), Settle::Waiting(50));
         assert!(!parcel.is_settled(&ctx));
-    }
-
-    #[test]
-    fn settle_lazy_gc_folds_resolved_promise_into_last_reads() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let ctx_handle = ctx.backend_handle();
-        let parcel = mock_parcel(&device, &mut pool);
-        let stamp = parcel.stamp_handle();
-        let (promise, resolver) = TimelinePromise::new();
-        stamp.push_pending(promise);
-        resolver.resolve(25);
-        assert_eq!(parcel.settle(&ctx), Settle::Waiting(25));
-        assert!(stamp.pending.lock().unwrap().is_empty());
-        assert_eq!(stamp.sync.lock().last_reads.get(ctx_handle), Some(25));
-    }
-
-    #[test]
-    fn settle_lazy_gc_drops_abandoned_promise() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let parcel = mock_parcel(&device, &mut pool);
-        let stamp = parcel.stamp_handle();
-        let (promise, resolver) = TimelinePromise::new();
-        stamp.push_pending(promise);
-        drop(resolver);
-        assert_eq!(promise_state_after_abandon(&stamp), PromiseState::Abandoned);
-        assert_eq!(parcel.settle(&ctx), Settle::Ready);
-        assert!(stamp.pending.lock().unwrap().is_empty());
-    }
-
-    fn promise_state_after_abandon(stamp: &Arc<ParcelStamp>) -> PromiseState {
-        stamp.pending.lock().unwrap()[0].poll()
     }
 }

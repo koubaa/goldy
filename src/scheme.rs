@@ -25,7 +25,7 @@ use crate::task_graph::{
     DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
     PRESENT_LEASE_SLOT_PLACEHOLDER,
 };
-use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
+use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
 use crate::types::{
     BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
@@ -186,10 +186,8 @@ struct SubmissionData {
     staging_pools: Vec<Arc<GrantStagingPool>>,
     /// Acquired swapchain frames for present grants; consumed by [`Grant::consume`].
     present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
-    /// Resolvers for present easement timeline promises; resolved by [`Grant::consume`].
-    present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
     /// Pre-allocated present easement timeline per grant when present GPU work was
-    /// enqueued on the submission worker at submit (promise still resolved at consume).
+    /// enqueued on the submission worker at submit.
     present_fifo_tvs: Vec<Option<TimelineValue>>,
     /// Frame tokens for grants whose present was scheduled on the worker (no GPU work at consume).
     present_fifo_tokens: Vec<Mutex<Option<crate::backend::FrameToken>>>,
@@ -243,7 +241,6 @@ impl fmt::Debug for SubmissionData {
             .field("cells", &self.cells.len())
             .field("staging_pools", &self.staging_pools.len())
             .field("present_frames", &self.present_frames.len())
-            .field("present_resolvers", &self.present_resolvers.len())
             .field("present_fifo_tvs", &self.present_fifo_tvs.len())
             .finish()
     }
@@ -361,17 +358,6 @@ impl Grant for PresentGrant {
             if let Some(frame_mutex) = submission.data.present_frames.get(idx) {
                 let _ = frame_mutex.lock().unwrap_or_else(|e| e.into_inner()).take();
             }
-            let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!(
-                    "present resolver index {} out of range for submission ({} present grants)",
-                    idx,
-                    submission.data.present_resolvers.len()
-                ))
-            })?;
-            let resolver = resolver_mutex
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
             let consume_job = submission
                 .data
                 .present_fifo_jobs
@@ -389,14 +375,8 @@ impl Grant for PresentGrant {
                     })),
                 };
                 job.run(hooks).map_err(GoldyError::Backend)?;
-                if let Some(resolver) = resolver {
-                    resolver.resolve(present_tv);
-                }
                 tracy_frame_mark!();
             } else {
-                if let Some(resolver) = resolver {
-                    resolver.resolve(present_tv);
-                }
                 complete_scheduled_present(&submission.data.backend, token, present_tv)?;
             }
         } else {
@@ -419,7 +399,7 @@ struct PresentGrantInfo {
 ///
 /// Only [`NodeKind::CopyTexture`] sources can be stamp-tracked — `CopyRenderTarget`
 /// sources are scheme-owned leases that do not participate in the [`ResourceKey`] /
-/// [`crate::parcel::ParcelStamp`] system, so they cannot carry a promise.
+/// [`crate::parcel::ParcelStamp`] system, so they cannot carry a FIFO easement stamp.
 /// A warning is emitted when such a node is encountered so the gap is visible.
 fn present_easement_source_stamps(
     ir: &GraphIR,
@@ -443,36 +423,20 @@ fn present_easement_source_stamps(
             }
             NodeKind::CopyRenderTarget { dst: d, .. } if *d == dst => {
                 // RenderTarget sources are scheme-owned leases with no ResourceKey and
-                // no ParcelStamp, so we cannot attach a promise to gate the next writer.
-                // The WAR hazard for this path is not covered by the easement promise
+                // no ParcelStamp, so we cannot stamp FIFO-ordered present reads.
+                // The WAR hazard for this path is not covered by the easement stamp
                 // mechanism. Log so the gap is visible; do not silently drop.
                 tracing::warn!(
                     target: "goldy::scheme",
                     lease_id,
                     "present easement: CopyRenderTarget source has no stamp; \
-                     WAR hazard not tracked by promise (TODO: extend RT stamp system)"
+                     WAR hazard not tracked by FIFO easement stamp (TODO: extend RT stamp system)"
                 );
             }
             _ => {}
         }
     }
     out
-}
-
-fn claim_present_easement_promises(
-    ir: &GraphIR,
-    present_grants: &[PresentGrantInfo],
-    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
-) -> Vec<Mutex<Option<PromiseResolver>>> {
-    let mut resolvers = Vec::with_capacity(present_grants.len());
-    for grant in present_grants {
-        let (promise, resolver) = TimelinePromise::new();
-        for stamp in present_easement_source_stamps(ir, grant.lease_id, resource_stamps) {
-            stamp.push_pending(promise.clone());
-        }
-        resolvers.push(Mutex::new(Some(resolver)));
-    }
-    resolvers
 }
 
 fn configure_present_easement_stamps(
@@ -1280,20 +1244,6 @@ impl Scheme {
             }
         }
 
-        {
-            let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
-            use crate::task_graph::cross_submit::net_access_per_resource;
-            let net = net_access_per_resource(&self.ir);
-            let ctx = self.ctx.backend_handle();
-            for (key, access) in &net {
-                if access.writes {
-                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
-                        stamp.drain_pending_for_submit_gate(ctx);
-                    }
-                }
-            }
-        }
-
         let submit_result = {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             let ir_clean = !structurally_dirty && !topo_dirty;
@@ -1377,8 +1327,6 @@ impl Scheme {
             );
         }
 
-        let present_resolvers =
-            claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
         let (present_fifo_tvs, present_fifo_tokens, present_fifo_jobs) =
             Self::schedule_presents_on_worker(&self.ctx, tv, &mut surface_frames)?;
         configure_present_easement_stamps(
@@ -1391,7 +1339,6 @@ impl Scheme {
         let submission = self.finish_submit_frame(
             tv,
             surface_frames,
-            present_resolvers,
             present_fifo_tvs,
             present_fifo_tokens,
             present_fifo_jobs,
@@ -1433,7 +1380,6 @@ impl Scheme {
         &mut self,
         tv_dispatch: TimelineValue,
         present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
-        present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
         present_fifo_tvs: Vec<Option<TimelineValue>>,
         present_fifo_tokens: Vec<Mutex<Option<crate::backend::FrameToken>>>,
         present_fifo_jobs: Vec<Mutex<Option<Box<dyn crate::backend::ScheduledPresentJob>>>>,
@@ -1448,7 +1394,6 @@ impl Scheme {
                     cells: Vec::new(),
                     staging_pools: Vec::new(),
                     present_frames,
-                    present_resolvers,
                     present_fifo_tvs,
                     present_fifo_tokens,
                     present_fifo_jobs,
@@ -1523,7 +1468,6 @@ impl Scheme {
                 cells,
                 staging_pools,
                 present_frames,
-                present_resolvers,
                 present_fifo_tvs,
                 present_fifo_tokens,
                 present_fifo_jobs,
@@ -1535,9 +1479,9 @@ impl Scheme {
     pub fn grant_present(&mut self, lease: &PresentLease) -> PresentGrant {
         self.dirty = true;
         // `ir_grant_id` is the globally-unique ID used only for IR fingerprinting.
-        // `present_idx` is the dense index into `present_frames`/`present_resolvers`
-        // built by iterating `present_grants` at submit time; the two must be kept
-        // independent so interleaved read grants do not corrupt the present vec index.
+        // `present_idx` is the dense index into `present_frames` built by iterating
+        // `present_grants` at submit time; the two must be kept independent so
+        // interleaved read grants do not corrupt the present vec index.
         let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
         let present_idx = self.present_grants.len() as u32;
@@ -4099,64 +4043,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn present_easement_promise_abandoned_when_submission_dropped() {
-        use crate::task_graph::cross_submit::ResourceKey;
-        use crate::timeline::PromiseState;
-
-        let device = mock_device();
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
-        let tex = mock_direct_texture(&device);
-        let pipeline = mock_pipeline(&device, &mock_shader(&device));
-
-        let mut scheme = Scheme::new(&ctx);
-        present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
-
-        let key = ResourceKey::Texture(tex.gpu_handle());
-        let submission = scheme.submit().expect("submit");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert_eq!(stamp.pending.lock().unwrap().len(), 1);
-        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Pending);
-        drop(submission);
-        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Abandoned);
-    }
-
-    #[test]
-    fn present_consume_resolves_with_present_timeline_not_compute() {
-        use crate::task_graph::cross_submit::ResourceKey;
-        use crate::timeline::PromiseState;
-
-        let device = mock_device();
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
-        let tex = mock_direct_texture(&device);
-        let pipeline = mock_pipeline(&device, &mock_shader(&device));
-
-        let mut scheme = Scheme::new(&ctx);
-        let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
-        let submission = scheme.submit().expect("submit");
-        let compute_tv = submission.timeline_value();
-
-        present.consume(&submission).expect("present");
-
-        let key = ResourceKey::Texture(tex.gpu_handle());
-        let poll_state = {
-            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-            stamp.pending.lock().unwrap()[0].poll()
-        };
-        match poll_state {
-            PromiseState::Resolved(present_tv) => {
-                assert!(
-                    present_tv > compute_tv,
-                    "present easement must resolve to the later present/copy timeline (present={present_tv}, compute={compute_tv})"
-                );
-            }
-            other => panic!("expected Resolved present timeline, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn submit_gate_folds_resolved_present_promise_into_last_reads() {
+    fn present_easement_stamped_at_submit_with_fifo_ordered_read() {
         use crate::task_graph::cross_submit::ResourceKey;
 
         let device = mock_device();
@@ -4167,85 +4054,29 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let ctx_handle = ctx.backend_handle();
 
         let mut scheme = Scheme::new(&ctx);
-        let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
-        let key = ResourceKey::Texture(tex.gpu_handle());
-
-        let sub1 = scheme.submit().expect("submit 1");
-        present.consume(&sub1).expect("present frame 1");
-
-        let _sub2 = scheme.submit().expect("submit 2");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert!(
-            stamp.sync.lock().last_reads.get(ctx_handle).is_some(),
-            "submit gate must fold resolved present promise into last_reads"
-        );
-        assert_eq!(
-            stamp.pending.lock().unwrap().len(),
-            1,
-            "submit 2 claims a fresh present promise; frame 1's resolved promise must be pruned"
-        );
-        assert_eq!(
-            stamp.pending.lock().unwrap()[0].poll(),
-            crate::timeline::PromiseState::Pending
-        );
-    }
-
-    #[test]
-    fn submit_gate_blocks_until_present_promise_resolved() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        use std::time::Duration;
-
-        let device = mock_device();
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
-        let tex = mock_direct_texture(&device);
-        let pipeline = mock_pipeline(&device, &mock_shader(&device));
-
-        let mut scheme = Scheme::new(&ctx);
-        let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
-        let sub1 = scheme.submit().expect("submit 1");
-
-        let scheme = Arc::new(std::sync::Mutex::new(scheme));
-        let barrier = Arc::new(Barrier::new(2));
-        let scheme2 = Arc::clone(&scheme);
-        let barrier2 = Arc::clone(&barrier);
-
-        let gate_thread = thread::spawn(move || {
-            barrier2.wait();
-            scheme2
-                .lock()
-                .unwrap()
-                .submit()
-                .expect("submit 2 must succeed after promise resolves");
-        });
-
-        barrier.wait();
-        thread::sleep(Duration::from_millis(30));
-        present.consume(&sub1).expect("consume releases submit gate");
-        gate_thread.join().expect("gate thread");
-    }
-
-    #[test]
-    fn texture_stamp_not_settled_while_present_promise_unresolved() {
-        use crate::task_graph::cross_submit::ResourceKey;
-        use crate::timeline::Settle;
-
-        let device = mock_device();
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
-        let tex = mock_direct_texture(&device);
-        let pipeline = mock_pipeline(&device, &mock_shader(&device));
-
-        let mut scheme = Scheme::new(&ctx);
         present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
-        let key = ResourceKey::Texture(tex.gpu_handle());
 
         let submission = scheme.submit().expect("submit");
-        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
-        assert_eq!(stamp.settle_on_context(&ctx), Settle::Pending);
-        drop(submission);
-        assert_eq!(stamp.settle_on_context(&ctx), Settle::Ready);
+        let compute_tv = submission.timeline_value();
+        let present_tv = submission
+            .present_fifo_tv(0)
+            .expect("present grant must carry worker-scheduled present timeline");
+
+        let key = ResourceKey::Texture(tex.gpu_handle());
+        let fifo_read = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp
+                .sync
+                .lock()
+                .fifo_ordered_reads
+                .get(ctx_handle)
+                .expect("present easement must stamp fifo_ordered_reads at submit")
+        };
+        assert!(
+            fifo_read > compute_tv,
+            "present easement fifo read must be later than compute submit (present={fifo_read}, compute={compute_tv})"
+        );
+        assert_eq!(fifo_read, present_tv);
     }
 
     /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
@@ -4319,33 +4150,39 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let sub1 = scheme.submit().expect("submit frame 1");
         let frame1_tv = sub1.timeline_value();
+        let present_tv = sub1.present_fifo_tv(0).expect("present timeline");
         {
             let sync = registered.sync.lock();
-            let read_tv = sync
-                .last_reads
+            let fifo_read = sync
+                .fifo_ordered_reads
                 .get(ctx_handle)
-                .expect("present-copy read must be on the ledger after submit");
+                .expect("present easement fifo read stamped at submit");
             let write_tv = sync
                 .last_write
                 .get(ctx_handle)
                 .expect("fine-write must be on the ledger after submit");
+            assert_eq!(fifo_read, present_tv);
             assert!(
-                read_tv <= frame1_tv && write_tv <= frame1_tv,
-                "ledger epochs must not exceed submission high-water (read={read_tv}, write={write_tv}, submit={frame1_tv})"
+                fifo_read > frame1_tv || write_tv <= frame1_tv,
+                "present fifo read is the worker-scheduled present epoch (present={fifo_read}, submit={frame1_tv})"
+            );
+            assert!(
+                write_tv <= frame1_tv,
+                "ledger write epoch must not exceed submission high-water (write={write_tv}, submit={frame1_tv})"
             );
         }
 
         present.consume(&sub1).expect("present frame 1");
 
-        // Frame 2 submit gate folds the resolved present epoch into last_reads.
+        // Frame 2: fifo easement stamp from frame 1 remains; loop-carried WAR uses queue order.
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
             let sync = registered.sync.lock();
-            sync.last_reads.get(ctx_handle).expect("last_reads after present fold")
+            sync.fifo_ordered_reads.get(ctx_handle).expect("fifo_ordered_reads after frame 2 submit")
         };
         assert!(
-            present_read_tv >= frame1_tv,
-            "folded present read epoch must be at least the frame-1 submit tv"
+            present_read_tv >= present_tv,
+            "frame 2 submit refreshes fifo easement stamp (frame1 present={present_tv}, after frame2={present_read_tv})"
         );
 
         // Loop-carried present WAR is covered by FIFO enqueue order; no live wait needed.
