@@ -74,8 +74,6 @@ pub struct MockBackend {
     pub buffer_view_create_count: usize,
     /// Default format for new surfaces (simulates GPU/display preference)
     pub default_surface_format: TextureFormat,
-    /// When true, [`Scheme::submit`] enqueues present on the per-device submission worker.
-    schedules_present_on_submit_worker: bool,
     /// When true, [`GpuBackend::supports_lazy_present_finish`] returns true (DX12-style).
     lazy_present_finish: bool,
     /// Device-global submission sequence (shared value space across contexts on one queue).
@@ -269,7 +267,6 @@ impl MockBackend {
             readback_free_count: 0,
             buffer_view_create_count: 0,
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
-            schedules_present_on_submit_worker: true,
             lazy_present_finish: false,
             device_retired_floor: HashMap::new(),
             surface_pending_acquire: HashMap::new(),
@@ -393,11 +390,6 @@ impl MockBackend {
     /// rather than assuming a hardcoded format.
     pub fn set_default_surface_format(&mut self, format: TextureFormat) {
         self.default_surface_format = format;
-    }
-
-    /// Control whether [`crate::Scheme::submit`] schedules present on the submission worker.
-    pub fn set_schedules_present_on_submit_worker(&mut self, enabled: bool) {
-        self.schedules_present_on_submit_worker = enabled;
     }
 
     /// Control whether the mock reports lazy present finish (DX12-style speculative acquire path).
@@ -597,10 +589,6 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         Ok(tv)
     }
 
-    fn schedules_present_on_submit_worker(&self) -> bool {
-        self.schedules_present_on_submit_worker
-    }
-
     fn supports_lazy_present_finish(&self) -> bool {
         self.lazy_present_finish
     }
@@ -641,9 +629,6 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         frame: FrameToken,
         present_tv: crate::timeline::TimelineValue,
     ) -> Result<Option<Box<dyn crate::backend::ScheduledPresentBlockingWait>>> {
-        if !self.schedules_present_on_submit_worker {
-            return Ok(None);
-        }
         let device = self.context_device(frame.context);
         let dev = self
             .devices

@@ -1045,14 +1045,6 @@ pub(crate) trait GpuBackendPresentSplit {
         submit_tv: crate::timeline::TimelineValue,
     ) -> Result<crate::timeline::TimelineValue>;
 
-    /// When true, [`Scheme::submit`](crate::Scheme::submit) enqueues present copy +
-    /// WSI present on the per-device submission worker immediately after compute
-    /// partitions, so execution order matches enqueue order without a loop-carried
-    /// same-context WAR wait on the next frame.
-    fn schedules_present_on_submit_worker(&self) -> bool {
-        false
-    }
-
     /// Enqueue present GPU work on the submission worker during scheme submit.
     /// Returns the pre-allocated present easement timeline value and, on lazy-finish
     /// backends, a job whose WSI present runs at grant consumption.

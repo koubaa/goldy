@@ -1339,15 +1339,6 @@ mod fifo_present_tests {
     use crate::backend::{FrameToken, GpuBackend, GpuBackendPresentSplit};
 
     #[test]
-    fn fifo_present_enabled_by_default() {
-        let backend = MetalBackend::new().expect("Metal backend");
-        assert!(
-            backend.schedules_present_on_submit_worker(),
-            "Metal must schedule present on the submission worker by default"
-        );
-    }
-
-    #[test]
     fn no_drawable_skip_path_unblocks_wait() {
         let _gpu_lock = metal_fifo_test_lock();
         let mut backend = MetalBackend::new().expect("Metal backend");

@@ -423,10 +423,6 @@ impl crate::backend::GpuBackendPresentSplit for VulkanBackend {
         present_split::finish_present(&mut self.state, finish)
     }
 
-    fn schedules_present_on_submit_worker(&self) -> bool {
-        true
-    }
-
     fn schedule_present_on_submission_worker(
         &mut self,
         frame: FrameToken,

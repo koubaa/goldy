@@ -400,28 +400,10 @@ impl Grant for PresentGrant {
                 complete_scheduled_present(&submission.data.backend, token, present_tv)?;
             }
         } else {
-            let frame_mutex = submission.data.present_frames.get(idx).ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!(
-                    "present grant index {} out of range for submission ({} present grants)",
-                    idx,
-                    submission.data.present_frames.len()
-                ))
-            })?;
-            let mut slot = frame_mutex.lock().unwrap_or_else(|e| e.into_inner());
-            let surface_frame = slot.take().ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission"))
-            })?;
-            let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
-            let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
-                GoldyError::Backend(anyhow::anyhow!(
-                    "present resolver index {} out of range for submission ({} present grants)",
-                    idx,
-                    submission.data.present_resolvers.len()
-                ))
-            })?;
-            if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                resolver.resolve(present_tv);
-            }
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "present grant index {idx} missing worker-scheduled present timeline \
+                 (backend must implement schedule_present_on_submission_worker)"
+            )));
         }
 
         Ok(())
@@ -499,21 +481,13 @@ fn configure_present_easement_stamps(
     present_fifo_tvs: &[Option<TimelineValue>],
     resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     ctx: crate::backend::ContextHandle,
-    fifo_on_worker: bool,
 ) {
     for (idx, grant) in present_grants.iter().enumerate() {
-        let stamps = present_easement_source_stamps(ir, grant.lease_id, resource_stamps);
-        if fifo_on_worker {
-            if let Some(present_tv) = present_fifo_tvs.get(idx).copied().flatten() {
-                for stamp in stamps {
-                    stamp.set_legacy_present_easement(false);
-                    stamp.sync.lock().mark_fifo_ordered_read(ctx, present_tv);
-                }
-            }
-        } else {
-            for stamp in stamps {
-                stamp.set_legacy_present_easement(true);
-            }
+        let Some(present_tv) = present_fifo_tvs.get(idx).copied().flatten() else {
+            continue;
+        };
+        for stamp in present_easement_source_stamps(ir, grant.lease_id, resource_stamps) {
+            stamp.sync.lock().mark_fifo_ordered_read(ctx, present_tv);
         }
     }
 }
@@ -1405,19 +1379,14 @@ impl Scheme {
 
         let present_resolvers =
             claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
-        let fifo_on_worker = {
-            let backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend.schedules_present_on_submit_worker()
-        };
         let (present_fifo_tvs, present_fifo_tokens, present_fifo_jobs) =
-            Self::schedule_presents_on_worker_if_supported(&self.ctx, tv, &mut surface_frames)?;
+            Self::schedule_presents_on_worker(&self.ctx, tv, &mut surface_frames)?;
         configure_present_easement_stamps(
             &self.ir,
             &self.present_grants,
             &present_fifo_tvs,
             self.submit_state.resource_stamps(),
             self.ctx.backend_handle(),
-            fifo_on_worker,
         );
         let submission = self.finish_submit_frame(
             tv,
@@ -1430,21 +1399,13 @@ impl Scheme {
         Ok(submission)
     }
 
-    fn schedule_presents_on_worker_if_supported(
+    fn schedule_presents_on_worker(
         ctx: &Context,
         compute_tv: TimelineValue,
         surface_frames: &mut [Mutex<Option<crate::surface::Frame>>],
     ) -> Result<SchedulePresentWorkerOutcome, GoldyError> {
         let _tz = crate::tracy_zone!("scheme.submit.schedule_present_on_worker");
         let mut backend = ctx.device().inner.backend.lock().unwrap();
-        if !backend.schedules_present_on_submit_worker() {
-            let n = surface_frames.len();
-            return Ok((
-                vec![None; n],
-                (0..n).map(|_| Mutex::new(None)).collect(),
-                (0..n).map(|_| Mutex::new(None)).collect(),
-            ));
-        }
         let mut tvs = Vec::with_capacity(surface_frames.len());
         let mut tokens = Vec::with_capacity(surface_frames.len());
         let mut jobs = Vec::with_capacity(surface_frames.len());
@@ -2533,12 +2494,6 @@ mod tests {
     fn mock_device_lazy_present() -> Arc<Device> {
         let mut backend = MockBackend::new();
         backend.set_lazy_present_finish(true);
-        Arc::new(Device::from_backend(Box::new(backend)).expect("mock device"))
-    }
-
-    fn mock_device_legacy_present() -> Arc<Device> {
-        let mut backend = MockBackend::new();
-        backend.set_schedules_present_on_submit_worker(false);
         Arc::new(Device::from_backend(Box::new(backend)).expect("mock device"))
     }
 
@@ -4457,61 +4412,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 .iter()
                 .all(|e| !(e.context == ctx_handle && e.value >= present_tv)),
             "FIFO present ordering makes same-context WAR wait redundant (got {frame2_waits:?})"
-        );
-    }
-
-    #[test]
-    fn present_war_ledger_live_wait_on_second_submit_path() {
-        use crate::task_graph::cross_submit::ResourceKey;
-        use crate::timeline::{Epoch, PromiseState};
-
-        let device = mock_device_legacy_present();
-        let (ctx, spool) = mock_swapchain_pool(&device);
-        let lease = spool.lease();
-        let tex = mock_direct_texture(&device);
-        let pipeline = mock_pipeline(&device, &mock_texture_shader(&device));
-        let ctx_handle = ctx.backend_handle();
-        let key = ResourceKey::Texture(tex.gpu_handle());
-
-        let mut scheme = Scheme::new(&ctx);
-        scheme
-            .node("fine_write", &pipeline)
-            .with_parcel(&tex, NodeAccess::Write)
-            .dispatch(1, 1, 1);
-        scheme.copy_texture_to_present(&tex, &lease);
-        let present = scheme.grant_present(&lease);
-
-        let sub1 = scheme.submit().expect("submit frame 1");
-        let compute_tv = sub1.timeline_value();
-        present.consume(&sub1).expect("present frame 1");
-
-        let present_tv = {
-            let stamp = scheme
-                .submit_state
-                .resource_stamps()
-                .get(&key)
-                .expect("out_image stamp");
-            match stamp.pending.lock().unwrap()[0].poll() {
-                PromiseState::Resolved(tv) => tv,
-                other => panic!("present promise must be resolved after consume, got {other:?}"),
-            }
-        };
-        assert!(
-            present_tv >= compute_tv,
-            "present epoch must cover the frame-1 submit (present={present_tv}, compute={compute_tv})"
-        );
-
-        let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
-        let _sub2 = scheme.submit().expect("submit frame 2");
-        let frame2_waits: Vec<Epoch> = device.with_mock_backend(|b| {
-            b.recorded_waits[waits_before..]
-                .iter()
-                .flat_map(|w| w.iter().copied())
-                .collect()
-        });
-        assert!(
-            frame2_waits.iter().any(|e| e.context == ctx_handle && e.value >= present_tv),
-            "frame 2 submit must live-wait on prior present read via ledger (need wait>={present_tv}, got {frame2_waits:?})"
         );
     }
 }

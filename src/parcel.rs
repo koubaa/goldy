@@ -50,9 +50,6 @@ pub(crate) struct ParcelStamp {
     /// Set when this stamp is registered for scheme/task-graph hazard tracking.
     /// TODO: delete this when task graph is eliminated
     scheme_registered: Arc<AtomicBool>,
-    /// Pending present-easement promises on this stamp require a live same-context WAR wait
-    /// when folded (legacy present path — not scheduled on the submission worker at submit).
-    legacy_present_easement: Arc<AtomicBool>,
 }
 
 impl ParcelStamp {
@@ -63,7 +60,6 @@ impl ParcelStamp {
             pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
             scheme_registered: Arc::new(AtomicBool::new(false)),
-            legacy_present_easement: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -74,16 +70,7 @@ impl ParcelStamp {
             pending: Arc::clone(&self.pending),
             home_device: self.home_device.clone(),
             scheme_registered: Arc::clone(&self.scheme_registered),
-            legacy_present_easement: Arc::clone(&self.legacy_present_easement),
         }
-    }
-
-    pub(crate) fn set_legacy_present_easement(&self, legacy: bool) {
-        self.legacy_present_easement.store(legacy, Ordering::Release);
-    }
-
-    pub(crate) fn is_legacy_present_easement(&self) -> bool {
-        self.legacy_present_easement.load(Ordering::Acquire)
     }
 
     //TODO: delete this when taskgraph is removed
@@ -138,9 +125,6 @@ impl ParcelStamp {
                 PromiseState::Pending => true,
                 PromiseState::Resolved(tv) => {
                     sync.record_read(ctx, tv);
-                    if self.is_legacy_present_easement() {
-                        sync.mark_war_read(ctx, tv);
-                    }
                     false
                 }
                 PromiseState::Abandoned => false,
@@ -165,9 +149,6 @@ impl ParcelStamp {
             }
             PromiseState::Resolved(tv) => {
                 sync.record_read(ctx, tv);
-                if self.is_legacy_present_easement() {
-                    sync.mark_war_read(ctx, tv);
-                }
                 false
             }
             PromiseState::Abandoned => false,

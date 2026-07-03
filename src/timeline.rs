@@ -211,9 +211,6 @@ pub struct ResourceSync {
     pub last_write_kinds: SmallContextMap<u8>,
     /// Last submission on `ctx` that read this resource (max per context).
     pub last_reads: ReferenceTable,
-    /// Present easement read epochs on `ctx` that require a live queue wait on the next
-    /// same-context write (legacy present path — GPU work not enqueued on the FIFO worker).
-    pub war_read_epochs: ReferenceTable,
     /// Read epochs on `ctx` whose hazard is covered by present work enqueued on the
     /// submission worker before the next frame's compute partitions.
     pub fifo_ordered_reads: ReferenceTable,
@@ -251,10 +248,6 @@ impl ResourceSync {
 
     pub fn record_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {
         mark_reference(&mut self.last_reads, ctx, tv);
-    }
-
-    pub fn mark_war_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {
-        mark_reference(&mut self.war_read_epochs, ctx, tv);
     }
 
     pub fn mark_fifo_ordered_read(&mut self, ctx: ContextHandle, tv: TimelineValue) {

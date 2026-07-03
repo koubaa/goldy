@@ -128,9 +128,6 @@ fn merge_aliased_ledger_entries(ledger: &LedgerSnapshot, key: ResourceKey) -> Op
                 for (ctx, tv) in entry.sync.last_reads.iter() {
                     m.sync.record_read(ctx, tv);
                 }
-                for (ctx, tv) in entry.sync.war_read_epochs.iter() {
-                    m.sync.mark_war_read(ctx, tv);
-                }
                 for (ctx, tv) in entry.sync.fifo_ordered_reads.iter() {
                     m.sync.mark_fifo_ordered_read(ctx, tv);
                 }
@@ -163,7 +160,7 @@ fn apply_cross_submit_hazards_single_context(
     sync: &ResourceSync,
     submitting_ctx: ContextHandle,
     prologue: &mut BarrierSet,
-    context_waits: &mut Vec<(ContextHandle, u64)>,
+    _context_waits: &mut Vec<(ContextHandle, u64)>,
 ) {
     if access.reads {
         if sync.last_write.get(submitting_ctx).is_some() {
@@ -208,11 +205,6 @@ fn apply_cross_submit_hazards_single_context(
                 },
             };
             merge_barrier(prologue, key, usage);
-        }
-        if let Some(read_tv) = sync.last_reads.get(submitting_ctx) {
-            if sync.war_read_epochs.get(submitting_ctx).unwrap_or(0) >= read_tv {
-                merge_context_wait(context_waits, submitting_ctx, read_tv);
-            }
         }
     }
 }
@@ -288,16 +280,10 @@ fn apply_cross_submit_hazards_for_resource(
             }
         }
         for (ctx, tv) in sync.last_reads.iter() {
-            // Cross-context WAR still needs an explicit queue wait.
-            //
-            // Same-context WAR is skipped when the read hazard is covered by FIFO
-            // single-queue ordering (intra-submit handoffs and present work enqueued
-            // on the submission worker at submit). Legacy present easement reads
-            // (`war_read_epochs`) still emit a live wait because present GPU work may
-            // be enqueued after the next frame's compute partitions.
+            // Cross-context WAR needs an explicit queue wait. Same-context WAR from present
+            // easement reads is covered by FIFO single-queue ordering (present copy enqueued
+            // on the submission worker at submit, before compute partitions).
             if ctx != submitting_ctx {
-                merge_context_wait(context_waits, ctx, tv);
-            } else if sync.war_read_epochs.get(ctx).unwrap_or(0) >= tv {
                 merge_context_wait(context_waits, ctx, tv);
             }
         }

@@ -486,10 +486,6 @@ impl crate::backend::GpuBackendPresentSplit for Dx12Backend {
         surface::finish_present(&mut self.state, finish, submit_tv)
     }
 
-    fn schedules_present_on_submit_worker(&self) -> bool {
-        true
-    }
-
     fn schedule_present_on_submission_worker(
         &mut self,
         frame: FrameToken,
