@@ -270,8 +270,13 @@ impl Submission {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn present_fifo_tv(&self, grant_idx: usize) -> Option<TimelineValue> {
+    /// Scheme that produced this submission.
+    pub fn scheme_id(&self) -> u64 {
+        self.data.scheme_id
+    }
+
+    /// Present-scanout timeline for grant `idx`, when scheduled on the submission worker.
+    pub fn present_fifo_tv(&self, grant_idx: usize) -> Option<TimelineValue> {
         self.data.present_fifo_tvs.get(grant_idx).copied().flatten()
     }
 }
@@ -354,21 +359,37 @@ impl Grant for PresentGrant {
                 .present_fifo_jobs
                 .get(idx)
                 .and_then(|m| m.lock().unwrap_or_else(|e| e.into_inner()).take());
+            let pool_began = Arc::clone(&self.pool);
+            let pool_completed = Arc::clone(&self.pool);
             if let Some(job) = consume_job {
-                let pool = Arc::clone(&self.pool);
                 let hooks = crate::backend::PresentConsumeHooks {
                     on_present_began: Some(Box::new(move || {
-                        crate::swapchain_pool::SwapchainPool::publish_present_began(&pool);
+                        crate::swapchain_pool::SwapchainPool::publish_present_began(&pool_began);
                     })),
-                    on_present_completed: Some(Box::new({
-                        let pool = Arc::clone(&self.pool);
-                        move || crate::swapchain_pool::SwapchainPool::publish_present_completed(&pool)
+                    on_present_completed: Some(Box::new(move || {
+                        crate::swapchain_pool::SwapchainPool::publish_present_completed(&pool_completed);
                     })),
                 };
                 job.run(hooks).map_err(GoldyError::Backend)?;
                 tracy_frame_mark!();
             } else {
-                complete_scheduled_present(&submission.data.backend, token, present_tv)?;
+                // Metal / Vulkan schedule present on the submission worker without a
+                // consume_job (DX12 provides one). SwapchainPool lifecycle counters
+                // must still advance or velato's wait_present_began gate deadlocks.
+                let is_metal = submission.data.backend.lock().unwrap().backend_type() == crate::types::BackendType::Metal;
+                let result =
+                    complete_scheduled_present(&submission.data.backend, token, present_tv);
+                crate::swapchain_pool::SwapchainPool::publish_present_began(&self.pool);
+                crate::swapchain_pool::SwapchainPool::publish_present_completed(&self.pool);
+                // Metal-only: `CAMetalLayer.nextDrawable()` is vsync-paced regardless of
+                // nominal capacity, so the next drawable is acquired here on TID_PRESENT
+                // (after real wall-clock time has elapsed) rather than eagerly on the
+                // render thread — see `try_acquire_after_present` for why. Vulkan/DX12
+                // keep the render-thread-driven `SwapchainPool::try_early_acquire` path.
+                if is_metal {
+                    crate::swapchain_pool::SwapchainPool::try_acquire_after_present(&self.pool);
+                }
+                result?;
             }
         } else {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -3707,7 +3728,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         .expect("swapchain pool");
 
         assert!(spool.ready_for_acquire(0));
-        assert!(spool.try_early_acquire(0).expect("early acquire"));
+        assert!(spool.try_early_acquire(&ctx, 0).expect("early acquire"));
         assert!(
             spool.has_stashed_drawable(),
             "early acquire should stash for resolve_present_slot"

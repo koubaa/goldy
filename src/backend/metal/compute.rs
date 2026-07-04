@@ -55,17 +55,141 @@ fn encode_wait_for_epochs(
     Ok(())
 }
 
-fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCategory) -> Option<u32> {
+/// A producer context's completion waiter plus the target timeline value, resolved on the
+/// render thread so the worker job needs no access to [`MetalState`].
+pub(super) struct ResolvedHostWait {
+    waiter: super::types::TimelineWaiter,
+    value: TimelineValue,
+}
+
+/// A deferred host write with its target pointer already resolved. The buffer's host pointer
+/// is stable for the buffer's lifetime (Metal buffers are not moved), so capturing it on the
+/// render thread and dereferencing later on the worker thread is sound — the same pattern
+/// already used for `drawable_ptr` in [`super::pending_submit`].
+pub(super) struct ResolvedDeferredWrite {
+    ptr: usize,
+    offset: u64,
+    data: std::sync::Arc<[u8]>,
+}
+
+/// Resolve the host-write sidecar's producer waiters and target buffer pointers.
+///
+/// This is the only part of the sidecar that needs [`MetalState`] (buffer/context lookups),
+/// so it must run on the render thread. It performs no blocking — only `HashMap` reads — so
+/// it does not stall the render thread. The actual CPU wait and memcpy are performed by
+/// [`apply_resolved_host_writes`] on the submission worker thread, matching where DX12/Vulkan
+/// run `apply_host_sidecar_before_gpu`.
+fn resolve_deferred_host_writes(
+    state: &MetalState,
+    sync: Option<&SubmitSync>,
+) -> Result<(Vec<ResolvedHostWait>, Vec<ResolvedDeferredWrite>)> {
+    let Some(s) = sync else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    if s.deferred_host_writes.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut waits = Vec::with_capacity(s.host_observed_waits.len());
+    for epoch in &s.host_observed_waits {
+        let waiter = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("deferred host write: unknown context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        waits.push(ResolvedHostWait {
+            waiter,
+            value: epoch.value,
+        });
+    }
+    let mut writes = Vec::with_capacity(s.deferred_host_writes.len());
+    for w in &s.deferred_host_writes {
+        let buf = state
+            .buffers
+            .get(&w.buffer)
+            .with_context(|| format!("deferred host write: invalid buffer handle {}", w.buffer))?;
+        anyhow::ensure!(
+            w.offset + w.data.len() as u64 <= buf.size,
+            "deferred host write exceeds buffer bounds (handle={})",
+            w.buffer
+        );
+        let ptr = buf.buffer.contents();
+        anyhow::ensure!(
+            !ptr.is_null(),
+            "deferred host write requires a host-visible buffer (handle={})",
+            w.buffer
+        );
+        writes.push(ResolvedDeferredWrite {
+            ptr: ptr as usize,
+            offset: w.offset,
+            data: std::sync::Arc::clone(&w.data),
+        });
+    }
+    Ok((waits, writes))
+}
+
+/// Apply the host-write sidecar for this submission (Metal analogue of the DX12/Vulkan
+/// `apply_host_sidecar_before_gpu` path). Runs on the submission worker thread, immediately
+/// before the command buffer is committed, so a not-yet-retired producer's CPU wait stalls
+/// the worker's queue rather than the render thread — the render thread can keep recording
+/// ahead while this wait (if any) resolves.
+///
+/// Metal buffers are `StorageModeShared`, so a refreshed CPU memcpy into `buffer.contents()`
+/// is read directly by the GPU when the command buffer executes — no upload→device copy or
+/// staging double-buffer is required. The write must happen *before* `commit()`, and only
+/// after any prior GPU reader of the target buffer has retired, which is what the
+/// `host_observed_waits` CPU waits enforce.
+pub(super) fn apply_resolved_host_writes(waits: &[ResolvedHostWait], writes: &[ResolvedDeferredWrite]) -> Result<()> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let _tz = tracy_zone!("goldy.submit_worker.mtl.apply_deferred_host_writes");
+    const HOST_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    for w in waits {
+        anyhow::ensure!(
+            w.waiter.wait_until(w.value, HOST_WAIT_TIMEOUT),
+            "deferred host write: host-observed wait timed out (value={})",
+            w.value
+        );
+    }
+    for w in writes {
+        unsafe {
+            std::ptr::copy_nonoverlapping(w.data.as_ptr(), (w.ptr as *mut u8).add(w.offset as usize), w.data.len());
+        }
+    }
+    Ok(())
+}
+
+fn buffer_stride_for_arg_index(
+    state: &MetalState,
+    device_handle: DeviceHandle,
+    index: u32,
+    cat: ResourceCategory,
+) -> Option<u32> {
     let expected_kind = match cat {
         ResourceCategory::Scattered => BufferKind::Scattered,
         ResourceCategory::Broadcast => BufferKind::Broadcast,
         _ => return None,
     };
-    state
-        .buffers
-        .values()
-        .find(|b| b.arg_buffer_index == index && b.access == expected_kind)
-        .and_then(|b| b.element_stride)
+    // Resolve via the live descriptor-registry owner for this bindless slot, not a scan
+    // of `state.buffers`. After slot recycle, stale buffers awaiting GPU deletion can
+    // still carry the same `arg_buffer_index`; `.find()` on the buffer table is
+    // ambiguous under parallel tests (and flaky under `GOLDY_VALIDATION=all`).
+    let ld = state.devices.get(&device_handle)?;
+    let registry = ld.descriptors.lock().unwrap();
+    let local_index = match expected_kind {
+        BufferKind::Scattered => index,
+        BufferKind::Broadcast => index.checked_sub(super::types::MAX_RESOURCES_PER_CATEGORY)?,
+    };
+    let handle = registry
+        .resource_registry
+        .buffer_indices
+        .iter()
+        .find(|(_, (slot, access))| *slot == local_index && *access == expected_kind)
+        .map(|(h, _)| *h)?;
+    state.buffers.get(&handle).and_then(|b| b.element_stride)
 }
 use ::metal as mtl;
 use anyhow::{Context, Result};
@@ -691,7 +815,7 @@ pub(super) fn record_commands_to_buffer(
                             raw_indices,
                             &pipeline.push_constant_categories,
                             &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_arg_index(state, idx, cat),
+                            |idx, cat| buffer_stride_for_arg_index(state, device_handle, idx, cat),
                             &pipeline.shader_debug_name,
                         )
                     })?;
@@ -1254,6 +1378,7 @@ pub(super) fn submit(
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
     encode_wait_for_epochs(state, command_buffer_ref, sync)?;
+    let (host_waits, host_writes) = resolve_deferred_host_writes(state, sync)?;
 
     // Reclaim and pre-stage all uploads before recording.
     let (belt_slices, texture_scratches, gpu_idle) = stage_uploads(state, ctx, device_handle, commands)?;
@@ -1298,6 +1423,8 @@ pub(super) fn submit(
         "compute",
         true,
         Some(compute_commit_instant),
+        host_waits,
+        host_writes,
     )?;
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
@@ -1401,6 +1528,7 @@ pub(super) fn submit_graph(
     };
     let command_buffer_ref = owned_command_buffer.as_ref();
     encode_wait_for_epochs(state, command_buffer_ref, sync)?;
+    let (host_waits, host_writes) = resolve_deferred_host_writes(state, sync)?;
 
     // Pre-pass: collect all compute commands across the entire graph into a flat
     // list, run the staging pre-pass once, then replay the graph using shared
@@ -1531,6 +1659,8 @@ pub(super) fn submit_graph(
         "graph",
         false,
         None,
+        host_waits,
+        host_writes,
     )?;
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.

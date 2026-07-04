@@ -48,6 +48,8 @@ struct MetalCommitPendingSubmit {
     log_kind: &'static str,
     api_log_commit: bool,
     compute_commit_instant: Option<Instant>,
+    host_waits: Vec<super::compute::ResolvedHostWait>,
+    host_writes: Vec<super::compute::ResolvedDeferredWrite>,
 }
 
 impl PendingSubmit for MetalCommitPendingSubmit {
@@ -55,6 +57,9 @@ impl PendingSubmit for MetalCommitPendingSubmit {
         let _tz = crate::tracy_zone!("goldy.submit_worker.mtl.commit", self.log_kind);
         let command_buffer_ref = self.command_buffer.as_ref();
         let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
+        // Host-write sidecar: any producer wait blocks this worker job, not the render
+        // thread, so recording of future frames can proceed while this resolves.
+        super::compute::apply_resolved_host_writes(&self.host_waits, &self.host_writes)?;
         if self.api_log_commit && super::api_log::enabled() {
             super::api_log::log_commit(self.signal_value);
         }
@@ -109,6 +114,7 @@ impl PendingSubmit for MetalCommitPendingSubmit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_metal_commit(
     ld: &SharedLogicalDevice,
     command_buffer: mtl::CommandBuffer,
@@ -119,6 +125,8 @@ pub(super) fn enqueue_metal_commit(
     log_kind: &'static str,
     api_log_commit: bool,
     compute_commit_instant: Option<Instant>,
+    host_waits: Vec<super::compute::ResolvedHostWait>,
+    host_writes: Vec<super::compute::ResolvedDeferredWrite>,
 ) -> Result<()> {
     ld.submission_worker.check_error()?;
     if let Some(ref sc_arc) = sc_arc {
@@ -135,6 +143,8 @@ pub(super) fn enqueue_metal_commit(
             log_kind,
             api_log_commit,
             compute_commit_instant,
+            host_waits,
+            host_writes,
         }),
     ) {
         Ok(()) => Ok(()),

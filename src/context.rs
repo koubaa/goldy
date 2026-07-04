@@ -187,8 +187,6 @@ impl Context {
 
     /// Latest GPU completion counter on this context's timeline.
     pub fn gpu_progress(&self) -> TimelineValue {
-        let _tz = crate::tracy_zone!("context.gpu_progress");
-        let _query = crate::tracy_zone!("context.gpu_progress.query");
         self.inner
             .timeline_reader
             .as_ref()
@@ -327,7 +325,6 @@ impl Context {
 
     /// Drain pending signals and service [`crate::signal::Signal::BoundaryCrossed`].
     pub fn poll_signals_and_service(&self) -> Vec<crate::signal::Signal> {
-        let _tz = crate::tracy_zone!("context.poll_signals_and_service");
         let signals = self.poll_signals();
         let latest_boundary = signals.iter().fold(None, |latest, signal| match signal {
             crate::signal::Signal::BoundaryCrossed { epoch } => Some(latest.unwrap_or(0).max(*epoch)),

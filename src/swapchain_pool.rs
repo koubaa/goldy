@@ -176,7 +176,7 @@ impl SwapchainPool {
     }
 
     /// Present easements whose WSI handoff has begun (after copy submit epoch).
-    pub fn presents_begun(&self) -> u64 {
+    pub fn presents_began(&self) -> u64 {
         self.inner.presents_begun.load(Ordering::Acquire)
     }
 
@@ -256,7 +256,7 @@ impl SwapchainPool {
     /// have begun WSI handoff — avoids blocking `Surface::begin()` on flip-index waits before
     /// the previous frame's present has started on TID_PRESENT.
     pub fn ready_for_acquire(&self, min_present_began: u64) -> bool {
-        if min_present_began > 0 && self.presents_begun() < min_present_began {
+        if min_present_began > 0 && self.presents_began() < min_present_began {
             return false;
         }
         !Self::rebuilding(&self.inner) && Self::has_acquire_capacity(&self.inner)
@@ -268,15 +268,39 @@ impl SwapchainPool {
     }
 
     /// Acquire and stash the next drawable when [`Self::ready_for_acquire`] is true.
-    pub fn try_early_acquire(&self, min_present_began: u64) -> Result<bool> {
+    ///
+    /// `ctx` is polled once before the `pending_acquire_count` gate below so a present's
+    /// completion handler (queued asynchronously off-thread) is reconciled into the atomic
+    /// counter before we read it. Without this, `pending_acquire_count` only gets drained
+    /// inside a *blocking* wait (see [`Self::wait_until_pending_below_inner`]), so this
+    /// non-blocking check can read a one-frame-stale "still in flight" value and skip a
+    /// stash it didn't need to — pushing the acquire onto the next frame's synchronous,
+    /// blocking `resolve_present_slot` path instead. That produces an every-other-frame
+    /// alternation between a cheap stash hit and a full blocking `nextDrawable` call.
+    ///
+    /// Only stash when no drawable is in flight, on every backend — including Metal.
+    ///
+    /// Tried relaxing this to a plain capacity check (`< depth`) on Metal so a second
+    /// drawable could be acquired while the first is still presenting: this made things
+    /// *worse* (~15ms/frame in `nextDrawable`). `CAMetalLayer.nextDrawable()` (with the
+    /// default `displaySyncEnabled`) is vsync-paced independent of `pending_acquire_count`
+    /// bookkeeping — it can block up to a full vsync interval regardless of nominal
+    /// capacity if called too soon after the previous acquire. This call site runs
+    /// eagerly, synchronously, on the render thread immediately after handing frame N's
+    /// present token to `TID_PRESENT` — essentially no wall-clock time has elapsed since
+    /// the prior acquire — so climbing to `pending == 2` here just moves the vsync stall
+    /// earlier and onto the render thread instead of avoiding it. Do not relax this gate
+    /// without also pacing the call (e.g. only attempting it after real CPU/GPU work has
+    /// elapsed, or moving it back to run after present has actually retired, as the now
+    /// removed `speculative_acquire_after_present` did on `TID_PRESENT`).
+    pub fn try_early_acquire(&self, ctx: &Context, min_present_began: u64) -> Result<bool> {
+        ctx.poll_signals_and_service();
         if !self.ready_for_acquire(min_present_began) {
             return Ok(false);
         }
         if Self::rebuilding(&self.inner) {
             return Ok(false);
         }
-        // Overlap stash only when no drawable is in flight; otherwise we climb to
-        // pending=2 and DXGI frame-latency wait blocks the next sync acquire.
         if self.pending_acquire_count() > 0 {
             return Ok(false);
         }
@@ -317,12 +341,37 @@ impl SwapchainPool {
 
     /// Block until the next submit can acquire without wedging DXGI frame latency.
     ///
-    /// When the submit path will take a stashed drawable, requires `effective < depth`.
-    /// When it must perform a synchronous acquire (no stash), requires all drawables
-    /// returned (`effective == 0`) so `Surface::begin()` does not block after saturation.
-    pub fn wait_for_submit_acquire(&self, ctx: &crate::Context, using_stash: bool) {
-        let threshold = if using_stash { self.depth() } else { 1 };
-        self.wait_until_pending_below(threshold, ctx);
+    /// When a drawable is already stashed, returns immediately. Otherwise requires all
+    /// drawables returned (`effective == 0`) before a blocking acquire. Re-checks stash
+    /// each iteration so a post-present acquire on `TID_PRESENT` unblocks a wait started
+    /// with `using_stash == false`.
+    pub fn wait_for_submit_acquire(&self, ctx: &crate::Context, _using_stash: bool) {
+        while !self.has_stashed_drawable() {
+            if Self::effective_pending_acquire_count(&self.inner) < 1 {
+                break;
+            }
+            // One poll iteration — do not call `wait_until_pending_below(1)` here; it
+            // blocks until pending==0 and cannot observe a stash landing at pending==2.
+            let return_fence = {
+                let surface = self.inner.surface.read().unwrap();
+                surface.peek_oldest_pending_swapchain_return()
+            };
+            if let Some(return_fence) = return_fence {
+                let _tz = crate::tracy_zone!("goldy.swapchain_pool.blocking_return_wait");
+                let surface = self.inner.surface.read().unwrap();
+                if let Err(e) = surface.blocking_wait_swapchain_return(ctx, return_fence) {
+                    tracing::warn!(
+                        target: "goldy::swapchain_pool",
+                        ?return_fence,
+                        error = %e,
+                        "blocking swapchain return wait failed; falling back to poll"
+                    );
+                }
+            } else {
+                std::thread::yield_now();
+            }
+            ctx.poll_signals_and_service();
+        }
     }
 
     /// Block until every acquired drawable has been returned (`pending_acquire_count == 0`).
@@ -498,6 +547,48 @@ impl SwapchainPool {
                 std::thread::yield_now();
             }
             ctx.poll_signals_and_service();
+        }
+    }
+
+    /// After present has been consumed on `TID_PRESENT`: try to acquire and stash the next
+    /// drawable for the following submit.
+    ///
+    /// Unlike [`Self::try_early_acquire`] (called from the render thread immediately after
+    /// dispatching the present token — before this frame's present has had any chance to
+    /// retire), this runs on `TID_PRESENT` *after* [`complete_scheduled_present`] for the
+    /// current frame, so real wall-clock time has elapsed and any vsync-paced block inside
+    /// `Surface::begin()` (e.g. `CAMetalLayer.nextDrawable()`, which blocks up to a full
+    /// vsync interval independent of nominal capacity) lands on the present thread — which
+    /// has nothing else to do until the next present token arrives — instead of stalling
+    /// the render thread's CPU work for frame N+1.
+    ///
+    /// Non-blocking on pool capacity: if `pending_acquire_count >= depth`, returns
+    /// immediately and the render thread falls back to a synchronous acquire on the next
+    /// submit. Never blocks on the capacity check itself — only the (possibly vsync-paced)
+    /// `acquire_slot` call below can block, and only once capacity is confirmed available.
+    pub(crate) fn try_acquire_after_present(pool: &Arc<SwapchainPoolInner>) {
+        let _tz = crate::tracy_zone!("goldy.swapchain_pool.acquire_after_present");
+        if Self::rebuilding(pool) {
+            return;
+        }
+        if !Self::has_acquire_capacity(pool) {
+            return;
+        }
+        match Self::acquire_slot(pool) {
+            Ok(slot) => {
+                if Self::rebuilding(pool) {
+                    slot.1.cancel();
+                    return;
+                }
+                Self::stash_drawable(pool, slot);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "goldy::swapchain_pool",
+                    error = %e,
+                    "post-present acquire skipped; submit will acquire synchronously"
+                );
+            }
         }
     }
 
