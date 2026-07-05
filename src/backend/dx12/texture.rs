@@ -474,6 +474,7 @@ pub(super) fn stage_texture_upload_region(
 }
 
 /// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn stage_copy_buffer_to_texture_upload(
     devices: &std::collections::HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
     textures: &std::collections::HashMap<TextureHandle, super::types::TextureState>,

@@ -651,6 +651,7 @@ impl Scheme {
     ///
     /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
     /// on a [`crate::types::BufferFlags::CPU_WRITABLE`] staging parcel before each [`Self::submit`].
+    #[allow(clippy::too_many_arguments)] // mirrors TaskGraph region + buffer offset parameters
     pub fn copy_buffer_to_texture_parcel(
         &mut self,
         src: &Parcel,
@@ -1000,7 +1001,7 @@ impl Scheme {
     /// retained submissions.
     ///
     /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    /// and stored on the returned [`Submission`] for [`Grant::consume`] via [`PresentGrant`].
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
         // Vulkan/DX12 retained partitions reuse a live command buffer — wait until the prior
         // submission retires before resubmitting to satisfy VUID-vkQueueSubmit2-commandBuffer-03875.

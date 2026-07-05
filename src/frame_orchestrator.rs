@@ -202,7 +202,7 @@ impl<T> FrameOrchestrator<T> {
     }
 
     /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
-    /// [`crate::PresentGrant::consume`].
+    /// [`crate::Grant::consume`] on a [`crate::PresentGrant`].
     ///
     /// Same retirement semantics as [`Self::end_frame_for_surface`]: pushes a ring slot
     /// whose timeline is filled later via [`Self::note_presented`], and does **not** emit a

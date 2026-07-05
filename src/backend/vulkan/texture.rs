@@ -1223,6 +1223,7 @@ pub(super) fn allocate_compute_texture_staging(
 }
 
 /// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn allocate_copy_buffer_to_texture_staging(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
