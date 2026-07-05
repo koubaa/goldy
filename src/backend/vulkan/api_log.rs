@@ -18,9 +18,7 @@ pub(super) fn configure_and_layer(entry: &Entry) -> Option<*const c_char> {
     let path = std::env::var("GOLDY_API_LOG").ok().filter(|s| !s.is_empty())?;
 
     if !path.ends_with(".json") {
-        tracing::warn!(
-            "GOLDY_API_LOG for Vulkan requires a `.json` path (got {path:?}); skipping api_dump"
-        );
+        tracing::warn!("GOLDY_API_LOG for Vulkan requires a `.json` path (got {path:?}); skipping api_dump");
         return None;
     }
 

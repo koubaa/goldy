@@ -2583,7 +2583,9 @@ fn scheme_commit_clear_parcel_full() {
         .expect("buf");
 
     let mut scheme = Scheme::new(&ctx);
-    scheme.commit_clear_parcel(&buf, 0, byte_size).expect("commit_clear_parcel");
+    scheme
+        .commit_clear_parcel(&buf, 0, byte_size)
+        .expect("commit_clear_parcel");
     let grant = scheme.grant_read(&buf).expect("grant_read");
     let frame = scheme.submit().expect("submit");
 
@@ -2626,13 +2628,19 @@ fn scheme_commit_clear_parcel_partial_preserves_edges() {
 
     let result = read_grant_u32(&grant, &frame, N);
     for i in 0..16 {
-        assert_eq!(result[i], 0xAAAA_AAAAu32, "edge[{i}] before clear region should be unchanged");
+        assert_eq!(
+            result[i], 0xAAAA_AAAAu32,
+            "edge[{i}] before clear region should be unchanged"
+        );
     }
     for i in 16..48 {
         assert_eq!(result[i], 0u32, "cleared region[{i}] should be zero");
     }
     for i in 48..64 {
-        assert_eq!(result[i], 0xCCCC_CCCCu32, "edge[{i}] after clear region should be unchanged");
+        assert_eq!(
+            result[i], 0xCCCC_CCCCu32,
+            "edge[{i}] after clear region should be unchanged"
+        );
     }
 }
 
@@ -2663,7 +2671,10 @@ fn scheme_commit_clear_parcel_size_zero_fills_to_end() {
         assert_eq!(result[i], init[i], "element {i} before offset should be unchanged");
     }
     for i in 16..64 {
-        assert_eq!(result[i], 0u32, "element {i} at or after offset should be zero (size=0 fill-to-end)");
+        assert_eq!(
+            result[i], 0u32,
+            "element {i} at or after offset should be zero (size=0 fill-to-end)"
+        );
     }
 }
 
@@ -2732,7 +2743,13 @@ fn scheme_copy_buffer_parcel_partial_with_offsets() {
         .acquire_buffer_with_data(&(0..N_SRC as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
         .expect("src");
     let dst = pool
-        .acquire_buffer((N_DST * 4) as u64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .acquire_buffer(
+            (N_DST * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
         .expect("dst");
 
     let mut scheme = Scheme::new(&ctx);
@@ -2756,7 +2773,14 @@ fn scheme_copy_buffer_parcel_rejects_texture_src() {
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let tex = pool
-        .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty(), None)
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
         .expect("tex");
     let buf = pool
         .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::empty(), None)
@@ -2777,7 +2801,14 @@ fn scheme_copy_buffer_parcel_rejects_texture_dst() {
         .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("buf");
     let tex = pool
-        .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty(), None)
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
         .expect("tex");
 
     let mut scheme = Scheme::new(&ctx);
@@ -2811,9 +2842,17 @@ fn scheme_copy_buffer_parcel_resubmit_does_not_rerecord() {
     // Second submit should be a clean resubmit.
     let frame2 = scheme.submit().expect("second submit");
 
-    assert_eq!(scheme.replay_stats().records, 1, "copy_buffer_parcel is identity; should record exactly once");
+    assert_eq!(
+        scheme.replay_stats().records,
+        1,
+        "copy_buffer_parcel is identity; should record exactly once"
+    );
     #[cfg(not(feature = "metal"))]
-    assert_eq!(scheme.replay_stats().resubmit_hits, 1, "second submit must be a retention hit");
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "second submit must be a retention hit"
+    );
 
     // Data should be correct on both frames.
     let result1 = read_grant_u32(&grant, &frame1, N);
@@ -2906,7 +2945,11 @@ fn scheme_cpu_writable_staging_update_each_frame() {
         assert_eq!(val, data2[i], "frame2 dst[{i}]");
     }
 
-    assert_eq!(scheme.replay_stats().records, 1, "CPU_WRITABLE staging: topology should record exactly once");
+    assert_eq!(
+        scheme.replay_stats().records,
+        1,
+        "CPU_WRITABLE staging: topology should record exactly once"
+    );
     #[cfg(not(feature = "metal"))]
     assert_eq!(scheme.replay_stats().resubmit_hits, 1, "frame2 must be a retention hit");
 }
@@ -3006,10 +3049,7 @@ fn scheme_commit_write_texture_marks_scheme_dirty() {
     scheme
         .commit_write_texture(&texture, vec![0u8; 4 * 4 * 4])
         .expect("first write");
-    assert!(
-        scheme.is_dirty(),
-        "scheme must be dirty after commit_write_texture"
-    );
+    assert!(scheme.is_dirty(), "scheme must be dirty after commit_write_texture");
     // Second write: scheme is already dirty, but adding another node keeps it dirty.
     scheme
         .commit_write_texture(&texture, vec![0u8; 4 * 4 * 4])
@@ -3254,7 +3294,14 @@ fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src() {
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     // Use a texture parcel (not a buffer) as the src — should error.
     let tex_parcel = pool
-        .acquire_texture(4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty(), None)
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
         .expect("tex_parcel");
 
     #[allow(deprecated)]
@@ -3271,7 +3318,10 @@ fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src() {
 
     let mut scheme = Scheme::new(&ctx);
     let result = scheme.copy_buffer_to_texture_parcel(&tex_parcel, 0, &dst_texture, 0, 0, 4, 4);
-    assert!(result.is_err(), "copy_buffer_to_texture_parcel should reject a texture parcel as src");
+    assert!(
+        result.is_err(),
+        "copy_buffer_to_texture_parcel should reject a texture parcel as src"
+    );
 }
 
 #[test]
@@ -3316,5 +3366,9 @@ fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
         "copy_buffer_to_texture_parcel is identity; should record exactly once"
     );
     #[cfg(not(feature = "metal"))]
-    assert_eq!(scheme.replay_stats().resubmit_hits, 1, "second submit must be a retention hit");
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "second submit must be a retention hit"
+    );
 }
