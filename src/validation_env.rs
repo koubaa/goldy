@@ -16,6 +16,8 @@
 //! - `GOLDY_VALIDATION=1|true|yes` (no list) — **GPU API only** (does not turn on layout checks,
 //!   so hot-path layout validation stays opt-in). For everything, use **`GOLDY_VALIDATION=all`**
 //!   or **`GOLDY_VALIDATION=layout,api`**.
+//! - `GOLDY_DISABLE_CB_REUSE=1|true|yes` — re-record command buffers every submit instead of
+//!   resubmitting retained ones (scheme/task-graph and frame-orchestrator paths).
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct ParsedValidation {
@@ -107,6 +109,14 @@ pub(crate) fn timeline_validation_enabled() -> bool {
 #[must_use]
 pub(crate) fn scheme_validation_enabled() -> bool {
     from_goldy_validation_var().scheme
+}
+
+/// When true, skip retained command-buffer resubmit and re-record every submission instead.
+///
+/// Set `GOLDY_DISABLE_CB_REUSE=1` (or `true` / `yes`).
+#[must_use]
+pub(crate) fn retained_cb_reuse_disabled() -> bool {
+    env_truthy("GOLDY_DISABLE_CB_REUSE")
 }
 
 #[cfg(test)]

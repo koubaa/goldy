@@ -283,6 +283,9 @@ fn backend_try_resubmit_retained(
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
     let _tz = crate::tracy_zone!("goldy.backend_try_resubmit_retained");
+    if crate::validation_env::retained_cb_reuse_disabled() {
+        return Ok(None);
+    }
     // Prologue is baked into the retained body; only cross-context waits are live.
     backend.try_resubmit_retained(ctx, key, submit_sync_waits_only(sync).as_ref())
 }
