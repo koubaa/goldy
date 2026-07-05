@@ -16,7 +16,8 @@ use anyhow::anyhow;
 use std::collections::VecDeque;
 
 /// Token returned from [`FrameOrchestrator::begin_frame`]; must be passed to
-/// [`FrameOrchestrator::flush`], [`FrameOrchestrator::end_frame_standalone`], or
+/// [`FrameOrchestrator::flush`], [`FrameOrchestrator::end_frame_standalone`],
+/// [`FrameOrchestrator::end_frame_for_present`], or
 /// [`FrameOrchestrator::end_frame_for_surface`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameHandle(pub(crate) u64);
@@ -40,7 +41,7 @@ struct FrameSlot<T> {
 /// Typical use:
 /// 1. [`Self::begin_frame`] (with retire closure)  
 /// 2. Record dispatch into one or more [`TaskGraph`]s; call [`Self::flush`] for mid-frame submits.  
-/// 3. [`Self::end_frame_standalone`] or [`Self::end_frame_for_surface`].  
+/// 3. [`Self::end_frame_standalone`], [`Self::end_frame_for_present`], or [`Self::end_frame_for_surface`].  
 /// 4. For swapchain frames, [`Self::note_presented`] after [`Frame::present`].
 pub struct FrameOrchestrator<T> {
     context: Context,
@@ -198,6 +199,28 @@ impl<T> FrameOrchestrator<T> {
         self.open = None;
         tracy_frame_mark!();
         Ok(tv)
+    }
+
+    /// End a frame whose scanout is deferred to [`crate::surface::Frame::present`] or
+    /// [`crate::Grant::consume`] on a [`crate::PresentGrant`].
+    ///
+    /// Same retirement semantics as [`Self::end_frame_for_surface`]: pushes a ring slot
+    /// whose timeline is filled later via [`Self::note_presented`], and does **not** emit a
+    /// Tracy frame mark (the mark belongs at present time, like the TaskGraph surface path).
+    pub fn end_frame_for_present(
+        &mut self,
+        handle: FrameHandle,
+        submit_timeline: TimelineValue,
+        cleanup: T,
+    ) -> Result<TimelineValue, GoldyError> {
+        let _tz = tracy_zone!("orchestrator.end_frame_for_present");
+        self.expect_open(handle)?;
+        self.ring.push_back(FrameSlot {
+            timeline: None,
+            data: cleanup,
+        });
+        self.open = None;
+        Ok(submit_timeline)
     }
 
     /// Submit `graph`, using command-buffer retention when [`Self::retains_command_buffers`].

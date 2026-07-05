@@ -1261,7 +1261,9 @@ fn record_gpu_command(
                 }
             }
         }
-        GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+        GpuCommand::WriteTexture { .. }
+        | GpuCommand::WriteTextureRegion { .. }
+        | GpuCommand::CopyBufferToTexture { .. } => {
             let _tz = tracy_zone!("dx12.write_texture");
             let upload = ctx
                 .staged_texture_uploads
@@ -1365,22 +1367,43 @@ fn record_gpu_command(
             src,
             src_offset,
             dst,
+            dst_offset,
             size,
         } => {
             let _tz = tracy_zone!("dx12.copy_buffer");
-            let (src_resource, dst_resource) = {
+            let (src_resource, dst_resource, src_off, dst_off, src_is_upload) = {
                 let src_buf = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                 let dst_buf = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                if src_offset.saturating_add(*size) > src_buf.size || *size > dst_buf.size {
+                if src_offset.saturating_add(*size) > src_buf.size || dst_offset.saturating_add(*size) > dst_buf.size {
                     anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                 }
-                (src_buf.resource.clone(), dst_buf.resource.clone())
+                let src_is_upload = src_buf.flags.contains(crate::types::BufferFlags::CPU_WRITABLE);
+                let src_resource = if src_is_upload {
+                    src_buf
+                        .upload_buffer
+                        .clone()
+                        .context("CopyBuffer: CPU_WRITABLE src missing upload buffer")?
+                } else {
+                    src_buf.resource.clone()
+                };
+                (
+                    src_resource,
+                    dst_buf.resource.clone(),
+                    *src_offset,
+                    *dst_offset,
+                    src_is_upload,
+                )
+            };
+            let src_access_before = if src_is_upload {
+                D3D12_BARRIER_ACCESS_COPY_SOURCE
+            } else {
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
             };
             if ctx.use_global_buffer_barriers {
                 let pre = D3D12_GLOBAL_BARRIER {
                     SyncBefore: D3D12_BARRIER_SYNC_ALL,
                     SyncAfter: D3D12_BARRIER_SYNC_COPY,
-                    AccessBefore: D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    AccessBefore: src_access_before,
                     AccessAfter: D3D12_BARRIER_ACCESS_COPY_SOURCE,
                 };
                 unsafe { barriers::barrier_globals(cl7, &[pre]) };
@@ -1389,7 +1412,7 @@ fn record_gpu_command(
                     &src_resource,
                     D3D12_BARRIER_SYNC_ALL,
                     D3D12_BARRIER_SYNC_COPY,
-                    D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                    src_access_before,
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
                 )];
                 unsafe {
@@ -1397,7 +1420,7 @@ fn record_gpu_command(
                     barriers::drop_buffer_barriers(&mut b_to_copy);
                 }
             }
-            unsafe { cl.CopyBufferRegion(&dst_resource, 0, &src_resource, *src_offset, *size) };
+            unsafe { cl.CopyBufferRegion(&dst_resource, dst_off, &src_resource, src_off, *size) };
         }
         GpuCommand::CopyTextureToReadback { src, dst, layout } => {
             let _tz = tracy_zone!("dx12.copy_texture_to_readback");
@@ -1735,7 +1758,10 @@ pub(super) fn submit(
     let has_upload = commands.iter().any(|c| {
         matches!(
             c,
-            GpuCommand::WriteBuffer { .. } | GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
+            GpuCommand::WriteBuffer { .. }
+                | GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+                | GpuCommand::CopyBufferToTexture { .. }
         )
     });
     if has_upload {
@@ -1823,6 +1849,29 @@ pub(super) fn submit(
                             height: *height,
                             data: data.as_ref(),
                         },
+                    )?);
+                }
+                GpuCommand::CopyBufferToTexture {
+                    src,
+                    src_offset,
+                    dst,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    staged_texture_uploads.push(super::texture::stage_copy_buffer_to_texture_upload(
+                        &state.devices,
+                        &state.textures,
+                        &state.buffers,
+                        &mut pool,
+                        *src,
+                        *src_offset,
+                        *dst,
+                        *x,
+                        *y,
+                        *width,
+                        *height,
                     )?);
                 }
                 _ => {}
@@ -1973,6 +2022,7 @@ pub(super) fn submit_graph(
                 GpuCommand::WriteBuffer { .. }
                     | GpuCommand::WriteTexture { .. }
                     | GpuCommand::WriteTextureRegion { .. }
+                    | GpuCommand::CopyBufferToTexture { .. }
             )
         )
     });
@@ -2061,6 +2111,29 @@ pub(super) fn submit_graph(
                                 height: *height,
                                 data,
                             },
+                        )?);
+                    }
+                    GpuCommand::CopyBufferToTexture {
+                        src,
+                        src_offset,
+                        dst,
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        staged_texture_uploads.push(super::texture::stage_copy_buffer_to_texture_upload(
+                            &state.devices,
+                            &state.textures,
+                            &state.buffers,
+                            &mut pool,
+                            *src,
+                            *src_offset,
+                            *dst,
+                            *x,
+                            *y,
+                            *width,
+                            *height,
                         )?);
                     }
                     _ => {}

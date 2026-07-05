@@ -401,8 +401,10 @@ pub(super) fn acquire(
     let goldy_format = dxgi_to_format(dxgi_format).unwrap_or(TextureFormat::Bgra8Unorm);
     let idx = image_index as usize;
 
-    let tex_handle =
-        ensure_compute_scratch_texture(state, surface_handle, idx, width, height, goldy_format, device_handle)?;
+    let tex_handle = {
+        let _tz = crate::tracy_zone!("surface.acquire.ensure_scratch");
+        ensure_compute_scratch_texture(state, surface_handle, idx, width, height, goldy_format, device_handle)?
+    };
 
     {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
@@ -730,6 +732,7 @@ pub(super) fn present(
         // fence_value was stored in frame_sync[current_frame].fence_value by
         // surface::render; acquire() waits for it on the next cycle through this slot.
     } else {
+        let _tz = crate::tracy_zone!("dx12.present.copy_to_backbuffer");
         let logical_device = state
             .devices
             .get(&device_handle)
@@ -828,15 +831,19 @@ pub(super) fn present(
     }
 
     // Present
-    let surface = state.surfaces.get_mut(&surface_handle).unwrap();
-    let (sync_interval, present_flags) = present_args(surface.present_mode, state.allow_tearing);
-    let hr = unsafe { surface.swapchain.Present(sync_interval, present_flags) };
-    if hr.is_err() {
-        anyhow::bail!("Present failed with HRESULT: {:?}", hr);
+    {
+        let _tz = crate::tracy_zone!("dx12.present.swapchain_present");
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
+        let (sync_interval, present_flags) = present_args(surface.present_mode, state.allow_tearing);
+        let hr = unsafe { surface.swapchain.Present(sync_interval, present_flags) };
+        if hr.is_err() {
+            anyhow::bail!("Present failed with HRESULT: {:?}", hr);
+        }
     }
 
     // Advance frame
     let (return_fence, return_image) = {
+        let surface = state.surfaces.get_mut(&surface_handle).unwrap();
         let fence_val = surface.frame_sync[current_frame].fence_value;
         let img = surface.current_image_index.unwrap_or(_image_index as u32);
         surface.current_image_index = None;

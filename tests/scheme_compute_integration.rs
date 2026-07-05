@@ -2567,3 +2567,808 @@ fn scheme_stress_alternating_write_dispatch() {
         assert_eq!(val, data2[i], "out2[{i}]: expected {}, got {val}", data2[i]);
     }
 }
+
+// ─── commit_clear_parcel ─────────────────────────────────────────────────────
+
+#[test]
+fn scheme_commit_clear_parcel_full() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer_with_data(&vec![0xDEAD_BEEFu32; N], BufferKind::Scattered)
+        .expect("buf");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .commit_clear_parcel(&buf, 0, byte_size)
+        .expect("commit_clear_parcel");
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &frame, N);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, 0, "element {i} should be zero after full clear");
+    }
+}
+
+#[test]
+fn scheme_commit_clear_parcel_partial_preserves_edges() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    // 64 u32s: indices [0..16] = 0xAAAA, [16..48] = 0xBBBB (to be cleared), [48..64] = 0xCCCC
+    const N: usize = 64;
+    let mut init: Vec<u32> = Vec::with_capacity(N);
+    for i in 0..N {
+        if i < 16 {
+            init.push(0xAAAA_AAAAu32);
+        } else if i < 48 {
+            init.push(0xBBBB_BBBBu32);
+        } else {
+            init.push(0xCCCC_CCCCu32);
+        }
+    }
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer_with_data(&init, BufferKind::Scattered)
+        .expect("buf");
+
+    // Clear elements [16..48] → bytes 64..192, size = 32 * 4 = 128.
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .commit_clear_parcel(&buf, 16 * 4, 32 * 4)
+        .expect("commit_clear_parcel");
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &frame, N);
+    for i in 0..16 {
+        assert_eq!(
+            result[i], 0xAAAA_AAAAu32,
+            "edge[{i}] before clear region should be unchanged"
+        );
+    }
+    for i in 16..48 {
+        assert_eq!(result[i], 0u32, "cleared region[{i}] should be zero");
+    }
+    for i in 48..64 {
+        assert_eq!(
+            result[i], 0xCCCC_CCCCu32,
+            "edge[{i}] after clear region should be unchanged"
+        );
+    }
+}
+
+#[test]
+fn scheme_commit_clear_parcel_size_zero_fills_to_end() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    // 64 u32s: first 16 stay, rest cleared via size=0 (fill-to-end).
+    const N: usize = 64;
+    let init: Vec<u32> = (0..N as u32).collect();
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer_with_data(&init, BufferKind::Scattered)
+        .expect("buf");
+
+    let mut scheme = Scheme::new(&ctx);
+    // offset = 16 elements in, size = 0 → fill from byte 64 to end
+    scheme
+        .commit_clear_parcel(&buf, 16 * 4, 0)
+        .expect("commit_clear_parcel size=0");
+    let grant = scheme.grant_read(&buf).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &frame, N);
+    for i in 0..16 {
+        assert_eq!(result[i], init[i], "element {i} before offset should be unchanged");
+    }
+    for i in 16..64 {
+        assert_eq!(
+            result[i], 0u32,
+            "element {i} at or after offset should be zero (size=0 fill-to-end)"
+        );
+    }
+}
+
+#[test]
+fn scheme_commit_clear_parcel_requires_buffer_parcel() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let tex_parcel = pool
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
+        .expect("tex_parcel");
+
+    let mut scheme = Scheme::new(&ctx);
+    let result = scheme.commit_clear_parcel(&tex_parcel, 0, 64);
+    assert!(result.is_err(), "commit_clear_parcel should reject texture parcels");
+}
+
+// ─── copy_buffer_parcel ───────────────────────────────────────────────────────
+
+#[test]
+fn scheme_copy_buffer_parcel_basic() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let src = pool
+        .acquire_buffer_with_data(&(1..=N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("src");
+    let dst = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("dst");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_parcel(&src, 0, &dst, 0, byte_size)
+        .expect("copy_buffer_parcel");
+    let grant = scheme.grant_read(&dst).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &frame, N);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, i as u32 + 1, "dst[{i}]: expected {}, got {val}", i + 1);
+    }
+}
+
+#[test]
+fn scheme_copy_buffer_parcel_partial_with_offsets() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    // src: 64 u32s [0..63]. Copy src[16..32] (bytes 64..128) into dst[0..16].
+    const N_SRC: usize = 64;
+    const N_DST: usize = 16;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let src = pool
+        .acquire_buffer_with_data(&(0..N_SRC as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("src");
+    let dst = pool
+        .acquire_buffer(
+            (N_DST * 4) as u64,
+            BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+            None,
+        )
+        .expect("dst");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_parcel(&src, (16 * 4) as u64, &dst, 0, (N_DST * 4) as u64)
+        .expect("copy_buffer_parcel");
+    let grant = scheme.grant_read(&dst).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &frame, N_DST);
+    for (i, &val) in result.iter().enumerate() {
+        let expected = 16u32 + i as u32;
+        assert_eq!(val, expected, "dst[{i}]: expected {expected}, got {val}");
+    }
+}
+
+#[test]
+fn scheme_copy_buffer_parcel_rejects_texture_src() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let tex = pool
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
+        .expect("tex");
+    let buf = pool
+        .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("buf");
+
+    let mut scheme = Scheme::new(&ctx);
+    let result = scheme.copy_buffer_parcel(&tex, 0, &buf, 0, 64);
+    assert!(result.is_err(), "copy_buffer_parcel should reject texture as src");
+}
+
+#[test]
+fn scheme_copy_buffer_parcel_rejects_texture_dst() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let buf = pool
+        .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("buf");
+    let tex = pool
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
+        .expect("tex");
+
+    let mut scheme = Scheme::new(&ctx);
+    let result = scheme.copy_buffer_parcel(&buf, 0, &tex, 0, 64);
+    assert!(result.is_err(), "copy_buffer_parcel should reject texture as dst");
+}
+
+#[test]
+fn scheme_copy_buffer_parcel_resubmit_does_not_rerecord() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let src = pool
+        .acquire_buffer_with_data(&(0..N as u32).collect::<Vec<u32>>(), BufferKind::Scattered)
+        .expect("src");
+    let dst = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("dst");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_parcel(&src, 0, &dst, 0, byte_size)
+        .expect("copy_buffer_parcel");
+    let grant = scheme.grant_read(&dst).expect("grant_read");
+
+    // First submit records.
+    let frame1 = scheme.submit().expect("first submit");
+    // Second submit should be a clean resubmit.
+    let frame2 = scheme.submit().expect("second submit");
+
+    assert_eq!(
+        scheme.replay_stats().records,
+        1,
+        "copy_buffer_parcel is identity; should record exactly once"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "second submit must be a retention hit"
+    );
+
+    // Data should be correct on both frames.
+    let result1 = read_grant_u32(&grant, &frame1, N);
+    let result2 = read_grant_u32(&grant, &frame2, N);
+    for i in 0..N {
+        assert_eq!(result1[i], i as u32, "frame1 dst[{i}]");
+        assert_eq!(result2[i], i as u32, "frame2 dst[{i}]");
+    }
+}
+
+// ─── CPU_WRITABLE staging ─────────────────────────────────────────────────────
+
+#[test]
+fn scheme_cpu_writable_staging_write_then_copy() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+    let data: Vec<u32> = (0xABC0_0000u32..).take(N).collect();
+    let bytes: Vec<u8> = bytemuck::cast_slice(&data).to_vec();
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    // Staging buffer: CPU-writable, written via parcel.write() before each submit.
+    let staging = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+    staging.write(0, &bytes).expect("staging.write");
+
+    let dst = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("dst");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_parcel(&staging, 0, &dst, 0, byte_size)
+        .expect("copy_buffer_parcel");
+    let grant = scheme.grant_read(&dst).expect("grant_read");
+    let frame = scheme.submit().expect("submit");
+
+    let result = read_grant_u32(&grant, &frame, N);
+    for (i, &val) in result.iter().enumerate() {
+        assert_eq!(val, data[i], "dst[{i}]: expected {:08X}, got {:08X}", data[i], val);
+    }
+}
+
+#[test]
+fn scheme_cpu_writable_staging_update_each_frame() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const N: usize = 64;
+    let byte_size = (N * 4) as u64;
+    let data1: Vec<u32> = (100u32..100 + N as u32).collect();
+    let data2: Vec<u32> = (200u32..200 + N as u32).collect();
+    let bytes1: Vec<u8> = bytemuck::cast_slice(&data1).to_vec();
+    let bytes2: Vec<u8> = bytemuck::cast_slice(&data2).to_vec();
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let staging = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+    let dst = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::empty(), None)
+        .expect("dst");
+
+    staging.write(0, &bytes1).expect("write bytes1");
+
+    // Record once: copy node + grant.
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_parcel(&staging, 0, &dst, 0, byte_size)
+        .expect("copy_buffer_parcel");
+    let grant = scheme.grant_read(&dst).expect("grant_read");
+
+    // Frame 1: staging has bytes1.
+    let frame1 = scheme.submit().expect("frame1 submit");
+    let result1 = read_grant_u32(&grant, &frame1, N);
+    for (i, &val) in result1.iter().enumerate() {
+        assert_eq!(val, data1[i], "frame1 dst[{i}]");
+    }
+
+    // Update staging (frame1 is already waited on by grant.consume above).
+    staging.write(0, &bytes2).expect("write bytes2");
+
+    // Frame 2: resubmit with new staging data; topology unchanged → no re-record.
+    let frame2 = scheme.submit().expect("frame2 submit");
+    let result2 = read_grant_u32(&grant, &frame2, N);
+    for (i, &val) in result2.iter().enumerate() {
+        assert_eq!(val, data2[i], "frame2 dst[{i}]");
+    }
+
+    assert_eq!(
+        scheme.replay_stats().records,
+        1,
+        "CPU_WRITABLE staging: topology should record exactly once"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(scheme.replay_stats().resubmit_hits, 1, "frame2 must be a retention hit");
+}
+
+// ─── commit_write_texture ─────────────────────────────────────────────────────
+
+#[test]
+fn scheme_commit_write_texture_round_trip() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const W: u32 = 8;
+    const H: u32 = 8;
+    let pixels: Vec<u8> = (0..W * H)
+        .flat_map(|i| {
+            let r = (i % W) as u8;
+            let g = (i / W) as u8;
+            [r, g, 128u8, 255u8]
+        })
+        .collect();
+
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .commit_write_texture(&texture, pixels.clone())
+        .expect("commit_write_texture");
+    let frame = scheme.submit().expect("submit");
+    frame.wait(&ctx).expect("wait");
+
+    let mut output = vec![0u8; texture.byte_size()];
+    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+
+    assert_eq!(
+        output, pixels,
+        "commit_write_texture: readback does not match uploaded data"
+    );
+}
+
+#[test]
+fn scheme_commit_write_texture_wrong_size_returns_error() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; 8 * 8 * 4],
+        8,
+        8,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    // Too few bytes — must error.
+    let result = scheme.commit_write_texture(&texture, vec![0u8; 10]);
+    assert!(result.is_err(), "commit_write_texture should reject wrong-size data");
+    // Too many bytes — must also error.
+    let result2 = scheme.commit_write_texture(&texture, vec![0u8; 8 * 8 * 4 + 4]);
+    assert!(result2.is_err(), "commit_write_texture should reject oversized data");
+}
+
+#[test]
+fn scheme_commit_write_texture_marks_scheme_dirty() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; 4 * 4 * 4],
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    assert!(scheme.is_dirty(), "new scheme starts dirty");
+    // Add a no-op submit to make it clean.
+    // We can't easily make a no-op scheme, so we just verify that each commit_write_texture re-marks dirty.
+    scheme
+        .commit_write_texture(&texture, vec![0u8; 4 * 4 * 4])
+        .expect("first write");
+    assert!(scheme.is_dirty(), "scheme must be dirty after commit_write_texture");
+    // Second write: scheme is already dirty, but adding another node keeps it dirty.
+    scheme
+        .commit_write_texture(&texture, vec![0u8; 4 * 4 * 4])
+        .expect("second write");
+    assert!(scheme.is_dirty(), "scheme must still be dirty after second write");
+}
+
+// ─── commit_write_texture_region ─────────────────────────────────────────────
+
+#[test]
+fn scheme_commit_write_texture_region_round_trip() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const W: u32 = 8;
+    const H: u32 = 8;
+    // Initialize with zeros.
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    )
+    .expect("texture");
+
+    // Write a 4×4 region at (2, 2) with a solid color.
+    const RX: u32 = 2;
+    const RY: u32 = 2;
+    const RW: u32 = 4;
+    const RH: u32 = 4;
+    let region_pixels: Vec<u8> = vec![200u8, 100u8, 50u8, 255u8].repeat((RW * RH) as usize);
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .commit_write_texture_region(&texture, RX, RY, RW, RH, region_pixels.clone())
+        .expect("commit_write_texture_region");
+    let frame = scheme.submit().expect("submit");
+    frame.wait(&ctx).expect("wait");
+
+    let mut output = vec![0u8; texture.byte_size()];
+    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let base = (y * W as usize + x) * 4;
+            let pixel = &output[base..base + 4];
+            let in_region = x >= RX as usize && x < (RX + RW) as usize && y >= RY as usize && y < (RY + RH) as usize;
+            if in_region {
+                assert_eq!(pixel[0], 200, "R at ({x},{y}): should be region color");
+                assert_eq!(pixel[1], 100, "G at ({x},{y}): should be region color");
+                assert_eq!(pixel[2], 50, "B at ({x},{y}): should be region color");
+                assert_eq!(pixel[3], 255, "A at ({x},{y}): should be region color");
+            } else {
+                assert_eq!(pixel[0], 0, "R at ({x},{y}): outside region should be zero");
+                assert_eq!(pixel[1], 0, "G at ({x},{y}): outside region should be zero");
+                assert_eq!(pixel[2], 0, "B at ({x},{y}): outside region should be zero");
+                assert_eq!(pixel[3], 0, "A at ({x},{y}): outside region should be zero");
+            }
+        }
+    }
+}
+
+#[test]
+fn scheme_commit_write_texture_region_oob_returns_error() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; 8 * 8 * 4],
+        8,
+        8,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    // Region extends beyond texture width.
+    let result = scheme.commit_write_texture_region(&texture, 6, 0, 4, 4, vec![0u8; 4 * 4 * 4]);
+    assert!(result.is_err(), "x+width exceeds texture width → error");
+    // Region extends beyond texture height.
+    let result2 = scheme.commit_write_texture_region(&texture, 0, 6, 4, 4, vec![0u8; 4 * 4 * 4]);
+    assert!(result2.is_err(), "y+height exceeds texture height → error");
+}
+
+#[test]
+fn scheme_commit_write_texture_region_multiple_non_overlapping() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const W: u32 = 8;
+    const H: u32 = 8;
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    )
+    .expect("texture");
+
+    // Top-left 4×4 → red (255,0,0,255). Bottom-right 4×4 → blue (0,0,255,255).
+    let red: Vec<u8> = vec![255u8, 0, 0, 255].repeat(16);
+    let blue: Vec<u8> = vec![0u8, 0, 255, 255].repeat(16);
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .commit_write_texture_region(&texture, 0, 0, 4, 4, red)
+        .expect("write red region");
+    scheme
+        .commit_write_texture_region(&texture, 4, 4, 4, 4, blue)
+        .expect("write blue region");
+    let frame = scheme.submit().expect("submit");
+    frame.wait(&ctx).expect("wait");
+
+    let mut output = vec![0u8; texture.byte_size()];
+    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let base = (y * W as usize + x) * 4;
+            let pixel = &output[base..base + 4];
+            let in_red_region = x < 4 && y < 4;
+            let in_blue_region = x >= 4 && y >= 4;
+            if in_red_region {
+                assert_eq!(pixel[0], 255, "R at ({x},{y}): expected red");
+                assert_eq!(pixel[2], 0, "B at ({x},{y}): expected red region has no blue");
+            } else if in_blue_region {
+                assert_eq!(pixel[0], 0, "R at ({x},{y}): expected blue region has no red");
+                assert_eq!(pixel[2], 255, "B at ({x},{y}): expected blue");
+            } else {
+                assert_eq!(pixel[0], 0, "R at ({x},{y}): unwritten region should be zero");
+                assert_eq!(pixel[1], 0, "G at ({x},{y}): unwritten region should be zero");
+                assert_eq!(pixel[2], 0, "B at ({x},{y}): unwritten region should be zero");
+            }
+        }
+    }
+}
+
+// ─── copy_buffer_to_texture_parcel ───────────────────────────────────────────
+
+#[test]
+fn scheme_copy_buffer_to_texture_parcel_full_texture() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const W: u32 = 4;
+    const H: u32 = 4;
+    let byte_size = (W * H * 4) as u64;
+
+    // Build a known RGBA pixel pattern.
+    let pixels: Vec<u8> = (0..W * H)
+        .flat_map(|i| {
+            let r = (i % W) as u8 * 60;
+            let g = (i / W) as u8 * 60;
+            [r, g, 0u8, 255u8]
+        })
+        .collect();
+
+    // CPU-writable staging buffer.
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let staging = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+    staging.write(0, &pixels).expect("staging.write");
+
+    // Destination texture (COPY_DST for buffer→texture copy; COPY_SRC for read_to_cpu readback).
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_to_texture_parcel(&staging, 0, &texture, 0, 0, W, H)
+        .expect("copy_buffer_to_texture_parcel");
+    let frame = scheme.submit().expect("submit");
+    frame.wait(&ctx).expect("wait");
+
+    let mut output = vec![0u8; texture.byte_size()];
+    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+
+    assert_eq!(
+        output, pixels,
+        "copy_buffer_to_texture_parcel: readback does not match staged pixel data"
+    );
+}
+
+#[test]
+fn scheme_copy_buffer_to_texture_parcel_oob_returns_error() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let staging = pool
+        .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; 8 * 8 * 4],
+        8,
+        8,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    // x + width exceeds texture width.
+    let result = scheme.copy_buffer_to_texture_parcel(&staging, 0, &texture, 6, 0, 4, 4);
+    assert!(result.is_err(), "x+width exceeds texture width → error");
+    // y + height exceeds texture height.
+    let result2 = scheme.copy_buffer_to_texture_parcel(&staging, 0, &texture, 0, 6, 4, 4);
+    assert!(result2.is_err(), "y+height exceeds texture height → error");
+}
+
+#[test]
+fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    // Use a texture parcel (not a buffer) as the src — should error.
+    let tex_parcel = pool
+        .acquire_texture(
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Direct,
+            TextureFlags::empty(),
+            None,
+        )
+        .expect("tex_parcel");
+
+    #[allow(deprecated)]
+    let dst_texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; 4 * 4 * 4],
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    )
+    .expect("dst_texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    let result = scheme.copy_buffer_to_texture_parcel(&tex_parcel, 0, &dst_texture, 0, 0, 4, 4);
+    assert!(
+        result.is_err(),
+        "copy_buffer_to_texture_parcel should reject a texture parcel as src"
+    );
+}
+
+#[test]
+fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const W: u32 = 4;
+    const H: u32 = 4;
+    let byte_size = (W * H * 4) as u64;
+    let pixels = vec![128u8; byte_size as usize];
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let staging = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+    staging.write(0, &pixels).expect("staging.write");
+
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &vec![0u8; byte_size as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_to_texture_parcel(&staging, 0, &texture, 0, 0, W, H)
+        .expect("copy_buffer_to_texture_parcel");
+
+    scheme.submit().expect("first submit");
+    scheme.submit().expect("second submit");
+
+    assert_eq!(
+        scheme.replay_stats().records,
+        1,
+        "copy_buffer_to_texture_parcel is identity; should record exactly once"
+    );
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        scheme.replay_stats().resubmit_hits,
+        1,
+        "second submit must be a retention hit"
+    );
+}

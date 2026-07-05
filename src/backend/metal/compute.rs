@@ -621,6 +621,54 @@ pub(super) fn record_commands_to_buffer(
                     mtl::MTLBlitOption::empty(),
                 );
             }
+            GpuCommand::CopyBufferToTexture {
+                dst: tex_handle,
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                let tex_state = state
+                    .textures
+                    .get(tex_handle)
+                    .context("CopyBufferToTexture: invalid texture handle")?;
+                anyhow::ensure!(
+                    *x + *width <= tex_state.width && *y + *height <= tex_state.height,
+                    "CopyBufferToTexture: region out of bounds"
+                );
+                let bpp = tex_state.format.bytes_per_pixel();
+                let expected = (*width as usize) * (*height as usize) * (bpp as usize);
+                if expected == 0 {
+                    continue;
+                }
+                ensure_blit_tex!(*tex_handle);
+                let scratch = texture_scratches
+                    .get(*tex_idx)
+                    .context("CopyBufferToTexture: texture_scratches index out of range")?;
+                *tex_idx += 1;
+                let bytes_per_row = (*width as u64) * (bpp as u64);
+                guard.blit.unwrap().copy_from_buffer_to_texture(
+                    &scratch.buffer,
+                    0,
+                    bytes_per_row,
+                    0,
+                    MTLSize {
+                        width: *width as u64,
+                        height: *height as u64,
+                        depth: 1,
+                    },
+                    &tex_state.texture,
+                    0,
+                    0,
+                    MTLOrigin {
+                        x: *x as u64,
+                        y: *y as u64,
+                        z: 0,
+                    },
+                    mtl::MTLBlitOption::empty(),
+                );
+            }
             GpuCommand::SetPipeline(handle) => {
                 ensure_compute!();
                 if let Some(pipeline) = state.compute_pipelines.get(handle) {
@@ -801,6 +849,7 @@ pub(super) fn record_commands_to_buffer(
                 src,
                 src_offset,
                 dst,
+                dst_offset,
                 size,
             } => {
                 ensure_blit_buf!(*src);
@@ -808,7 +857,9 @@ pub(super) fn record_commands_to_buffer(
                 let (src_mtl, dst_mtl) = {
                     let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                     let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                    if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
+                    if src_offset.saturating_add(*size) > src_state.size
+                        || dst_offset.saturating_add(*size) > dst_state.size
+                    {
                         anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                     }
                     (src_state.buffer.clone(), dst_state.buffer.clone())
@@ -819,7 +870,7 @@ pub(super) fn record_commands_to_buffer(
                 guard
                     .blit
                     .unwrap()
-                    .copy_from_buffer(&src_mtl, *src_offset, &dst_mtl, 0, *size);
+                    .copy_from_buffer(&src_mtl, *src_offset, &dst_mtl, *dst_offset, *size);
             }
             GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                 ensure_blit_buf!(*dst);
@@ -952,7 +1003,10 @@ fn stage_uploads(
     let has_upload = commands.iter().any(|c| {
         matches!(
             c,
-            GpuCommand::WriteBuffer { .. } | GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
+            GpuCommand::WriteBuffer { .. }
+                | GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+                | GpuCommand::CopyBufferToTexture { .. }
         )
     });
 
@@ -1054,6 +1108,42 @@ fn stage_uploads(
                     .acquire(&device_mtl, data.len() as u64)?;
                 unsafe {
                     std::ptr::copy_nonoverlapping(data.as_ptr(), entry.mapped_ptr(), data.len());
+                }
+                texture_scratches.push(entry);
+                would_have_gpu_work = true;
+            }
+            GpuCommand::CopyBufferToTexture {
+                src,
+                src_offset,
+                dst,
+                width,
+                height,
+                ..
+            } => {
+                let tex = state
+                    .textures
+                    .get(dst)
+                    .context("CopyBufferToTexture: invalid texture handle")?;
+                let bpp = tex.format.bytes_per_pixel();
+                let flat_len = (*width as usize)
+                    .checked_mul(*height as usize)
+                    .and_then(|h| h.checked_mul(bpp as usize))
+                    .context("CopyBufferToTexture: flat byte size overflow")?;
+                if flat_len == 0 {
+                    continue;
+                }
+                let data = super::buffer::cpu_writable_flat_slice(&state.buffers, *src, *src_offset, flat_len)?;
+                let sc_arc = state
+                    .contexts
+                    .get(&ctx)
+                    .context("stage_uploads: invalid context handle")?;
+                let entry = sc_arc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .acquire(&device_mtl, flat_len as u64)?;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), entry.mapped_ptr(), flat_len);
                 }
                 texture_scratches.push(entry);
                 would_have_gpu_work = true;

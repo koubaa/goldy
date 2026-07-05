@@ -609,7 +609,9 @@ pub(super) fn submit(
     let has_write_texture = commands.iter().any(|c| {
         matches!(
             c,
-            GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. }
+            GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+                | GpuCommand::CopyBufferToTexture { .. }
         )
     });
 
@@ -786,6 +788,33 @@ pub(super) fn submit(
                     pool,
                     *texture,
                     data,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                )?);
+            }
+            GpuCommand::CopyBufferToTexture {
+                src,
+                src_offset,
+                dst,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                let mut sc_guard = sc_arc.lock().unwrap();
+                let pool = &mut sc_guard.texture_staging_pool;
+                texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
+                    &state.instance,
+                    &state.devices,
+                    &state.textures,
+                    &state.buffers,
+                    pool,
+                    *src,
+                    *src_offset,
+                    *dst,
                     *x,
                     *y,
                     *width,
@@ -1166,7 +1195,9 @@ pub(super) fn submit(
                         }
                     }
                 }
-                GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+                | GpuCommand::CopyBufferToTexture { .. } => {
                     let _tz = tracy_zone!("vk.write_texture");
                     let scratch = texture_upload_scratch
                         .get(texture_upload_idx)
@@ -1246,13 +1277,16 @@ pub(super) fn submit(
                     src,
                     src_offset,
                     dst,
+                    dst_offset,
                     size,
                 } => {
                     let _tz = tracy_zone!("vk.copy_buffer");
                     let (src_buf, dst_buf) = {
                         let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                         let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                        if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
+                        if src_offset.saturating_add(*size) > src_state.size
+                            || dst_offset.saturating_add(*size) > dst_state.size
+                        {
                             anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                         }
                         (src_state.buffer, dst_state.buffer)
@@ -1268,7 +1302,7 @@ pub(super) fn submit(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         let region = vk::BufferCopy {
                             src_offset: *src_offset,
-                            dst_offset: 0,
+                            dst_offset: *dst_offset,
                             size: *size,
                         };
                         logical_device
@@ -1596,13 +1630,18 @@ fn submit_graph_impl(
                 GpuCommand::WriteBuffer { .. }
                     | GpuCommand::WriteTexture { .. }
                     | GpuCommand::WriteTextureRegion { .. }
+                    | GpuCommand::CopyBufferToTexture { .. }
             )
         )
     });
     let has_write_texture_graph = commands.iter().any(|c| {
         matches!(
             c,
-            GraphCommand::Compute(GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. })
+            GraphCommand::Compute(
+                GpuCommand::WriteTexture { .. }
+                    | GpuCommand::WriteTextureRegion { .. }
+                    | GpuCommand::CopyBufferToTexture { .. }
+            )
         )
     });
 
@@ -1712,6 +1751,33 @@ fn submit_graph_impl(
                             pool,
                             *texture,
                             data,
+                            *x,
+                            *y,
+                            *width,
+                            *height,
+                        )?);
+                    }
+                    GpuCommand::CopyBufferToTexture {
+                        src,
+                        src_offset,
+                        dst,
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
+                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let pool = &mut sc_guard.texture_staging_pool;
+                        texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
+                            &state.instance,
+                            &state.devices,
+                            &state.textures,
+                            &state.buffers,
+                            pool,
+                            *src,
+                            *src_offset,
+                            *dst,
                             *x,
                             *y,
                             *width,
@@ -2103,7 +2169,9 @@ fn submit_graph_impl(
                         }
                     }
                 }
-                GpuCommand::WriteTexture { .. } | GpuCommand::WriteTextureRegion { .. } => {
+                GpuCommand::WriteTexture { .. }
+                | GpuCommand::WriteTextureRegion { .. }
+                | GpuCommand::CopyBufferToTexture { .. } => {
                     let _tz = tracy_zone!("vk.write_texture");
                     let scratch = texture_upload_scratch
                         .get(texture_upload_idx)
@@ -2176,13 +2244,16 @@ fn submit_graph_impl(
                     src,
                     src_offset,
                     dst,
+                    dst_offset,
                     size,
                 } => {
                     let _tz = tracy_zone!("vk.copy_buffer");
                     let (src_buf, dst_buf) = {
                         let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
                         let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
-                        if src_offset.saturating_add(*size) > src_state.size || *size > dst_state.size {
+                        if src_offset.saturating_add(*size) > src_state.size
+                            || dst_offset.saturating_add(*size) > dst_state.size
+                        {
                             anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                         }
                         (src_state.buffer, dst_state.buffer)
@@ -2198,7 +2269,7 @@ fn submit_graph_impl(
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                         let region = vk::BufferCopy {
                             src_offset: *src_offset,
-                            dst_offset: 0,
+                            dst_offset: *dst_offset,
                             size: *size,
                         };
                         logical_device

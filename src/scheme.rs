@@ -272,6 +272,7 @@ impl Grant for PresentGrant {
     type Output = ();
 
     fn consume(&self, submission: &Submission) -> Result<Self::Output, GoldyError> {
+        let _tz = crate::tracy_zone!("scheme.grant_present.consume");
         if submission.data.scheme_id != self.scheme_id {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "PresentGrant belongs to a different scheme than this submission"
@@ -599,6 +600,119 @@ impl Scheme {
         Ok(())
     }
 
+    /// Append a GPU buffer-to-buffer copy between two buffer parcels (identity only; no bytes in IR).
+    ///
+    /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
+    /// on a [`crate::types::BufferFlags::CPU_WRITABLE`] staging parcel before each [`Self::submit`].
+    pub fn copy_buffer_parcel(
+        &mut self,
+        src: &Parcel,
+        src_offset: u64,
+        dst: &Parcel,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let src_resource = src.resource_id();
+        let dst_resource = dst.resource_id();
+        if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. })
+            || !matches!(dst_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. })
+        {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_buffer_parcel requires buffer parcels"
+            )));
+        }
+        self.submit_state.register_parcel_stamp(src);
+        self.submit_state.register_parcel_stamp(dst);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_buffer_parcel",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: dst_resource,
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src: src_resource,
+                src_offset,
+                dst: dst_resource,
+                dst_offset,
+                size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Append a CPU-writable buffer → texture copy node (identity only; no bytes in IR).
+    ///
+    /// Record once while parcel identities are stable; refresh source bytes via [`crate::Buffer::write`]
+    /// on a [`crate::types::BufferFlags::CPU_WRITABLE`] staging parcel before each [`Self::submit`].
+    #[allow(clippy::too_many_arguments)] // mirrors TaskGraph region + buffer offset parameters
+    pub fn copy_buffer_to_texture_parcel(
+        &mut self,
+        src: &Parcel,
+        src_offset: u64,
+        dst: &crate::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let src_resource = src.resource_id();
+        if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_buffer_to_texture_parcel requires a buffer parcel source"
+            )));
+        }
+        let x_end = x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_buffer_to_texture_parcel: x+width overflow")))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("copy_buffer_to_texture_parcel: y+height overflow")))?;
+        if x_end > dst.width() || y_end > dst.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_buffer_to_texture_parcel: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                dst.width(),
+                dst.height()
+            )));
+        }
+        let th = dst.gpu_handle();
+        self.submit_state.register_parcel_stamp(src);
+        self.ir.nodes.push(TaskNode {
+            label: "copy_buffer_to_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Texture(th),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyBufferToTexture {
+                src: src_resource,
+                src_offset,
+                dst: th,
+                x,
+                y,
+                width,
+                height,
+            },
+        });
+        Ok(())
+    }
+
     /// Append a zero-fill node for `parcel[offset..offset+size]`.
     ///
     /// Mirrors [`crate::TaskGraph::clear_parcel`].
@@ -887,7 +1001,7 @@ impl Scheme {
     /// retained submissions.
     ///
     /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    /// and stored on the returned [`Submission`] for [`Grant::consume`] via [`PresentGrant`].
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
         // Vulkan/DX12 retained partitions reuse a live command buffer — wait until the prior
         // submission retires before resubmitting to satisfy VUID-vkQueueSubmit2-commandBuffer-03875.
@@ -896,6 +1010,7 @@ impl Scheme {
         // `#[cfg(not(feature = "metal"))]` gate would omit this wait on Vulkan too.
         if let Some(prev_tv) = self.last_submitted_tv {
             if self.ctx.device().backend_type() != BackendType::Metal {
+                let _tz = crate::tracy_zone!("scheme.submit.wait_prev");
                 self.ctx.wait_until(prev_tv)?;
             }
         }
@@ -908,21 +1023,26 @@ impl Scheme {
 
         let mut present_slots = Vec::with_capacity(self.present_grants.len());
         let mut surface_frames = Vec::with_capacity(self.present_grants.len());
-        for grant in &self.present_grants {
-            let (slot_id, surface_frame, uav_index, handle) =
-                SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
-            present_slots.push(ResolvedPresentSlot {
-                lease_id: grant.lease_id,
-                slot_id,
-                handle,
-                uav_index,
-            });
-            surface_frames.push(Mutex::new(Some(surface_frame)));
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.acquire_present");
+            for grant in &self.present_grants {
+                let (slot_id, surface_frame, uav_index, handle) =
+                    SwapchainPool::acquire_slot(&grant.pool).map_err(|e| self.ctx.classify(e))?;
+                present_slots.push(ResolvedPresentSlot {
+                    lease_id: grant.lease_id,
+                    slot_id,
+                    handle,
+                    uav_index,
+                });
+                surface_frames.push(Mutex::new(Some(surface_frame)));
+            }
         }
 
-        let submit_result =
+        let submit_result = {
+            let _tz = crate::tracy_zone!("scheme.submit.pipelined");
             self.submit_state
-                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots);
+                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots)
+        };
 
         let (tv, part_result) = match submit_result {
             Ok(ok) => ok,
@@ -943,7 +1063,10 @@ impl Scheme {
         self.dirty = false;
         self.retention_key = None;
 
-        let recorded = !part_result.all_from_cache();
+        // Standalone upload partitions (WriteTexture, etc.) never increment
+        // `PartitionSubmitResult.records`, but the first submit after IR mutation still
+        // counts as a scheme record when `structurally_dirty`.
+        let recorded = !part_result.all_from_cache() || structurally_dirty;
         let on_record_path = structurally_dirty || topo_dirty || recorded;
 
         if on_record_path {
@@ -1025,6 +1148,7 @@ impl Scheme {
                             src: *source,
                             src_offset: *src_offset,
                             dst: staging,
+                            dst_offset: 0,
                             size: *byte_size,
                         });
                     }

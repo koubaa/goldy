@@ -1222,6 +1222,45 @@ pub(super) fn allocate_compute_texture_staging(
     })
 }
 
+/// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn allocate_copy_buffer_to_texture_staging(
+    instance: &ash::Instance,
+    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+    textures: &HashMap<TextureHandle, TextureState>,
+    buffers: &HashMap<crate::backend::BufferHandle, super::types::BufferState>,
+    pool: &mut super::staging::TextureStagingPool,
+    src: crate::backend::BufferHandle,
+    src_offset: u64,
+    texture_handle: TextureHandle,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<ComputeTextureScratch> {
+    let texture = textures
+        .get(&texture_handle)
+        .context("allocate_copy_buffer_to_texture_staging: invalid texture")?;
+    let bpp = texture.format.bytes_per_pixel();
+    let flat_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|h| h.checked_mul(bpp as usize))
+        .context("CopyBufferToTexture: flat byte size overflow")?;
+    let data = super::buffer::cpu_writable_flat_slice(buffers, src, src_offset, flat_len)?;
+    allocate_compute_texture_staging(
+        instance,
+        devices,
+        textures,
+        pool,
+        texture_handle,
+        data,
+        x,
+        y,
+        width,
+        height,
+    )
+}
+
 /// Record buffer→image copy + layout transitions into an open command buffer.
 pub(super) fn record_compute_texture_upload(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,

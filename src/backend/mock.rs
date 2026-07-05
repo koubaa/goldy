@@ -309,7 +309,14 @@ impl MockBackend {
         self.buffer_view_create_count = 0;
     }
 
-    fn execute_copy_buffer(&mut self, src: BufferHandle, src_offset: u64, dst: BufferHandle, size: u64) -> Result<()> {
+    fn execute_copy_buffer(
+        &mut self,
+        src: BufferHandle,
+        src_offset: u64,
+        dst: BufferHandle,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<()> {
         let copy_len = size as usize;
         let src_data = {
             let src_buf = self
@@ -326,10 +333,11 @@ impl MockBackend {
             .buffers
             .get_mut(&dst)
             .ok_or_else(|| anyhow::anyhow!("CopyBuffer: invalid dst"))?;
-        if copy_len as u64 > dst_buf.size {
+        if dst_offset.saturating_add(copy_len as u64) > dst_buf.size {
             anyhow::bail!("CopyBuffer: size exceeds dst bounds");
         }
-        dst_buf.data[..copy_len].copy_from_slice(&src_data);
+        let dst_start = dst_offset as usize;
+        dst_buf.data[dst_start..dst_start + copy_len].copy_from_slice(&src_data);
         Ok(())
     }
 
@@ -1403,9 +1411,10 @@ impl GpuBackend for MockBackend {
                     src,
                     src_offset,
                     dst,
+                    dst_offset,
                     size,
                 } => {
-                    self.execute_copy_buffer(*src, *src_offset, *dst, *size)?;
+                    self.execute_copy_buffer(*src, *src_offset, *dst, *dst_offset, *size)?;
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     self.execute_copy_texture_to_readback(*src, *dst, *layout)?;
