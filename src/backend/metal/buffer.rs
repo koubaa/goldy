@@ -112,10 +112,10 @@ fn insert_buffer_common(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let arg_buffer_index = {
-        let mut ledger = logical_device.ledger.lock().unwrap();
+        let mut registry = logical_device.descriptors.lock().unwrap();
         match access {
-            BufferKind::Broadcast => ledger.resource_registry.register_uniform_buffer(handle),
-            BufferKind::Scattered => ledger.resource_registry.register_storage_buffer(handle),
+            BufferKind::Broadcast => registry.resource_registry.register_uniform_buffer(handle),
+            BufferKind::Scattered => registry.resource_registry.register_storage_buffer(handle),
         }
     };
     let encoding_index = match access {
@@ -382,7 +382,7 @@ pub(super) fn create_view(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let arg_buffer_index = logical_device
-        .ledger
+        .descriptors
         .lock()
         .unwrap()
         .resource_registry
@@ -574,7 +574,7 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
         let barrier = super::context::reclamation_barrier(state, buffer.device_handle, gpu_idle);
         if let Some(device) = state.devices.get(&buffer.device_handle) {
             device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry

@@ -27,6 +27,10 @@ pub struct Context {
 pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
+    timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
+    deletion_flush: Option<Arc<dyn crate::backend::ContextDeferredDeletionFlush>>,
+    reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
+    submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
     high_water_timeline: AtomicU64,
     /// Per-context transient resource heap (backing buffer + cached views/textures).
     ///
@@ -65,6 +69,13 @@ impl Drop for ContextInner {
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
         }
+        // Release cloned per-context backend handles before destroy_context.
+        // Backends expect sole ownership of the per-context Arc at teardown.
+        self.timeline_reader.take();
+        self.deletion_flush.take();
+        self.reclamation_scope.take();
+        self.submit_session.take();
+        self.device.unregister_context_timeline_reader(self.handle);
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         let mut backend = self.device.inner.backend.lock().unwrap();
@@ -80,10 +91,31 @@ impl Context {
                 .create_context(device.inner.handle)
                 .map_err(GoldyError::Backend)?
         };
+        let timeline_reader = {
+            let backend = device.inner.backend.lock().unwrap();
+            backend
+                .clone_context_timeline_reader(handle)
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader")))?
+        };
+        device.register_context_timeline_reader(handle, Arc::clone(&timeline_reader));
+        let (deletion_flush, reclamation_scope) = {
+            let backend = device.inner.backend.lock().unwrap();
+            let deletion_flush = backend
+                .clone_context_deletion_flush(handle, Arc::clone(&device.inner.context_readers))
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context deletion flush")))?;
+            let reclamation_scope = backend.clone_context_reclamation_scope(handle);
+            (deletion_flush, reclamation_scope)
+        };
+        let submit_session =
+            crate::backend::LockedSubmitSession::from_backend(Arc::clone(&device.inner.backend), handle);
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
                 handle,
+                timeline_reader: Some(timeline_reader),
+                deletion_flush: Some(deletion_flush),
+                reclamation_scope: Some(reclamation_scope),
+                submit_session: Some(submit_session),
                 high_water_timeline: AtomicU64::new(0),
                 placement_heap: Mutex::new(None),
                 transient_pool: Mutex::new(TransientPool::new()),
@@ -98,6 +130,10 @@ impl Context {
 
     pub(crate) fn backend_handle(&self) -> ContextHandle {
         self.inner.handle
+    }
+
+    pub(crate) fn submit_session(&self) -> &dyn crate::backend::ContextSubmitSession {
+        self.inner.submit_session.as_ref().expect("submit session").as_ref()
     }
 
     /// Test-only access to the backend context id.
@@ -143,45 +179,90 @@ impl Context {
     /// Latest GPU completion counter on this context's timeline.
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("context.gpu_progress");
-        let backend = {
-            let _lock = crate::tracy_zone!("context.gpu_progress.lock");
-            self.inner.device.inner.backend.lock().unwrap()
-        };
         let _query = crate::tracy_zone!("context.gpu_progress.query");
-        backend.gpu_progress(self.inner.handle)
+        self.inner
+            .timeline_reader
+            .as_ref()
+            .expect("timeline reader")
+            .gpu_progress()
     }
 
     /// Block until the timeline reaches at least `value`.
     pub fn wait_until(&self, value: TimelineValue) -> Result<(), GoldyError> {
+        self.wait_until_context(self.inner.handle, value)
+    }
+
+    fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("context.wait_until");
-        let mut backend = {
-            let _lock = crate::tracy_zone!("context.wait_until.lock");
-            self.inner.device.inner.backend.lock().unwrap()
+        let already_complete = if ctx == self.inner.handle {
+            self.gpu_progress() >= value
+        } else {
+            self.inner.device.context_gpu_progress(ctx).is_some_and(|p| p >= value)
         };
-        let _backend = crate::tracy_zone!("context.wait_until.backend");
-        backend.wait_until(self.inner.handle, value).map_err(|e| {
-            drop(backend);
-            self.classify(e)
-        })
+        let backend_mutex = &self.inner.device.inner.backend;
+        if !already_complete {
+            let blocking = {
+                let _lock = crate::tracy_zone!("context.wait_until.lock");
+                let backend = backend_mutex.lock().unwrap();
+                let _prepare = crate::tracy_zone!("context.wait_until.prepare");
+                backend
+                    .take_timeline_blocking_wait(ctx, value)
+                    .map_err(|e| self.classify(e))?
+            };
+            if let Some(wait) = blocking {
+                let _block = crate::tracy_zone!("context.wait_until.block");
+                wait.block().map_err(|e| self.classify(e))?;
+            }
+        }
+        {
+            let _lock = crate::tracy_zone!("context.wait_until.lock");
+            let mut backend = backend_mutex.lock().unwrap();
+            let _finish = crate::tracy_zone!("context.wait_until.finish");
+            backend.finish_timeline_wait(ctx, value).map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })
+        }
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
     pub fn wait_until_timeout(&self, value: TimelineValue, timeout_ms: u32) -> Result<(), GoldyError> {
-        let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        match backend.wait_until_timeout(self.inner.handle, value, timeout_ms) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(GoldyError::SubmitTimeout),
-            Err(e) => {
-                drop(backend);
-                Err(self.classify(e))
+        let ctx = self.inner.handle;
+        let already_complete = self.gpu_progress() >= value;
+        let backend_mutex = &self.inner.device.inner.backend;
+        if !already_complete {
+            let blocking = {
+                let _lock = crate::tracy_zone!("context.wait_until.lock");
+                let backend = backend_mutex.lock().unwrap();
+                backend
+                    .take_timeline_blocking_wait(ctx, value)
+                    .map_err(|e| self.classify(e))?
+            };
+            if let Some(wait) = blocking {
+                let _block = crate::tracy_zone!("context.wait_until.block");
+                if !wait.block_timeout(timeout_ms).map_err(|e| self.classify(e))? {
+                    return Err(GoldyError::SubmitTimeout);
+                }
             }
+        }
+        {
+            let _lock = crate::tracy_zone!("context.wait_until.lock");
+            let mut backend = backend_mutex.lock().unwrap();
+            let _finish = crate::tracy_zone!("context.wait_until.finish");
+            backend.finish_timeline_wait(ctx, value).map_err(|e| {
+                drop(backend);
+                self.classify(e)
+            })
         }
     }
 
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
     pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
-        let backend = self.inner.device.inner.backend.lock().unwrap();
-        backend.peek_oldest_in_flight(self.inner.handle)
+        self.inner
+            .timeline_reader
+            .as_ref()
+            .expect("timeline reader")
+            .peek_oldest_in_flight()
     }
 
     /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this context.
@@ -195,8 +276,9 @@ impl Context {
 
     /// Drain pending backend signals (GPU completion, swapchain, oversubscribed).
     pub fn poll_signals(&self) -> Vec<crate::signal::Signal> {
+        let progress = self.gpu_progress();
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        backend.poll_signals(self.inner.handle)
+        backend.poll_signals(self.inner.handle, progress)
     }
 
     /// Drain pending signals and service [`crate::signal::Signal::BoundaryCrossed`].
@@ -234,14 +316,22 @@ impl Context {
         let retired = self.device().timeline_retired();
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_pre");
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.flush_deferred_deletions(self.inner.handle);
+            self.inner
+                .deletion_flush
+                .as_ref()
+                .expect("deletion flush")
+                .flush(retired);
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.reclaim");
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.set_reclamation_context(self.inner.handle, Some(epoch));
-            drop(backend);
+            self.inner
+                .reclamation_scope
+                .as_ref()
+                .expect("reclamation scope")
+                .set_epoch(Some(epoch));
+        }
+        {
+            let _tz = crate::tracy_zone!("context.boundary_crossed.drain_vram");
             self.device().vram_allocator().boundary_crossed(retired);
         }
         {
@@ -256,9 +346,16 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_post");
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.set_reclamation_context(self.inner.handle, None);
-            backend.flush_deferred_deletions(self.inner.handle);
+            self.inner
+                .reclamation_scope
+                .as_ref()
+                .expect("reclamation scope")
+                .set_epoch(None);
+            self.inner
+                .deletion_flush
+                .as_ref()
+                .expect("deletion flush")
+                .flush(retired);
         }
     }
 
@@ -301,13 +398,9 @@ impl Context {
     /// Submit a compiled [`TaskGraph`] on this context's timeline.
     pub fn submit(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         if !graph.has_transient_resources() {
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
             let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), true)
-                .map_err(|e| {
-                    drop(backend);
-                    self.classify(e)
-                })?;
+                .submit_with_backend(self, self.submit_session(), None, &HashMap::new(), true)
+                .map_err(|e| self.classify(e))?;
             graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
@@ -325,13 +418,9 @@ impl Context {
     pub fn submit_pipelined(&self, graph: &mut TaskGraph) -> Result<TimelineValue, GoldyError> {
         let _tz = crate::tracy_zone!("context.submit_pipelined");
         if !graph.has_transient_resources() {
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
             let tv = graph
-                .submit_with_backend(self, backend.as_mut(), None, &HashMap::new(), false)
-                .map_err(|e| {
-                    drop(backend);
-                    self.classify(e)
-                })?;
+                .submit_with_backend(self, self.submit_session(), None, &HashMap::new(), false)
+                .map_err(|e| self.classify(e))?;
             graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
             return Ok(tv);
@@ -349,13 +438,9 @@ impl Context {
         if graph.has_transient_resources() {
             return self.submit_pipelined(graph);
         }
-        let mut backend = self.inner.device.inner.backend.lock().unwrap();
         let tv = graph
-            .submit_with_backend_and_retain(self, backend.as_mut())
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+            .submit_with_backend_and_retain(self, self.submit_session())
+            .map_err(|e| self.classify(e))?;
         graph.apply_reference_stamps(self.backend_handle(), &self.inner.device.inner, tv);
         self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         Ok(tv)
@@ -368,23 +453,21 @@ impl Context {
         if refs.is_empty() {
             return true;
         }
-        let backend = self.inner.device.inner.backend.lock().unwrap();
+        let device = &self.inner.device;
         let mut progress = HashMap::with_capacity(refs.len());
         for &ctx in refs.keys() {
-            progress.insert(ctx, backend.gpu_progress(ctx));
+            let p = device
+                .context_gpu_progress(ctx)
+                .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
+            progress.insert(ctx, p);
         }
-        drop(backend);
         is_ready(refs, &progress)
     }
 
     /// Block until every context in `refs` has retired the stamped timeline values.
     pub fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
         for (&ctx_handle, &tv) in refs {
-            let mut backend = self.inner.device.inner.backend.lock().unwrap();
-            backend.wait_until(ctx_handle, tv).map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+            self.wait_until_context(ctx_handle, tv)?;
         }
         Ok(())
     }
@@ -393,13 +476,10 @@ impl Context {
         if crate::validation_env::retained_cb_reuse_disabled() {
             return Ok(None);
         }
-        let mut backend = self.inner.device.inner.backend.lock().unwrap();
-        let result = backend
+        let result = self
+            .submit_session()
             .try_resubmit_retained(self.inner.handle, key, None)
-            .map_err(|e| {
-                drop(backend);
-                self.classify(e)
-            })?;
+            .map_err(|e| self.classify(e))?;
         if let Some(tv) = result {
             self.inner.high_water_timeline.fetch_max(tv, Ordering::Relaxed);
         }
@@ -533,9 +613,8 @@ impl Context {
         // stamping creates a window where a concurrent submit sees last_timeline = None
         // and evicts in-flight transient textures synchronously, causing GPU UAF.
         // Lock order is always heap → backend; no other code path reverses this.
-        let mut backend = device.inner.backend.lock().unwrap();
-        let tv = graph.submit_ir_with_resolver(self, backend.as_mut(), &resolver, wait_for_transient_completion)?;
-        drop(backend);
+        let tv =
+            graph.submit_ir_with_resolver(self, self.submit_session(), &resolver, wait_for_transient_completion)?;
 
         if let Some(heap) = heap_guard.as_mut() {
             heap.stamp_pending(tv);

@@ -30,7 +30,8 @@ pub(super) fn record(
                 // TODO: Implement depth clear
             }
             RenderCommand::SetPipeline(pipeline_handle) => {
-                if let Some(pipeline) = state.pipelines.get(pipeline_handle) {
+                let pipelines_read = state.pipelines.read().unwrap();
+                if let Some(pipeline) = pipelines_read.entries.get(pipeline_handle) {
                     current_vertex_stride = pipeline.vertex_stride;
                     current_pipeline_handle = Some(*pipeline_handle);
                     unsafe {
@@ -41,7 +42,8 @@ pub(super) fn record(
                 }
             }
             RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
-                if let Some(buf_state) = state.buffers.get(buffer) {
+                let buffers_read = state.buffers.read().unwrap();
+                if let Some(buf_state) = buffers_read.entries.get(buffer) {
                     let view = D3D12_VERTEX_BUFFER_VIEW {
                         BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
                         SizeInBytes: (buf_state.size - offset) as u32,
@@ -51,7 +53,8 @@ pub(super) fn record(
                 }
             }
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
-                if let Some(buf_state) = state.buffers.get(buffer) {
+                let buffers_read = state.buffers.read().unwrap();
+                if let Some(buf_state) = buffers_read.entries.get(buffer) {
                     let view = D3D12_INDEX_BUFFER_VIEW {
                         BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
                         SizeInBytes: (buf_state.size - offset) as u32,
@@ -71,15 +74,18 @@ pub(super) fn record(
                 user: raw_user,
                 frame_table_base,
             } => {
-                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
-                    crate::backend::with_layout_validation(|| {
-                        crate::backend::validate_bindless_slot_kinds(
-                            raw_indices,
-                            &pipeline.push_constant_slot_kinds,
-                            |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                            &pipeline.shader_debug_name,
-                        )
-                    })?;
+                let pipelines_read = state.pipelines.read().unwrap();
+                if let Some(h) = current_pipeline_handle {
+                    if let Some(pipeline) = pipelines_read.entries.get(&h) {
+                        crate::backend::with_layout_validation(|| {
+                            crate::backend::validate_bindless_slot_kinds(
+                                raw_indices,
+                                &pipeline.push_constant_slot_kinds,
+                                |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                                &pipeline.shader_debug_name,
+                            )
+                        })?;
+                    }
                 }
                 let mut layout = types::PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
@@ -93,21 +99,24 @@ pub(super) fn record(
                 }
             }
             RenderCommand::BindResourcesTyped { handles: typed_handles } => {
-                if let Some(pipeline) = current_pipeline_handle.and_then(|h| state.pipelines.get(&h)) {
-                    crate::backend::validate_typed_push_constants(
-                        typed_handles,
-                        &pipeline.push_constant_categories,
-                        &pipeline.shader_debug_name,
-                    )?;
-                    let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
-                    crate::backend::with_layout_validation(|| {
-                        crate::backend::validate_bindless_slot_kinds(
-                            &indices,
-                            &pipeline.push_constant_slot_kinds,
-                            |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                let pipelines_read = state.pipelines.read().unwrap();
+                if let Some(h) = current_pipeline_handle {
+                    if let Some(pipeline) = pipelines_read.entries.get(&h) {
+                        crate::backend::validate_typed_push_constants(
+                            typed_handles,
+                            &pipeline.push_constant_categories,
                             &pipeline.shader_debug_name,
-                        )
-                    })?;
+                        )?;
+                        let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
+                        crate::backend::with_layout_validation(|| {
+                            crate::backend::validate_bindless_slot_kinds(
+                                &indices,
+                                &pipeline.push_constant_slot_kinds,
+                                |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                                &pipeline.shader_debug_name,
+                            )
+                        })?;
+                    }
                 }
                 anyhow::bail!(
                     "RenderCommand::BindResourcesTyped must be lowered before DX12 record; \

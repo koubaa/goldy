@@ -1246,13 +1246,6 @@ pub(super) fn submit(
         )?;
     }
 
-    let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-        v
-    };
-
     let waiter = state
         .contexts
         .get(&ctx)
@@ -1261,41 +1254,6 @@ pub(super) fn submit(
         .unwrap()
         .timeline_waiter
         .clone();
-
-    let compute_commit_instant = std::time::Instant::now();
-    if super::api_log::enabled() {
-        super::api_log::log_commit(signal_value);
-    }
-    let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
-        let status = cb.status();
-        if status != MTLCommandBufferStatus::Completed {
-            let description = read_command_buffer_error_description(cb);
-            tracing::error!(
-                "GPU command buffer (timeline={}) finished with status={:?}: {}",
-                signal_value,
-                status,
-                description
-            );
-        }
-        let cpu_lifetime = compute_commit_instant.elapsed();
-        let (gpu_start, gpu_end): (f64, f64) = unsafe {
-            (
-                objc::msg_send![cb, GPUStartTime],
-                objc::msg_send![cb, GPUEndTime],
-            )
-        };
-        let gpu_ms = (gpu_end - gpu_start) * 1000.0;
-        tracing::debug!(
-            "[mtl.cb_done] kind=compute signal_value={signal_value} commit_to_complete={cpu_lifetime:?} gpu_exec={gpu_ms:.3}ms"
-        );
-        if crate::gpu_profiler::gpu_profile_enabled() {
-            crate::gpu_profiler::log_cb_timing("metal", signal_value, gpu_ms);
-        }
-        waiter.signal(signal_value);
-    })
-    .copy();
-    command_buffer_ref.add_completed_handler(&handler);
-
     let timeline_event = state
         .contexts
         .get(&ctx)
@@ -1304,10 +1262,6 @@ pub(super) fn submit(
         .unwrap()
         .timeline_event
         .clone();
-    command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
-
-    // Clone queue_lock before commit so we hold only the per-device queue lock
-    // during the actual enqueue — not all of MetalState.
     let queue_lock = state
         .devices
         .get(&device_handle)
@@ -1315,14 +1269,55 @@ pub(super) fn submit(
         .queue_lock
         .clone();
 
-    tracing::debug!(
-        "[mtl.cb_commit] kind=compute signal_value={signal_value} queue=command_queue commands={n}",
-        n = commands.len()
-    );
-    {
+    let compute_commit_instant = std::time::Instant::now();
+    let signal_value = {
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let _queue_guard = queue_lock.lock().unwrap();
+        let signal_value = {
+            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
+            v
+        };
+        if super::api_log::enabled() {
+            super::api_log::log_commit(signal_value);
+        }
+        let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
+            let status = cb.status();
+            if status != MTLCommandBufferStatus::Completed {
+                let description = read_command_buffer_error_description(cb);
+                tracing::error!(
+                    "GPU command buffer (timeline={}) finished with status={:?}: {}",
+                    signal_value,
+                    status,
+                    description
+                );
+            }
+            let cpu_lifetime = compute_commit_instant.elapsed();
+            let (gpu_start, gpu_end): (f64, f64) = unsafe {
+                (
+                    objc::msg_send![cb, GPUStartTime],
+                    objc::msg_send![cb, GPUEndTime],
+                )
+            };
+            let gpu_ms = (gpu_end - gpu_start) * 1000.0;
+            tracing::debug!(
+                "[mtl.cb_done] kind=compute signal_value={signal_value} commit_to_complete={cpu_lifetime:?} gpu_exec={gpu_ms:.3}ms"
+            );
+            if crate::gpu_profiler::gpu_profile_enabled() {
+                crate::gpu_profiler::log_cb_timing("metal", signal_value, gpu_ms);
+            }
+            waiter.signal(signal_value);
+        })
+        .copy();
+        command_buffer_ref.add_completed_handler(&handler);
+        command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
+        tracing::debug!(
+            "[mtl.cb_commit] kind=compute signal_value={signal_value} queue=command_queue commands={n}",
+            n = commands.len()
+        );
         command_buffer_ref.commit();
-    }
+        signal_value
+    };
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1538,13 +1533,6 @@ pub(super) fn submit_graph(
     }
 
     // Signal timeline and commit — same pattern as `submit`.
-    let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-        ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-        v
-    };
-
     let waiter = state
         .contexts
         .get(&ctx)
@@ -1553,31 +1541,6 @@ pub(super) fn submit_graph(
         .unwrap()
         .timeline_waiter
         .clone();
-
-    let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
-        let status = cb.status();
-        if status != MTLCommandBufferStatus::Completed {
-            let description = read_command_buffer_error_description(cb);
-            tracing::error!(
-                "GPU command buffer (graph, timeline={}) finished with status={:?}: {}",
-                signal_value,
-                status,
-                description
-            );
-        }
-        // Capture per-command-buffer GPU timestamps. `GPUStartTime` / `GPUEndTime`
-        // are only valid after completion, which is guaranteed here.
-        if crate::gpu_profiler::gpu_profile_enabled() {
-            let gpu_start: f64 = unsafe { objc::msg_send![cb, GPUStartTime] };
-            let gpu_end: f64 = unsafe { objc::msg_send![cb, GPUEndTime] };
-            let ms = (gpu_end - gpu_start) * 1000.0;
-            crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
-        }
-        waiter.signal(signal_value);
-    })
-    .copy();
-    command_buffer_ref.add_completed_handler(&handler);
-
     let timeline_event = state
         .contexts
         .get(&ctx)
@@ -1586,20 +1549,48 @@ pub(super) fn submit_graph(
         .unwrap()
         .timeline_event
         .clone();
-    command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
-
-    // Clone queue_lock before commit so we hold only the per-device queue lock
-    // during the actual enqueue — not all of MetalState.
     let queue_lock = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?
         .queue_lock
         .clone();
-    {
+
+    let signal_value = {
+        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
         let _queue_guard = queue_lock.lock().unwrap();
+        let signal_value = {
+            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
+            v
+        };
+        let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
+            let status = cb.status();
+            if status != MTLCommandBufferStatus::Completed {
+                let description = read_command_buffer_error_description(cb);
+                tracing::error!(
+                    "GPU command buffer (graph, timeline={}) finished with status={:?}: {}",
+                    signal_value,
+                    status,
+                    description
+                );
+            }
+            // Capture per-command-buffer GPU timestamps. `GPUStartTime` / `GPUEndTime`
+            // are only valid after completion, which is guaranteed here.
+            if crate::gpu_profiler::gpu_profile_enabled() {
+                let gpu_start: f64 = unsafe { objc::msg_send![cb, GPUStartTime] };
+                let gpu_end: f64 = unsafe { objc::msg_send![cb, GPUEndTime] };
+                let ms = (gpu_end - gpu_start) * 1000.0;
+                crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
+            }
+            waiter.signal(signal_value);
+        })
+        .copy();
+        command_buffer_ref.add_completed_handler(&handler);
+        command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
         command_buffer_ref.commit();
-    }
+        signal_value
+    };
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(sc_arc) = state.contexts.get(&ctx) {

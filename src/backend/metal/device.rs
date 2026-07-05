@@ -2,8 +2,8 @@
 
 use super::super::DeviceHandle;
 use super::types::{
-    DeletionQueue, DeviceLedger, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, TextureHeapAllocator,
-    ARGUMENT_BUFFER_SIZE,
+    DeletionQueue, DescriptorRegistry, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
+    TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;
@@ -118,7 +118,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         storage_image_encoder,
         sampler_encoder,
         frame_table: Mutex::new(frame_table),
-        ledger: Arc::new(Mutex::new(DeviceLedger::new())),
+        descriptors: Arc::new(Mutex::new(DescriptorRegistry::new())),
         timeline_next: Arc::new(AtomicU64::new(1)),
         timeline_scheduled_max: AtomicU64::new(0),
         retired_floor: AtomicU64::new(0),

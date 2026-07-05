@@ -172,10 +172,9 @@ pub(super) fn create_with_depth(
     // Close the command list initially
     unsafe { command_list.Close() }.ok();
 
-    let handle = state.next_render_target_handle;
-    state.next_render_target_handle += 1;
+    let handle = state.render_targets.write().unwrap().alloc_handle();
 
-    state.render_targets.insert(
+    state.render_targets.write().unwrap().entries.insert(
         handle,
         RenderTargetState {
             device_handle,
@@ -205,7 +204,7 @@ pub(super) fn create_with_depth(
 
 /// Destroy a render target.
 pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
-    if let Some(rt) = state.render_targets.remove(&target) {
+    if let Some(rt) = state.render_targets.write().unwrap().entries.remove(&target) {
         state.free_rtv_offsets.push(rt.rtv_offset);
         if let Some(dsv_off) = rt.dsv_offset {
             state.free_dsv_offsets.push(dsv_off);
@@ -229,8 +228,9 @@ pub(super) fn record_render_pass_to_list(
 ) -> Result<bool> {
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let render_target = state
-        .render_targets
+    let render_targets_read = state.render_targets.read().unwrap();
+    let render_target = render_targets_read
+        .entries
         .get(&target)
         .context("Invalid render target handle")?;
 
@@ -351,7 +351,7 @@ pub(super) fn record_render_pass_to_list(
             super::frame_table::record_prologue(
                 &state.contexts,
                 &state.frame_tables,
-                &state.buffers,
+                &state.buffers.read().unwrap().entries,
                 device_handle,
                 cmd_list,
                 &staging_data,
@@ -394,8 +394,9 @@ pub(super) fn render(
     // Upgrading render_to_target to a pool would eliminate the wait but is not yet done.
     unsafe { logical_device.command_allocator.Reset() }.context("Failed to reset command allocator")?;
 
-    let render_target = state
-        .render_targets
+    let render_targets_read = state.render_targets.read().unwrap();
+    let render_target = render_targets_read
+        .entries
         .get(&target)
         .context("Invalid render target handle")?;
 
@@ -429,8 +430,11 @@ pub(super) fn render(
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;
 
-    if let Some(rt) = state.render_targets.get_mut(&target) {
-        rt.has_rendered = true;
+    {
+        let mut render_targets_write = state.render_targets.write().unwrap();
+        if let Some(rt) = render_targets_write.entries.get_mut(&target) {
+            rt.has_rendered = true;
+        }
     }
 
     Ok(())
@@ -439,29 +443,35 @@ pub(super) fn render(
 /// Read render target contents to CPU memory.
 #[allow(clippy::too_many_lines)]
 pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, output: &mut [u8]) -> Result<()> {
-    let render_target = state
-        .render_targets
-        .get(&target)
-        .context("Invalid render target handle")?;
+    let (width, height, format, device_handle, needs_staging) = {
+        let render_targets_read = state.render_targets.read().unwrap();
+        let render_target = render_targets_read
+            .entries
+            .get(&target)
+            .context("Invalid render target handle")?;
 
-    if !render_target.has_rendered {
-        anyhow::bail!("Cannot read from render target that hasn't been rendered to");
-    }
+        if !render_target.has_rendered {
+            anyhow::bail!("Cannot read from render target that hasn't been rendered to");
+        }
 
-    let width = render_target.width;
-    let height = render_target.height;
-    let format = render_target.format;
+        (
+            render_target.width,
+            render_target.height,
+            render_target.format,
+            render_target.device_handle,
+            render_target.staging_buffer.is_none(),
+        )
+    };
+
     let expected_size = (width * height * format.bytes_per_pixel()) as usize;
 
     if output.len() < expected_size {
         anyhow::bail!("Output buffer too small: {} < {}", output.len(), expected_size);
     }
 
-    let device_handle = render_target.device_handle;
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     // Ensure staging buffer exists
-    let needs_staging = render_target.staging_buffer.is_none();
     if needs_staging {
         let row_pitch = ((width * format.bytes_per_pixel() + 255) & !255) as u64; // 256-byte aligned
         let staging_size = row_pitch * height as u64;
@@ -502,14 +512,18 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, out
         let staging_buffer = staging_buffer.context("CreateCommittedResource returned null")?;
 
         // Store staging buffer in render target
-        if let Some(rt) = state.render_targets.get_mut(&target) {
-            rt.staging_buffer = Some(staging_buffer);
+        {
+            let mut render_targets_write = state.render_targets.write().unwrap();
+            if let Some(rt) = render_targets_write.entries.get_mut(&target) {
+                rt.staging_buffer = Some(staging_buffer);
+            }
         }
     }
 
     // Get render target again (borrow checker)
-    let render_target = state
-        .render_targets
+    let render_targets_read = state.render_targets.read().unwrap();
+    let render_target = render_targets_read
+        .entries
         .get(&target)
         .context("Invalid render target handle")?;
 

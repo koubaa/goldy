@@ -51,7 +51,7 @@ pub(crate) fn init_device(
 
     {
         let dev = state.devices.get(&device_handle).context("init frame table")?;
-        dev.ledger
+        dev.descriptors
             .lock()
             .unwrap()
             .resource_registry

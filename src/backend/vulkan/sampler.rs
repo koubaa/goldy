@@ -46,7 +46,7 @@ pub(super) fn create(
     let bindless_index = {
         let logical_device = devices.get(&device_handle).unwrap();
         let index = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -99,7 +99,7 @@ pub(super) fn destroy(
             // Defer reclamation: sampler slot must not be reused until all
             // in-flight submissions that referenced it have retired.
             logical_device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .reclaim_sampler_slots(sampler_handle);

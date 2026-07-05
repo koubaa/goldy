@@ -130,10 +130,10 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
             let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
         }
         if !ctx_batch.is_empty() {
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-            let mut ledger = ledger_arc.lock().unwrap();
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
             for r in ctx_batch {
-                super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                super::types::destroy_pending_deletion(ld, &mut registry, r);
             }
         }
     }

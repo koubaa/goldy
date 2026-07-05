@@ -170,14 +170,13 @@ pub(super) fn create(
     let resource = resource.context("CreateCommittedResource returned null")?;
 
     // Get texture handle first (needed for registry)
-    let handle = state.next_texture_handle;
-    state.next_texture_handle += 1;
+    let handle = state.textures.write().unwrap().alloc_handle();
 
     // Create SRV - use unified resource registry to avoid descriptor heap collisions
     // (textures and buffers share the same CBV/SRV/UAV heap)
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let srv_offset = logical_device
-        .ledger
+        .descriptors
         .lock()
         .unwrap()
         .resource_registry
@@ -212,7 +211,7 @@ pub(super) fn create(
     // bindless_offset must point to UAV for goldy_direct_spatial.
     let bindless_offset = if is_storage {
         let uav_offset = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -246,7 +245,7 @@ pub(super) fn create(
     let sampled_bindless_offset = if is_dual_access {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
         let srv2_offset = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -285,7 +284,7 @@ pub(super) fn create(
         D3D12_BARRIER_LAYOUT_COMMON
     };
 
-    state.textures.insert(
+    state.textures.write().unwrap().entries.insert(
         handle,
         TextureState {
             device_handle,
@@ -590,7 +589,7 @@ pub(super) fn write(
         let mut pool = super::staging::TextureStagingPool::new();
         stage_texture_upload_full(
             &state.devices,
-            &state.textures,
+            &state.textures.read().unwrap().entries,
             &mut pool,
             texture_handle,
             data,
@@ -617,7 +616,7 @@ pub(super) fn write_region(
         let mut pool = super::staging::TextureStagingPool::new();
         stage_texture_upload_region(
             &state.devices,
-            &state.textures,
+            &state.textures.read().unwrap().entries,
             &mut pool,
             TextureUploadRegion {
                 texture_handle,
@@ -649,11 +648,14 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
     let copies = uploads;
     let count = copies.len();
 
-    let first_tex = state
-        .textures
-        .get(&copies[0].texture_handle)
-        .context("flush_pending_copies: invalid texture handle")?;
-    let device_handle = first_tex.device_handle;
+    let device_handle = {
+        let textures_read = state.textures.read().unwrap();
+        textures_read
+            .entries
+            .get(&copies[0].texture_handle)
+            .context("flush_pending_copies: invalid texture handle")?
+            .device_handle
+    };
 
     let logical_device = state
         .devices
@@ -691,16 +693,19 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
 
     for tex_handle in &texture_order {
         let indices = &groups[tex_handle];
-        let texture = state
-            .textures
-            .get(tex_handle)
-            .context("flush_pending_copies: texture disappeared")?;
-
-        // Use the layout the texture was in when the FIRST copy was enqueued.
         let layout_before = copies[indices[0]].layout_before;
+        let resource = {
+            let textures_read = state.textures.read().unwrap();
+            textures_read
+                .entries
+                .get(tex_handle)
+                .context("flush_pending_copies: texture disappeared")?
+                .resource
+                .clone()
+        };
 
         let mut b_to_copy = [barriers::texture_barrier_full(
-            &texture.resource,
+            &resource,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_SYNC_COPY,
             access_for_layout(layout_before),
@@ -726,7 +731,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
             };
 
             let dst_location = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: unsafe { std::mem::transmute_copy(&texture.resource) },
+                pResource: unsafe { std::mem::transmute_copy(&resource) },
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                 Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
             };
@@ -737,7 +742,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
         }
 
         let mut b_to_shader = [barriers::texture_barrier_full(
-            &texture.resource,
+            &resource,
             D3D12_BARRIER_SYNC_COPY,
             D3D12_BARRIER_SYNC_ALL,
             D3D12_BARRIER_ACCESS_COPY_DEST,
@@ -748,8 +753,11 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
         unsafe { barriers::barrier_textures(&command_list7, &b_to_shader) };
         unsafe { barriers::drop_texture_barriers(&mut b_to_shader) };
 
-        if let Some(tex) = state.textures.get_mut(tex_handle) {
-            tex.last_layout = after_layout;
+        {
+            let mut textures_write = state.textures.write().unwrap();
+            if let Some(tex) = textures_write.entries.get_mut(tex_handle) {
+                tex.last_layout = after_layout;
+            }
         }
     }
 
@@ -925,7 +933,11 @@ pub(super) fn record_copy_texture_to_readback(
 pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {
     use windows::Win32::Graphics::Direct3D12::*;
 
-    let texture = state.textures.get(&texture_handle).context("Invalid texture handle")?;
+    let textures_read = state.textures.read().unwrap();
+    let texture = textures_read
+        .entries
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let width = texture.width;
@@ -1108,10 +1120,10 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, 
 /// Destroy a texture, queueing the D3D12 resource and bindless descriptor slots
 /// for deferred deletion after in-flight GPU work completes.
 pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
-    if let Some(tex) = state.textures.remove(&texture_handle) {
+    if let Some(tex) = state.textures.write().unwrap().entries.remove(&texture_handle) {
         if let Some(dev) = state.devices.get(&tex.device_handle) {
             if tex.transient_placed {
-                dev.ledger.lock().unwrap().reclaim_texture_slots(texture_handle);
+                dev.descriptors.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;
             }
             let last_fence = dev
@@ -1131,13 +1143,22 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
 
 /// Get the bindless index for a texture.
 pub(super) fn bindless_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
-    state.textures.get(&texture_handle).and_then(|t| t.bindless_offset)
+    state
+        .textures
+        .read()
+        .unwrap()
+        .entries
+        .get(&texture_handle)
+        .and_then(|t| t.bindless_offset)
 }
 
 /// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
 pub(super) fn bindless_sampled_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
     state
         .textures
+        .read()
+        .unwrap()
+        .entries
         .get(&texture_handle)
         .and_then(|t| t.sampled_bindless_offset)
 }

@@ -2,8 +2,9 @@
 mod buffer_alloc_tests {
     use crate::buffer::BufferPool;
     use crate::device::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+    use crate::task_graph::NodeAccess;
     use crate::types::{BufferFlags, ResourceAccess};
-    use crate::{BufferKind, DeviceType, NodeAccess};
+    use crate::{BufferKind, DeviceType};
 
     fn make_device() -> Device {
         let inst = Instance::new().expect("instance");

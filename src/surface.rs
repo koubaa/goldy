@@ -586,18 +586,23 @@ impl Frame {
     fn do_present_sync(&mut self) -> Result<TimelineValue> {
         let _tz = tracy_zone!("frame.present");
         if self.presented {
-            return Ok(self.submit_tv.unwrap_or_else(|| {
-                let backend = self.backend.lock().unwrap();
-                backend.gpu_progress(self.ctx_handle)
-            }));
+            return Ok(self.submit_tv.unwrap_or_else(|| self.context.gpu_progress()));
         }
         self.presented = true;
         let _ = self.texture.take();
         let submit_tv = self.submit_frame()?;
+        let backend_mutex = &self.backend;
         let present_tv = {
-            let _tz = tracy_zone!("frame.present.present_frame");
-            let mut backend = self.backend.lock().unwrap();
-            backend.present_frame(self.token, submit_tv)?
+            let work = {
+                let mut backend = backend_mutex.lock().unwrap();
+                backend.take_present_gpu_work(self.token, submit_tv)?
+            };
+            let finish = {
+                let _gpu = tracy_zone!("frame.present.gpu");
+                work.run()?
+            };
+            let mut backend = backend_mutex.lock().unwrap();
+            backend.finish_present(finish, submit_tv)?
         };
         self.apply_frame_bookkeeping(submit_tv)?;
         Ok(present_tv)

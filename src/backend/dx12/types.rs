@@ -585,14 +585,14 @@ impl DeletionQueue {
     }
 }
 
-/// Device-shared descriptor-heap ledger.
+/// Device-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
 /// `ResourceRegistry` (descriptor slot allocator), the per-context
 /// `slot_last_seen` reference table, and the `pending_slot_reclamations`
 /// list.  Wrapped in `Arc<Mutex<>>` on `LogicalDevice` so that future phases
 /// can lock it independently of the global backend mutex.
-pub(crate) struct DeviceLedger {
+pub(crate) struct DescriptorRegistry {
     /// Registry tracking resource offsets in descriptor heaps.
     pub resource_registry: ResourceRegistry,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
@@ -602,7 +602,7 @@ pub(crate) struct DeviceLedger {
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
 }
 
-impl DeviceLedger {
+impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
@@ -670,7 +670,7 @@ impl DeviceLedger {
     /// Return pending slots to the free list once every referencing context has retired.
     ///
     /// Takes the per-state `context_fences` index (not the full context map) so this
-    /// method can be called while holding the ledger lock without risking a lock-ordering
+    /// method can be called while holding the descriptors lock without risking a lock-ordering
     /// deadlock with per-context `Mutex<Dx12SubmissionContext>`.
     pub(crate) fn drain_ready_slot_reclamations(
         &mut self,
@@ -764,13 +764,19 @@ pub(crate) struct LogicalDevice {
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
     pub deletion_queue: Mutex<DeletionQueue>,
-    /// Descriptor-heap ledger: `ResourceRegistry` + slot reference-tracking.
+    /// Descriptor registry: `ResourceRegistry` + slot reference-tracking.
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
-    pub ledger: Arc<Mutex<DeviceLedger>>,
+    pub descriptors: Arc<Mutex<DescriptorRegistry>>,
     /// Cached PSO blobs (graphics + compute) and disk-dirty flag.
     /// `RwLock` because reads dominate after warmup; `Arc` for Phase 5 cloning.
     pub pso_cache: Arc<RwLock<PsoCache>>,
+    /// Serialises all `ExecuteCommandLists` + `Signal` pairs on this device's queue.
+    ///
+    /// D3D12 marks the command queue as externally synchronized for concurrent submits.
+    /// Phase 5 lock-free submit clones this `Arc` and holds it only across the GPU
+    /// enqueue, matching Vulkan's `queue_lock` and Metal's present/compute pairing.
+    pub queue_lock: Arc<Mutex<()>>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
@@ -786,10 +792,10 @@ impl LogicalDevice {
         if batch.is_empty() {
             return;
         }
-        let ledger_arc = Arc::clone(&self.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = Arc::clone(&self.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in batch {
-            destroy_pending_deletion(self, &mut ledger, resource);
+            destroy_pending_deletion(self, &mut registry, resource);
         }
     }
 
@@ -804,15 +810,19 @@ impl LogicalDevice {
         if batch.is_empty() {
             return;
         }
-        let ledger_arc = Arc::clone(&self.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = Arc::clone(&self.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in batch {
-            destroy_pending_deletion(self, &mut ledger, resource);
+            destroy_pending_deletion(self, &mut registry, resource);
         }
     }
 }
 
-pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLedger, resource: PendingDeletion) {
+pub(crate) fn destroy_pending_deletion(
+    ld: &LogicalDevice,
+    registry: &mut DescriptorRegistry,
+    resource: PendingDeletion,
+) {
     match resource {
         PendingDeletion::Buffer {
             buffer_handle,
@@ -821,7 +831,7 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
             coherent_readback,
             reserved_tiles,
         } => {
-            ledger.reclaim_buffer_slots(buffer_handle);
+            registry.reclaim_buffer_slots(buffer_handle);
             if let Some(tiles) = reserved_tiles {
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
@@ -837,7 +847,7 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
             drop(coherent_readback);
         }
         PendingDeletion::BufferView { buffer_handle } => {
-            ledger.reclaim_buffer_slots(buffer_handle);
+            registry.reclaim_buffer_slots(buffer_handle);
         }
         PendingDeletion::ReplacedBufferGpu {
             resource,
@@ -872,7 +882,7 @@ pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, ledger: &mut DeviceLe
             texture_handle,
             resource,
         } => {
-            ledger.reclaim_texture_slots(texture_handle);
+            registry.reclaim_texture_slots(texture_handle);
             drop(resource);
         }
         PendingDeletion::StandaloneResource(resource) => {
@@ -1029,6 +1039,21 @@ pub(crate) struct TextureState {
     /// For `TextureKind::DirectInterpolated` textures, the SRV (sampled-texture) slot.
     pub sampled_bindless_offset: Option<u32>,
     /// Last known layout for enhanced texture barriers (replaces legacy `current_state`).
+    ///
+    /// Stored on the texture, not on the submission context: layout is device-global
+    /// state for the GPU resource. Recording updates this field (`textures.write()` in
+    /// [`super::compute::record_gpu_command`] and texture upload/copy helpers) so the
+    /// next barrier on this texture knows where to transition from.
+    ///
+    /// Concurrent recording does not require a per-context copy of this field. Parcels
+    /// and the record-gate enforce exclusive mutation claims — a scheme that writes a
+    /// texture must fully claim it before recording, and the ledger blocks a second
+    /// context from recording against the same resource until the first submit retires.
+    /// Disjoint textures therefore update disjoint map entries with no semantic conflict;
+    /// two contexts never legitimately race on the same `last_layout`.
+    ///
+    /// Phase 5b-iv may still see `textures.write()` block unrelated readers on other
+    /// entries (whole-map `RwLock` writer exclusion); that is a performance concern only.
     pub last_layout: Direct3D12::D3D12_BARRIER_LAYOUT,
     /// Whether this texture was created with UAV access (TextureKind::Direct).
     pub is_storage: bool,
@@ -1100,6 +1125,55 @@ pub(crate) struct SurfaceState {
     pub pending_swapchain_returns: Vec<(u32, crate::timeline::TimelineValue)>,
 }
 
+/// Map plus monotonic handle allocator for a single resource kind.
+///
+/// Wrapped in [`Arc<RwLock<_>>`] on [`Dx12State`] so submit recording can take read
+/// guards without the global backend mutex (Phase 5b-iii).
+macro_rules! handle_table {
+    ($table:ident, $shared:ident, $handle:ty, $value:ty) => {
+        #[derive(Default)]
+        pub(crate) struct $table {
+            pub entries: HashMap<$handle, $value>,
+            pub next_handle: $handle,
+        }
+
+        impl $table {
+            pub fn new() -> Self {
+                Self {
+                    entries: HashMap::new(),
+                    next_handle: 1,
+                }
+            }
+
+            pub fn alloc_handle(&mut self) -> $handle {
+                let h = self.next_handle;
+                self.next_handle += 1;
+                h
+            }
+        }
+
+        pub(crate) type $shared = Arc<RwLock<$table>>;
+    };
+}
+
+handle_table!(BufferTable, SharedBufferTable, BufferHandle, BufferState);
+handle_table!(ShaderTable, SharedShaderTable, ShaderHandle, ShaderState);
+handle_table!(PipelineTable, SharedPipelineTable, PipelineHandle, PipelineState);
+handle_table!(
+    ComputePipelineTable,
+    SharedComputePipelineTable,
+    ComputePipelineHandle,
+    ComputePipelineState
+);
+handle_table!(
+    RenderTargetTable,
+    SharedRenderTargetTable,
+    RenderTargetHandle,
+    RenderTargetState
+);
+handle_table!(TextureTable, SharedTextureTable, TextureHandle, TextureState);
+handle_table!(SamplerTable, SharedSamplerTable, SamplerHandle, SamplerState);
+
 /// Consolidated DX12 backend state.
 /// This holds all the resources and state for the DX12 backend.
 pub(super) struct Dx12State {
@@ -1115,26 +1189,23 @@ pub(super) struct Dx12State {
     /// Fence handles for every live context, keyed by context ID.
     ///
     /// Maintained in sync with `contexts` (inserted on create, removed on destroy).
-    /// Used by [`DeviceLedger::drain_ready_slot_reclamations`] and [`device_retired`] so
+    /// Used by [`DescriptorRegistry::drain_ready_slot_reclamations`] and [`device_retired`] so
     /// those paths can query fence completion without acquiring any per-context lock,
-    /// avoiding a ledger-lock → context-lock ordering hazard.
-    pub context_fences: HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
-    pub buffers: HashMap<BufferHandle, BufferState>,
-    pub next_buffer_handle: BufferHandle,
-    pub shaders: HashMap<ShaderHandle, ShaderState>,
-    pub next_shader_handle: ShaderHandle,
-    pub pipelines: HashMap<PipelineHandle, PipelineState>,
-    pub next_pipeline_handle: PipelineHandle,
-    pub compute_pipelines: HashMap<ComputePipelineHandle, ComputePipelineState>,
-    pub next_compute_pipeline_handle: ComputePipelineHandle,
-    pub render_targets: HashMap<RenderTargetHandle, RenderTargetState>,
-    pub next_render_target_handle: RenderTargetHandle,
+    /// avoiding a descriptors-lock → context-lock ordering hazard.
+    ///
+    /// Shared via [`Arc<RwLock<>>`] so [`ContextDeferredDeletionFlush`] clones can drain slots
+    /// without the global backend mutex.
+    pub context_fences:
+        std::sync::Arc<std::sync::RwLock<HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>>>,
+    pub buffers: SharedBufferTable,
+    pub shaders: SharedShaderTable,
+    pub pipelines: SharedPipelineTable,
+    pub compute_pipelines: SharedComputePipelineTable,
+    pub render_targets: SharedRenderTargetTable,
     pub surfaces: HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,
-    pub textures: HashMap<TextureHandle, TextureState>,
-    pub next_texture_handle: TextureHandle,
-    pub samplers: HashMap<SamplerHandle, SamplerState>,
-    pub next_sampler_handle: SamplerHandle,
+    pub textures: SharedTextureTable,
+    pub samplers: SharedSamplerTable,
     /// Next RTV descriptor offset (high-water mark; prefer free_rtv_offsets first)
     pub next_rtv_offset: u32,
     /// Recycled RTV descriptor slots available for reuse

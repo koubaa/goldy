@@ -579,11 +579,13 @@ pub(super) fn create(
         }
     }
 
-    let handle = state.next_compute_pipeline_handle;
-    state.next_compute_pipeline_handle += 1;
+    let handle = state.compute_pipelines.write().unwrap().alloc_handle();
 
     let (cats, slot_kinds, strides) = state
         .shaders
+        .read()
+        .unwrap()
+        .entries
         .get(&compute_shader)
         .and_then(|s| s.reflection.as_ref())
         .map(|r| {
@@ -595,7 +597,7 @@ pub(super) fn create(
         })
         .unwrap_or_default();
 
-    state.compute_pipelines.insert(
+    state.compute_pipelines.write().unwrap().entries.insert(
         handle,
         ComputePipelineState {
             device_handle,
@@ -615,7 +617,12 @@ pub(super) fn create(
 
 /// Destroy a compute pipeline.
 pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHandle) {
-    state.compute_pipelines.remove(&pipeline_handle);
+    state
+        .compute_pipelines
+        .write()
+        .unwrap()
+        .entries
+        .remove(&pipeline_handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -635,8 +642,8 @@ fn queue_wait_for_epochs(state: &Dx12State, consumer_device: DeviceHandle, sync:
         .get(&consumer_device)
         .context("queue_wait_for_epochs: invalid device")?;
     for epoch in &s.waits {
-        let (_, producer_fence) = state
-            .context_fences
+        let fences = state.context_fences.read().unwrap();
+        let (_, producer_fence) = fences
             .get(&epoch.context)
             .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
         unsafe {
@@ -667,6 +674,8 @@ fn acquire_allocator_slot(
 
     let ctx_fence = state
         .context_fences
+        .read()
+        .unwrap()
         .get(&ctx)
         .context("Invalid context handle")?
         .1
@@ -740,6 +749,11 @@ struct CmdCtx<'a> {
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
+///
+/// Some arms take `textures.write()` to update [`TextureState::last_layout`]. That is
+/// safe without per-context layout tracking: parcel exclusivity prevents two contexts
+/// from recording against the same texture concurrently (see the field doc on
+/// `last_layout`).
 #[allow(clippy::too_many_lines)]
 fn record_gpu_command(
     state: &mut Dx12State,
@@ -755,7 +769,7 @@ fn record_gpu_command(
             super::frame_table::record_prologue(
                 &state.contexts,
                 &state.frame_tables,
-                &state.buffers,
+                &state.buffers.read().unwrap().entries,
                 device_handle,
                 cl7,
                 data,
@@ -774,17 +788,22 @@ fn record_gpu_command(
 
             /*let pipeline_changed = ctx.current_compute_pipeline != Some(*handle);
             if pipeline_changed {
-                if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
+                {
+                    let compute_pipelines_read = state.compute_pipelines.read().unwrap();
+                    if let Some(pipeline_state) = compute_pipelines_read.entries.get(handle) {
                     unsafe {
                         cl.SetComputeRootSignature(&pipeline_state.root_signature);
                         cl.SetPipelineState(&pipeline_state.pipeline_state);
                     }
                 }
             }*/
-            if let Some(pipeline_state) = state.compute_pipelines.get(handle) {
-                unsafe {
-                    cl.SetComputeRootSignature(&pipeline_state.root_signature);
-                    cl.SetPipelineState(&pipeline_state.pipeline_state);
+            {
+                let compute_pipelines_read = state.compute_pipelines.read().unwrap();
+                if let Some(pipeline_state) = compute_pipelines_read.entries.get(handle) {
+                    unsafe {
+                        cl.SetComputeRootSignature(&pipeline_state.root_signature);
+                        cl.SetPipelineState(&pipeline_state.pipeline_state);
+                    }
                 }
             }
         }
@@ -793,25 +812,32 @@ fn record_gpu_command(
             user: raw_user,
             frame_table_base,
         } => {
-            if let Some(pipeline) = ctx
-                .current_compute_pipeline
-                .and_then(|h| state.compute_pipelines.get(&h))
-            {
-                crate::backend::with_layout_validation(|| {
-                    crate::backend::validate_raw_binding_strides(
-                        raw_indices,
-                        &pipeline.push_constant_categories,
-                        &pipeline.binding_element_strides,
-                        |idx, cat| buffer_stride_for_bindless_index(&state.buffers, device_handle, idx, cat),
-                        &pipeline.shader_debug_name,
-                    )?;
-                    crate::backend::validate_bindless_slot_kinds(
-                        raw_indices,
-                        &pipeline.push_constant_slot_kinds,
-                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
-                        &pipeline.shader_debug_name,
-                    )
-                })?;
+            let pipelines_read = state.compute_pipelines.read().unwrap();
+            if let Some(h) = ctx.current_compute_pipeline {
+                if let Some(pipeline) = pipelines_read.entries.get(&h) {
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_raw_binding_strides(
+                            raw_indices,
+                            &pipeline.push_constant_categories,
+                            &pipeline.binding_element_strides,
+                            |idx, cat| {
+                                buffer_stride_for_bindless_index(
+                                    &state.buffers.read().unwrap().entries,
+                                    device_handle,
+                                    idx,
+                                    cat,
+                                )
+                            },
+                            &pipeline.shader_debug_name,
+                        )?;
+                        crate::backend::validate_bindless_slot_kinds(
+                            raw_indices,
+                            &pipeline.push_constant_slot_kinds,
+                            |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
+                }
             }
             let mut layout = types::PushLayout::default();
             shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
@@ -825,24 +851,24 @@ fn record_gpu_command(
             }
         }
         GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-            if let Some(pipeline) = ctx
-                .current_compute_pipeline
-                .and_then(|h| state.compute_pipelines.get(&h))
-            {
-                crate::backend::validate_typed_push_constants(
-                    typed_handles,
-                    &pipeline.push_constant_categories,
-                    &pipeline.shader_debug_name,
-                )?;
-                let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
-                crate::backend::with_layout_validation(|| {
-                    crate::backend::validate_bindless_slot_kinds(
-                        &indices,
-                        &pipeline.push_constant_slot_kinds,
-                        |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+            let pipelines_read = state.compute_pipelines.read().unwrap();
+            if let Some(h) = ctx.current_compute_pipeline {
+                if let Some(pipeline) = pipelines_read.entries.get(&h) {
+                    crate::backend::validate_typed_push_constants(
+                        typed_handles,
+                        &pipeline.push_constant_categories,
                         &pipeline.shader_debug_name,
-                    )
-                })?;
+                    )?;
+                    let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
+                    crate::backend::with_layout_validation(|| {
+                        crate::backend::validate_bindless_slot_kinds(
+                            &indices,
+                            &pipeline.push_constant_slot_kinds,
+                            |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                            &pipeline.shader_debug_name,
+                        )
+                    })?;
+                }
             }
             anyhow::bail!(
                 "GpuCommand::BindResourcesTyped must be lowered to BindResourcesRaw before DX12 record; \
@@ -877,8 +903,9 @@ fn record_gpu_command(
                 .devices
                 .get(&device_handle)
                 .context("DispatchIndirect: invalid device")?;
-            let buf_state = state
-                .buffers
+            let buffers_read = state.buffers.read().unwrap();
+            let buf_state = buffers_read
+                .entries
                 .get(buffer)
                 .context("DispatchIndirect: invalid buffer handle")?;
             let signature = logical_device
@@ -1059,7 +1086,8 @@ fn record_gpu_command(
                 for (h, usage) in buf_entries {
                     // Clamp access against the resource's real capabilities: a
                     // non-storage (upload) buffer can never carry UAV/COPY_DEST.
-                    let is_storage = state.buffers.get(h).map(|bs| bs.is_storage).unwrap_or(false);
+                    let buffers_read = state.buffers.read().unwrap();
+                    let is_storage = buffers_read.entries.get(h).map(|bs| bs.is_storage).unwrap_or(false);
                     let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, is_storage);
                     let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, is_storage);
                     // WARP validation (ID 1331): global barriers with AccessBefore=COMMON
@@ -1084,7 +1112,7 @@ fn record_gpu_command(
                 buf_barriers = buf_entries
                     .iter()
                     .filter_map(|(h, usage)| {
-                        state.buffers.get(h).map(|bs| {
+                        state.buffers.read().unwrap().entries.get(h).map(|bs| {
                             barriers::buffer_barrier_full(
                                 &bs.resource,
                                 slot_usage_to_dx12_sync(&usage.src, bs.is_storage),
@@ -1100,7 +1128,7 @@ fn record_gpu_command(
             let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_entries
                 .iter()
                 .filter_map(|(h, usage)| {
-                    state.textures.get(h).map(|ts| {
+                    state.textures.read().unwrap().entries.get(h).map(|ts| {
                         let (tex_sync_after, tex_access_after, tex_layout_after) =
                             texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
                         let (tex_sync_before, tex_access_before, tex_layout_before) =
@@ -1131,16 +1159,20 @@ fn record_gpu_command(
             unsafe { barriers::drop_texture_barriers(&mut tex_barriers) };
 
             for (h, usage) in tex_entries {
-                if let Some(ts) = state.textures.get_mut(h) {
-                    let (_, _, tex_layout_after) = texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
-                    ts.last_layout = tex_layout_after;
+                {
+                    let mut textures_write = state.textures.write().unwrap();
+                    if let Some(ts) = textures_write.entries.get_mut(h) {
+                        let (_, _, tex_layout_after) = texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
+                        ts.last_layout = tex_layout_after;
+                    }
                 }
             }
         }
         GpuCommand::ClearBuffer { buffer, offset, size } => {
             let _tz = tracy_zone!("dx12.clear_buffer");
-            let buf_state = state
-                .buffers
+            let buffers_read = state.buffers.read().unwrap();
+            let buf_state = buffers_read
+                .entries
                 .get(buffer)
                 .context("ClearBuffer: invalid buffer handle")?;
             let clear_size = if *size == 0 {
@@ -1207,8 +1239,9 @@ fn record_gpu_command(
             data,
         } => {
             let _tz = tracy_zone!("dx12.write_buffer");
-            let buf_state = state
-                .buffers
+            let buffers_read = state.buffers.read().unwrap();
+            let buf_state = buffers_read
+                .entries
                 .get(buf_handle)
                 .context("WriteBuffer: invalid buffer handle")?;
             if !buf_state.is_storage {
@@ -1232,7 +1265,8 @@ fn record_gpu_command(
                 ctx.belt_idx += 1;
                 let upload_src = belt_entry.0.clone();
                 let upload_off = belt_entry.1;
-                let buf_state = state.buffers.get(buf_handle).unwrap();
+                let buffers_read = state.buffers.read().unwrap();
+                let buf_state = buffers_read.entries.get(buf_handle).unwrap();
 
                 if ctx.use_global_buffer_barriers {
                     let pre = D3D12_GLOBAL_BARRIER {
@@ -1270,16 +1304,29 @@ fn record_gpu_command(
                 .get(ctx.texture_upload_idx)
                 .context("WriteTexture: staged upload missing (internal)")?;
             ctx.texture_upload_idx += 1;
-            super::texture::record_staged_texture_upload(cl, cl7, &mut state.textures, upload)?;
+            super::texture::record_staged_texture_upload(
+                cl,
+                cl7,
+                &mut state.textures.write().unwrap().entries,
+                upload,
+            )?;
         }
         GpuCommand::CopyTexture { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_texture");
             let (src_res, src_layout, src_is_storage) = {
-                let ts = state.textures.get(src).context("CopyTexture: src texture not found")?;
+                let textures_read = state.textures.read().unwrap();
+                let ts = textures_read
+                    .entries
+                    .get(src)
+                    .context("CopyTexture: src texture not found")?;
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
             let (dst_res, dst_layout, dst_is_storage) = {
-                let ts = state.textures.get(dst).context("CopyTexture: dst texture not found")?;
+                let textures_read = state.textures.read().unwrap();
+                let ts = textures_read
+                    .entries
+                    .get(dst)
+                    .context("CopyTexture: dst texture not found")?;
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
 
@@ -1356,11 +1403,14 @@ fn record_gpu_command(
             unsafe { barriers::barrier_textures(cl7, &post_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
 
-            if let Some(ts) = state.textures.get_mut(src) {
-                ts.last_layout = src_post_state.1;
-            }
-            if let Some(ts) = state.textures.get_mut(dst) {
-                ts.last_layout = dst_post_state.1;
+            {
+                let mut textures_write = state.textures.write().unwrap();
+                if let Some(ts) = textures_write.entries.get_mut(src) {
+                    ts.last_layout = src_post_state.1;
+                }
+                if let Some(ts) = textures_write.entries.get_mut(dst) {
+                    ts.last_layout = dst_post_state.1;
+                }
             }
         }
         GpuCommand::CopyBuffer {
@@ -1372,8 +1422,9 @@ fn record_gpu_command(
         } => {
             let _tz = tracy_zone!("dx12.copy_buffer");
             let (src_resource, dst_resource, src_off, dst_off, src_is_upload) = {
-                let src_buf = state.buffers.get(src).context("CopyBuffer: invalid src")?;
-                let dst_buf = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                let buffers_read = state.buffers.read().unwrap();
+                let src_buf = buffers_read.entries.get(src).context("CopyBuffer: invalid src")?;
+                let dst_buf = buffers_read.entries.get(dst).context("CopyBuffer: invalid dst")?;
                 if src_offset.saturating_add(*size) > src_buf.size || dst_offset.saturating_add(*size) > dst_buf.size {
                     anyhow::bail!("CopyBuffer: size exceeds buffer bounds");
                 }
@@ -1427,8 +1478,8 @@ fn record_gpu_command(
             super::texture::record_copy_texture_to_readback(
                 cl,
                 cl7,
-                &mut state.textures,
-                &state.buffers,
+                &mut state.textures.write().unwrap().entries,
+                &state.buffers.read().unwrap().entries,
                 *src,
                 *dst,
                 *layout,
@@ -1437,15 +1488,17 @@ fn record_gpu_command(
         GpuCommand::CopyRenderTarget { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_render_target");
             let src_res = {
-                let rt = state
-                    .render_targets
+                let render_targets_read = state.render_targets.read().unwrap();
+                let rt = render_targets_read
+                    .entries
                     .get(src)
                     .context("CopyRenderTarget: src render target not found")?;
                 rt.texture.clone()
             };
             let (dst_res, dst_layout, dst_is_storage) = {
-                let ts = state
-                    .textures
+                let textures_read = state.textures.read().unwrap();
+                let ts = textures_read
+                    .entries
                     .get(dst)
                     .context("CopyRenderTarget: dst texture not found")?;
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
@@ -1512,8 +1565,11 @@ fn record_gpu_command(
             unsafe { barriers::barrier_textures(cl7, &post_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
 
-            if let Some(ts) = state.textures.get_mut(dst) {
-                ts.last_layout = dst_post_state.1;
+            {
+                let mut textures_write = state.textures.write().unwrap();
+                if let Some(ts) = textures_write.entries.get_mut(dst) {
+                    ts.last_layout = dst_post_state.1;
+                }
             }
         }
     }
@@ -1602,7 +1658,7 @@ fn execute_signal_and_finish(
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
@@ -1611,6 +1667,8 @@ fn execute_signal_and_finish(
     let logical_device = state.devices.get(&device_handle).unwrap();
     let ctx_fence = state
         .context_fences
+        .read()
+        .unwrap()
         .get(&ctx)
         .context("Invalid context handle")?
         .1
@@ -1618,6 +1676,8 @@ fn execute_signal_and_finish(
     {
         let _tz = tracy_zone!("dx12.execute_and_signal");
         queue_wait_for_epochs(state, device_handle, sync)?;
+        let queue_lock = std::sync::Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe { logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]) };
         unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
             .context("Failed to signal context fence")?;
@@ -1688,12 +1748,13 @@ fn execute_signal_and_finish(
         })
         .unwrap_or_default();
     if let Some(dev) = state.devices.get(&device_handle) {
-        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in ctx_del_batch {
-            types::destroy_pending_deletion(dev, &mut ledger, resource);
+            types::destroy_pending_deletion(dev, &mut registry, resource);
         }
-        ledger.drain_ready_slot_reclamations(&state.context_fences);
+        let fences = state.context_fences.read().unwrap();
+        registry.drain_ready_slot_reclamations(&fences);
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1748,6 +1809,8 @@ pub(super) fn submit(
         let dev = state.devices.get(&device_handle).context("Invalid device handle")?;
         let ctx_fence = state
             .context_fences
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .1
@@ -1793,8 +1856,9 @@ pub(super) fn submit(
                     data,
                     ..
                 } => {
-                    let buf = state
-                        .buffers
+                    let buffers_read = state.buffers.read().unwrap();
+                    let buf = buffers_read
+                        .entries
                         .get(buf_handle)
                         .context("WriteBuffer pre-pass: invalid handle")?;
                     if buf.is_storage {
@@ -1821,7 +1885,7 @@ pub(super) fn submit(
                 } => {
                     staged_texture_uploads.push(super::texture::stage_texture_upload_full(
                         &state.devices,
-                        &state.textures,
+                        &state.textures.read().unwrap().entries,
                         &mut pool,
                         *texture,
                         data.as_ref(),
@@ -1839,7 +1903,7 @@ pub(super) fn submit(
                 } => {
                     staged_texture_uploads.push(super::texture::stage_texture_upload_region(
                         &state.devices,
-                        &state.textures,
+                        &state.textures.read().unwrap().entries,
                         &mut pool,
                         super::texture::TextureUploadRegion {
                             texture_handle: *texture,
@@ -1862,8 +1926,8 @@ pub(super) fn submit(
                 } => {
                     staged_texture_uploads.push(super::texture::stage_copy_buffer_to_texture_upload(
                         &state.devices,
-                        &state.textures,
-                        &state.buffers,
+                        &state.textures.read().unwrap().entries,
+                        &state.buffers.read().unwrap().entries,
                         &mut pool,
                         *src,
                         *src_offset,
@@ -1954,7 +2018,7 @@ pub(super) fn submit(
         }
     }
 
-    let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &state.buffers);
+    let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &state.buffers.read().unwrap().entries);
     execute_signal_and_finish(
         state,
         &command_list,
@@ -2008,6 +2072,8 @@ pub(super) fn submit_graph(
         let dev = state.devices.get(&device_handle).context("Invalid device handle")?;
         let ctx_fence = state
             .context_fences
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .1
@@ -2055,8 +2121,9 @@ pub(super) fn submit_graph(
                         data,
                         ..
                     } => {
-                        let buf = state
-                            .buffers
+                        let buffers_read = state.buffers.read().unwrap();
+                        let buf = buffers_read
+                            .entries
                             .get(buf_handle)
                             .context("WriteBuffer pre-pass: invalid handle")?;
                         if buf.is_storage {
@@ -2083,7 +2150,7 @@ pub(super) fn submit_graph(
                     } => {
                         staged_texture_uploads.push(super::texture::stage_texture_upload_full(
                             &state.devices,
-                            &state.textures,
+                            &state.textures.read().unwrap().entries,
                             &mut pool,
                             *texture,
                             data,
@@ -2101,7 +2168,7 @@ pub(super) fn submit_graph(
                     } => {
                         staged_texture_uploads.push(super::texture::stage_texture_upload_region(
                             &state.devices,
-                            &state.textures,
+                            &state.textures.read().unwrap().entries,
                             &mut pool,
                             super::texture::TextureUploadRegion {
                                 texture_handle: *texture,
@@ -2124,8 +2191,8 @@ pub(super) fn submit_graph(
                     } => {
                         staged_texture_uploads.push(super::texture::stage_copy_buffer_to_texture_upload(
                             &state.devices,
-                            &state.textures,
-                            &state.buffers,
+                            &state.textures.read().unwrap().entries,
+                            &state.buffers.read().unwrap().entries,
                             &mut pool,
                             *src,
                             *src_offset,
@@ -2238,19 +2305,22 @@ pub(super) fn submit_graph(
                     // Color is already COPY_SOURCE after record_render_pass_to_list.
                     // Global render→compute barriers cannot express texture layout
                     // transitions and trip the debug layer before swapchain copy.
-                    if let Some(rt) = state.render_targets.get(target) {
-                        if let Some(ref depth_res) = rt.depth_texture {
-                            let depth_after = barriers::texture_barrier_full(
-                                depth_res,
-                                D3D12_BARRIER_SYNC_DEPTH_STENCIL,
-                                D3D12_BARRIER_SYNC_ALL,
-                                D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
-                                D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ,
-                                D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
-                                D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
-                            );
-                            unsafe {
-                                barriers::barrier_textures(cmd_ctx.command_list7, &[depth_after]);
+                    {
+                        let render_targets_read = state.render_targets.read().unwrap();
+                        if let Some(rt) = render_targets_read.entries.get(target) {
+                            if let Some(ref depth_res) = rt.depth_texture {
+                                let depth_after = barriers::texture_barrier_full(
+                                    depth_res,
+                                    D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+                                    D3D12_BARRIER_SYNC_ALL,
+                                    D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE,
+                                    D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ,
+                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE,
+                                    D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ,
+                                );
+                                unsafe {
+                                    barriers::barrier_textures(cmd_ctx.command_list7, &[depth_after]);
+                                }
                             }
                         }
                     }
@@ -2289,7 +2359,7 @@ pub(super) fn submit_graph(
         }
     }
 
-    let used_slots = collect_bindless_slots_from_graph_commands(commands, &state.buffers);
+    let used_slots = collect_bindless_slots_from_graph_commands(commands, &state.buffers.read().unwrap().entries);
     let result = execute_signal_and_finish(
         state,
         &command_list,
@@ -2312,8 +2382,11 @@ pub(super) fn submit_graph(
     )?;
 
     for t in rendered_targets {
-        if let Some(rt) = state.render_targets.get_mut(&t) {
-            rt.has_rendered = true;
+        {
+            let mut render_targets_write = state.render_targets.write().unwrap();
+            if let Some(rt) = render_targets_write.entries.get_mut(&t) {
+                rt.has_rendered = true;
+            }
         }
     }
 
@@ -2370,19 +2443,26 @@ pub(super) fn try_resubmit_retained(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast retained command list")?;
 
-    let (ctx_fence, command_queue) = {
+    let (ctx_fence, command_queue, queue_lock) = {
         let ctx_fence = state
             .context_fences
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .1
             .clone();
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        (ctx_fence, ld.command_queue.clone())
+        (
+            ctx_fence,
+            ld.command_queue.clone(),
+            std::sync::Arc::clone(&ld.queue_lock),
+        )
     };
     {
         let _tz = tracy_zone!("dx12.resubmit_retained");
         queue_wait_for_epochs(state, device_handle, sync)?;
+        let _queue_guard = queue_lock.lock().unwrap();
         unsafe {
             command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
         }
@@ -2391,7 +2471,7 @@ pub(super) fn try_resubmit_retained(
     }
 
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
@@ -2418,12 +2498,13 @@ pub(super) fn try_resubmit_retained(
         })
         .unwrap_or_default();
     if let Some(dev) = state.devices.get(&device_handle) {
-        let ledger_arc = std::sync::Arc::clone(&dev.ledger);
-        let mut ledger = ledger_arc.lock().unwrap();
+        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+        let mut registry = descriptors_arc.lock().unwrap();
         for resource in retained_del_batch {
-            types::destroy_pending_deletion(dev, &mut ledger, resource);
+            types::destroy_pending_deletion(dev, &mut registry, resource);
         }
-        ledger.drain_ready_slot_reclamations(&state.context_fences);
+        let fences = state.context_fences.read().unwrap();
+        registry.drain_ready_slot_reclamations(&fences);
     }
 
     Ok(Some(fence_value))

@@ -5,6 +5,7 @@
 //! separate upload submission per call (one-node upload [`Scheme`] on `ctx`),
 //! serialized against worker schemes by queue order. Callers do not use
 //! `TaskGraph::clear_buffer` or `TaskGraph::write_buffer` directly.
+//!
 #![cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 #![allow(deprecated)]
 
@@ -23,10 +24,9 @@ use submission::submission_context;
 use upload::write_to_parcel;
 
 fn make_device() -> Device {
-    let instance = Instance::new().expect("Failed to create instance");
-
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     if std::env::var("GOLDY_DX12_ALLOW_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        let instance = Instance::new().expect("Failed to create instance");
         if let Ok(adapter) = instance.request_adapter(&RequestAdapterOptions {
             power_preference: goldy::PowerPreference::None,
             force_fallback_adapter: true,
@@ -37,11 +37,12 @@ fn make_device() -> Device {
         }
     }
 
+    let instance = Instance::new().expect("Failed to create instance");
     instance
         .request_adapter(&RequestAdapterOptions::default())
-        .expect("Failed to request adapter")
+        .expect("adapter")
         .request_device(&DeviceDescriptor::default())
-        .expect("Failed to create device")
+        .expect("device")
 }
 
 fn test_alloc_texture(
@@ -2101,7 +2102,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let out = pool
         .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
@@ -2133,7 +2134,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let out = pool
         .acquire_buffer_with_data(&[0xDEAD_BEEFu32], BufferKind::Scattered)
         .expect("out");
@@ -2164,7 +2165,7 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let out = pool
         .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
@@ -2195,7 +2196,7 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let out = pool
         .acquire_buffer(4, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
@@ -2231,7 +2232,7 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
     let ctx = submission_context(&device);
     let shader = ShaderModule::from_slang(&device, SHADER).expect("compile");
     let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let out = pool
         .acquire_buffer(8, BufferKind::Scattered, None, BufferFlags::empty(), None)
         .expect("out");
@@ -2271,7 +2272,7 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
 
     const N: usize = 64;
     let input: Vec<u32> = (0..N as u32).collect();
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let inp = pool
         .acquire_buffer_with_data(&input, BufferKind::Scattered)
         .expect("inp");
@@ -2320,7 +2321,7 @@ fn scheme_buffer_view_copy_between_sub_regions() {
     }
     let dst = vec![0u32; N];
 
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let cells = pool
         .acquire_record([ordinal(Init::data(&src)), ordinal(Init::data(&dst))])
         .expect("acquire_record");
@@ -2368,7 +2369,7 @@ fn scheme_buffer_view_isolation() {
         *slot = (i + 1) as u32;
     }
 
-    let mut pool = RetainedPool::new(Arc::new(device));
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let cells = pool
         .acquire_record([ordinal(Init::data(&sentinel)), ordinal(Init::data(&work))])
         .expect("acquire_record");

@@ -52,6 +52,11 @@ use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use super::types::{SharedLogicalDevice, SharedMetalSubmissionContext, TimelineWaiter};
+use crate::backend::{PresentFinishState, PresentGpuWork};
+use crate::timeline::TimelineValue;
 
 /// Create a surface for window presentation.
 /// When `depth_format` is `Some`, a depth buffer is created for 3D rendering.
@@ -113,7 +118,7 @@ pub(super) fn create(
     // slot that the GPU is concurrently reading (see module-level doc comment).
     let bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT] = std::array::from_fn(|_| {
         logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -197,7 +202,7 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
             let slot_barrier = if gpu_idle { None } else { Some(barrier) };
             for &local in &slot_arr {
                 logical_device
-                    .ledger
+                    .descriptors
                     .lock()
                     .unwrap()
                     .resource_registry
@@ -448,130 +453,109 @@ pub(super) fn render(
     Ok(())
 }
 
-/// Present the acquired drawable.
-///
-/// The drawable is presented and released; the per-frame texture handle is
-/// unregistered. This is the sole place where `presentDrawable:` is called.
-pub(super) fn present(
+/// Clone present resources under the global backend lock for lock-free GPU enqueue.
+pub(super) fn prepare_present_work(
     state: &mut MetalState,
     frame: crate::backend::FrameToken,
-) -> Result<crate::timeline::TimelineValue> {
-    let _tz = crate::tracy_zone!("mtl.surface.present");
+    _submit_tv: TimelineValue,
+) -> Result<Box<dyn PresentGpuWork>> {
     let surface = frame.surface;
     let present_slot = frame.present_slot as usize;
     let ctx = frame.context;
-    let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
 
+    let surface_state = state.surfaces.get_mut(&surface).context("Invalid surface handle")?;
     let device_handle = surface_state.device_handle;
-
-    let drawable_ptr = match surface_state.drawable_slots[present_slot] {
-        Some(d) => d,
-        None => {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                sc.deletion_queue.process_up_to(ctx_signaled);
-            }
-            let retired = super::context::device_retired(state, device_handle);
-            let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
-            ld.process_deletion_queue_up_to(retired);
-            return Ok(state
-                .contexts
-                .get(&ctx)
-                .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
-                .unwrap_or(retired));
-        }
-    };
-    let tex_handle = surface_state.drawable_texture_handles[present_slot];
-
-    let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
-
-    let (owned_command_buffer, signal_value) = {
-        let _tz = crate::tracy_zone!("mtl.present.encode");
-        let signal_value = {
-            let ld = state.devices.get(&device_handle).context("Device no longer valid")?;
-            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-            v
-        };
-
-        let owned_command_buffer = logical_device.command_queue.new_command_buffer().to_owned();
-        let command_buffer = owned_command_buffer.as_ref();
-
-        let (timeline_event, waiter, signal_queue_present, return_pending) = {
-            let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-            let sc = sc_arc.lock().unwrap();
-            (
-                sc.timeline_event.clone(),
-                sc.timeline_waiter.clone(),
-                std::sync::Arc::clone(&sc.signal_queue),
-                sc.pending_swapchain_returns.clone(),
-            )
-        };
-        command_buffer.encode_signal_event(timeline_event.as_ref(), signal_value);
-
-        let return_image = state.surfaces.get(&surface).and_then(|s| s.last_acquired_image_index);
-        let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
-            waiter.signal(signal_value);
-            if let Some(idx) = return_image {
-                // Metal has no WSI timeline to poll: push SwapchainReturned here from the
-                // completion handler. Vulkan/DX12 defer this signal until poll_signals when
-                // gpu_progress crosses the copy/fence value.
-                signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
-                if let Ok(mut pending) = return_pending.lock() {
-                    pending.push((surface, idx));
-                }
-            }
-        })
-        .copy();
-        command_buffer.add_completed_handler(&handler);
-
-        (owned_command_buffer, signal_value)
-    };
-
-    let drawable = drawable_ptr as id;
-    {
-        let _tz = crate::tracy_zone!("mtl.present.present_drawable");
-        let command_buffer = owned_command_buffer.as_ref();
-        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable as *const mtl::DrawableRef) };
-        command_buffer.present_drawable(drawable_ref);
-        if super::api_log::enabled() {
-            super::api_log::log_present_drawable(signal_value);
-        }
-        command_buffer.commit();
-    }
-
-    // Release the retained drawable
-    unsafe {
-        let (): () = msg_send![drawable, release];
-    }
-
-    // Unregister the temporary surface texture
-    if let Some(th) = tex_handle {
-        unregister_surface_texture(state, th);
-    }
-
-    // Clear the drawable state for this slot.
-    let surface_state = state
-        .surfaces
-        .get_mut(&surface)
-        .expect("surface must be registered before presenting a frame");
-    surface_state.drawable_slots[present_slot] = None;
-    surface_state.drawable_texture_handles[present_slot] = None;
+    let return_image = surface_state.last_acquired_image_index;
+    let drawable_ptr = surface_state.drawable_slots[present_slot].take();
+    let tex_handle = surface_state.drawable_texture_handles[present_slot].take();
     if surface_state.current_texture_handle == tex_handle {
         surface_state.current_texture_handle = None;
     }
     surface_state.last_acquired_image_index = None;
 
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
-        sc.in_flight_command_buffers
-            .push_back((signal_value, owned_command_buffer));
-        sc.last_submitted_seq = signal_value;
-        super::drain_completed_cbs(&mut sc);
+    let Some(drawable_ptr) = drawable_ptr else {
+        let present_timeline = if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            sc.deletion_queue.process_up_to(ctx_signaled);
+            ctx_signaled
+        } else {
+            super::context::device_retired(state, device_handle)
+        };
+        let retired = super::context::device_retired(state, device_handle);
+        if let Some(ld) = state.devices.get(&device_handle) {
+            ld.process_deletion_queue_up_to(retired);
+        }
+        return Ok(Box::new(MetalSkipPresentGpuWork {
+            frame,
+            present_timeline,
+        }));
+    };
+
+    let logical_device = state
+        .devices
+        .get(&device_handle)
+        .context("Device no longer valid")?
+        .clone();
+    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
+    let (timeline_event, waiter, signal_queue_present, return_pending) = {
+        let sc = sc_arc.lock().unwrap();
+        (
+            sc.timeline_event.clone(),
+            sc.timeline_waiter.clone(),
+            Arc::clone(&sc.signal_queue),
+            sc.pending_swapchain_returns.clone(),
+        )
+    };
+
+    Ok(Box::new(MetalPresentGpuWork {
+        frame,
+        surface,
+        drawable_ptr: drawable_ptr as usize,
+        tex_handle,
+        logical_device,
+        sc_arc,
+        timeline_event,
+        waiter,
+        signal_queue_present,
+        return_pending,
+        return_image,
+    }))
+}
+
+/// Bookkeeping after [`MetalPresentGpuWork::run`] — brief global backend lock only.
+pub(super) fn finish_present(
+    state: &mut MetalState,
+    finish: PresentFinishState,
+    _submit_tv: TimelineValue,
+) -> Result<TimelineValue> {
+    let surface = finish.frame.surface;
+    let present_slot = finish.frame.present_slot as usize;
+    let ctx = finish.frame.context;
+    let device_handle = state
+        .surfaces
+        .get(&surface)
+        .map(|s| s.device_handle)
+        .context("Invalid surface handle")?;
+
+    if finish.present_ok {
+        if let Some(th) = finish.scratch_texture {
+            unregister_surface_texture(state, th);
+        }
+        if let Some(surface_state) = state.surfaces.get_mut(&surface) {
+            surface_state.drawable_slots[present_slot] = None;
+            surface_state.drawable_texture_handles[present_slot] = None;
+        }
     }
-    // Drain per-context deletion queue on the context's own clock (hot path),
-    // then the device-level queue as the async GC safety net (see issue #190).
+
+    if let Some(signal_timeline) = finish.signal_timeline {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            sc.last_submitted_seq = signal_timeline;
+            super::drain_completed_cbs(&mut sc);
+        }
+    }
+
     if let Some(sc_arc) = state.contexts.get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
@@ -584,7 +568,120 @@ pub(super) fn present(
         }
     }
 
-    Ok(signal_value)
+    Ok(finish.present_timeline)
+}
+
+struct MetalSkipPresentGpuWork {
+    frame: crate::backend::FrameToken,
+    present_timeline: TimelineValue,
+}
+
+impl PresentGpuWork for MetalSkipPresentGpuWork {
+    fn run(self: Box<Self>) -> Result<PresentFinishState> {
+        Ok(PresentFinishState {
+            frame: self.frame,
+            return_fence: 0,
+            scratch_texture: None,
+            scratch_layout_updated: false,
+            present_timeline: self.present_timeline,
+            copy_timeline: None,
+            frame_compute_timeline: None,
+            signal_timeline: None,
+            render_pass_submitted: false,
+            present_ok: false,
+        })
+    }
+}
+
+struct MetalPresentGpuWork {
+    frame: crate::backend::FrameToken,
+    surface: SurfaceHandle,
+    /// Drawable retained until GPU present; stored as usize for `Send`.
+    drawable_ptr: usize,
+    tex_handle: Option<TextureHandle>,
+    logical_device: SharedLogicalDevice,
+    sc_arc: SharedMetalSubmissionContext,
+    timeline_event: mtl::SharedEvent,
+    waiter: TimelineWaiter,
+    signal_queue_present: Arc<crate::signal::SignalQueue>,
+    return_pending: Arc<std::sync::Mutex<Vec<(SurfaceHandle, u32)>>>,
+    return_image: Option<u32>,
+}
+
+impl PresentGpuWork for MetalPresentGpuWork {
+    fn run(self: Box<Self>) -> Result<PresentFinishState> {
+        let _tz = crate::tracy_zone!("mtl.present.gpu");
+        let owned_command_buffer = self.logical_device.command_queue.new_command_buffer().to_owned();
+        let command_buffer = owned_command_buffer.as_ref();
+        let queue_lock = self.logical_device.queue_lock.clone();
+        let drawable_ptr = self.drawable_ptr as id;
+        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
+
+        let signal_value = {
+            let _queue_guard = queue_lock.lock().unwrap();
+            let signal_value = {
+                let v = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+                self.logical_device
+                    .timeline_scheduled_max
+                    .fetch_max(v, Ordering::Relaxed);
+                v
+            };
+            command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
+            let surface = self.surface;
+            let return_image = self.return_image;
+            let signal_queue_present = Arc::clone(&self.signal_queue_present);
+            let return_pending = Arc::clone(&self.return_pending);
+            let waiter = self.waiter.clone();
+            let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
+                waiter.signal(signal_value);
+                if let Some(idx) = return_image {
+                    signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    if let Ok(mut pending) = return_pending.lock() {
+                        pending.push((surface, idx));
+                    }
+                }
+            })
+            .copy();
+            command_buffer.add_completed_handler(&handler);
+            command_buffer.present_drawable(drawable_ref);
+            if super::api_log::enabled() {
+                super::api_log::log_present_drawable(signal_value);
+            }
+            command_buffer.commit();
+            signal_value
+        };
+
+        unsafe {
+            let (): () = msg_send![drawable_ptr, release];
+        }
+
+        {
+            let mut sc = self.sc_arc.lock().unwrap();
+            sc.in_flight_command_buffers
+                .push_back((signal_value, owned_command_buffer));
+            super::drain_completed_cbs(&mut sc);
+        }
+
+        Ok(PresentFinishState {
+            frame: self.frame,
+            return_fence: 0,
+            scratch_texture: self.tex_handle,
+            scratch_layout_updated: false,
+            present_timeline: signal_value,
+            copy_timeline: None,
+            frame_compute_timeline: None,
+            signal_timeline: Some(signal_value),
+            render_pass_submitted: false,
+            present_ok: true,
+        })
+    }
+}
+
+/// Present the acquired drawable (legacy single-lock entry — prefer split path).
+pub(super) fn present(state: &mut MetalState, frame: crate::backend::FrameToken) -> Result<TimelineValue> {
+    let work = prepare_present_work(state, frame, 0)?;
+    let finish = work.run()?;
+    finish_present(state, finish, 0)
 }
 pub(super) fn submit_frame(state: &mut MetalState, frame: &FrameToken) -> Result<crate::timeline::TimelineValue> {
     let pending = {
@@ -750,7 +847,7 @@ fn register_surface_texture(
         let logical_device = state.devices.get(&device_handle).context("Device no longer valid")?;
 
         logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -816,7 +913,7 @@ fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle)
     if let Some(tex_state) = state.textures.remove(&tex_handle) {
         if let Some(device) = state.devices.get(&tex_state.device_handle) {
             device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry

@@ -30,6 +30,7 @@ mod utils;
 
 use super::*;
 use crate::{goldy_event, goldy_span};
+use ::metal as mtl;
 use anyhow::{Context, Result};
 use types::MetalState;
 
@@ -48,7 +49,12 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
-        device.ledger.lock().unwrap().resource_registry.drain_pending_slots();
+        device
+            .descriptors
+            .lock()
+            .unwrap()
+            .resource_registry
+            .drain_pending_slots();
     }
 }
 
@@ -146,7 +152,7 @@ impl MetalBackend {
         Ok(Self {
             state: MetalState {
                 adapters,
-                device_lost: std::sync::atomic::AtomicBool::new(false),
+                device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 devices: std::collections::HashMap::new(),
                 next_device_handle: 1,
                 contexts: std::collections::HashMap::new(),
@@ -180,6 +186,92 @@ impl Drop for MetalBackend {
         for handle in device_handles {
             device::destroy(&mut self.state, handle);
         }
+    }
+}
+
+impl crate::backend::GpuBackendTimelineWait for MetalBackend {
+    fn take_timeline_blocking_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn crate::backend::TimelineBlockingWait>>> {
+        use std::sync::atomic::Ordering;
+
+        if self.state.device_lost.load(Ordering::Relaxed) {
+            anyhow::bail!("Metal device lost");
+        }
+
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+
+        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            sc.in_flight_command_buffers
+                .iter()
+                .find(|(tv, _)| *tv >= value)
+                .map(|(_, cb)| cb.to_owned())
+        });
+
+        if let Some(cb) = cb_to_wait {
+            return Ok(Some(Box::new(MetalCommandBufferBlockingWait { cb })));
+        }
+
+        let waiter = self
+            .state
+            .contexts
+            .get(&ctx)
+            .context("Invalid context handle")?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        Ok(Some(Box::new(MetalWaiterBlockingWait {
+            waiter,
+            value,
+            device_lost: std::sync::Arc::clone(&self.state.device_lost),
+        })))
+    }
+
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let device = self.context_device(ctx);
+        let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
+        let retired = context::device_retired(&self.state, device);
+        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            drain_completed_cbs(&mut sc);
+            sc.deletion_queue.process_up_to(value);
+        }
+        if let Some(ld) = self.state.devices.get(&device) {
+            ld.process_deletion_queue_up_to(value.min(retired));
+        }
+        {
+            let _pz = crate::tracy_zone!("mtl.wait_until.drain_pending_slots");
+            drain_all_pending_slots(&mut self.state);
+        }
+        if self.state.device_lost.load(Ordering::Relaxed) {
+            anyhow::bail!("Metal device lost");
+        }
+        Ok(())
+    }
+}
+
+impl crate::backend::GpuBackendPresentSplit for MetalBackend {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
+        surface::prepare_present_work(&mut self.state, frame, submit_tv)
+    }
+
+    fn finish_present(
+        &mut self,
+        finish: crate::backend::PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue> {
+        surface::finish_present(&mut self.state, finish, submit_tv)
     }
 }
 
@@ -228,6 +320,57 @@ impl GpuBackend for MetalBackend {
 
     fn destroy_context(&mut self, ctx: ContextHandle) {
         context::destroy(&mut self.state, ctx);
+    }
+
+    fn clone_context_timeline_reader(
+        &self,
+        ctx: ContextHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
+        Some(std::sync::Arc::new(MetalContextTimelineReader {
+            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
+        }))
+    }
+
+    fn clone_device_timeline_reader(
+        &self,
+        device: DeviceHandle,
+    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
+        Some(std::sync::Arc::new(MetalDeviceTimelineReader {
+            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
+        }))
+    }
+
+    fn clone_context_deletion_flush(
+        &self,
+        ctx: ContextHandle,
+        context_readers: std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
+            >,
+        >,
+    ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        let device_handle = {
+            let sc_guard = sc.lock().unwrap();
+            sc_guard.device
+        };
+        Some(std::sync::Arc::new(MetalContextDeferredDeletionFlush {
+            sc,
+            ld: std::sync::Arc::clone(self.state.devices.get(&device_handle)?),
+            timeline: std::sync::Arc::clone(context_readers.lock().unwrap().get(&ctx)?),
+        }))
+    }
+
+    fn clone_context_reclamation_scope(
+        &self,
+        ctx: ContextHandle,
+    ) -> std::sync::Arc<dyn crate::backend::ContextReclamationScope> {
+        if let Some(sc) = self.state.contexts.get(&ctx) {
+            return std::sync::Arc::new(MetalContextReclamationScope {
+                sc: std::sync::Arc::clone(sc),
+            });
+        }
+        std::sync::Arc::new(crate::backend::NoOpReclamationScope)
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
@@ -643,7 +786,11 @@ impl GpuBackend for MetalBackend {
         }
     }
 
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal> {
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        _progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal> {
         let device = self.context_device(ctx);
         let sc_arc = match self.state.contexts.get(&ctx) {
             Some(sc) => sc.clone(),
@@ -680,91 +827,6 @@ impl GpuBackend for MetalBackend {
             .get(&surface)
             .map(|s| s.pending_acquire_count)
             .unwrap_or(0)
-    }
-
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
-        use std::sync::atomic::Ordering;
-        let device = self.context_device(ctx);
-        let _tz = crate::tracy_zone!("mtl.wait_until");
-
-        if self.state.device_lost.load(Ordering::Relaxed) {
-            anyhow::bail!("Metal device lost");
-        }
-
-        // Fast path: GPU has already passed this timeline value.
-        if self.gpu_progress(ctx) >= value {
-            let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
-            let retired = context::device_retired(&self.state, device);
-            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                drain_completed_cbs(&mut sc);
-                sc.deletion_queue.process_up_to(value);
-            }
-            if let Some(ld) = self.state.devices.get(&device) {
-                ld.process_deletion_queue_up_to(value.min(retired));
-            }
-            drain_all_pending_slots(&mut self.state);
-            return Ok(());
-        }
-
-        // Find the MTLCommandBuffer whose timeline value is >= `value` and call
-        // waitUntilCompleted() on it.  Since the command queue is serial, completing
-        // that CB guarantees all earlier CBs (and timeline values) are also done.
-        // This uses the Metal runtime's native Mach-semaphore wait rather than
-        // routing through completedHandler -> condvar, eliminating GCD dispatch latency.
-        let cb_to_wait = self.state.contexts.get(&ctx).and_then(|sc_arc| {
-            let sc = sc_arc.lock().unwrap();
-            sc.in_flight_command_buffers
-                .iter()
-                .find(|(tv, _)| *tv >= value)
-                .map(|(_, cb)| cb.to_owned())
-        });
-
-        if let Some(cb) = cb_to_wait {
-            let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
-            cb.wait_until_completed();
-        } else {
-            // No CB in the deque for this value (value already retired or this is a
-            // future value with no submit yet). Fall back to condvar.
-            let waiter = self
-                .state
-                .contexts
-                .get(&ctx)
-                .context("Invalid context handle")?
-                .lock()
-                .unwrap()
-                .timeline_waiter
-                .clone();
-            let timeout = std::time::Duration::from_secs(300);
-            let reached = {
-                let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
-                waiter.wait_until(value, timeout)
-            };
-            if !reached {
-                if self.state.device_lost.load(Ordering::Relaxed) {
-                    anyhow::bail!("Metal device lost");
-                }
-                anyhow::bail!("wait_until exceeded 300s");
-            }
-        }
-
-        {
-            let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
-            let retired = context::device_retired(&self.state, device);
-            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                drain_completed_cbs(&mut sc);
-                sc.deletion_queue.process_up_to(value);
-            }
-            if let Some(ld) = self.state.devices.get(&device) {
-                ld.process_deletion_queue_up_to(value.min(retired));
-            }
-        }
-        {
-            let _pz = crate::tracy_zone!("mtl.wait_until.drain_pending_slots");
-            drain_all_pending_slots(&mut self.state);
-        }
-        Ok(())
     }
 
     fn wait_until_timeout(
@@ -884,7 +946,13 @@ impl GpuBackend for MetalBackend {
         self.state
             .devices
             .get(&device)
-            .map(|ld| ld.ledger.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| {
+                ld.descriptors
+                    .lock()
+                    .unwrap()
+                    .resource_registry
+                    .available_slots(category)
+            })
             .unwrap_or(0)
     }
 
@@ -996,6 +1064,131 @@ impl GpuBackend for MetalBackend {
             .get(&ctx)
             .map(|sc_arc| sc_arc.lock().unwrap().in_flight_command_buffers.len())
             .unwrap_or(0)
+    }
+}
+
+struct MetalCommandBufferBlockingWait {
+    cb: mtl::CommandBuffer,
+}
+
+impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
+        self.cb.wait_until_completed();
+        Ok(())
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        use mtl::MTLCommandBufferStatus;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
+        loop {
+            match self.cb.status() {
+                MTLCommandBufferStatus::Completed => return Ok(true),
+                MTLCommandBufferStatus::Error => anyhow::bail!("Metal command buffer failed"),
+                _ if std::time::Instant::now() >= deadline => return Ok(false),
+                _ => std::thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+    }
+}
+
+struct MetalContextTimelineReader {
+    sc: types::SharedMetalSubmissionContext,
+}
+
+impl crate::backend::ContextTimelineReader for MetalContextTimelineReader {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
+        let sc = self.sc.lock().unwrap();
+        context::context_gpu_progress(&sc)
+    }
+
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
+        let sc = self.sc.lock().unwrap();
+        let progress = context::context_gpu_progress(&sc);
+        if progress < sc.last_submitted_seq {
+            Some(progress.saturating_add(1))
+        } else {
+            None
+        }
+    }
+}
+
+struct MetalWaiterBlockingWait {
+    waiter: types::TimelineWaiter,
+    value: crate::timeline::TimelineValue,
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::backend::TimelineBlockingWait for MetalWaiterBlockingWait {
+    fn block(self: Box<Self>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let timeout = std::time::Duration::from_secs(300);
+        let reached = {
+            let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
+            self.waiter.wait_until(self.value, timeout)
+        };
+        if !reached {
+            if self.device_lost.load(Ordering::Relaxed) {
+                anyhow::bail!("Metal device lost");
+            }
+            anyhow::bail!("wait_until exceeded 300s");
+        }
+        Ok(())
+    }
+
+    fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
+        use std::sync::atomic::Ordering;
+        let timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
+        let reached = {
+            let _wz = crate::tracy_zone!("mtl.wait_until.condvar_fallback");
+            self.waiter.wait_until(self.value, timeout)
+        };
+        if !reached {
+            if self.device_lost.load(Ordering::Relaxed) {
+                anyhow::bail!("Metal device lost");
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
+struct MetalDeviceTimelineReader {
+    ld: types::SharedLogicalDevice,
+}
+
+impl crate::backend::DeviceTimelineReader for MetalDeviceTimelineReader {
+    fn device_horizon(&self) -> crate::timeline::TimelineValue {
+        use std::sync::atomic::Ordering;
+        self.ld.retired_floor.load(Ordering::Relaxed)
+    }
+}
+
+struct MetalContextDeferredDeletionFlush {
+    sc: types::SharedMetalSubmissionContext,
+    ld: types::SharedLogicalDevice,
+    timeline: std::sync::Arc<dyn crate::backend::ContextTimelineReader>,
+}
+
+impl crate::backend::ContextDeferredDeletionFlush for MetalContextDeferredDeletionFlush {
+    fn flush(&self, device_retired: crate::timeline::TimelineValue) {
+        let ctx_signaled = self.timeline.gpu_progress();
+        if let Ok(mut sc) = self.sc.lock() {
+            sc.deletion_queue.process_up_to(ctx_signaled);
+        }
+        self.ld.process_deletion_queue_up_to(device_retired);
+    }
+}
+
+struct MetalContextReclamationScope {
+    sc: types::SharedMetalSubmissionContext,
+}
+
+impl crate::backend::ContextReclamationScope for MetalContextReclamationScope {
+    fn set_epoch(&self, epoch: Option<crate::timeline::TimelineValue>) {
+        if let Ok(mut sc) = self.sc.lock() {
+            sc.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
+        }
     }
 }
 

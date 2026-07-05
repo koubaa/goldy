@@ -474,7 +474,7 @@ impl TextureCopyFootprint {
     }
 }
 
-/// Cross-submission synchronization derived from the resource epoch ledger.
+/// Cross-submission synchronization derived from the runtime's ledger (spec §5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubmitSync {
     /// Same-context scoped memory barrier prepended before command execution.
@@ -701,8 +701,225 @@ pub enum GraphCommand {
 #[deprecated(since = "0.1.0", note = "renamed to GpuCommand")]
 pub type ComputeCommand = GpuCommand;
 
+/// Blocking GPU timeline wait, cloned out of the backend under the global lock so
+/// [`TimelineBlockingWait::block`] can run without holding it.
+pub(crate) trait TimelineBlockingWait: Send {
+    fn block(self: Box<Self>) -> Result<()>;
+
+    /// Like [`Self::block`] but returns `Ok(false)` on timeout instead of blocking forever.
+    fn block_timeout(self: Box<Self>, _timeout_ms: u32) -> Result<bool> {
+        self.block()?;
+        Ok(true)
+    }
+}
+
+/// Per-context GPU timeline queries cloned out of the backend so
+/// [`Context::gpu_progress`](crate::Context::gpu_progress) and
+/// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
+/// need the global backend lock.
+#[doc(hidden)]
+pub trait ContextTimelineReader: Send + Sync {
+    fn gpu_progress(&self) -> crate::timeline::TimelineValue;
+    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
+}
+
+/// Device-scoped timeline horizon (retired floor + device sync primitive) cloned out of
+/// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can combine
+/// it with per-context readers without the global backend mutex.
+#[doc(hidden)]
+pub trait DeviceTimelineReader: Send + Sync {
+    /// Floor and device-level sync completion; excludes per-context fence/semaphore progress.
+    fn device_horizon(&self) -> crate::timeline::TimelineValue;
+}
+
+/// Per-context deferred GPU deletion flush cloned out of the backend so
+/// [`Context::boundary_crossed`](crate::Context::boundary_crossed) does not need the global
+/// backend mutex for `flush_deferred_deletions`.
+#[doc(hidden)]
+pub trait ContextDeferredDeletionFlush: Send + Sync {
+    fn flush(&self, device_retired: crate::timeline::TimelineValue);
+}
+
+/// Per-context reclamation epoch scope (Metal heap routing during `boundary_crossed`).
+#[doc(hidden)]
+pub trait ContextReclamationScope: Send + Sync {
+    fn set_epoch(&self, epoch: Option<crate::timeline::TimelineValue>);
+}
+
+pub(crate) struct NoOpReclamationScope;
+
+impl ContextReclamationScope for NoOpReclamationScope {
+    fn set_epoch(&self, _epoch: Option<crate::timeline::TimelineValue>) {}
+}
+
+pub(crate) struct NoOpDeferredDeletionFlush;
+
+impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
+    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {}
+}
+
+/// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
+#[allow(dead_code)] // fields read by present-split impls behind backend feature flags
+pub(crate) struct PresentFinishState {
+    pub frame: FrameToken,
+    /// Fence/timeline guarding swapchain image return (0 when immediate return).
+    pub return_fence: crate::timeline::TimelineValue,
+    pub scratch_texture: Option<TextureHandle>,
+    pub scratch_layout_updated: bool,
+    pub present_timeline: crate::timeline::TimelineValue,
+    /// Vulkan: timeline signalled by the present-copy submit (if any).
+    pub copy_timeline: Option<crate::timeline::TimelineValue>,
+    /// Vulkan: compute timeline stored on the surface slot (easement semantics).
+    pub frame_compute_timeline: Option<crate::timeline::TimelineValue>,
+    /// Vulkan: context `last_submitted_seq` update from the copy submit.
+    pub signal_timeline: Option<crate::timeline::TimelineValue>,
+    pub render_pass_submitted: bool,
+    /// Whether WSI `queue_present` / equivalent succeeded (modulo OUT_OF_DATE).
+    pub present_ok: bool,
+}
+
+/// GPU-side present work (copy + queue present) cloned out of the backend under the
+/// global lock so [`Frame::present`](crate::Frame::present) can drop it during execution.
+pub(crate) trait PresentGpuWork: Send {
+    fn run(self: Box<Self>) -> Result<PresentFinishState>;
+}
+
+/// Lock-free submit surface cloned at [`crate::Context::new`].
+///
+/// Holds `Arc` handles to per-context submission state, device ledger, and resource
+/// tables so IR lowering + command recording + queue submit can run without the global
+/// backend mutex. Resource create/destroy still takes the global lock (write access).
+pub(crate) trait ContextSubmitSession: Send + Sync {
+    fn retains_present_partitions(&self) -> bool;
+    fn submit_standalone(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue>;
+    fn submit_graph(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue>;
+    fn submit_graph_and_retain(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue>;
+    fn try_resubmit_retained(
+        &self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>>;
+    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
+    fn evict_retained(&self, ctx: ContextHandle, key: u64);
+}
+
+/// Per-context submit session that acquires the global backend mutex only around
+/// individual backend submit calls (Phase 5a). Backends can later replace this
+/// with a lock-free session cloned from `Arc<RwLock<State>>` sub-handles.
+pub(crate) struct LockedSubmitSession {
+    backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+    backend_type: BackendType,
+}
+
+impl LockedSubmitSession {
+    pub fn from_backend(
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+        _ctx: ContextHandle,
+    ) -> std::sync::Arc<dyn ContextSubmitSession> {
+        let backend_type = backend.lock().unwrap().backend_type();
+        std::sync::Arc::new(Self { backend, backend_type })
+    }
+}
+
+impl ContextSubmitSession for LockedSubmitSession {
+    fn retains_present_partitions(&self) -> bool {
+        !matches!(self.backend_type, crate::types::BackendType::Metal)
+    }
+
+    fn submit_standalone(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GpuCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.backend.lock().unwrap().submit_standalone(ctx, commands, sync)
+    }
+
+    fn submit_graph(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.backend.lock().unwrap().submit_graph(ctx, commands, sync)
+    }
+
+    fn submit_graph_and_retain(
+        &self,
+        ctx: ContextHandle,
+        commands: &[GraphCommand],
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<crate::timeline::TimelineValue> {
+        self.backend
+            .lock()
+            .unwrap()
+            .submit_graph_and_retain(ctx, commands, key, sync)
+    }
+
+    fn try_resubmit_retained(
+        &self,
+        ctx: ContextHandle,
+        key: u64,
+        sync: Option<&SubmitSync>,
+    ) -> Result<Option<crate::timeline::TimelineValue>> {
+        self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
+    }
+
+    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
+    fn evict_retained(&self, ctx: ContextHandle, key: u64) {
+        self.backend.lock().unwrap().evict_retained(ctx, key);
+    }
+}
+
+/// Split present hooks used by [`Frame::present`](crate::Frame::present) to drop the
+/// global backend lock during copy + WSI present.
+pub(crate) trait GpuBackendPresentSplit {
+    fn take_present_gpu_work(
+        &mut self,
+        frame: FrameToken,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<Box<dyn PresentGpuWork>>;
+
+    fn finish_present(
+        &mut self,
+        finish: PresentFinishState,
+        submit_tv: crate::timeline::TimelineValue,
+    ) -> Result<crate::timeline::TimelineValue>;
+}
+
+/// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
+/// to drop the global backend lock during blocking GPU waits.
+pub(crate) trait GpuBackendTimelineWait {
+    fn take_timeline_blocking_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<Box<dyn TimelineBlockingWait>>>;
+
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
+}
+
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
-pub trait GpuBackend: Send + Sync {
+#[allow(private_bounds)]
+pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
@@ -730,6 +947,34 @@ pub trait GpuBackend: Send + Sync {
     // Submission context (timeline / submit / reclaim API is keyed by context)
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle>;
     fn destroy_context(&mut self, ctx: ContextHandle);
+
+    /// Clone the per-context timeline reader out of backend state.
+    ///
+    /// Called once from [`Context::new`](crate::Context::new) so hot-path progress
+    /// queries avoid the global backend mutex.
+    #[doc(hidden)]
+    fn clone_context_timeline_reader(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
+
+    /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
+    #[doc(hidden)]
+    fn clone_context_deletion_flush(
+        &self,
+        ctx: ContextHandle,
+        context_readers: std::sync::Arc<
+            std::sync::Mutex<std::collections::HashMap<ContextHandle, std::sync::Arc<dyn ContextTimelineReader>>>,
+        >,
+    ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>>;
+
+    /// Clone the per-context reclamation scope for [`Context::boundary_crossed`].
+    #[doc(hidden)]
+    fn clone_context_reclamation_scope(&self, ctx: ContextHandle) -> std::sync::Arc<dyn ContextReclamationScope> {
+        let _ = ctx;
+        std::sync::Arc::new(NoOpReclamationScope)
+    }
+
+    /// Clone the device-scoped timeline horizon reader for lock-free retirement queries.
+    #[doc(hidden)]
+    fn clone_device_timeline_reader(&self, device: DeviceHandle) -> Option<std::sync::Arc<dyn DeviceTimelineReader>>;
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///
@@ -1082,7 +1327,14 @@ pub trait GpuBackend: Send + Sync {
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
-    fn poll_signals(&mut self, ctx: ContextHandle) -> Vec<crate::signal::Signal>;
+    ///
+    /// `progress` is the caller's lock-free [`Context::gpu_progress`](crate::Context::gpu_progress)
+    /// so this path does not re-query the timeline under the global backend mutex.
+    fn poll_signals(
+        &mut self,
+        ctx: ContextHandle,
+        progress: crate::timeline::TimelineValue,
+    ) -> Vec<crate::signal::Signal>;
 
     /// Oldest timeline ticket not yet retired by the GPU, if any work is still in flight.
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue>;
@@ -1090,7 +1342,12 @@ pub trait GpuBackend: Send + Sync {
     /// Number of swapchain drawables held by the client / GPU and not yet returned by the compositor.
     fn pending_acquire_count(&self, surface: SurfaceHandle) -> u32;
 
-    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
+    fn wait_until(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
+        if let Some(wait) = self.take_timeline_blocking_wait(ctx, value)? {
+            wait.block()?;
+        }
+        self.finish_timeline_wait(ctx, value)
+    }
 
     fn wait_until_timeout(
         &mut self,

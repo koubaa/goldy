@@ -194,7 +194,7 @@ pub(super) fn create(
     let bindless_index = {
         let logical_device = devices.get(&device_handle).unwrap();
         let index = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -352,7 +352,7 @@ pub(super) fn create_sparse_with_capacity(
 
     let bindless_index = {
         let index = ld
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -1173,7 +1173,7 @@ pub(super) fn destroy(
             }
 
             if buffer.transient_heap_suballoc {
-                device.ledger.lock().unwrap().reclaim_buffer_slots(buffer_handle);
+                device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
                 unsafe {
                     device.device.destroy_buffer(buffer.buffer, None);
                 }
@@ -1258,7 +1258,7 @@ pub(super) fn create_view(
     } else {
         let handle_for_registry = *next_buffer_handle;
         let index = logical_device
-            .ledger
+            .descriptors
             .lock()
             .unwrap()
             .resource_registry

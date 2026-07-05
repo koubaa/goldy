@@ -666,7 +666,7 @@ pub(crate) struct LogicalDevice {
     /// Frame-table selector + device table (arg slots 0–1) and N-frame ring guard.
     pub frame_table: Mutex<super::frame_table::MetalFrameTable>,
     /// Registry tracking resource indices in the argument buffer
-    pub ledger: Arc<Mutex<DeviceLedger>>,
+    pub descriptors: Arc<Mutex<DescriptorRegistry>>,
     /// Device-global submission sequence (contexts signal their own shared events).
     pub timeline_next: Arc<AtomicU64>,
     /// Highest device-global seq scheduled on the GPU queue (used for idle / flush).
@@ -691,7 +691,7 @@ impl LogicalDevice {
     /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
     pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
         self.deletion_queue.lock().unwrap().process_up_to(completed);
-        self.ledger
+        self.descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -1044,7 +1044,7 @@ impl ResourceRegistry {
     }
 }
 
-/// Device-shared descriptor-heap ledger.
+/// Device-shared descriptor registry.
 ///
 /// Wraps `ResourceRegistry` (the bindless slot allocator + pending-free lists)
 /// behind an `Arc<Mutex<>>` so that submit paths can acquire it independently
@@ -1056,11 +1056,11 @@ impl ResourceRegistry {
 /// no-cross-context-dependency axiom each slot has a single owning context, so
 /// per-context own-clock reclaim is sufficient; the conservative
 /// `device_retired` GC drain is kept as a safety net (see issue #190).
-pub(crate) struct DeviceLedger {
+pub(crate) struct DescriptorRegistry {
     pub resource_registry: ResourceRegistry,
 }
 
-impl DeviceLedger {
+impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
@@ -1266,7 +1266,7 @@ pub(super) struct MetalState {
     /// fast instead of burning the full timeout budget per frame, letting
     /// the app cascade errors quickly and exit cleanly rather than appearing
     /// frozen for tens of seconds while each frame times out.
-    pub device_lost: std::sync::atomic::AtomicBool,
+    pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub devices: std::collections::HashMap<DeviceHandle, SharedLogicalDevice>,
     pub next_device_handle: DeviceHandle,
     pub contexts: std::collections::HashMap<super::ContextHandle, SharedMetalSubmissionContext>,

@@ -46,12 +46,26 @@ pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHan
 
     let (staging, staging_mapped) = create_upload_table_buffer(ld)?;
 
-    state.buffers.get_mut(&selector).unwrap().element_stride = Some(4);
-    state.buffers.get_mut(&device_table).unwrap().element_stride = Some(4);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&selector)
+        .unwrap()
+        .element_stride = Some(4);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&device_table)
+        .unwrap()
+        .element_stride = Some(4);
 
     {
         let dev = state.devices.get(&device_handle).context("init frame table")?;
-        dev.ledger
+        dev.descriptors
             .lock()
             .unwrap()
             .resource_registry
@@ -188,9 +202,8 @@ fn create_scattered_u32_buffer_at_slot(
             .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), cpu_handle);
     }
 
-    let handle = state.next_buffer_handle;
-    state.next_buffer_handle += 1;
-    state.buffers.insert(
+    let handle = state.buffers.write().unwrap().alloc_handle();
+    state.buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -345,7 +358,8 @@ pub(crate) fn sync_table_row_to_device(
         .frame_tables
         .get(&device_handle)
         .context("frame table not initialized")?;
-    let device_table = state.buffers.get(&ft.device_table).context("device table")?;
+    let buffers_read = state.buffers.read().unwrap();
+    let device_table = buffers_read.entries.get(&ft.device_table).context("device table")?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
@@ -501,10 +515,21 @@ pub(crate) fn prepare_render_commands(
             |h| {
                 state
                     .pipelines
+                    .read()
+                    .unwrap()
+                    .entries
                     .get(&h)
                     .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
             },
-            |h| state.buffers.get(&h).and_then(|b| b.element_stride),
+            |h| {
+                state
+                    .buffers
+                    .read()
+                    .unwrap()
+                    .entries
+                    .get(&h)
+                    .and_then(|b| b.element_stride)
+            },
         )
     })?;
 
@@ -518,6 +543,9 @@ pub(crate) fn prepare_render_commands(
                     .map(|h| {
                         state
                             .buffers
+                            .read()
+                            .unwrap()
+                            .entries
                             .get(h)
                             .and_then(|b| b.bindless_offset)
                             .with_context(|| format!("BindResources: buffer handle {h:?} has no bindless offset"))

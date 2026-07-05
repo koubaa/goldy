@@ -729,10 +729,10 @@ pub(super) fn submit(
                 .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
                 .unwrap_or_default();
             if let Some(ld) = state.devices.get(&device_handle) {
-                let ledger_arc = std::sync::Arc::clone(&ld.ledger);
-                let mut ledger = ledger_arc.lock().unwrap();
+                let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+                let mut registry = descriptors_arc.lock().unwrap();
                 for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                    super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
             }
         }
@@ -1471,7 +1471,7 @@ pub(super) fn submit(
 
     let used_slots = collect_slot_keys_from_gpu_commands(&commands, &state.compute_pipelines, &state.buffers);
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, signal_value, used_slots);
@@ -1583,15 +1583,15 @@ pub(super) fn submit(
             .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
         if let Some(ld) = state.devices.get(&device_handle) {
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
-                let mut ledger = ledger_arc.lock().unwrap();
+                let mut registry = descriptors_arc.lock().unwrap();
                 for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                    super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
                     super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
-                ledger.drain_ready_slot_reclamations(&completed_values);
+                registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
     }
@@ -2538,7 +2538,7 @@ fn submit_graph_impl(
     let used_slots =
         collect_slot_keys_from_graph_commands(commands, &state.compute_pipelines, &state.pipelines, &state.buffers);
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
@@ -2684,15 +2684,15 @@ fn submit_graph_impl(
             .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
         if let Some(ld) = state.devices.get(&device_handle) {
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
-                let mut ledger = ledger_arc.lock().unwrap();
+                let mut registry = descriptors_arc.lock().unwrap();
                 for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                    super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
                     super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
-                ledger.drain_ready_slot_reclamations(&completed_values);
+                registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
     }
@@ -2782,7 +2782,7 @@ pub(super) fn try_resubmit_retained(
     }
 
     if let Some(ld) = state.devices.get(&device_handle) {
-        ld.ledger
+        ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, signal_value, used_slots);
@@ -2804,15 +2804,15 @@ pub(super) fn try_resubmit_retained(
             .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
         if let Some(ld) = state.devices.get(&device_handle) {
-            let ledger_arc = std::sync::Arc::clone(&ld.ledger);
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
-                let mut ledger = ledger_arc.lock().unwrap();
+                let mut registry = descriptors_arc.lock().unwrap();
                 for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut ledger, r);
+                    super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
                     super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
-                ledger.drain_ready_slot_reclamations(&completed_values);
+                registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
     }

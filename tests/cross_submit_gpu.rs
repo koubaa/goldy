@@ -326,8 +326,10 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
         .with_parcel(&parcel, NodeAccess::Write)
         .dispatch(1, 1, 1);
     writer.submit().expect("writer record");
-    assert!(reader.is_topology_dirty());
 
+    // Topology dirty flag is meaningful on all backends: the writer joining
+    // the shared parcel must mark the reader dirty exactly once.
+    assert!(reader.is_topology_dirty());
     reader.submit().expect("reader topology re-record");
     assert!(!reader.is_topology_dirty());
 
@@ -335,13 +337,20 @@ fn retained_reader_dirtied_once_by_new_writer_then_stable() {
         reader.submit().expect("reader stable resubmit");
     }
 
-    if device.backend_type() == BackendType::Metal {
-        return;
-    }
-    assert_eq!(reader.replay_stats().records, 2);
+    // topology_records is meaningful on all backends: exactly one re-record
+    // was triggered by a foreign-scheme topology change (not a structural
+    // mutation). Metal re-records on every submit but still tracks why.
     assert_eq!(reader.replay_stats().topology_records, 1);
-    #[cfg(not(feature = "metal"))]
-    assert_eq!(reader.replay_stats().resubmit_hits, 2);
+
+    // records and resubmit_hits diverge by backend: on Metal every submit
+    // is a re-record (no CB reuse), so records == total submits (4) and
+    // resubmit_hits is not tracked. On Vulkan/DX12 the two stable submits
+    // are served from the retained command list.
+    if device.backend_type() != BackendType::Metal {
+        assert_eq!(reader.replay_stats().records, 2);
+        #[cfg(not(feature = "metal"))]
+        assert_eq!(reader.replay_stats().resubmit_hits, 2);
+    }
 }
 
 #[test]

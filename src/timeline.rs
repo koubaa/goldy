@@ -148,6 +148,9 @@ pub fn epochs_from(table: &ReferenceTable) -> Vec<Epoch> {
 const PROMISE_PENDING: u64 = 0;
 const PROMISE_ABANDONED: u64 = u64::MAX;
 
+/// Progress for a context that has been destroyed (GPU was drained at teardown).
+pub(crate) const CONTEXT_DESTROYED_PROGRESS: TimelineValue = u64::MAX;
+
 /// Pattern-match primitive for a within-context timeline promise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromiseState {

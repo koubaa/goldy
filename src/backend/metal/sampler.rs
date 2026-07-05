@@ -36,7 +36,7 @@ pub(super) fn create(
     let sampler = logical_device.device.new_sampler(&descriptor);
 
     let index = logical_device
-        .ledger
+        .descriptors
         .lock()
         .unwrap()
         .resource_registry
@@ -92,7 +92,7 @@ pub(super) fn destroy(state: &mut MetalState, sampler_handle: SamplerHandle) {
         let barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
         if let Some(device) = state.devices.get(&device_handle) {
             device
-                .ledger
+                .descriptors
                 .lock()
                 .unwrap()
                 .resource_registry

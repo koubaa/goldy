@@ -129,7 +129,7 @@ pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
     super::drain_completed_cbs(&mut sc);
     sc.in_flight_command_buffers.clear();
     let signaled_after = sc.timeline_event.as_ref().signaled_value();
-    // Persist retirement on the device ledger: once this context is removed,
+    // Persist retirement on the descriptor registry: once this context is removed,
     // `device_retired` no longer reads its shared event. `last_submitted_seq` only
     // counts committed command buffers, so it is a safe floor if the shared event lags.
     let retired_horizon = signaled_after.max(last_seq);
