@@ -6,12 +6,12 @@
 use crate::backend::{FrameToken, GpuBackend, SurfaceHandle};
 use crate::context::Context as GpuContext;
 use crate::task_graph::TaskGraph;
-use crate::texture::Texture;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
 use crate::tracy_zone;
 use crate::types::{PresentMode, ResourceAccess, SurfaceConfig, TextureFormat};
 use crate::vram_allocator::DeferredPayload;
+use crate::Texture;
 use anyhow::{Context, Result};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::{Arc, Mutex};
@@ -128,6 +128,7 @@ impl Surface {
         };
 
         let texture = Some(Texture::borrowed(
+            self.context.device(),
             Arc::clone(&self.backend),
             texture_handle,
             w,
@@ -290,7 +291,7 @@ impl Surface {
 
         // ── Step 6: add swapchain to the resolver ────────────────────────────
         let swapchain_tex = frame.texture();
-        let sc_handle = swapchain_tex.handle;
+        let sc_handle = swapchain_tex.gpu_handle();
         let uav_index = swapchain_tex
             .resource_index(ResourceAccess::Write)
             .context("swapchain texture has no UAV resource index")?;
@@ -390,7 +391,7 @@ impl Surface {
         }
 
         let swapchain_tex = frame.texture();
-        let sc_handle = swapchain_tex.handle;
+        let sc_handle = swapchain_tex.gpu_handle();
         let uav_index = swapchain_tex
             .resource_index(ResourceAccess::Write)
             .context("swapchain texture has no UAV resource index")?;
@@ -576,7 +577,8 @@ impl Frame {
 
     /// Submit recorded work and present on this thread.
     ///
-    /// Returns the **submit** timeline (compute completion), not a separate present signal.
+    /// Returns the easement-expiry timeline value (present/copy completion on the owning
+    /// context), not the compute submit timeline.
     pub fn present(mut self) -> Result<TimelineValue> {
         self.do_present_sync()
     }
@@ -592,13 +594,13 @@ impl Frame {
         self.presented = true;
         let _ = self.texture.take();
         let submit_tv = self.submit_frame()?;
-        {
+        let present_tv = {
             let _tz = tracy_zone!("frame.present.present_frame");
             let mut backend = self.backend.lock().unwrap();
-            backend.present_frame(self.token, submit_tv)?;
-        }
+            backend.present_frame(self.token, submit_tv)?
+        };
         self.apply_frame_bookkeeping(submit_tv)?;
-        Ok(submit_tv)
+        Ok(present_tv)
     }
 
     fn apply_frame_bookkeeping(&self, submit_tv: TimelineValue) -> Result<()> {

@@ -8,7 +8,7 @@
 //! `Context::parcel_ready`.
 
 use crate::context::Context;
-use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping};
+use crate::parcel::{BookkeepingGuard, BytesByKind, Parcel, PoolBookkeeping, Texture};
 use crate::retained_pool::{RetainedHold, StampedParcel};
 use crate::timeline::ReferenceTable;
 use crate::types::{BufferFlags, BufferKind, TextureFlags, TextureFormat, TextureKind};
@@ -114,7 +114,8 @@ impl TransientPool {
         format: TextureFormat,
         access: TextureKind,
         flags: TextureFlags,
-    ) -> Result<Parcel> {
+    ) -> Result<Texture> {
+        let home_device = Arc::downgrade(&ctx.device().inner);
         let key = TextureKey {
             width,
             height,
@@ -127,14 +128,9 @@ impl TransientPool {
                 let entry = bin.swap_remove(pos);
                 let bytes = entry.parcel.byte_size();
                 self.pending.subtract(ParcelType::Texture, bytes);
-                let mut parcel = entry.parcel;
-                parcel.attach_bookkeeping(BookkeepingGuard::new(
-                    Arc::downgrade(&self.outstanding),
-                    ParcelType::Texture,
-                    bytes,
-                ));
+                let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Texture, bytes);
                 self.outstanding.add(ParcelType::Texture, bytes);
-                return Ok(parcel);
+                return Ok(Texture::from_parcel(entry.parcel, guard, home_device));
             }
         }
 
@@ -145,7 +141,7 @@ impl TransientPool {
         let bytes = tex.byte_size() as u64;
         self.outstanding.add(ParcelType::Texture, bytes);
         let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Texture, bytes);
-        Ok(Parcel::from_texture(tex, guard, Arc::downgrade(&ctx.device().inner)))
+        Ok(Texture::from_backing(tex, guard, home_device))
     }
 
     /// Acquire a one-submission buffer lease backing parcel, reusing a retired bin entry when possible.
@@ -200,8 +196,8 @@ impl TransientPool {
     pub(crate) fn adopt(&mut self, stamped: StampedParcel) {
         let StampedParcel { hold, ready_after } = stamped;
         match hold {
-            RetainedHold::Texture(parcel) => {
-                self.park_texture(parcel, ready_after);
+            RetainedHold::Texture(texture) => {
+                self.park_texture(texture, ready_after);
             }
             RetainedHold::Buffer(buffer) => {
                 // Partitioned buffers (from `RetainedPool::acquire_record`) cannot be
@@ -240,7 +236,9 @@ impl TransientPool {
         }
     }
 
-    fn park_texture(&mut self, parcel: Parcel, ready_after: ReferenceTable) {
+    fn park_texture(&mut self, mut texture: Texture, ready_after: ReferenceTable) {
+        texture.release_bookkeeping();
+        let parcel = texture.into_parcel();
         let bytes = parcel.byte_size();
         let (width, height, format, access, flags) = parcel.texture_descriptor().expect("texture hold has descriptor");
         let key = TextureKey {

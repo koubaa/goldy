@@ -1,7 +1,7 @@
 use crate::error::{non_null, Result};
 use crate::sys::{self, GoldyParcel};
 
-/// Opaque retained GPU texture parcel.
+/// Opaque retained GPU parcel (buffer units from [`Buffer::field`]; textures use [`crate::Texture`]).
 pub struct Parcel {
     ptr: *mut GoldyParcel,
 }

@@ -4,8 +4,8 @@ use crate::buffer::buffer_from_owned;
 use crate::buffer::PyBuffer;
 use crate::device::PyDevice;
 use crate::error::IntoPyResult;
-use crate::parcel::parcel_from_texture;
-use crate::parcel::PyParcel;
+use crate::texture::texture_from_owned;
+use crate::texture::PyTexture;
 use crate::types::{PyBufferKind, PyTextureFormat, PyTextureKind};
 use goldy::{field, Init, RecordField};
 use pyo3::prelude::*;
@@ -57,7 +57,7 @@ impl PyRetainedPool {
         Ok(buffer_from_owned(buffer))
     }
 
-    /// Acquire a retained texture parcel.
+    /// Acquire a retained texture.
     #[pyo3(signature = (width, height, format, kind, *, copy_src = true, copy_dst = false))]
     fn acquire_texture(
         &self,
@@ -67,7 +67,7 @@ impl PyRetainedPool {
         kind: PyTextureKind,
         copy_src: bool,
         copy_dst: bool,
-    ) -> PyResult<PyParcel> {
+    ) -> PyResult<PyTexture> {
         let mut flags = goldy::TextureFlags::empty();
         if copy_src {
             flags |= goldy::TextureFlags::COPY_SRC;
@@ -75,12 +75,12 @@ impl PyRetainedPool {
         if copy_dst {
             flags |= goldy::TextureFlags::COPY_DST;
         }
-        let parcel = self
+        let texture = self
             .inner
             .borrow_mut()
             .acquire_texture(width, height, format.into(), kind.into(), flags, None)
             .into_py_result()?;
-        Ok(parcel_from_texture(parcel))
+        Ok(texture_from_owned(texture))
     }
 
     /// Begin building a partitioned buffer (one backing allocation, multiple units).

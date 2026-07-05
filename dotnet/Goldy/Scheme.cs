@@ -64,7 +64,7 @@ public sealed class Scheme : IDisposable
     /// <summary>
     /// Copy a scheme-held render target into a texture parcel (for grant readback).
     /// </summary>
-    public void CopyToTexture(SchemeRenderTargetLease src, Parcel dst)
+    public void CopyToTexture(SchemeRenderTargetLease src, Texture dst)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(src);
@@ -117,12 +117,12 @@ public sealed class Scheme : IDisposable
     /// <summary>
     /// Record a read easement over a texture parcel (once per scheme).
     /// </summary>
-    public ReadGrant GrantReadTexture(Parcel parcel)
+    public ReadGrant GrantReadTexture(Texture texture)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(parcel);
+        ArgumentNullException.ThrowIfNull(texture);
 
-        var grant = NativeMethods.SchemeGrantReadTexture(Handle, parcel.Handle);
+        var grant = NativeMethods.SchemeGrantReadTexture(Handle, texture.Handle);
         if (grant == nint.Zero)
             throw GoldyException.FromLastError("Scheme grant_read_texture");
         return new ReadGrant(grant);
@@ -173,6 +173,17 @@ public sealed class SchemeComputeNodeScope : IDisposable
             _scheme.Handle, parcel.Handle, nodeAccess);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme compute_node_with_parcel");
+        return this;
+    }
+
+    public SchemeComputeNodeScope WithTexture(Texture texture, NodeAccess nodeAccess)
+    {
+        EnsureOpen();
+        ArgumentNullException.ThrowIfNull(texture);
+        var result = NativeMethods.SchemeComputeNodeWithTexture(
+            _scheme.Handle, texture.Handle, nodeAccess);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme compute_node_with_texture");
         return this;
     }
 

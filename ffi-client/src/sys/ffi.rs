@@ -66,7 +66,7 @@ pub type FnGoldySchemeRenderPassDrawIndexed =
 pub type FnGoldySchemeRenderPassDrawFullscreen = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
 pub type FnGoldySchemeRenderPassFinish = unsafe extern "C" fn(*mut GoldyScheme) -> GoldyResult;
 pub type FnGoldySchemeCopyToTexture =
-    unsafe extern "C" fn(*mut GoldyScheme, *const GoldySchemeRenderTargetLease, *const GoldyParcel) -> GoldyResult;
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldySchemeRenderTargetLease, *const GoldyTexture) -> GoldyResult;
 pub type FnGoldySchemeCopyToPresent = unsafe extern "C" fn(
     *mut GoldyScheme,
     *const GoldySchemeRenderTargetLease,
@@ -78,7 +78,7 @@ pub type FnGoldyPresentGrantDestroy = unsafe extern "C" fn(*mut GoldyPresentGran
 pub type FnGoldyPresentGrantConsume =
     unsafe extern "C" fn(*const GoldyPresentGrant, *const GoldySchemeSubmission) -> GoldyResult;
 pub type FnGoldySchemeGrantReadTexture =
-    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel) -> *mut GoldyReadGrant;
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyTexture) -> *mut GoldyReadGrant;
 pub type FnGoldyRetainedPoolAcquireTexture = unsafe extern "C" fn(
     *mut GoldyRetainedPool,
     u32,
@@ -88,7 +88,7 @@ pub type FnGoldyRetainedPoolAcquireTexture = unsafe extern "C" fn(
     GoldyTextureFlags,
     *const u8,
     usize,
-) -> *mut GoldyParcel;
+) -> *mut GoldyTexture;
 pub type FnGoldySwapchainPoolDestroy = unsafe extern "C" fn(*mut GoldySwapchainPool);
 pub type FnGoldySwapchainPoolLease = unsafe extern "C" fn(*const GoldySwapchainPool) -> *mut GoldyPresentLease;
 pub type FnGoldySwapchainPoolWidth = unsafe extern "C" fn(*const GoldySwapchainPool) -> u32;
@@ -179,5 +179,7 @@ pub type FnGoldyBufferUnitByteSize = unsafe extern "C" fn(*const GoldyBuffer, u3
 pub type FnGoldyBufferUnitReadToCpu =
     unsafe extern "C" fn(*const GoldyBuffer, u32, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
 pub type FnGoldyBufferField = unsafe extern "C" fn(*const GoldyBuffer, u32) -> *mut GoldyParcel;
+pub type FnGoldyTextureByteSize = unsafe extern "C" fn(*const GoldyTexture) -> u64;
+pub type FnGoldyTextureDestroy = unsafe extern "C" fn(*mut GoldyTexture);
 pub type FnGoldyParcelByteSize = unsafe extern "C" fn(*const GoldyParcel) -> u64;
 pub type FnGoldyParcelDestroy = unsafe extern "C" fn(*mut GoldyParcel);

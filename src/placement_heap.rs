@@ -35,7 +35,7 @@ use crate::backend::TextureHandle;
 use crate::buffer::{Allocation, BufferView};
 use crate::device::Device;
 use crate::task_graph::TransientTextureKey;
-use crate::texture::Texture;
+use crate::texture::TextureBacking;
 use crate::timeline::TimelineValue;
 use crate::tracy_plot;
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, TextureFlags, TextureKind};
@@ -71,7 +71,7 @@ struct CachedView {
 /// the incoming request the cached texture is returned directly, skipping
 /// `Texture::new` and the bindless descriptor allocation.
 struct CachedTexture {
-    texture: Texture,
+    texture: TextureBacking,
     key: TransientTextureKey,
 }
 
@@ -407,7 +407,7 @@ impl PlacementHeap {
                 let epoch = self.max_in_flight_timeline();
                 if let Some(epoch) = epoch {
                     let mut payload = DeferredPayload::new();
-                    let new_tex = Texture::new(
+                    let new_tex = TextureBacking::new(
                         device,
                         key.width,
                         key.height,
@@ -429,7 +429,7 @@ impl PlacementHeap {
                     handles.push(h);
                 } else {
                     // No in-flight work; safe to replace synchronously.
-                    let new_tex = Texture::new(
+                    let new_tex = TextureBacking::new(
                         device,
                         key.width,
                         key.height,
@@ -447,7 +447,7 @@ impl PlacementHeap {
                 }
             } else {
                 // New slot (cache is growing): just create.
-                let new_tex = Texture::new(
+                let new_tex = TextureBacking::new(
                     device,
                     key.width,
                     key.height,

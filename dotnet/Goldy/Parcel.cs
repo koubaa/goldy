@@ -4,7 +4,7 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// Opaque retained GPU parcel (buffer or texture).
+/// Opaque retained GPU parcel (buffer units; textures use <see cref="Texture"/>).
 /// </summary>
 public sealed class Parcel : IDisposable
 {

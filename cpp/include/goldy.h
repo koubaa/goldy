@@ -176,7 +176,7 @@ typedef struct GoldyDevice GoldyDevice;
 // Opaque handle to a Goldy Instance.
 typedef struct GoldyInstance GoldyInstance;
 
-// Opaque handle to a bindable [`goldy::Parcel`] (texture parcels; buffer units use [`GoldyBuffer`] + index).
+// Opaque handle to a bindable [`goldy::Parcel`] (buffer units; textures use [`GoldyTexture`]).
 typedef struct GoldyParcel GoldyParcel;
 
 // Opaque present easement grant handle returned by [`goldy_scheme_grant_present`].
@@ -230,6 +230,9 @@ typedef struct GoldySurfaceFrame GoldySurfaceFrame;
 
 // Opaque handle to a swapchain pool.
 typedef struct GoldySwapchainPool GoldySwapchainPool;
+
+// Opaque handle to an acquired [`goldy::Texture`].
+typedef struct GoldyTexture GoldyTexture;
 
 // Adapter info.
 typedef struct GoldyAdapterInfo {
@@ -605,14 +608,14 @@ struct GoldyBuffer *goldy_retained_pool_acquire_buffer(struct GoldyRetainedPool 
                                                        const uint8_t *data,
                                                        size_t data_size);
 
-struct GoldyParcel *goldy_retained_pool_acquire_texture(struct GoldyRetainedPool *pool,
-                                                        uint32_t width,
-                                                        uint32_t height,
-                                                        enum GoldyTextureFormat format,
-                                                        enum GoldyTextureKind access,
-                                                        struct GoldyTextureFlags flags,
-                                                        const uint8_t *data,
-                                                        size_t data_size);
+struct GoldyTexture *goldy_retained_pool_acquire_texture(struct GoldyRetainedPool *pool,
+                                                         uint32_t width,
+                                                         uint32_t height,
+                                                         enum GoldyTextureFormat format,
+                                                         enum GoldyTextureKind access,
+                                                         struct GoldyTextureFlags flags,
+                                                         const uint8_t *data,
+                                                         size_t data_size);
 
 struct GoldyRetainedPool *goldy_retained_pool_create(const struct GoldyDevice *device);
 
@@ -690,6 +693,14 @@ enum GoldyResult goldy_scheme_compute_node_with_parcel(struct GoldyScheme *schem
                                                        const struct GoldyParcel *parcel,
                                                        enum GoldyNodeAccess node_access);
 
+// Declare a retained texture for the active compute node (shader binding + dependency).
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_with_texture(struct GoldyScheme *scheme,
+                                                        const struct GoldyTexture *texture,
+                                                        enum GoldyNodeAccess node_access);
+
 // Copy a scheme-held render target into a present lease drawable.
 //
 // # Safety
@@ -704,7 +715,7 @@ enum GoldyResult goldy_scheme_copy_to_present(struct GoldyScheme *scheme,
 // All pointers must be valid.
 enum GoldyResult goldy_scheme_copy_to_texture(struct GoldyScheme *scheme,
                                               const struct GoldySchemeRenderTargetLease *src_lease,
-                                              const struct GoldyParcel *dst_parcel);
+                                              const struct GoldyTexture *dst_texture);
 
 // Create a scheme bound to `ctx`.
 //
@@ -744,7 +755,7 @@ struct GoldyReadGrant *goldy_scheme_grant_read(struct GoldyScheme *scheme,
 // # Safety
 // All pointers must be valid.
 struct GoldyReadGrant *goldy_scheme_grant_read_texture(struct GoldyScheme *scheme,
-                                                       const struct GoldyParcel *parcel);
+                                                       const struct GoldyTexture *texture);
 
 // True when the next submit must re-record.
 //
@@ -1097,6 +1108,10 @@ enum GoldyResult goldy_swapchain_pool_resize(struct GoldySwapchainPool *pool,
 // # Safety
 // `pool` must be valid.
 uint32_t goldy_swapchain_pool_width(const struct GoldySwapchainPool *pool);
+
+uint64_t goldy_texture_byte_size(const struct GoldyTexture *texture);
+
+void goldy_texture_destroy(struct GoldyTexture *texture);
 
 #ifdef __cplusplus
 }  // extern "C"

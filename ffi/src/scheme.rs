@@ -8,7 +8,7 @@ pub use scheme_graphics::*;
 use crate::compute::GoldyComputePipeline;
 use crate::context::GoldyContext;
 use crate::error::{set_last_error, set_last_error_from_anyhow, GoldyResult};
-use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel};
+use crate::retained_pool::{buffer_unit_at, GoldyBuffer, GoldyParcel, GoldyTexture};
 use crate::types::GoldyNodeAccess;
 use goldy::scheme::{ReadGrant, Scheme};
 use goldy::task_graph::{ComputeNodeRecord, NodeAccess, RenderPassRecord};
@@ -239,6 +239,32 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel(
         Some(_) => GoldyResult::Ok,
         None => {
             set_last_error("Parcel has no bindless slot for the shader binding");
+            GoldyResult::InvalidArgument
+        }
+    }
+}
+
+/// Declare a retained texture for the active compute node (shader binding + dependency).
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn goldy_scheme_compute_node_with_texture(
+    scheme: *mut GoldyScheme,
+    texture: *const GoldyTexture,
+    node_access: GoldyNodeAccess,
+) -> GoldyResult {
+    if scheme.is_null() || texture.is_null() {
+        return GoldyResult::NullPointer;
+    }
+    let node = match active_compute_mut(&mut *scheme) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    match node.with_parcel(&(*texture).inner, map_node_access(node_access)) {
+        Some(_) => GoldyResult::Ok,
+        None => {
+            set_last_error("Texture has no bindless slot for the shader binding");
             GoldyResult::InvalidArgument
         }
     }

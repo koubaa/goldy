@@ -24,6 +24,7 @@ mod scheme;
 mod shader;
 mod surface;
 mod swapchain_pool;
+mod texture;
 mod types;
 
 use pyo3::prelude::*;
@@ -69,6 +70,7 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<swapchain_pool::PySwapchainPool>()?;
     m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
+    m.add_class::<texture::PyTexture>()?;
     m.add_class::<retained_pool::PyRetainedPool>()?;
     m.add_class::<retained_pool::PyRecordBuilder>()?;
     m.add_class::<shader::PyShaderModule>()?;

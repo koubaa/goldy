@@ -9,7 +9,7 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureHandle, TextureReadbackLayout};
+use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureCopyFootprint, TextureHandle};
 use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::error::GoldyError;
@@ -25,13 +25,13 @@ use crate::task_graph::{
     DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, ShaderResourceSlot, TaskNode,
     PRESENT_LEASE_SLOT_PLACEHOLDER,
 };
-use crate::texture::Texture;
-use crate::timeline::TimelineValue;
+use crate::timeline::{PromiseResolver, TimelinePromise, TimelineValue};
 use crate::types::{
-    BackendType, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
+    BufferFlags, Color, DepthFormat, DispatchShape, IndexFormat, ResourceAccess, ResourceHandle, TextureFlags,
     TextureFormat, TextureKind,
 };
 use crate::validation_env;
+use crate::Buffer;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -48,7 +48,7 @@ static NEXT_SCHEME_ID: AtomicU64 = AtomicU64::new(1);
 /// staging is not handed to a later submit until `gpu_progress` passes that stamp.
 enum GrantStagingAllocSpec {
     Buffer { byte_size: u64 },
-    Texture { layout: TextureReadbackLayout },
+    Texture { layout: TextureCopyFootprint },
 }
 
 /// Staging buffer parked in a grant pool until its submission timeline retires.
@@ -74,7 +74,7 @@ impl GrantStagingPool {
         })
     }
 
-    fn new_texture(ctx: &Context, layout: TextureReadbackLayout) -> Arc<Self> {
+    fn new_texture(ctx: &Context, layout: TextureCopyFootprint) -> Arc<Self> {
         Arc::new(Self {
             handles: Mutex::new(Vec::new()),
             alloc_spec: GrantStagingAllocSpec::Texture { layout },
@@ -178,6 +178,8 @@ struct SubmissionData {
     staging_pools: Vec<Arc<GrantStagingPool>>,
     /// Acquired swapchain frames for present grants; consumed by [`PresentGrant::consume`].
     present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+    /// Resolvers for present easement timeline promises; resolved by [`PresentGrant::consume`].
+    present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
 }
 
 impl Drop for SubmissionData {
@@ -206,6 +208,7 @@ impl fmt::Debug for SubmissionData {
             .field("cells", &self.cells.len())
             .field("staging_pools", &self.staging_pools.len())
             .field("present_frames", &self.present_frames.len())
+            .field("present_resolvers", &self.present_resolvers.len())
             .finish()
     }
 }
@@ -290,13 +293,84 @@ impl Grant for PresentGrant {
         let surface_frame = slot
             .take()
             .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("grant access already consumed for this submission")))?;
-        surface_frame.present().map(|_| ()).map_err(GoldyError::Backend)
+        let present_tv = surface_frame.present().map_err(GoldyError::Backend)?;
+        let resolver_mutex = submission.data.present_resolvers.get(idx).ok_or_else(|| {
+            GoldyError::Backend(anyhow::anyhow!(
+                "present resolver index {} out of range for submission ({} present grants)",
+                idx,
+                submission.data.present_resolvers.len()
+            ))
+        })?;
+        if let Some(resolver) = resolver_mutex.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            resolver.resolve(present_tv);
+        }
+        Ok(())
     }
 }
 
 struct PresentGrantInfo {
     lease_id: u32,
     pool: std::sync::Arc<crate::swapchain_pool::SwapchainPoolInner>,
+}
+
+/// Parcel stamps read by a present easement for `lease_id` (copy-to-present sources).
+///
+/// Only [`NodeKind::CopyTexture`] sources can be stamp-tracked — `CopyRenderTarget`
+/// sources are scheme-owned leases that do not participate in the [`ResourceKey`] /
+/// [`crate::parcel::ParcelStamp`] system, so they cannot carry a promise.
+/// A warning is emitted when such a node is encountered so the gap is visible.
+fn present_easement_source_stamps(
+    ir: &GraphIR,
+    lease_id: u32,
+    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+) -> Vec<Arc<crate::parcel::ParcelStamp>> {
+    let dst = ResourceId::PresentLease(lease_id);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in &ir.nodes {
+        match &node.kind {
+            NodeKind::CopyTexture { src, dst: d, .. } if *d == dst => {
+                let key = ResourceKey::Texture(*src);
+                let hit = resource_stamps.get(&key);
+                if let Some(stamp) = hit {
+                    let ptr = Arc::as_ptr(stamp);
+                    if seen.insert(ptr) {
+                        out.push(Arc::clone(stamp));
+                    }
+                }
+            }
+            NodeKind::CopyRenderTarget { dst: d, .. } if *d == dst => {
+                // RenderTarget sources are scheme-owned leases with no ResourceKey and
+                // no ParcelStamp, so we cannot attach a promise to gate the next writer.
+                // The WAR hazard for this path is not covered by the easement promise
+                // mechanism. Log so the gap is visible; do not silently drop.
+                tracing::warn!(
+                    target: "goldy::scheme",
+                    lease_id,
+                    "present easement: CopyRenderTarget source has no stamp; \
+                     WAR hazard not tracked by promise (TODO: extend RT stamp system)"
+                );
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn claim_present_easement_promises(
+    ir: &GraphIR,
+    present_grants: &[PresentGrantInfo],
+    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+) -> Vec<Mutex<Option<PromiseResolver>>> {
+    let mut resolvers = Vec::with_capacity(present_grants.len());
+    for grant in present_grants {
+        let (promise, resolver) = TimelinePromise::new();
+        for stamp in present_easement_source_stamps(ir, grant.lease_id, resource_stamps) {
+            stamp.push_pending(promise.clone());
+        }
+        resolvers.push(Mutex::new(Some(resolver)));
+    }
+    resolvers
 }
 
 /// Stable index of a read-easement grant recorded in the scheme IR.
@@ -311,7 +385,7 @@ pub struct GrantTexture;
 
 enum GrantReadKind {
     Buffer,
-    Texture(TextureReadbackLayout),
+    Texture(TextureCopyFootprint),
 }
 
 enum GrantSource {
@@ -325,8 +399,8 @@ enum GrantSource {
     Texture {
         source: TextureHandle,
         #[allow(dead_code)]
-        source_backing: Texture,
-        layout: TextureReadbackLayout,
+        source_backing: crate::texture::TextureBacking,
+        layout: TextureCopyFootprint,
     },
 }
 
@@ -506,22 +580,6 @@ pub struct Scheme {
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     /// Retention key stored at record time. `None` when the backend cannot retain `ir`.
     retention_key: Option<u64>,
-    /// Timeline value from the most recent successful [`Self::submit`].
-    ///
-    /// On Vulkan, retained partitions are resubmitted as live `VkCommandBuffer` objects
-    /// (VUID-vkQueueSubmit2-commandBuffer-03875 forbids submitting a CB that is still
-    /// pending).  Before resubmitting on the clean path we wait on this value to ensure all
-    /// prior partitions have retired.
-    ///
-    /// On Metal, `try_resubmit_retained` always re-encodes a fresh `MTLCommandBuffer` from
-    /// the cached `GraphCommand` list, so there is no pending CB to wait for and the wait is
-    /// skipped at runtime.
-    ///
-    /// This is still conservative: a lowered scheme may become multiple queue submissions
-    /// (A1, A2, A3) and another scheme's B1 need only wait for the slice it depends on —
-    /// not A3.  A per-slice retirement gate belongs in the IR lowering path; until then,
-    /// whole-scheme `last_submitted_tv` is the correctness stopgap.
-    last_submitted_tv: Option<TimelineValue>,
     stats: ReplayStats,
     next_grant_id: u32,
     /// Process-unique identity for cross-scheme [`Submission`] / [`ReadGrant`] pairing.
@@ -545,7 +603,6 @@ impl Scheme {
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             retention_key: None,
-            last_submitted_tv: None,
             stats: ReplayStats::default(),
             next_grant_id: 0,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
@@ -568,6 +625,12 @@ impl Scheme {
     /// Submission outcome counters.
     pub fn replay_stats(&self) -> ReplayStats {
         self.stats
+    }
+
+    /// Per-partition timeline values from the most recent successful submit (diagnostics/tests).
+    #[doc(hidden)]
+    pub fn partition_last_tvs(&self) -> &[Option<TimelineValue>] {
+        self.submit_state.partition_last_tvs()
     }
 
     /// Register stamp targets collected during compute-node recording.
@@ -751,7 +814,7 @@ impl Scheme {
     /// Mirrors [`crate::TaskGraph::write_texture`].
     pub fn commit_write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
         let expected = texture.byte_size();
-        if data.len() != expected {
+        if data.len() != expected as usize {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "commit_write_texture: expected {} bytes, got {}",
                 expected,
@@ -878,12 +941,12 @@ impl Scheme {
         flags: TextureFlags,
     ) -> Result<Lease<LeaseTexture>, GoldyError> {
         self.dirty = true;
-        let backing = self
+        let texture = self
             .ctx
             .with_transient_pool(|pool| pool.acquire_texture(&self.ctx, width, height, format, access, flags))
             .map_err(|e| self.ctx.classify(e))?;
         let id = LeaseId(u32::try_from(self.leases.len()).expect("lease id overflow"));
-        self.leases.push(backing);
+        self.leases.push(texture.into_lease_parcel());
         Ok(Lease {
             id,
             _marker: PhantomData,
@@ -1001,24 +1064,19 @@ impl Scheme {
     /// retained submissions.
     ///
     /// When present grants are recorded, swapchain drawables are acquired before lowering
-    /// and stored on the returned [`Submission`] for [`Grant::consume`] via [`PresentGrant`].
+    /// and stored on the returned [`Submission`] for [`PresentGrant::consume`].
+    ///
+    /// Per-partition command-buffer reuse legality (Vulkan `SIMULTANEOUS_USE`, DX12
+    /// non-reset retained allocators) is enforced in the IR submit loop — no whole-scheme
+    /// CPU wait here.
     pub fn submit(&mut self) -> Result<Submission, GoldyError> {
-        // Vulkan/DX12 retained partitions reuse a live command buffer — wait until the prior
-        // submission retires before resubmitting to satisfy VUID-vkQueueSubmit2-commandBuffer-03875.
-        // Skip on Metal (fresh MTLCommandBuffer each resubmit). Use a runtime backend check:
-        // the `metal` Cargo feature is enabled on all default builds, so a compile-time
-        // `#[cfg(not(feature = "metal"))]` gate would omit this wait on Vulkan too.
-        if let Some(prev_tv) = self.last_submitted_tv {
-            if self.ctx.device().backend_type() != BackendType::Metal {
-                let _tz = crate::tracy_zone!("scheme.submit.wait_prev");
-                self.ctx.wait_until(prev_tv)?;
-            }
-        }
-
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         let structurally_dirty = self.dirty;
-        if structurally_dirty || topo_dirty {
-            self.submit_state.invalidate_retention();
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.dirty_check");
+            if structurally_dirty || topo_dirty {
+                self.submit_state.invalidate_retention();
+            }
         }
 
         let mut present_slots = Vec::with_capacity(self.present_grants.len());
@@ -1038,10 +1096,25 @@ impl Scheme {
             }
         }
 
+        {
+            let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
+            use crate::task_graph::cross_submit::net_access_per_resource;
+            let net = net_access_per_resource(&self.ir);
+            let ctx = self.ctx.backend_handle();
+            for (key, access) in &net {
+                if access.writes {
+                    if let Some(stamp) = self.submit_state.resource_stamps().get(key) {
+                        stamp.drain_pending_for_submit_gate(ctx);
+                    }
+                }
+            }
+        }
+
         let submit_result = {
             let _tz = crate::tracy_zone!("scheme.submit.pipelined");
+            let ir_clean = !structurally_dirty && !topo_dirty;
             self.submit_state
-                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots)
+                .submit_pipelined_and_retain_with_presents(&self.ctx, &self.ir, &present_slots, ir_clean)
         };
 
         let (tv, part_result) = match submit_result {
@@ -1097,8 +1170,32 @@ impl Scheme {
             }
         }
 
-        let submission = self.finish_submit_frame(tv, surface_frames)?;
-        self.last_submitted_tv = Some(submission.timeline_value());
+        if structurally_dirty || topo_dirty {
+            tracing::debug!(
+                target: "goldy::scheme",
+                scheme_id = self.scheme_id,
+                structurally_dirty,
+                topo_dirty,
+                partition_records = part_result.records,
+                partition_resubmits = part_result.resubmit_hits,
+                scheme_recorded = recorded,
+                "submit dirty"
+            );
+        } else {
+            tracing::debug!(
+                target: "goldy::scheme",
+                scheme_id = self.scheme_id,
+                partition_records = part_result.records,
+                partition_resubmits = part_result.resubmit_hits,
+                scheme_recorded = recorded,
+                all_partitions_from_cache = part_result.all_from_cache(),
+                "submit clean (not dirty)"
+            );
+        }
+
+        let present_resolvers =
+            claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
+        let submission = self.finish_submit_frame(tv, surface_frames, present_resolvers)?;
         Ok(submission)
     }
 
@@ -1106,6 +1203,7 @@ impl Scheme {
         &mut self,
         tv_dispatch: TimelineValue,
         present_frames: Vec<Mutex<Option<crate::surface::Frame>>>,
+        present_resolvers: Vec<Mutex<Option<PromiseResolver>>>,
     ) -> Result<Submission, GoldyError> {
         if self.grants.is_empty() {
             return Ok(Submission {
@@ -1115,6 +1213,7 @@ impl Scheme {
                     cells: Vec::new(),
                     staging_pools: Vec::new(),
                     present_frames,
+                    present_resolvers,
                 }),
             });
         }
@@ -1185,6 +1284,7 @@ impl Scheme {
                 cells,
                 staging_pools,
                 present_frames,
+                present_resolvers,
             }),
         })
     }
@@ -1192,8 +1292,13 @@ impl Scheme {
     /// Record a present easement grant over a swapchain lease.
     pub fn grant_present(&mut self, lease: &PresentLease) -> PresentGrant {
         self.dirty = true;
-        let grant_id = self.next_grant_id;
+        // `ir_grant_id` is the globally-unique ID used only for IR fingerprinting.
+        // `present_idx` is the dense index into `present_frames`/`present_resolvers`
+        // built by iterating `present_grants` at submit time; the two must be kept
+        // independent so interleaved read grants do not corrupt the present vec index.
+        let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
+        let present_idx = self.present_grants.len() as u32;
         self.present_grants.push(PresentGrantInfo {
             lease_id: lease.id,
             pool: Arc::clone(&lease.pool),
@@ -1204,10 +1309,10 @@ impl Scheme {
                 resource: ResourceId::PresentLease(lease.id),
                 access: NodeAccess::Read,
             }],
-            kind: NodeKind::GrantPresent { grant_id },
+            kind: NodeKind::GrantPresent { grant_id: ir_grant_id },
         });
         PresentGrant {
-            grant_id,
+            grant_id: present_idx,
             scheme_id: self.scheme_id,
         }
     }
@@ -1245,7 +1350,10 @@ impl Scheme {
     /// mechanism used by [`Self::copy_to_present`].
     pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
         self.dirty = true;
-        let src_h = src.handle;
+        let src_h = src.gpu_handle();
+        let stamp = src.whole().stamp_handle();
+        self.submit_state
+            .register_stamp_parts(ResourceId::Texture(src_h), stamp);
         self.ir.nodes.push(TaskNode {
             label: "copy_texture_to_present",
             bindings: vec![
@@ -1261,6 +1369,7 @@ impl Scheme {
             kind: NodeKind::CopyTexture {
                 src: src_h,
                 dst: ResourceId::PresentLease(dst.id),
+                dst_buffer_layout: None,
             },
         });
     }
@@ -1376,9 +1485,11 @@ impl Drop for Scheme {
             let ready_after = parcel.last_referenced();
             parcel.release_bookkeeping();
             if parcel.texture_descriptor().is_some() {
+                let home_device = parcel.home_device().clone();
+                let texture = crate::Texture::from_returned_parcel(parcel, home_device);
                 ctx.with_transient_pool(|pool| {
                     pool.adopt(StampedParcel {
-                        hold: crate::retained_pool::RetainedHold::Texture(parcel),
+                        hold: crate::retained_pool::RetainedHold::Texture(texture),
                         ready_after,
                     });
                 });
@@ -1416,8 +1527,11 @@ impl Scheme {
                 "grant_read requires non-zero buffer byte size"
             )));
         }
-        let grant_id = GrantId(self.next_grant_id);
+        // `ir_grant_id` is unique within the IR for fingerprinting; `read_idx` is the
+        // dense index into `cells` built by iterating `grants` at submit time.
+        let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
+        let read_idx = GrantId(self.grants.len() as u32);
         let staging_pool = GrantStagingPool::new_buffer(&self.ctx, byte_size);
         self.grants.push(GrantInfo {
             source: GrantSource::Buffer {
@@ -1435,10 +1549,10 @@ impl Scheme {
                 resource,
                 access: NodeAccess::Read,
             }],
-            kind: NodeKind::GrantRead { grant_id: grant_id.0 },
+            kind: NodeKind::GrantRead { grant_id: ir_grant_id },
         });
         Ok(ReadGrant {
-            grant_id,
+            grant_id: read_idx,
             scheme_id: self.scheme_id,
             ctx: self.ctx.clone(),
             byte_size,
@@ -1488,11 +1602,12 @@ impl Scheme {
         let layout = {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
             backend
-                .query_texture_readback_layout(self.ctx.device().inner.handle, width, height, format)
+                .query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
                 .map_err(|e| self.ctx.classify(e))?
         };
-        let grant_id = GrantId(self.next_grant_id);
+        let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;
+        let read_idx = GrantId(self.grants.len() as u32);
         let staging_pool = GrantStagingPool::new_texture(&self.ctx, layout);
         self.grants.push(GrantInfo {
             source: GrantSource::Texture {
@@ -1509,10 +1624,10 @@ impl Scheme {
                 resource,
                 access: NodeAccess::Read,
             }],
-            kind: NodeKind::GrantRead { grant_id: grant_id.0 },
+            kind: NodeKind::GrantRead { grant_id: ir_grant_id },
         });
         Ok(ReadGrant {
-            grant_id,
+            grant_id: read_idx,
             scheme_id: self.scheme_id,
             ctx: self.ctx.clone(),
             byte_size: layout.logical_bytes,
@@ -1520,6 +1635,67 @@ impl Scheme {
             return_pool: staging_pool,
             _marker: PhantomData,
         })
+    }
+
+    /// Record a GPU copy from `src` into `dst`.
+    ///
+    /// When `dst` is a [`Buffer`] with [`BufferFlags::CPU_READABLE`], the copy uses the
+    /// buffer footprint from [`crate::Texture::copy_layout`]. Acquire `dst` sized to
+    /// `layout.staging_bytes`, then [`Self::submit`] and wait the returned timeline before
+    /// reading `dst` on the CPU.
+    ///
+    /// Required when `src` may have been written by a prior scheme submission on the same
+    /// [`Context`]: cross-submission barriers and parcel stamps are applied before the transfer read.
+    pub fn copy_texture(&mut self, src: &crate::Texture, dst: &Buffer) -> Result<TextureCopyFootprint, GoldyError> {
+        if !dst.flags().contains(BufferFlags::CPU_READABLE) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture to buffer requires BufferFlags::CPU_READABLE destination"
+            )));
+        }
+        let layout = src.copy_layout();
+        if dst.byte_size() < layout.staging_bytes {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "copy_texture destination too small: {} < {}",
+                dst.byte_size(),
+                layout.staging_bytes
+            )));
+        }
+
+        let src_h = src.gpu_handle();
+        let stamp = src.whole().stamp_handle();
+        self.submit_state
+            .register_stamp_parts(ResourceId::Texture(src_h), stamp);
+
+        self.ir.nodes.retain(|node| {
+            !matches!(
+                node.kind,
+                NodeKind::CopyTexture {
+                    dst_buffer_layout: Some(_),
+                    ..
+                }
+            )
+        });
+        self.ir.nodes.push(TaskNode {
+            label: "copy_texture",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Texture(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::Buffer(dst.backing_handle()),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyTexture {
+                src: src_h,
+                dst: ResourceId::Buffer(dst.backing_handle()),
+                dst_buffer_layout: Some(layout),
+            },
+        });
+        self.dirty = true;
+
+        Ok(layout)
     }
 }
 
@@ -1625,10 +1801,10 @@ impl IntoDispatch for &Parcel {
 ///
 /// Returns a `(resource_identity, bindless_slot_index)` pair where:
 /// - `resource_identity` is `Some((ResourceId, Option<ParcelStamp>))` for resources that
-///   participate in barrier generation. The stamp is `Some` for resources that also participate in
-///   cross-scheme hazard tracking (buffers, parcel-wrapped textures). It is `None` for resources
-///   that need barriers but carry no stamp, such as [`crate::Texture`] objects. `resource_identity`
-///   is `None` for barrier-free resources such as samplers, which only need a bindless slot.
+///   participate in barrier generation. The stamp is `Some` for parcel-backed resources
+///   (buffers, textures) that also participate in cross-scheme hazard tracking.
+///   `resource_identity` is `None` for barrier-free resources such as samplers, which only need
+///   a bindless slot.
 /// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
 type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>;
 type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
@@ -1681,10 +1857,6 @@ impl SchemeBindable for crate::Sampler {
 
 impl SchemeBindable for crate::Texture {
     fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
-        // Raw textures participate in barrier generation but carry no ParcelStamp because
-        // they are not parcel-wrapped (e.g. TexturePool-managed). Cross-submit hazard
-        // tracking is handled by frame pipeline depth, matching the classic TaskGraph path.
-        //
         // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
         // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
         // fall back to the UAV bindless index — mirroring the TaskGraph path's behaviour in
@@ -1697,7 +1869,8 @@ impl SchemeBindable for crate::Texture {
                 None
             }
         });
-        (Some((ResourceId::Texture(self.handle), None)), slot)
+        let parcel = self.whole();
+        (Some((parcel.resource_id(), Some(parcel.stamp_handle()))), slot)
     }
 }
 
@@ -2218,6 +2391,30 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
+    #[cfg(not(feature = "metal"))]
+    fn clean_resubmit_performs_no_cpu_wait() {
+        use crate::backend::GpuBackend;
+
+        let device = mock_device();
+        let mut pool = RetainedPool::new(device.clone());
+        let mut scheme = clean_scheme(&device, &mut pool);
+
+        scheme.submit().unwrap();
+        scheme.submit().unwrap();
+
+        let backend = device.inner.backend.lock().unwrap();
+        assert_eq!(
+            backend.test_wait_until_count(),
+            0,
+            "clean scheme resubmits must not call wait_until on the submit path"
+        );
+        assert!(
+            !scheme.partition_last_tvs().is_empty(),
+            "per-partition timelines are tracked after submit"
+        );
+    }
+
+    #[test]
     fn mutation_marks_dirty_and_rerecords_once() {
         let device = mock_device();
         let mut pool = RetainedPool::new(device.clone());
@@ -2649,7 +2846,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     // Texture grant tests
     // ------------------------------------------------------------------
 
-    fn texture_parcel(pool: &mut RetainedPool) -> Parcel {
+    fn texture_parcel(pool: &mut RetainedPool) -> crate::Texture {
         pool.acquire_texture(
             4,
             4,
@@ -3425,5 +3622,184 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .node("bad_bind", &pipeline)
             .with_parcel(&texture, NodeAccess::Write)
             .dispatch(1, 1, 1);
+    }
+
+    fn mock_direct_texture(device: &Arc<Device>) -> crate::Texture {
+        let mut pool = RetainedPool::new(device.clone());
+        pool.acquire_texture(
+            4,
+            4,
+            crate::types::TextureFormat::Rgba8Unorm,
+            crate::types::TextureKind::Direct,
+            crate::types::TextureFlags::empty(),
+            None,
+        )
+        .expect("direct texture")
+    }
+
+    fn present_scheme_with_texture_copy(
+        scheme: &mut Scheme,
+        tex: &crate::Texture,
+        lease: &PresentLease,
+        pipeline: &ComputePipeline,
+    ) -> PresentGrant {
+        scheme
+            .node("write_tex", pipeline)
+            .with_parcel(tex, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        scheme.copy_texture_to_present(tex, lease);
+        scheme.grant_present(lease)
+    }
+
+    #[test]
+    fn present_easement_promise_abandoned_when_submission_dropped() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
+
+        let key = ResourceKey::Texture(tex.gpu_handle());
+        let submission = scheme.submit().expect("submit");
+        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+        assert_eq!(stamp.pending.lock().unwrap().len(), 1);
+        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Pending);
+        drop(submission);
+        assert_eq!(stamp.pending.lock().unwrap()[0].poll(), PromiseState::Abandoned);
+    }
+
+    #[test]
+    fn present_consume_resolves_with_present_timeline_not_compute() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::PromiseState;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
+        let submission = scheme.submit().expect("submit");
+        let compute_tv = submission.timeline_value();
+
+        present.consume(&submission).expect("present");
+
+        let key = ResourceKey::Texture(tex.gpu_handle());
+        let poll_state = {
+            let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+            stamp.pending.lock().unwrap()[0].poll()
+        };
+        match poll_state {
+            PromiseState::Resolved(present_tv) => {
+                assert!(
+                    present_tv > compute_tv,
+                    "present easement must resolve to the later present/copy timeline (present={present_tv}, compute={compute_tv})"
+                );
+            }
+            other => panic!("expected Resolved present timeline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_gate_folds_resolved_present_promise_into_foreign_reads() {
+        use crate::task_graph::cross_submit::ResourceKey;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+        let ctx_handle = ctx.backend_handle();
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
+        let key = ResourceKey::Texture(tex.gpu_handle());
+
+        let sub1 = scheme.submit().expect("submit 1");
+        present.consume(&sub1).expect("present frame 1");
+
+        let _sub2 = scheme.submit().expect("submit 2");
+        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+        let sync = stamp.sync.lock().unwrap();
+        assert!(
+            sync.foreign_reads.get(&ctx_handle).is_some(),
+            "submit gate must fold resolved present promise into foreign_reads"
+        );
+        drop(sync);
+        assert_eq!(
+            stamp.pending.lock().unwrap().len(),
+            1,
+            "submit 2 claims a fresh present promise; frame 1's resolved promise must be pruned"
+        );
+        assert_eq!(
+            stamp.pending.lock().unwrap()[0].poll(),
+            crate::timeline::PromiseState::Pending
+        );
+    }
+
+    #[test]
+    fn submit_gate_blocks_until_present_promise_resolved() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        let present = present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
+        let sub1 = scheme.submit().expect("submit 1");
+
+        let scheme = Arc::new(std::sync::Mutex::new(scheme));
+        let barrier = Arc::new(Barrier::new(2));
+        let scheme2 = Arc::clone(&scheme);
+        let barrier2 = Arc::clone(&barrier);
+
+        let gate_thread = thread::spawn(move || {
+            barrier2.wait();
+            scheme2
+                .lock()
+                .unwrap()
+                .submit()
+                .expect("submit 2 must succeed after promise resolves");
+        });
+
+        barrier.wait();
+        thread::sleep(Duration::from_millis(30));
+        present.consume(&sub1).expect("consume releases submit gate");
+        gate_thread.join().expect("gate thread");
+    }
+
+    #[test]
+    fn texture_stamp_not_settled_while_present_promise_unresolved() {
+        use crate::task_graph::cross_submit::ResourceKey;
+        use crate::timeline::Settle;
+
+        let device = mock_device();
+        let (ctx, spool) = mock_swapchain_pool(&device);
+        let lease = spool.lease();
+        let tex = mock_direct_texture(&device);
+        let pipeline = mock_pipeline(&device, &mock_shader(&device));
+
+        let mut scheme = Scheme::new(&ctx);
+        present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
+        let key = ResourceKey::Texture(tex.gpu_handle());
+
+        let submission = scheme.submit().expect("submit");
+        let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+        assert_eq!(stamp.settle_on_context(&ctx), Settle::Pending);
+        drop(submission);
+        assert_eq!(stamp.settle_on_context(&ctx), Settle::Ready);
     }
 }

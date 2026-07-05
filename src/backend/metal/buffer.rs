@@ -166,7 +166,7 @@ fn insert_buffer_common(
             access,
             view_byte_offset,
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -414,7 +414,7 @@ pub(super) fn create_view(
             access: BufferKind::Scattered,
             view_byte_offset: Some(offset),
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -522,7 +522,7 @@ pub(super) fn resize(
         access: old_state.access,
         view_byte_offset: None,
         is_grant_readback: false,
-        grant_texture_readback: None,
+        texture_copy_footprint: None,
     };
 
     let new_mtl = state.buffers.get(&buffer_handle).unwrap().buffer.clone();
@@ -830,20 +830,20 @@ pub(super) fn alloc_readback_buffer(
             access: BufferKind::Scattered,
             view_byte_offset: None,
             is_grant_readback: true,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
     Ok(handle)
 }
 
-pub(super) fn query_texture_readback_layout(
+pub(super) fn query_texture_copy_footprint(
     width: u32,
     height: u32,
     format: crate::types::TextureFormat,
-) -> crate::backend::TextureReadbackLayout {
+) -> crate::backend::TextureCopyFootprint {
     let row_pitch = width.saturating_mul(format.bytes_per_pixel());
     let logical_bytes = row_pitch as u64 * height as u64;
-    crate::backend::TextureReadbackLayout {
+    crate::backend::TextureCopyFootprint {
         width,
         height,
         format,
@@ -857,11 +857,11 @@ pub(super) fn query_texture_readback_layout(
 pub(super) fn alloc_texture_readback_staging(
     state: &mut MetalState,
     device_handle: DeviceHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
 ) -> Result<BufferHandle> {
     let handle = alloc_readback_buffer(state, device_handle, layout.staging_bytes)?;
     if let Some(buf) = state.buffers.get_mut(&handle) {
-        buf.grant_texture_readback = Some(layout);
+        buf.texture_copy_footprint = Some(layout);
     }
     Ok(handle)
 }
@@ -869,7 +869,7 @@ pub(super) fn alloc_texture_readback_staging(
 pub(super) fn read_texture_readback_staging(
     state: &MetalState,
     buffer_handle: BufferHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
     output: &mut [u8],
 ) -> Result<()> {
     if output.len() as u64 != layout.logical_bytes {

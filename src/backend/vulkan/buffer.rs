@@ -265,7 +265,7 @@ pub(super) fn create(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -398,7 +398,7 @@ pub(super) fn create_sparse_with_capacity(
             sparse_block_size: block,
             sparse_pages,
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -1103,7 +1103,7 @@ pub(super) fn resize(
         sparse_block_size: 0,
         sparse_pages: Vec::new(),
         is_grant_readback: false,
-        grant_texture_readback: None,
+        texture_copy_footprint: None,
     };
 
     let view_handles: Vec<BufferHandle> = buffers
@@ -1321,7 +1321,7 @@ pub(super) fn create_view(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: false,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
 
@@ -1697,20 +1697,20 @@ pub(super) fn alloc_readback_buffer(
             sparse_block_size: 0,
             sparse_pages: Vec::new(),
             is_grant_readback: true,
-            grant_texture_readback: None,
+            texture_copy_footprint: None,
         },
     );
     Ok(handle)
 }
 
-pub(super) fn query_texture_readback_layout(
+pub(super) fn query_texture_copy_footprint(
     width: u32,
     height: u32,
     format: crate::types::TextureFormat,
-) -> crate::backend::TextureReadbackLayout {
+) -> crate::backend::TextureCopyFootprint {
     let row_pitch = width.saturating_mul(format.bytes_per_pixel());
     let logical_bytes = row_pitch as u64 * height as u64;
-    crate::backend::TextureReadbackLayout {
+    crate::backend::TextureCopyFootprint {
         width,
         height,
         format,
@@ -1727,7 +1727,7 @@ pub(super) fn alloc_texture_readback_staging(
     buffers: &mut HashMap<BufferHandle, BufferState>,
     next_buffer_handle: &mut BufferHandle,
     device_handle: DeviceHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
 ) -> Result<BufferHandle> {
     let handle = alloc_readback_buffer(
         instance,
@@ -1738,7 +1738,7 @@ pub(super) fn alloc_texture_readback_staging(
         layout.staging_bytes,
     )?;
     if let Some(buf) = buffers.get_mut(&handle) {
-        buf.grant_texture_readback = Some(layout);
+        buf.texture_copy_footprint = Some(layout);
     }
     Ok(handle)
 }
@@ -1746,7 +1746,7 @@ pub(super) fn alloc_texture_readback_staging(
 pub(super) fn read_texture_readback_staging(
     buffers: &HashMap<BufferHandle, BufferState>,
     buffer_handle: BufferHandle,
-    layout: crate::backend::TextureReadbackLayout,
+    layout: crate::backend::TextureCopyFootprint,
     output: &mut [u8],
 ) -> Result<()> {
     if output.len() as u64 != layout.logical_bytes {

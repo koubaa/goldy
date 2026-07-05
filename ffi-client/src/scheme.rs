@@ -8,6 +8,7 @@ use crate::sys::{
     self, GoldyPresentGrant, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme,
     GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
+use crate::texture::Texture;
 use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, TextureFormat};
 use std::ffi::CString;
 use std::ops::Range;
@@ -183,12 +184,12 @@ impl Scheme {
     }
 
     /// Record a read easement over a texture parcel (once per scheme).
-    pub fn grant_read_texture(&mut self, parcel: &Parcel) -> Result<ReadGrant> {
-        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read_texture(self.ptr, parcel.as_ptr()) });
+    pub fn grant_read_texture(&mut self, texture: &Texture) -> Result<ReadGrant> {
+        let ptr = non_null_expect(unsafe { sys::goldy_scheme_grant_read_texture(self.ptr, texture.as_ptr()) });
         Ok(ReadGrant { ptr })
     }
 
-    pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Parcel) -> Result<()> {
+    pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Texture) -> Result<()> {
         check(unsafe { sys::goldy_scheme_copy_to_texture(self.ptr, src.as_ptr(), dst.as_ptr()) })
     }
 

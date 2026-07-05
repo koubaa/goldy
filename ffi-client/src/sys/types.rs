@@ -4,6 +4,7 @@ use std::ffi::c_char;
 
 pub enum GoldyRecordBuilder {}
 pub enum GoldyBuffer {}
+pub enum GoldyTexture {}
 pub enum GoldyParcel {}
 pub enum GoldyRetainedPool {}
 pub enum GoldyComputePipeline {}

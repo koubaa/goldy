@@ -1,8 +1,8 @@
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::error::{non_null, Result};
-use crate::parcel::Parcel;
 use crate::sys::{self, GoldyRecordBuilder, GoldyRetainedPool};
+use crate::texture::Texture;
 use crate::types::BufferKind;
 use bytemuck::Pod;
 use std::ffi::CString;
@@ -151,7 +151,7 @@ impl RetainedPool {
         kind: crate::types::TextureKind,
         flags: crate::types::TextureFlags,
         init: Option<&[u8]>,
-    ) -> Result<Parcel> {
+    ) -> Result<Texture> {
         let (data, data_size) = match init {
             Some(bytes) => (bytes.as_ptr(), bytes.len()),
             None => (std::ptr::null(), 0),
@@ -168,7 +168,7 @@ impl RetainedPool {
                 data_size,
             )
         })?;
-        Parcel::from_ptr(ptr)
+        Texture::from_ptr(ptr)
     }
 
     pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldyRetainedPool {

@@ -659,20 +659,20 @@ impl GpuBackend for Dx12Backend {
         buffer::destroy(&mut self.state, buffer);
     }
 
-    fn query_texture_readback_layout(
+    fn query_texture_copy_footprint(
         &self,
         device: DeviceHandle,
         width: u32,
         height: u32,
         format: crate::types::TextureFormat,
-    ) -> Result<crate::backend::TextureReadbackLayout> {
-        texture::query_readback_layout(&self.state, device, width, height, format)
+    ) -> Result<crate::backend::TextureCopyFootprint> {
+        texture::query_texture_copy_footprint(&self.state, device, width, height, format)
     }
 
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
     ) -> Result<BufferHandle> {
         buffer::alloc_texture_readback_staging(&mut self.state, device, layout)
     }
@@ -680,7 +680,7 @@ impl GpuBackend for Dx12Backend {
     fn read_texture_readback_staging(
         &self,
         buffer: BufferHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
@@ -803,7 +803,7 @@ impl GpuBackend for Dx12Backend {
         surface_handle: SurfaceHandle,
         ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
+        let (image, present_slot) = surface::acquire(&mut self.state, surface_handle, ctx)?;
         let tex = surface::frame_texture(&self.state, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
@@ -812,13 +812,20 @@ impl GpuBackend for Dx12Backend {
                 image,
                 context: ctx,
                 frame_slot: image as u32,
+                present_slot,
             },
             tex,
         ))
     }
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        surface::render(&mut self.state, frame.surface, frame.image, commands)
+        surface::render(
+            &mut self.state,
+            frame.surface,
+            frame.image,
+            frame.present_slot,
+            commands,
+        )
     }
 
     fn surface_resize(&mut self, surface_handle: SurfaceHandle, width: u32, height: u32) -> Result<()> {

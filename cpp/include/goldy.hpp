@@ -66,6 +66,7 @@ class Context;
 class Adapter;
 class RetainedPool;
 class Buffer;
+class Texture;
 class Parcel;
 class RecordBuilder;
 class ShaderModule;
@@ -224,6 +225,10 @@ struct RetainedPoolDeleter {
 
 struct BufferDeleter {
     void operator()(GoldyBuffer* p) const { if (p) goldy_buffer_destroy(p); }
+};
+
+struct TextureDeleter {
+    void operator()(GoldyTexture* p) const { if (p) goldy_texture_destroy(p); }
 };
 
 struct ParcelDeleter {
@@ -608,9 +613,9 @@ public:
     [[nodiscard]] Buffer acquire_buffer_bytes(std::span<const uint8_t> data, BufferKind access,
                                               uint32_t element_stride = 1);
 
-    [[nodiscard]] Parcel acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
-                                         GoldyTextureKind kind, GoldyTextureFlags flags,
-                                         std::span<const uint8_t> init = {});
+    [[nodiscard]] Texture acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
+                                          GoldyTextureKind kind, GoldyTextureFlags flags,
+                                          std::span<const uint8_t> init = {});
 
     GoldyRetainedPool* get() const { return ptr_.get(); }
 
@@ -619,7 +624,29 @@ private:
 };
 
 /**
- * @brief Opaque retained GPU parcel (texture parcels; buffer units use Buffer + unit index).
+ * @brief Opaque retained GPU texture.
+ */
+class Texture {
+public:
+    Texture() = default;
+
+    explicit Texture(GoldyTexture* ptr) : ptr_(ptr) {}
+
+    Texture(const Texture&) = delete;
+    Texture& operator=(const Texture&) = delete;
+    Texture(Texture&&) = default;
+    Texture& operator=(Texture&&) = default;
+
+    uint64_t byte_size() const { return goldy_texture_byte_size(ptr_.get()); }
+
+    GoldyTexture* get() const { return ptr_.get(); }
+
+private:
+    std::unique_ptr<GoldyTexture, detail::TextureDeleter> ptr_;
+};
+
+/**
+ * @brief Opaque retained GPU parcel (buffer units; textures use Texture).
  */
 class Parcel {
 public:
@@ -807,16 +834,16 @@ inline Buffer RetainedPool::acquire_buffer(uint64_t size, BufferKind access, uin
     return Buffer(ptr);
 }
 
-inline Parcel RetainedPool::acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
-                                            GoldyTextureKind kind, GoldyTextureFlags flags,
-                                            std::span<const uint8_t> init) {
-    GoldyParcel* ptr = goldy_retained_pool_acquire_texture(
+inline Texture RetainedPool::acquire_texture(uint32_t width, uint32_t height, GoldyTextureFormat format,
+                                             GoldyTextureKind kind, GoldyTextureFlags flags,
+                                             std::span<const uint8_t> init) {
+    GoldyTexture* ptr = goldy_retained_pool_acquire_texture(
         ptr_.get(), width, height, format, kind, flags,
         init.empty() ? nullptr : init.data(), init.size());
     if (!ptr) {
         throw Exception::from_last_error();
     }
-    return Parcel(ptr);
+    return Texture(ptr);
 }
 
 inline Buffer RecordBuilder::build(RetainedPool& pool) {
@@ -1404,8 +1431,8 @@ public:
         return grant_read(buffer.field(unit));
     }
 
-    [[nodiscard]] ReadGrant grant_read_texture(const Parcel& parcel) {
-        GoldyReadGrant* grant = goldy_scheme_grant_read_texture(ptr_.get(), parcel.get());
+    [[nodiscard]] ReadGrant grant_read_texture(const Texture& texture) {
+        GoldyReadGrant* grant = goldy_scheme_grant_read_texture(ptr_.get(), texture.get());
         if (!grant) {
             throw Exception::from_last_error();
         }
@@ -1423,7 +1450,7 @@ public:
         return SchemeRenderTargetLease{lease};
     }
 
-    void copy_to_texture(const SchemeRenderTargetLease& src, const Parcel& dst) {
+    void copy_to_texture(const SchemeRenderTargetLease& src, const Texture& dst) {
         detail::throw_on_result(goldy_scheme_copy_to_texture(ptr_.get(), src.get(), dst.get()));
     }
 

@@ -1109,25 +1109,44 @@ pub(super) fn submit(
                                 })
                             })
                             .collect();
-                        // Textures: we don't track per-image Vulkan layout in TextureState,
-                        // so use a global memory barrier per texture entry. No layout
-                        // transition needed — just execution + memory dependency.
-                        let tex_mem: Vec<vk::MemoryBarrier2> = tex_entries
+                        // Textures: emit per-image ImageMemoryBarrier2 with layout
+                        // tracking. Storage images are created UNDEFINED and must
+                        // transition to GENERAL on first use; GENERAL→GENERAL on
+                        // subsequent frames carries only the execution/memory
+                        // dependency (same effect as the old global MemoryBarrier2
+                        // but formally correct and handles cold-start).
+                        let tex_img: Vec<vk::ImageMemoryBarrier2> = tex_entries
                             .iter()
-                            .map(|(_, usage)| {
-                                vk::MemoryBarrier2::default()
-                                    .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                    .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
-                                    .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                            .filter_map(|(h, usage)| {
+                                state.textures.get(h).map(|ts| {
+                                    let old_layout = ts.image_layout();
+                                    ts.set_image_layout(vk::ImageLayout::GENERAL);
+                                    vk::ImageMemoryBarrier2::default()
+                                        .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
+                                        .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                                        .old_layout(old_layout)
+                                        .new_layout(vk::ImageLayout::GENERAL)
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .image(ts.image)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                                            base_mip_level: 0,
+                                            level_count: 1,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        })
+                                })
                             })
                             .collect();
-                        let dep_info = if tex_mem.is_empty() {
+                        let dep_info = if tex_img.is_empty() {
                             vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
                         } else {
                             vk::DependencyInfo::default()
                                 .buffer_memory_barriers(&buf_barriers)
-                                .memory_barriers(&tex_mem)
+                                .image_memory_barriers(&tex_img)
                         };
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
@@ -1797,12 +1816,12 @@ fn submit_graph_impl(
         let mut sc = sc_arc.lock().unwrap();
         let cb = acquire_cmd_buffer(ld, &mut sc)?;
         // Use ONE_TIME_SUBMIT for normal submits (driver hint for optimization).
-        // When retaining, omit the flag so the CB stays executable after GPU completion
-        // and can be resubmitted on the next frame.
+        // Retained CBs use SIMULTANEOUS_USE so a still-pending CB may be resubmitted
+        // without a CPU wait (VUID-vkQueueSubmit2-commandBuffer-03875).
         let flags = if retain_key.is_none() {
             vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT
         } else {
-            vk::CommandBufferUsageFlags::empty()
+            vk::CommandBufferUsageFlags::SIMULTANEOUS_USE
         };
         let begin_info = vk::CommandBufferBeginInfo::default().flags(flags);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
@@ -2087,25 +2106,44 @@ fn submit_graph_impl(
                                 })
                             })
                             .collect();
-                        // Textures: we don't track per-image Vulkan layout in TextureState,
-                        // so use a global memory barrier per texture entry. No layout
-                        // transition needed — just execution + memory dependency.
-                        let tex_mem: Vec<vk::MemoryBarrier2> = tex_entries
+                        // Textures: emit per-image ImageMemoryBarrier2 with layout
+                        // tracking. Storage images are created UNDEFINED and must
+                        // transition to GENERAL on first use; GENERAL→GENERAL on
+                        // subsequent frames carries only the execution/memory
+                        // dependency (same effect as the old global MemoryBarrier2
+                        // but formally correct and handles cold-start).
+                        let tex_img: Vec<vk::ImageMemoryBarrier2> = tex_entries
                             .iter()
-                            .map(|(_, usage)| {
-                                vk::MemoryBarrier2::default()
-                                    .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
-                                    .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
-                                    .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
-                                    .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                            .filter_map(|(h, usage)| {
+                                state.textures.get(h).map(|ts| {
+                                    let old_layout = ts.image_layout();
+                                    ts.set_image_layout(vk::ImageLayout::GENERAL);
+                                    vk::ImageMemoryBarrier2::default()
+                                        .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
+                                        .src_access_mask(slot_usage_to_vk_access(&usage.src, false))
+                                        .dst_stage_mask(slot_usage_to_vk_stage(&usage.dst))
+                                        .dst_access_mask(slot_usage_to_vk_access(&usage.dst, false))
+                                        .old_layout(old_layout)
+                                        .new_layout(vk::ImageLayout::GENERAL)
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .image(ts.image)
+                                        .subresource_range(vk::ImageSubresourceRange {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                                            base_mip_level: 0,
+                                            level_count: 1,
+                                            base_array_layer: 0,
+                                            layer_count: 1,
+                                        })
+                                })
                             })
                             .collect();
-                        let dep_info = if tex_mem.is_empty() {
+                        let dep_info = if tex_img.is_empty() {
                             vk::DependencyInfo::default().buffer_memory_barriers(&buf_barriers)
                         } else {
                             vk::DependencyInfo::default()
                                 .buffer_memory_barriers(&buf_barriers)
-                                .memory_barriers(&tex_mem)
+                                .image_memory_barriers(&tex_img)
                         };
                         logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
                     }
@@ -2664,9 +2702,9 @@ fn submit_graph_impl(
 
 /// Record, submit, and retain a dispatch command buffer keyed by `key`.
 ///
-/// The CB is recorded without `ONE_TIME_SUBMIT` (driver keeps it executable after GPU
-/// completion) and stored in `SubmissionContext::retained_compute_cbs` rather than
-/// `timeline_cmd_buffers`, so it survives the normal reap cycle.
+/// The CB is recorded with `SIMULTANEOUS_USE` so a still-pending retained CB may be
+/// resubmitted without a CPU wait (VUID-vkQueueSubmit2-commandBuffer-03875).
+/// Stored in `SubmissionContext::retained_compute_cbs` rather than `timeline_cmd_buffers`.
 /// On subsequent frames call [`try_resubmit_retained`] to re-execute without re-recording.
 /// If commands contain any WriteBuffer/WriteTexture nodes the call falls back to a normal
 /// (non-retained) submit via [`submit_graph`].

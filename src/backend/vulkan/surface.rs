@@ -645,7 +645,7 @@ pub(super) fn acquire(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
     ctx: super::ContextHandle,
-) -> Result<SwapchainImageHandle> {
+) -> Result<(SwapchainImageHandle, u32)> {
     let _tz = crate::tracy_zone!("vk.surface.acquire");
 
     // Get surface state and current frame index.
@@ -848,7 +848,12 @@ pub(super) fn acquire(
                     .push(crate::signal::Signal::SwapchainAcquired { image_index });
             }
 
-            Ok(image_index as SwapchainImageHandle)
+            {
+                let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
+                surface_state.current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+            }
+
+            Ok((image_index as SwapchainImageHandle, current_frame as u32))
         }
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
             tracing::info!("Swapchain out of date - resize required");
@@ -879,20 +884,13 @@ pub(super) fn frame_texture(
     surfaces.get(&surface_handle).and_then(|s| s.current_texture_handle)
 }
 
-/// In-flight slot index for the frame most recently acquired on this surface.
-pub(super) fn current_frame_slot(
-    surfaces: &HashMap<SurfaceHandle, SurfaceState>,
-    surface_handle: SurfaceHandle,
-) -> Option<u32> {
-    surfaces.get(&surface_handle).map(|s| s.current_frame as u32)
-}
-
 /// Render commands to the surface's current swapchain image.
 #[allow(clippy::too_many_lines)]
 pub(super) fn render(
     state: &mut super::types::VulkanState,
     surface_handle: SurfaceHandle,
-    _image: SwapchainImageHandle,
+    image: SwapchainImageHandle,
+    present_slot: u32,
     timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
 ) -> Result<()> {
@@ -901,9 +899,9 @@ pub(super) fn render(
     let buffers = &state.buffers;
     let pipelines = &state.pipelines;
     let surfaces = &mut state.surfaces;
+    let present_slot = present_slot as usize;
+    let image_index = image as u32;
     let (
-        _image_index,
-        current_frame,
         device_handle,
         cmd,
         prep_cmd,
@@ -921,14 +919,8 @@ pub(super) fn render(
         in_flight_fence,
     ) = {
         let surface_state = surfaces.get(&surface_handle).context("Invalid surface handle")?;
-        let image_index = surface_state
-            .current_image_index
-            .context("No image acquired - call surface_acquire first")?;
-        let current_frame = surface_state.current_frame;
-        let frame = &surface_state.frame_sync[current_frame];
+        let frame = &surface_state.frame_sync[present_slot];
         (
-            image_index,
-            current_frame,
             surface_state.device_handle,
             frame.command_buffer,
             surface_state.swapchain_prep_command_buffers[image_index as usize],
@@ -1216,7 +1208,7 @@ pub(super) fn render(
     .context("Failed to submit render command buffer")?;
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
-        let fs = &mut surface_state.frame_sync[current_frame];
+        let fs = &mut surface_state.frame_sync[present_slot];
         fs.render_pass_submitted = true;
         fs.fence_pending = true;
         fs.frame_timeline_value = Some(signal_timeline_value);
@@ -1257,7 +1249,7 @@ pub(super) fn present_frame(
     frame: crate::backend::FrameToken,
     submit_tv: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
-    present(state, frame.surface, frame.image, frame.context, submit_tv)
+    present(state, frame, submit_tv)
 }
 
 /// Present the rendered image to the screen.
@@ -1266,36 +1258,27 @@ pub(super) fn present_frame(
 /// then queues the swapchain image for presentation.
 pub(super) fn present(
     state: &mut super::types::VulkanState,
-    surface_handle: SurfaceHandle,
-    _image: SwapchainImageHandle,
-    ctx: super::ContextHandle,
+    frame: crate::backend::FrameToken,
     frame_compute_timeline_value: crate::timeline::TimelineValue,
 ) -> Result<crate::timeline::TimelineValue> {
     let _tz = crate::tracy_zone!("vk.surface.present");
-    // Take the surface texture handle but do NOT unregister yet — the deferred
-    // compute CBs (and the render CB in the graphics path) reference the
+    let surface_handle = frame.surface;
+    let image_index = frame.image as u32;
+    let present_slot = frame.present_slot as usize;
+    let ctx = frame.context;
     // The swapchain image view + bindless descriptor are permanent (registered
-    // at swapchain creation), so no deferred unregister is needed.  Just clear
-    // the per-frame alias and proceed.
-    let (image_index, current_frame, render_pass_submitted, device_handle, render_finished_sem_present, swapchain) = {
-        let s = state
-            .surfaces
-            .get_mut(&surface_handle)
-            .context("Invalid surface handle")?;
-        s.current_texture_handle = None;
-        let image_index = s
-            .current_image_index
-            .context("No image to present - call surface_render first")?;
-        let cf = s.current_frame;
-        let rp = s.frame_sync[cf].render_pass_submitted;
+    // at swapchain creation), so no deferred unregister is needed.
+    let (render_pass_submitted, device_handle, render_finished_sem_present, swapchain) = {
+        let s = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
+        let rp = s.frame_sync[present_slot].render_pass_submitted;
         let dh = s.device_handle;
-        let fr = &s.frame_sync[cf];
-        (image_index, cf, rp, dh, fr.render_finished_semaphore, s.swapchain)
+        let fr = &s.frame_sync[present_slot];
+        (rp, dh, fr.render_finished_semaphore, s.swapchain)
     };
 
     let image_available_sem_present = {
         let s = state.surfaces.get(&surface_handle).unwrap();
-        s.frame_sync[current_frame].image_available_semaphore
+        s.frame_sync[present_slot].image_available_semaphore
     };
 
     if !render_pass_submitted {
@@ -1315,12 +1298,16 @@ pub(super) fn present(
         // PRESENT_SRC_KHR. Compute submissions are owned by the runtime and may
         // be split/fused independently of this WSI copy.
 
-        let (scratch_image, copy_cb) = {
+        let (scratch_image, _scratch_texture_handle, copy_cb) = {
             let s = state.surfaces.get(&surface_handle).unwrap();
-            let scratch = s.scratch_texture_slots[current_frame]
+            let scratch = s.scratch_texture_slots[present_slot]
                 .as_ref()
                 .expect("scratch texture slot not initialized before present");
-            (scratch.image, s.frame_sync[current_frame].copy_command_buffer)
+            (
+                scratch.image,
+                scratch.texture_handle,
+                s.frame_sync[present_slot].copy_command_buffer,
+            )
         };
         let swapchain_image = {
             let s = state.surfaces.get(&surface_handle).unwrap();
@@ -1526,7 +1513,7 @@ pub(super) fn present(
             tracing::warn!(
                 surface_handle,
                 %device_handle,
-                current_frame,
+                present_slot,
                 image_index,
                 result = ?e,
                 "present copy queue_submit2 failed"
@@ -1545,11 +1532,11 @@ pub(super) fn present(
             // finishes — the copy only reads the scratch texture, so there's no
             // need for callers to wait for the WSI copy before reclaiming RTs.
             let surface_state_mut = state.surfaces.get_mut(&surface_handle).unwrap();
-            surface_state_mut.frame_sync[current_frame].frame_timeline_value = Some(frame_compute_timeline_value);
-            surface_state_mut.frame_sync[current_frame].last_compute_timeline_value = frame_compute_timeline_value;
-            surface_state_mut.frame_sync[current_frame].copy_timeline_value = Some(signal_timeline_value);
+            surface_state_mut.frame_sync[present_slot].frame_timeline_value = Some(frame_compute_timeline_value);
+            surface_state_mut.frame_sync[present_slot].last_compute_timeline_value = frame_compute_timeline_value;
+            surface_state_mut.frame_sync[present_slot].copy_timeline_value = Some(signal_timeline_value);
             tracing::debug!(
-                current_frame,
+                present_slot,
                 frame_compute_timeline_value,
                 signal_timeline_value,
                 "vk.present: stored timeline values"
@@ -1588,7 +1575,7 @@ pub(super) fn present(
             tracing::debug!(
                 surface_handle,
                 %device_handle,
-                current_frame,
+                present_slot,
                 image_index,
                 result = ?e,
                 "queue_present: swapchain out of date (will rebuild)"
@@ -1597,7 +1584,7 @@ pub(super) fn present(
             tracing::warn!(
                 surface_handle,
                 %device_handle,
-                current_frame,
+                present_slot,
                 image_index,
                 result = ?e,
                 "queue_present failed"
@@ -1605,12 +1592,9 @@ pub(super) fn present(
         }
     }
 
-    // Clear the current image and advance frame counter.
     let (copy_tv, image_idx_for_return) = {
         let surface_state = state.surfaces.get_mut(&surface_handle).unwrap();
-        let copy_tv = surface_state.frame_sync[current_frame].copy_timeline_value;
-        surface_state.current_image_index = None;
-        surface_state.current_frame = (surface_state.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        let copy_tv = surface_state.frame_sync[present_slot].copy_timeline_value;
         (copy_tv, image_index)
     };
 
@@ -1634,17 +1618,16 @@ pub(super) fn present(
     // Handle suboptimal or out of date
     match result {
         Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-            let timeline_value = {
-                let surface_state = state
+            // Prefer the copy timeline (scheme path); fall back to the compute timeline
+            // (render-pass path). Both are consumed (taken) so a second call for the same
+            // slot returns None, surfacing accidental double-present as a hard error.
+            let easement_tv = copy_tv.or_else(|| {
+                state
                     .surfaces
                     .get_mut(&surface_handle)
-                    .context("Invalid surface handle")?;
-                surface_state.frame_sync[current_frame]
-                    .frame_timeline_value
-                    .take()
-                    .context("present: frame timeline value missing (internal error)")?
-            };
-            Ok(timeline_value)
+                    .and_then(|s| s.frame_sync[present_slot].frame_timeline_value.take())
+            });
+            easement_tv.context("present: easement timeline value missing (internal error)")
         }
         Err(e) => Err(anyhow::anyhow!("Failed to present: {:?}", e)),
     }
@@ -2215,6 +2198,7 @@ fn ensure_scratch_texture_slot(
                 });
             let dep = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier));
             ld.device.cmd_pipeline_barrier2(cb, &dep);
+
             ld.device.end_command_buffer(cb).context("end scratch init CB")?;
 
             let cb_info = vk::CommandBufferSubmitInfo::default().command_buffer(cb);
@@ -2356,6 +2340,8 @@ fn register_surface_texture(
             bindless_index: Some(bindless_index),
             sampled_bindless_index: None,
             current_layout: std::sync::atomic::AtomicI32::new(vk::ImageLayout::GENERAL.as_raw()),
+            // Swapchain images are storage images (GENERAL); never SHADER_READ_ONLY.
+            is_storage_image: true,
             transient_heap_suballoc: false,
             debug_name: std::sync::Mutex::new(None),
         },

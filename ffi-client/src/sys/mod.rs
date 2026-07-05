@@ -127,6 +127,14 @@ pub unsafe fn goldy_buffer_field(buffer: *const GoldyBuffer, unit: u32) -> *mut 
     (lib().goldy_buffer_field)(buffer, unit)
 }
 
+pub unsafe fn goldy_texture_destroy(texture: *mut GoldyTexture) {
+    (lib().goldy_texture_destroy)(texture)
+}
+
+pub unsafe fn goldy_texture_byte_size(texture: *const GoldyTexture) -> u64 {
+    (lib().goldy_texture_byte_size)(texture)
+}
+
 pub unsafe fn goldy_parcel_destroy(parcel: *mut GoldyParcel) {
     (lib().goldy_parcel_destroy)(parcel)
 }
@@ -517,9 +525,9 @@ pub unsafe fn goldy_scheme_render_pass_finish(scheme: *mut GoldyScheme) -> Goldy
 pub unsafe fn goldy_scheme_copy_to_texture(
     scheme: *mut GoldyScheme,
     src_lease: *const GoldySchemeRenderTargetLease,
-    dst_parcel: *const GoldyParcel,
+    dst_texture: *const GoldyTexture,
 ) -> GoldyResult {
-    (lib().goldy_scheme_copy_to_texture)(scheme, src_lease, dst_parcel)
+    (lib().goldy_scheme_copy_to_texture)(scheme, src_lease, dst_texture)
 }
 
 pub unsafe fn goldy_scheme_copy_to_present(
@@ -550,9 +558,9 @@ pub unsafe fn goldy_present_grant_consume(
 
 pub unsafe fn goldy_scheme_grant_read_texture(
     scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
+    texture: *const GoldyTexture,
 ) -> *mut GoldyReadGrant {
-    (lib().goldy_scheme_grant_read_texture)(scheme, parcel)
+    (lib().goldy_scheme_grant_read_texture)(scheme, texture)
 }
 
 pub unsafe fn goldy_retained_pool_acquire_texture(
@@ -564,7 +572,7 @@ pub unsafe fn goldy_retained_pool_acquire_texture(
     flags: GoldyTextureFlags,
     data: *const u8,
     data_size: usize,
-) -> *mut GoldyParcel {
+) -> *mut GoldyTexture {
     (lib().goldy_retained_pool_acquire_texture)(pool, width, height, format, access, flags, data, data_size)
 }
 

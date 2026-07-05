@@ -13,9 +13,9 @@ use goldy_ffi::{
     goldy_scheme_render_pass_draw, goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline,
     goldy_scheme_render_pass_set_vertex_buffer_parcel, goldy_scheme_render_pass_with_parcel,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
-    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyColor,
-    GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFlags, GoldyTextureFormat,
-    GoldyTextureKind, GoldyVertexAttribute, GoldyVertexFormat,
+    goldy_shader_builtin_vertex_color_2d, goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy,
+    GoldyBufferKind, GoldyColor, GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc, GoldyResult,
+    GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind, GoldyVertexAttribute, GoldyVertexFormat,
 };
 use std::ffi::CString;
 use std::mem::size_of;
@@ -227,7 +227,7 @@ fn scheme_triangle_readback_center_pixel_lit() {
         goldy_render_pipeline_destroy(pipeline);
         goldy_shader_destroy(shader);
         goldy_parcel_destroy(vertex_parcel);
-        goldy_parcel_destroy(readback);
+        goldy_texture_destroy(readback);
         goldy_buffer_destroy(vertex_buffer);
         goldy_retained_pool_destroy(pool);
         goldy_context_destroy(ctx);

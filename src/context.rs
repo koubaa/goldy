@@ -390,6 +390,9 @@ impl Context {
     }
 
     pub fn try_resubmit_retained(&self, key: u64) -> Result<Option<TimelineValue>, GoldyError> {
+        if crate::validation_env::retained_cb_reuse_disabled() {
+            return Ok(None);
+        }
         let mut backend = self.inner.device.inner.backend.lock().unwrap();
         let result = backend
             .try_resubmit_retained(self.inner.handle, key, None)

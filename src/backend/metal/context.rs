@@ -5,9 +5,27 @@ use super::types::{MetalState, MetalSubmissionContext, TimelineWaiter};
 use super::{ContextHandle, DeviceHandle};
 use ::metal as mtl;
 use anyhow::{Context as _, Result};
+use mtl::MTLCommandBufferStatus;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+
+/// Best-effort retirement horizon for one context without blocking.
+///
+/// `MTLSharedEvent::signaled_value` can lag completion handlers and individual
+/// command-buffer completion; task-graph re-record safety uses this value.
+pub(super) fn context_gpu_progress(sc: &MetalSubmissionContext) -> u64 {
+    let mut progress = sc.timeline_event.as_ref().signaled_value();
+    progress = progress.max(sc.timeline_waiter.completed_value());
+    for (tv, cb) in &sc.in_flight_command_buffers {
+        if cb.status() == MTLCommandBufferStatus::Completed {
+            progress = progress.max(*tv);
+        } else {
+            break;
+        }
+    }
+    progress
+}
 
 /// Latest device-global seq retired on `device` (max over live context shared events, floored).
 ///
@@ -27,7 +45,7 @@ pub(super) fn device_retired(state: &MetalState, device: DeviceHandle) -> u64 {
         .filter_map(|sc_arc| {
             let sc = sc_arc.lock().unwrap();
             if sc.device == device {
-                Some(sc.timeline_event.as_ref().signaled_value())
+                Some(context_gpu_progress(&sc))
             } else {
                 None
             }

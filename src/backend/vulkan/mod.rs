@@ -561,20 +561,20 @@ impl GpuBackend for VulkanBackend {
         buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer);
     }
 
-    fn query_texture_readback_layout(
+    fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,
         width: u32,
         height: u32,
         format: crate::types::TextureFormat,
-    ) -> Result<crate::backend::TextureReadbackLayout> {
-        Ok(buffer::query_texture_readback_layout(width, height, format))
+    ) -> Result<crate::backend::TextureCopyFootprint> {
+        Ok(buffer::query_texture_copy_footprint(width, height, format))
     }
 
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
     ) -> Result<BufferHandle> {
         buffer::alloc_texture_readback_staging(
             &self.state.instance,
@@ -589,7 +589,7 @@ impl GpuBackend for VulkanBackend {
     fn read_texture_readback_staging(
         &self,
         buffer: BufferHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_texture_readback_staging(&self.state.buffers, buffer, layout, output)
@@ -791,9 +791,7 @@ impl GpuBackend for VulkanBackend {
         surface_handle: SurfaceHandle,
         ctx: ContextHandle,
     ) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface_handle, ctx)?;
-        let frame_slot = surface::current_frame_slot(&self.state.surfaces, surface_handle)
-            .context("begin_frame: surface frame slot unavailable")?;
+        let (image, present_slot) = surface::acquire(&mut self.state, surface_handle, ctx)?;
         let tex = surface::frame_texture(&self.state.surfaces, surface_handle)
             .context("begin_frame: surface frame texture unavailable")?;
         Ok((
@@ -801,7 +799,8 @@ impl GpuBackend for VulkanBackend {
                 surface: surface_handle,
                 image,
                 context: ctx,
-                frame_slot,
+                frame_slot: present_slot,
+                present_slot,
             },
             tex,
         ))
@@ -816,12 +815,19 @@ impl GpuBackend for VulkanBackend {
             .lock()
             .unwrap()
             .timeline_semaphore;
-        surface::render(&mut self.state, frame.surface, frame.image, timeline_sem, commands)?;
+        surface::render(
+            &mut self.state,
+            frame.surface,
+            frame.image,
+            frame.present_slot,
+            timeline_sem,
+            commands,
+        )?;
         if let Some(tv) = self
             .state
             .surfaces
             .get(&frame.surface)
-            .and_then(|s| s.frame_sync.get(s.current_frame))
+            .and_then(|s| s.frame_sync.get(frame.present_slot as usize))
             .and_then(|fs| fs.frame_timeline_value)
         {
             if let Some(sc_arc) = self.state.contexts.get(&frame.context) {

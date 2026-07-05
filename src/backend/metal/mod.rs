@@ -53,13 +53,13 @@ pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState)
 }
 
 /// Drop all entries from the front of a context's in-flight CB deque whose timeline
-/// value is <= the current signaled value.  Safe to call at any time.
+/// value is <= the current retirement horizon.  Safe to call at any time.
 pub(in crate::backend::metal) fn drain_completed_cbs(sc: &mut types::MetalSubmissionContext) {
-    let signaled = sc.timeline_event.as_ref().signaled_value();
+    let progress = context::context_gpu_progress(sc);
     while sc
         .in_flight_command_buffers
         .front()
-        .is_some_and(|(tv, _)| *tv <= signaled)
+        .is_some_and(|(tv, _)| *tv <= progress)
     {
         sc.in_flight_command_buffers.pop_front();
     }
@@ -351,20 +351,20 @@ impl GpuBackend for MetalBackend {
         buffer::destroy(&mut self.state, buffer);
     }
 
-    fn query_texture_readback_layout(
+    fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,
         width: u32,
         height: u32,
         format: crate::types::TextureFormat,
-    ) -> Result<crate::backend::TextureReadbackLayout> {
-        Ok(buffer::query_texture_readback_layout(width, height, format))
+    ) -> Result<crate::backend::TextureCopyFootprint> {
+        Ok(buffer::query_texture_copy_footprint(width, height, format))
     }
 
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
     ) -> Result<BufferHandle> {
         buffer::alloc_texture_readback_staging(&mut self.state, device, layout)
     }
@@ -372,7 +372,7 @@ impl GpuBackend for MetalBackend {
     fn read_texture_readback_staging(
         &self,
         buffer: BufferHandle,
-        layout: crate::backend::TextureReadbackLayout,
+        layout: crate::backend::TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()> {
         buffer::read_texture_readback_staging(&self.state, buffer, layout, output)
@@ -568,7 +568,7 @@ impl GpuBackend for MetalBackend {
     }
 
     fn begin_frame(&mut self, surface: SurfaceHandle, ctx: ContextHandle) -> Result<(FrameToken, TextureHandle)> {
-        let image = surface::acquire(&mut self.state, surface, ctx)?;
+        let (image, present_slot) = surface::acquire(&mut self.state, surface, ctx)?;
         let tex =
             surface::frame_texture(&self.state, surface).context("begin_frame: surface frame texture unavailable")?;
         Ok((
@@ -578,13 +578,20 @@ impl GpuBackend for MetalBackend {
                 context: ctx,
                 // Metal bindless slot and returned image index both use current_frame.
                 frame_slot: image as u32,
+                present_slot,
             },
             tex,
         ))
     }
 
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
-        surface::render(&mut self.state, frame.surface, frame.image, commands)
+        surface::render(
+            &mut self.state,
+            frame.surface,
+            frame.image,
+            frame.present_slot,
+            commands,
+        )
     }
 
     fn surface_resize(&mut self, surface: SurfaceHandle, width: u32, height: u32) -> Result<()> {
@@ -619,7 +626,7 @@ impl GpuBackend for MetalBackend {
         self.state
             .contexts
             .get(&ctx)
-            .map(|sc_arc| sc_arc.lock().unwrap().timeline_event.as_ref().signaled_value())
+            .map(|sc_arc| context::context_gpu_progress(&sc_arc.lock().unwrap()))
             .unwrap_or(0)
     }
 
@@ -659,7 +666,7 @@ impl GpuBackend for MetalBackend {
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
         let sc_arc = self.state.contexts.get(&ctx)?;
         let sc = sc_arc.lock().unwrap();
-        let progress = sc.timeline_event.as_ref().signaled_value();
+        let progress = context::context_gpu_progress(&sc);
         if progress < sc.last_submitted_seq {
             Some(progress.saturating_add(1))
         } else {

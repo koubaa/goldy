@@ -198,7 +198,7 @@ class TestComputePipeline:
         '''
         width = height = 16
         pool = goldy.RetainedPool(device)
-        parcel = pool.acquire_texture(
+        texture = pool.acquire_texture(
             width,
             height,
             goldy.TextureFormat.RGBA8_UNORM,
@@ -210,10 +210,10 @@ class TestComputePipeline:
 
         ctx = device.create_context()
         scheme = goldy.Scheme(ctx)
-        scheme.node("write_tex", pipeline).with_parcel(
-            parcel, goldy.NodeAccess.WRITE
+        scheme.node("write_tex", pipeline).with_texture(
+            texture, goldy.NodeAccess.WRITE
         ).dispatch(2, 2, 1)
-        grant = scheme.grant_read_texture(parcel)
+        grant = scheme.grant_read_texture(texture)
         frame = scheme.submit()
         pixels = grant.consume(frame)
         assert len(pixels) > 0

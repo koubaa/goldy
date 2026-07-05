@@ -205,7 +205,20 @@ pub enum NodeKind {
     /// Both textures must have compatible formats and identical dimensions.
     /// `src` must have [`crate::types::TextureFlags::COPY_SRC`] and
     /// `dst` must have [`crate::types::TextureFlags::COPY_DST`].
-    CopyTexture { src: TextureHandle, dst: ResourceId },
+    CopyTexture {
+        src: TextureHandle,
+        dst: ResourceId,
+        /// `Some` when `dst` is a buffer parcel; lowers to image→buffer transfer with this footprint.
+        ///
+        /// TODO: This duplicates data derivable from the source texture descriptor (`width` /
+        /// `height` / `format` on the parcel) plus a backend footprint query at record time
+        /// (tight rows on Vulkan/Metal; `GetCopyableFootprints` on DX12). It is stored on the
+        /// node so callers can depad CPU reads without a second query and so [`super::analysis`]
+        /// can lower without holding a backend handle. Remove by re-querying in the backend when
+        /// recording [`crate::backend::GpuCommand::CopyTextureToReadback`] and returning the
+        /// footprint only from scheme copy helpers (for client-side depadding after `wait()`).
+        dst_buffer_layout: Option<crate::backend::TextureCopyFootprint>,
+    },
     /// Copy an offscreen [`crate::RenderTarget`] color buffer to a texture or swapchain output.
     ///
     /// The source render target must have been written by an earlier

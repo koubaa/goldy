@@ -6,6 +6,7 @@ use crate::error::{GoldyError, IntoPyResult};
 use crate::parcel::PyParcel;
 use crate::pipeline::PyRenderPipeline;
 use crate::pyutil::parse_index_range;
+use crate::texture::PyTexture;
 use crate::types::{PyColor, PyDepthFormat, PyNodeAccess, PyTextureFormat};
 use goldy::scheme::{Lease, LeaseRenderTarget, PresentGrant, ReadGrant};
 use goldy::swapchain_pool::PresentLease;
@@ -210,11 +211,11 @@ impl PyScheme {
         Ok(PySchemeRenderPass { scheme: slf })
     }
 
-    fn copy_to_texture(&self, src: &PySchemeRenderTargetLease, dst: &PyParcel) -> PyResult<()> {
+    fn copy_to_texture(&self, src: &PySchemeRenderTargetLease, dst: &PyTexture) -> PyResult<()> {
         self.ensure_no_active_recorder()?;
         self.inner
             .borrow_mut()
-            .copy_to_texture(&src.inner, dst.inner.as_parcel())
+            .copy_to_texture(&src.inner, &*dst.inner)
             .into_py_result()
     }
 
@@ -243,12 +244,12 @@ impl PyScheme {
         })
     }
 
-    fn grant_read_texture(&self, parcel: &PyParcel) -> PyResult<PyReadGrant> {
+    fn grant_read_texture(&self, texture: &PyTexture) -> PyResult<PyReadGrant> {
         self.ensure_no_active_recorder()?;
         let grant = self
             .inner
             .borrow_mut()
-            .grant_read_texture(parcel.inner.as_parcel())
+            .grant_read_texture(&*texture.inner)
             .into_py_result()?;
         Ok(PyReadGrant {
             inner: PyReadGrantInner::Texture(grant),
@@ -353,6 +354,24 @@ impl PySchemeComputeNode {
                 .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
             node.with_parcel(parcel.inner.as_parcel(), node_access.into())
                 .ok_or_else(|| GoldyError::new_err("Parcel has no bindless slot for the shader binding"))?;
+        }
+        Ok(slf)
+    }
+
+    fn with_texture<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        texture: &PyTexture,
+        node_access: PyNodeAccess,
+    ) -> PyResult<PyRef<'py, Self>> {
+        {
+            let scheme = slf.scheme.borrow(py);
+            let mut active = scheme.active_compute.borrow_mut();
+            let node = active
+                .as_mut()
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("No compute node is being recorded"))?;
+            node.with_parcel(&*texture.inner, node_access.into())
+                .ok_or_else(|| GoldyError::new_err("Texture has no bindless slot for the shader binding"))?;
         }
         Ok(slf)
     }

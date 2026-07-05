@@ -2325,6 +2325,9 @@ pub(super) fn submit_graph(
 /// Calls `ExecuteCommandLists` on the closed list stored by a prior
 /// `submit_graph(..., Some(key))` call, then signals the device fence.
 /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
+///
+/// No CPU wait is required: the retained slot's allocator is not reset while in flight
+/// (`acquire_allocator_slot` skips retained slots), and re-executing a closed list is legal.
 pub(super) fn try_resubmit_retained(
     state: &mut Dx12State,
     ctx: ContextHandle,

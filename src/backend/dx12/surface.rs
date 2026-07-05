@@ -329,7 +329,7 @@ pub(super) fn acquire(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
     ctx: super::ContextHandle,
-) -> Result<SwapchainImageHandle> {
+) -> Result<(SwapchainImageHandle, u32)> {
     if state
         .surfaces
         .get(&surface_handle)
@@ -340,14 +340,14 @@ pub(super) fn acquire(
     }
 
     // Extract values needed before the pre-acquire blocking waits.
-    let (cf, device_handle, waitable, prev_fence) = {
+    let (present_slot, device_handle, waitable, prev_fence) = {
         let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
-        let cf = surface.current_frame;
+        let present_slot = surface.current_frame;
         (
-            cf,
+            present_slot,
             surface.device_handle,
             surface.frame_latency_waitable,
-            surface.frame_sync[cf].fence_value,
+            surface.frame_sync[present_slot].fence_value,
         )
     };
 
@@ -373,7 +373,7 @@ pub(super) fn acquire(
             wait_for_fence(&logical_device.fence, prev_fence)?;
         }
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.frame_sync[cf].fence_value = 0;
+            surf.frame_sync[present_slot].fence_value = 0;
         }
     }
 
@@ -389,7 +389,7 @@ pub(super) fn acquire(
         .get_mut(&surface_handle)
         .context("Invalid surface handle")?;
 
-    surface.frame_sync[cf].render_pass_submitted = false;
+    surface.frame_sync[present_slot].render_pass_submitted = false;
     surface.pending_frame_compute.clear();
 
     let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
@@ -410,6 +410,7 @@ pub(super) fn acquire(
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
         surface.current_texture_handle = Some(tex_handle);
         surface.pending_acquire_count = surface.pending_acquire_count.saturating_add(1);
+        surface.current_frame = (present_slot + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -420,7 +421,7 @@ pub(super) fn acquire(
             .push(crate::signal::Signal::SwapchainAcquired { image_index });
     }
 
-    Ok(image_index as SwapchainImageHandle)
+    Ok((image_index as SwapchainImageHandle, present_slot as u32))
 }
 
 pub(super) fn record_gpu_work(
@@ -466,7 +467,7 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
 }
 
 pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, _submit_tv: u64) -> Result<u64> {
-    present(state, frame.surface, frame.image, frame.context)?;
+    present(state, frame)?;
     let device_handle = state
         .surfaces
         .get(&frame.surface)
@@ -495,29 +496,27 @@ pub(super) fn frame_texture(state: &Dx12State, surface_handle: SurfaceHandle) ->
 pub(super) fn render(
     state: &mut Dx12State,
     surface_handle: SurfaceHandle,
-    _image: SwapchainImageHandle,
+    image: SwapchainImageHandle,
+    present_slot: u32,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
 
-    let image_index = surface
-        .current_image_index
-        .context("No image acquired - call surface_acquire first")?;
-
+    let image_index = image as usize;
+    let present_slot = present_slot as usize;
     let device_handle = surface.device_handle;
     let logical_device = state
         .devices
         .get(&device_handle)
         .context("Surface's device is invalid")?;
 
-    let current_frame = surface.current_frame;
-    let frame = &surface.frame_sync[current_frame];
+    let frame = &surface.frame_sync[present_slot];
     let cmd = &frame.command_list;
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let width = surface.width;
     let height = surface.height;
-    let render_target = &surface.render_targets[image_index as usize];
-    let rtv_offset = surface.rtv_offsets[image_index as usize];
+    let render_target = &surface.render_targets[image_index];
+    let rtv_offset = surface.rtv_offsets[image_index];
     let depth_resource = surface.depth_texture.clone();
 
     // Reset command allocator and list
@@ -686,8 +685,8 @@ pub(super) fn render(
     // Update fence value for next operation
 
     if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-        surf.frame_sync[current_frame].fence_value = fence_value;
-        surf.frame_sync[current_frame].render_pass_submitted = true;
+        surf.frame_sync[present_slot].fence_value = fence_value;
+        surf.frame_sync[present_slot].render_pass_submitted = true;
     }
 
     Ok(())
@@ -697,39 +696,36 @@ pub(super) fn render(
 ///
 /// Graphics path: waits for the last graphics submit then presents.
 /// Compute-only path: copies the scratch UAV texture to the swapchain back buffer, then presents.
-pub(super) fn present(
-    state: &mut Dx12State,
-    surface_handle: SurfaceHandle,
-    _image: SwapchainImageHandle,
-    ctx: super::ContextHandle,
-) -> Result<()> {
-    let (device_handle, _image_index, current_frame, scratch_handle, backbuffer, render_pass_submitted) = {
+pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<()> {
+    let surface_handle = frame.surface;
+    let image_index = frame.image as usize;
+    let present_slot = frame.present_slot as usize;
+    let ctx = frame.context;
+
+    // Clear the texture sentinel so the next acquire does not warn.
+    if let Some(s) = state.surfaces.get_mut(&surface_handle) {
+        s.current_texture_handle = None;
+    }
+
+    let (device_handle, scratch_handle, backbuffer, render_pass_submitted) = {
         let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
-        let image_index = surface
-            .current_image_index
-            .context("No image to present - call surface_acquire first")? as usize;
-        let scratch_handle = surface.current_texture_handle.context("No acquired surface texture")?;
-        let expected = surface.compute_scratch_textures.get(image_index).copied().flatten();
-        if expected != Some(scratch_handle) {
-            anyhow::bail!("DX12 surface present: scratch texture handle mismatch");
-        }
-        let render_pass_submitted = surface.frame_sync[surface.current_frame].render_pass_submitted;
+        let scratch_handle = surface
+            .compute_scratch_textures
+            .get(image_index)
+            .copied()
+            .flatten()
+            .context("No scratch texture for swapchain image")?;
+        let render_pass_submitted = surface.frame_sync[present_slot].render_pass_submitted;
         (
             surface.device_handle,
-            image_index,
-            surface.current_frame,
             scratch_handle,
             surface.render_targets[image_index].clone(),
             render_pass_submitted,
         )
     };
 
-    if let Some(s) = state.surfaces.get_mut(&surface_handle) {
-        s.current_texture_handle = None;
-    }
-
     if render_pass_submitted {
-        // fence_value was stored in frame_sync[current_frame].fence_value by
+        // fence_value was stored in frame_sync[present_slot].fence_value by
         // surface::render; acquire() waits for it on the next cycle through this slot.
     } else {
         let _tz = crate::tracy_zone!("dx12.present.copy_to_backbuffer");
@@ -746,8 +742,8 @@ pub(super) fn present(
 
         let (cmd7, cmd_alloc) = {
             let surface = state.surfaces.get(&surface_handle).unwrap();
-            let frame = &surface.frame_sync[current_frame];
-            (frame.command_list.clone(), frame.command_allocator.clone())
+            let frame_sync = &surface.frame_sync[present_slot];
+            (frame_sync.command_list.clone(), frame_sync.command_allocator.clone())
         };
 
         unsafe { cmd_alloc.Reset() }.context("Failed to reset command allocator for present copy")?;
@@ -822,7 +818,7 @@ pub(super) fn present(
 
         // Record the fence so acquire() can wait for it before reusing this slot.
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.frame_sync[current_frame].fence_value = fence_value;
+            surf.frame_sync[present_slot].fence_value = fence_value;
         }
 
         if let Some(tex) = state.textures.get_mut(&scratch_handle) {
@@ -841,13 +837,10 @@ pub(super) fn present(
         }
     }
 
-    // Advance frame
     let (return_fence, return_image) = {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
-        let fence_val = surface.frame_sync[current_frame].fence_value;
-        let img = surface.current_image_index.unwrap_or(_image_index as u32);
-        surface.current_image_index = None;
-        surface.current_frame = (surface.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        let fence_val = surface.frame_sync[present_slot].fence_value;
+        let img = frame.image as u32;
         (fence_val, img)
     };
 
