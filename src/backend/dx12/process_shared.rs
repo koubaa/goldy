@@ -43,10 +43,17 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
             }
 
             let mut debug_interface: Option<ID3D12Debug> = None;
-            if unsafe { D3D12GetDebugInterface(&mut debug_interface) }.is_ok() {
-                if let Some(d) = debug_interface {
+            let d = unsafe { D3D12GetDebugInterface(&mut debug_interface) }
+                .is_ok()
+                .then(|| debug_interface)
+                .flatten();
+            match d {
+                Some(d) => {
                     unsafe { d.EnableDebugLayer() };
-                    tracing::info!("D3D12 debug layer enabled");
+                    // warn!, not info!: the default `RUST_LOG` filter is "warn", so an info-level
+                    // confirmation here would silently vanish and look identical to the debug
+                    // layer never having been enabled at all.
+                    tracing::warn!("D3D12 debug layer enabled");
 
                     if env_enable_dred() {
                         super::diagnostic::enable_dred_settings();
@@ -55,11 +62,21 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
                     if env_enable_gbv() {
                         if let Ok(debug1) = d.cast::<ID3D12Debug1>() {
                             unsafe { debug1.SetEnableGPUBasedValidation(true) };
-                            tracing::info!("D3D12 GPU-Based Validation (GBV) enabled");
+                            tracing::warn!("D3D12 GPU-Based Validation (GBV) enabled");
                         } else {
                             tracing::warn!("ID3D12Debug1 not available — GPU-Based Validation unavailable");
                         }
                     }
+                }
+                None => {
+                    // Most common cause: the "Graphics Tools" optional Windows feature (which
+                    // hosts the D3D12 debug layer DLL) is not installed. Without it, DRED/GBV
+                    // env vars are silently no-ops and `GOLDY_DX12_DEBUG=1` does nothing.
+                    tracing::warn!(
+                        "D3D12GetDebugInterface failed — debug layer NOT enabled (DRED/GBV inactive). \
+                         Install the \"Graphics Tools\" optional Windows feature: \
+                         Settings > System > Optional features > Add a feature > Graphics Tools."
+                    );
                 }
             }
         }

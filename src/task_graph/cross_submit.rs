@@ -152,6 +152,198 @@ fn sync_has_foreign_context(sync: &ResourceSync, submitting_ctx: ContextHandle) 
         || sync.last_reads.iter().any(|(ctx, _)| ctx != submitting_ctx)
 }
 
+fn merge_device_queue_wait(device_waits: &mut Vec<u64>, tv: u64) {
+    match device_waits.as_slice() {
+        [] => device_waits.push(tv),
+        [max] if tv <= *max => {}
+        _ => {
+            let max = device_waits.iter().copied().max().unwrap_or(0).max(tv);
+            device_waits.clear();
+            device_waits.push(max);
+        }
+    }
+}
+
+/// Present-copy reads retire on the device fence; compute writes run on a per-context queue.
+fn emit_present_easement_device_wait(
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    device_queue_waits: &mut Vec<u64>,
+) {
+    if let Some(fifo_tv) = sync.fifo_ordered_reads.get(submitting_ctx) {
+        merge_device_queue_wait(device_queue_waits, fifo_tv);
+    }
+}
+
+/// Present blits read textures as `TRANSFER` on the device queue; the next compute write on a
+/// per-context queue needs an explicit transfer→write prologue. A queue wait on the device
+/// fence orders execution but does not replace that layout/access transition — without it D3D12
+/// reports `0x887A002B` (write to a resource still in copy-source / read-only state).
+fn emit_present_easement_texture_war_barrier(
+    key: ResourceKey,
+    access: NetAccess,
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    prologue: &mut BarrierSet,
+) {
+    if !matches!(key, ResourceKey::Texture(_)) {
+        return;
+    }
+    if sync.fifo_ordered_reads.get(submitting_ctx).is_none() {
+        // #region agent log
+        if let ResourceKey::Texture(tex) = key {
+            crate::debug_session_log::write(
+                "H1",
+                "cross_submit.rs:emit_present_easement_texture_war_barrier",
+                "present easement texture barrier skipped: no fifo_ordered_read",
+                &format!(
+                    r#"{{"texture":{},"submitting_ctx":{},"fifo_ordered_reads":{:?}}}"#,
+                    tex,
+                    submitting_ctx,
+                    sync.fifo_ordered_reads
+                ),
+            );
+        }
+        // #endregion
+        return;
+    }
+    let usage = BarrierUsage {
+        src: {
+            let mut s = SlotUsageSet::default();
+            s.merge(NodeAccess::Read, UsageKindFlags::TRANSFER);
+            s
+        },
+        dst: {
+            let mut d = SlotUsageSet::default();
+            d.merge(NodeAccess::Write, access.write_kinds);
+            d
+        },
+    };
+    merge_barrier(prologue, key, usage);
+    // #region agent log
+    if let ResourceKey::Texture(tex) = key {
+        crate::debug_session_log::write(
+            "H1",
+            "cross_submit.rs:emit_present_easement_texture_war_barrier",
+            "present easement transfer→write texture prologue emitted",
+            &format!(
+                r#"{{"texture":{},"submitting_ctx":{},"fifo_tv":{},"write_kinds":"{:?}"}}"#,
+                tex,
+                submitting_ctx,
+                sync.fifo_ordered_reads.get(submitting_ctx).unwrap_or(0),
+                access.write_kinds
+            ),
+        );
+    }
+    // #endregion
+}
+
+/// Present easement barriers must be replayed on every retained resubmit: the baked CB
+/// only carries record-time prologue, while present-copy reads advance on the device queue
+/// each frame.
+pub(crate) fn present_easement_live_prologue(
+    prologue: &BarrierSet,
+    device_queue_waits: &[u64],
+) -> BarrierSet {
+    if device_queue_waits.is_empty() {
+        return BarrierSet::default();
+    }
+    let mut out = BarrierSet::default();
+    for (h, usage) in &prologue.textures {
+        if !usage.src.kinds.contains(UsageKindFlags::TRANSFER) {
+            continue;
+        }
+        if !usage.dst.access.writes() {
+            continue;
+        }
+        // Recover whatever write kind the baked entry actually recorded — not just COMPUTE.
+        // The prior version filtered to `dst.kinds.contains(COMPUTE)`, so any present-easement
+        // write that (also or only) came from e.g. a render pass silently dropped its live
+        // transfer→write replay on retained resubmit, leaving the resource in the stale
+        // record-time state instead of the actual post-present TRANSFER state.
+        out.textures.push((
+            *h,
+            BarrierUsage {
+                src: {
+                    let mut s = SlotUsageSet::default();
+                    s.merge(NodeAccess::Read, UsageKindFlags::TRANSFER);
+                    s
+                },
+                dst: {
+                    let mut d = SlotUsageSet::default();
+                    d.merge(NodeAccess::Write, usage.dst.kinds);
+                    d
+                },
+            },
+        ));
+    }
+    out
+}
+
+/// True when any written resource in this partition still has a registered reader edge.
+/// While readers remain on the interaction set, same-context WAR is covered by FIFO queue
+/// ordering and retained resubmit must not promote baked WAW prologue to a live queue wait.
+pub(crate) fn partition_has_active_read_edges(
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
+) -> bool {
+    net.iter()
+        .filter(|(_, access)| access.writes)
+        .filter_map(|(key, _)| resource_stamps.get(key))
+        .any(|stamp| {
+            stamp
+                .interaction_set
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.role == InteractionRole::Reads)
+        })
+}
+
+/// True when the parcel's interaction set has both foreign readers and writers (cross-scheme WAR).
+fn stamp_has_cross_scheme_war(stamp: &ParcelStamp) -> bool {
+    let edges = stamp.interaction_set.lock().unwrap();
+    let has_read = edges.iter().any(|e| e.role == InteractionRole::Reads);
+    let has_write = edges.iter().any(|e| e.role == InteractionRole::Writes);
+    if !(has_read && has_write) {
+        return false;
+    }
+    let schemes: FxHashSet<u64> = edges.iter().map(|e| e.scheme_id).collect();
+    schemes.len() > 1
+}
+
+/// Bake a transfer→compute WAR prologue for same-context cross-scheme retained replay.
+fn emit_cross_scheme_same_context_war_prologue(
+    key: ResourceKey,
+    access: NetAccess,
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    prologue: &mut BarrierSet,
+    stamp: &ParcelStamp,
+) {
+    if !access.writes || !stamp_has_cross_scheme_war(stamp) {
+        return;
+    }
+    for (ctx, _tv) in sync.last_reads.iter() {
+        if ctx != submitting_ctx {
+            continue;
+        }
+        let usage = BarrierUsage {
+            src: {
+                let mut s = SlotUsageSet::default();
+                s.merge(NodeAccess::Read, UsageKindFlags::TRANSFER);
+                s
+            },
+            dst: {
+                let mut d = SlotUsageSet::default();
+                d.merge(NodeAccess::Write, access.write_kinds);
+                d
+            },
+        };
+        merge_barrier(prologue, key, usage);
+    }
+}
+
 fn apply_cross_submit_hazards_single_context(
     key: ResourceKey,
     access: NetAccess,
@@ -159,6 +351,8 @@ fn apply_cross_submit_hazards_single_context(
     submitting_ctx: ContextHandle,
     prologue: &mut BarrierSet,
     _context_waits: &mut Vec<(ContextHandle, u64)>,
+    device_queue_waits: &mut Vec<u64>,
+    stamp: Option<&ParcelStamp>,
 ) {
     if access.reads {
         if sync.last_write.get(submitting_ctx).is_some() {
@@ -204,6 +398,11 @@ fn apply_cross_submit_hazards_single_context(
             };
             merge_barrier(prologue, key, usage);
         }
+        if let Some(stamp) = stamp {
+            emit_cross_scheme_same_context_war_prologue(key, access, sync, submitting_ctx, prologue, stamp);
+        }
+        emit_present_easement_texture_war_barrier(key, access, sync, submitting_ctx, prologue);
+        emit_present_easement_device_wait(sync, submitting_ctx, device_queue_waits);
     }
 }
 
@@ -214,9 +413,20 @@ fn apply_cross_submit_hazards_for_resource(
     submitting_ctx: ContextHandle,
     prologue: &mut BarrierSet,
     context_waits: &mut Vec<(ContextHandle, u64)>,
+    device_queue_waits: &mut Vec<u64>,
+    stamp: Option<&ParcelStamp>,
 ) {
     if !sync_has_foreign_context(sync, submitting_ctx) {
-        apply_cross_submit_hazards_single_context(key, access, sync, submitting_ctx, prologue, context_waits);
+        apply_cross_submit_hazards_single_context(
+            key,
+            access,
+            sync,
+            submitting_ctx,
+            prologue,
+            context_waits,
+            device_queue_waits,
+            stamp,
+        );
         return;
     }
 
@@ -271,13 +481,12 @@ fn apply_cross_submit_hazards_for_resource(
             }
         }
         for (ctx, tv) in sync.last_reads.iter() {
-            // Cross-context WAR needs an explicit queue wait. Same-context WAR from present
-            // easement reads is covered by FIFO single-queue ordering (present copy enqueued
-            // on the submission worker at submit, before compute partitions).
             if ctx != submitting_ctx {
                 merge_context_wait(context_waits, ctx, tv);
             }
         }
+        emit_present_easement_texture_war_barrier(key, access, sync, submitting_ctx, prologue);
+        emit_present_easement_device_wait(sync, submitting_ctx, device_queue_waits);
     }
 }
 
@@ -297,11 +506,13 @@ pub struct CrossSubmitSync {
     pub prologue: BarrierSet,
     /// Cross-context GPU queue-waits (one per producer context, max tv).
     pub waits: Vec<Epoch>,
+    /// Device-timeline waits on the shared device fence (present easement).
+    pub device_queue_waits: Vec<u64>,
 }
 
 impl CrossSubmitSync {
     pub fn is_empty(&self) -> bool {
-        self.prologue.is_empty() && self.waits.is_empty()
+        self.prologue.is_empty() && self.waits.is_empty() && self.device_queue_waits.is_empty()
     }
 }
 
@@ -437,10 +648,12 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
 pub fn compute_cross_submit_sync_into(
     prologue: &mut BarrierSet,
     waits: &mut Vec<Epoch>,
+    device_queue_waits: &mut Vec<u64>,
     context_waits: &mut Vec<(ContextHandle, u64)>,
     net: &ResourceKeyMap<NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: ContextHandle,
+    resource_stamps: Option<&ResourceKeyMap<Arc<ParcelStamp>>>,
 ) {
     {
         let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.reset");
@@ -448,11 +661,13 @@ pub fn compute_cross_submit_sync_into(
         prologue.textures.clear();
         prologue.transient_ids.clear();
         context_waits.clear();
+        device_queue_waits.clear();
     }
 
     {
         let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards");
         for (key, access) in net {
+            let stamp = resource_stamps.and_then(|stamps| stamps.get(key).map(|s| s.as_ref()));
             if let Some(entry) = ledger.get(key) {
                 apply_cross_submit_hazards_for_resource(
                     *key,
@@ -461,6 +676,8 @@ pub fn compute_cross_submit_sync_into(
                     submitting_ctx,
                     prologue,
                     context_waits,
+                    device_queue_waits,
+                    stamp,
                 );
             } else if let Some(entry) = merge_aliased_ledger_entries(ledger, *key) {
                 let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync.hazards.alias_merge");
@@ -471,6 +688,8 @@ pub fn compute_cross_submit_sync_into(
                     submitting_ctx,
                     prologue,
                     context_waits,
+                    device_queue_waits,
+                    stamp,
                 );
             }
         }
@@ -499,10 +718,12 @@ pub fn compute_cross_submit_sync(
     compute_cross_submit_sync_into(
         &mut result.prologue,
         &mut result.waits,
+        &mut result.device_queue_waits,
         &mut context_waits,
         net,
         ledger,
         submitting_ctx,
+        None,
     );
     result
 }
@@ -733,6 +954,7 @@ impl CrossSubmitScratch {
         self.submit_sync.prologue.textures.clear();
         self.submit_sync.prologue.transient_ids.clear();
         self.submit_sync.waits.clear();
+        self.submit_sync.device_queue_waits.clear();
     }
 
     /// `cached_net` — when `Some`, skips the wave walk and reuses a prior partition net
@@ -763,12 +985,72 @@ impl CrossSubmitScratch {
             compute_cross_submit_sync_into(
                 &mut self.submit_sync.prologue,
                 &mut self.submit_sync.waits,
+                &mut self.submit_sync.device_queue_waits,
                 &mut self.context_waits,
                 &self.net,
                 &self.ledger,
                 submitting_ctx,
+                Some(resource_stamps),
             );
         }
+        // #region agent log
+        {
+            let s = &self.submit_sync;
+            if !s.device_queue_waits.is_empty() || !s.prologue.textures.is_empty() {
+                let tex_prologue: Vec<String> = s
+                    .prologue
+                    .textures
+                    .iter()
+                    .map(|(h, u)| {
+                        format!(
+                            "{{\"handle\":{},\"src\":\"{:?}\",\"dst\":\"{:?}\"}}",
+                            h, u.src.kinds, u.dst.kinds
+                        )
+                    })
+                    .collect();
+                crate::debug_session_log::write(
+                    "H1-H4",
+                    "cross_submit.rs:CrossSubmitScratch::plan",
+                    "cross-submit plan with present-easement or texture prologue",
+                    &format!(
+                        r#"{{"submitting_ctx":{},"device_queue_waits":{:?},"waits_len":{},"prologue_textures":[{}],"prologue_buffers":{}}}"#,
+                        submitting_ctx,
+                        s.device_queue_waits,
+                        s.waits.len(),
+                        tex_prologue.join(","),
+                        s.prologue.buffers.len()
+                    ),
+                );
+                // H15: duplicate texture barriers (post H6/7/8 revert baseline — stale WAW + present easement)
+                let mut per_tex: FxHashMap<u64, usize> = FxHashMap::default();
+                for (h, _) in &s.prologue.textures {
+                    *per_tex.entry(*h).or_insert(0) += 1;
+                }
+                for (h, count) in per_tex {
+                    if count > 1 {
+                        let entries: Vec<String> = s
+                            .prologue
+                            .textures
+                            .iter()
+                            .filter(|(tex, _)| *tex == h)
+                            .map(|(_, u)| format!("{{\"src\":\"{:?}\",\"dst\":\"{:?}\"}}", u.src.kinds, u.dst.kinds))
+                            .collect();
+                        crate::debug_session_log::write(
+                            "H15",
+                            "cross_submit.rs:CrossSubmitScratch::plan",
+                            "duplicate texture barriers in prologue",
+                            &format!(
+                                r#"{{"texture":{},"count":{},"barriers":[{}]}}"#,
+                                h,
+                                count,
+                                entries.join(",")
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        // #endregion
         &self.submit_sync
     }
 
@@ -820,6 +1102,27 @@ pub fn apply_stamp_targets_legacy(targets: &[Arc<ParcelStamp>], ctx: crate::back
     }
 }
 
+/// True when every buffer/texture entry in `cmd` is already covered by `prologue`
+/// with identical [`BarrierUsage`]. Used to skip intra-graph wave barriers that
+/// duplicate the cross-submit prologue prepended by [`prepend_prologue`] /
+/// [`super::graph::graph_commands_with_sync_prologue`] — log evidence (H19) showed
+/// copy partitions emitting two COMPUTE→TRANSFER barriers on texture 1 per frame.
+pub(crate) fn resource_barrier_redundant_with_prologue(
+    cmd_buffers: &[(BufferHandle, BarrierUsage)],
+    cmd_textures: &[(TextureHandle, BarrierUsage)],
+    prologue: &BarrierSet,
+) -> bool {
+    if cmd_buffers.is_empty() && cmd_textures.is_empty() {
+        return false;
+    }
+    cmd_buffers
+        .iter()
+        .all(|(h, u)| prologue.buffers.iter().any(|(ph, pu)| ph == h && pu == u))
+        && cmd_textures
+            .iter()
+            .all(|(h, u)| prologue.textures.iter().any(|(ph, pu)| ph == h && pu == u))
+}
+
 /// Prepend a cross-submission prologue barrier to a command slice.
 pub fn prepend_prologue(
     commands: &[crate::backend::GpuCommand],
@@ -833,7 +1136,31 @@ pub fn prepend_prologue(
         buffers: prologue.buffers.clone(),
         textures: prologue.textures.clone(),
     });
-    out.extend_from_slice(commands);
+    let mut skip = 0usize;
+    while skip < commands.len() {
+        if let crate::backend::GpuCommand::ResourceBarrier { buffers, textures } = &commands[skip] {
+            if resource_barrier_redundant_with_prologue(buffers, textures, prologue) {
+                // #region agent log
+                crate::debug_session_log::write(
+                    "H19",
+                    "cross_submit.rs:prepend_prologue",
+                    "skipped redundant leading ResourceBarrier already covered by cross-submit prologue",
+                    &format!(
+                        r#"{{"cmd_buffers":{},"cmd_textures":{},"prologue_buffers":{},"prologue_textures":{}}}"#,
+                        buffers.len(),
+                        textures.len(),
+                        prologue.buffers.len(),
+                        prologue.textures.len()
+                    ),
+                );
+                // #endregion
+                skip += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    out.extend_from_slice(&commands[skip..]);
     out
 }
 
@@ -870,6 +1197,35 @@ fn dirty_foreign_schemes(edges: &mut [InteractionEdge], scheme_id: u64) {
             flag.store(true, Ordering::Release);
         }
     }
+}
+
+fn edges_have_foreign_war_conflict(edges: &[InteractionEdge], scheme_id: u64, role: InteractionRole) -> bool {
+    match role {
+        InteractionRole::Writes => edges
+            .iter()
+            .any(|e| e.scheme_id != scheme_id && e.role == InteractionRole::Reads),
+        InteractionRole::Reads => edges
+            .iter()
+            .any(|e| e.scheme_id != scheme_id && e.role == InteractionRole::Writes),
+    }
+}
+
+fn dirty_self_if_foreign_war(
+    edges: &[InteractionEdge],
+    scheme_id: u64,
+    role: InteractionRole,
+    dirty_flag: &Arc<AtomicBool>,
+) {
+    // Only writers need a topology refresh when a foreign reader already owns the parcel.
+    // Foreign writes vs this scheme's read rely on FIFO / live sync — readers must not
+    // re-record (see retained_reader_observes_independent_writer_across_resubmits).
+    if role != InteractionRole::Writes {
+        return;
+    }
+    if !edges_have_foreign_war_conflict(edges, scheme_id, role) {
+        return;
+    }
+    dirty_flag.store(true, Ordering::Release);
 }
 
 type SelfTopologyEdge = (InteractionRole, u8, ContextHandle);
@@ -923,6 +1279,7 @@ pub(crate) fn update_scheme_topology(
         prune_dead_edges(&mut edges);
 
         let existing = edges.iter().position(|edge| edge.scheme_id == scheme_id);
+        let is_first_parcel_registration = previous_self_edges.get(key).is_none();
         let topology_changed = match existing {
             Some(idx) => !edge_matches(&edges[idx], role, kind_bits, ctx),
             None => previous_self_edges.get(key) != Some(&new_edge),
@@ -941,6 +1298,9 @@ pub(crate) fn update_scheme_topology(
                 Some(idx) => edges[idx] = edge,
                 None => edges.push(edge),
             }
+            if is_first_parcel_registration {
+                dirty_self_if_foreign_war(&edges, scheme_id, role, dirty_flag);
+            }
         } else if let Some(idx) = existing {
             edges[idx].dirty_flag = weak_dirty.clone();
         } else {
@@ -951,6 +1311,9 @@ pub(crate) fn update_scheme_topology(
                 ctx,
                 dirty_flag: weak_dirty.clone(),
             });
+            if is_first_parcel_registration {
+                dirty_self_if_foreign_war(&edges, scheme_id, role, dirty_flag);
+            }
         }
     }
 }
@@ -1183,7 +1546,7 @@ mod tests {
     }
 
     #[test]
-    fn war_same_context_emits_no_wait_with_fifo_ordering() {
+    fn war_same_context_non_fifo_read_emits_no_context_wait() {
         let ctx = 1;
         let key = buf_key(10);
         let ledger = ledger_with_read(ctx, key, 3);
@@ -1192,6 +1555,153 @@ mod tests {
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
         assert!(sync.prologue.is_empty());
         assert!(sync.waits.is_empty());
+        assert!(sync.device_queue_waits.is_empty());
+    }
+
+    #[test]
+    fn war_cross_scheme_same_context_emits_war_prologue_when_interaction_set_visible() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let ctx = 1;
+        let key = buf_key(10);
+        let ledger = ledger_with_read(ctx, key, 3);
+        let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
+        let net = net_access_per_resource(&ir);
+
+        let reader_dirty = Arc::new(AtomicBool::new(false));
+        let writer_dirty = Arc::new(AtomicBool::new(false));
+        let stamp = empty_stamp();
+        {
+            let mut edges = stamp.interaction_set.lock().unwrap();
+            edges.push(InteractionEdge {
+                scheme_id: 1,
+                role: InteractionRole::Reads,
+                kind_bits: UsageKindFlags::TRANSFER.bits(),
+                ctx,
+                dirty_flag: Arc::downgrade(&reader_dirty),
+            });
+            edges.push(InteractionEdge {
+                scheme_id: 2,
+                role: InteractionRole::Writes,
+                kind_bits: UsageKindFlags::COMPUTE.bits(),
+                ctx,
+                dirty_flag: Arc::downgrade(&writer_dirty),
+            });
+        }
+        let mut stamps: ResourceKeyMap<Arc<ParcelStamp>> = ResourceKeyMap::default();
+        stamps.insert(key, Arc::clone(&stamp));
+
+        let mut prologue = BarrierSet::default();
+        let mut waits = Vec::new();
+        let mut device_waits = Vec::new();
+        let mut context_waits = Vec::new();
+        compute_cross_submit_sync_into(
+            &mut prologue,
+            &mut waits,
+            &mut device_waits,
+            &mut context_waits,
+            &net,
+            &ledger,
+            ctx,
+            Some(&stamps),
+        );
+        assert!(waits.is_empty(), "same-context cross-scheme WAR is baked, not a live wait");
+        assert_eq!(prologue.buffers.len(), 1, "transfer read → compute write needs a prologue barrier");
+    }
+
+    #[test]
+    fn war_same_context_fifo_present_easement_emits_device_queue_wait() {
+        let ctx = 1;
+        let key = buf_key(10);
+        let present_tv = 7u64;
+        let mut sync = ResourceSync::default();
+        sync.record_read(ctx, present_tv);
+        sync.mark_fifo_ordered_read(ctx, present_tv);
+        let mut ledger = LedgerSnapshot::default();
+        ledger.insert(key, LedgerEntry { sync });
+        let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
+        let net = net_access_per_resource(&ir);
+        let plan = compute_cross_submit_sync(&net, &ledger, ctx);
+        assert!(plan.prologue.is_empty());
+        assert!(plan.waits.is_empty());
+        assert_eq!(plan.device_queue_waits, vec![present_tv]);
+    }
+
+    #[test]
+    fn war_fifo_present_easement_texture_emits_transfer_to_write_barrier() {
+        let ctx = 1;
+        let tex = 5;
+        let key = ResourceKey::Texture(tex);
+        let present_tv = 7u64;
+        let mut sync = ResourceSync::default();
+        sync.record_read(ctx, present_tv);
+        sync.mark_fifo_ordered_read(ctx, present_tv);
+        sync.record_write(ctx, 6, WRITE_KINDS_COMPUTE_TRANSFER);
+        let mut ledger = LedgerSnapshot::default();
+        ledger.insert(key, LedgerEntry { sync });
+        let ir = single_binding_ir(ResourceId::Texture(tex), NodeAccess::Write);
+        let net = net_access_per_resource(&ir);
+        let plan = compute_cross_submit_sync(&net, &ledger, ctx);
+        assert!(plan.waits.is_empty());
+        assert_eq!(plan.device_queue_waits, vec![present_tv]);
+        assert_eq!(plan.prologue.textures.len(), 1);
+        assert!(plan.prologue.textures[0].1.src.kinds.contains(UsageKindFlags::TRANSFER));
+        assert!(plan.prologue.textures[0].1.dst.kinds.contains(UsageKindFlags::COMPUTE));
+    }
+
+    #[test]
+    fn present_easement_live_prologue_extracts_transfer_to_compute_texture() {
+        let mut full = BarrierSet::default();
+        full.textures.push((
+            1,
+            BarrierUsage {
+                src: {
+                    let mut s = SlotUsageSet::default();
+                    s.merge(NodeAccess::Read, UsageKindFlags::TRANSFER | UsageKindFlags::COMPUTE);
+                    s
+                },
+                dst: {
+                    let mut d = SlotUsageSet::default();
+                    d.merge(NodeAccess::Write, UsageKindFlags::COMPUTE);
+                    d
+                },
+            },
+        ));
+        let live = present_easement_live_prologue(&full, &[99]);
+        assert_eq!(live.textures.len(), 1);
+        assert_eq!(live.textures[0].0, 1);
+        assert_eq!(live.textures[0].1.src.kinds, UsageKindFlags::TRANSFER);
+        assert_eq!(live.textures[0].1.dst.kinds, UsageKindFlags::COMPUTE);
+        assert!(present_easement_live_prologue(&full, &[]).is_empty());
+    }
+
+    #[test]
+    fn present_easement_live_prologue_recovers_non_compute_write_kinds() {
+        // Regression: an earlier version filtered to `dst.kinds.contains(COMPUTE)`, which
+        // silently dropped the live replay for any present-easement write that wasn't COMPUTE
+        // (e.g. a RENDER-only write), leaving the resource in a stale record-time state on
+        // retained resubmit.
+        let mut full = BarrierSet::default();
+        full.textures.push((
+            1,
+            BarrierUsage {
+                src: {
+                    let mut s = SlotUsageSet::default();
+                    s.merge(NodeAccess::Read, UsageKindFlags::TRANSFER);
+                    s
+                },
+                dst: {
+                    let mut d = SlotUsageSet::default();
+                    d.merge(NodeAccess::Write, UsageKindFlags::RENDER);
+                    d
+                },
+            },
+        ));
+        let live = present_easement_live_prologue(&full, &[99]);
+        assert_eq!(live.textures.len(), 1);
+        assert_eq!(live.textures[0].1.src.kinds, UsageKindFlags::TRANSFER);
+        assert_eq!(live.textures[0].1.dst.kinds, UsageKindFlags::RENDER);
     }
 
     #[test]

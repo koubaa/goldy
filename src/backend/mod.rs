@@ -51,7 +51,7 @@ use crate::types::{
     PrimitiveTopology, ResourceAccess, ResourceHandle, SamplerDesc, TextureFlags, TextureFormat, TextureKind,
     VertexBufferLayout,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 
 /// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
@@ -371,6 +371,73 @@ pub type SwapchainImageHandle = u64;
 pub type TextureHandle = u64;
 pub type SamplerHandle = u64;
 
+/// Compile inputs snapshotted (under a backend's exclusive per-device lock, briefly) so the
+/// actual Slang compile can run afterward without holding that lock — see
+/// [`GpuBackend::prepare_shader_stage_precompile`].
+pub struct ShaderStagePrecompilePrep {
+    compiler: Arc<crate::slang::SlangCompiler>,
+    /// Dedicated lock serializing shader compiles against each other (not against unrelated
+    /// backend operations like submits, buffer creation, or waits).
+    compile_lock: Arc<std::sync::Mutex<()>>,
+    source: String,
+    search_paths: Vec<String>,
+    defines: Vec<(String, String)>,
+    optimization_level: crate::types::OptimizationLevel,
+    layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+    entry_point_name: &'static str,
+    target: crate::slang::ShaderTarget,
+    stage: crate::slang::SlangStage,
+}
+
+impl ShaderStagePrecompilePrep {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        compiler: Arc<crate::slang::SlangCompiler>,
+        compile_lock: Arc<std::sync::Mutex<()>>,
+        source: String,
+        search_paths: Vec<String>,
+        defines: Vec<(String, String)>,
+        optimization_level: crate::types::OptimizationLevel,
+        layout_checks: Vec<crate::slang::OwnedLayoutCheck>,
+        entry_point_name: &'static str,
+        target: crate::slang::ShaderTarget,
+        stage: crate::slang::SlangStage,
+    ) -> Self {
+        Self {
+            compiler,
+            compile_lock,
+            source,
+            search_paths,
+            defines,
+            optimization_level,
+            layout_checks,
+            entry_point_name,
+            target,
+            stage,
+        }
+    }
+
+    /// Runs the (possibly slow) Slang compile under this prep's dedicated shader-compilation
+    /// lock — NOT the backend's exclusive per-device mutex. Only call this after dropping any
+    /// lock held on the owning backend.
+    pub(crate) fn compile(&self) -> Result<crate::slang::CompiledShaderWithReflection> {
+        let _guard = self.compile_lock.lock().unwrap();
+        let search_path_refs: Vec<&str> = self.search_paths.iter().map(|s| s.as_str()).collect();
+        let define_refs: Vec<(&str, &str)> = self.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        self.compiler
+            .compile_with_reflection(
+                &self.source,
+                self.target,
+                &[(self.entry_point_name, self.stage)],
+                &search_path_refs,
+                &define_refs,
+                &self.layout_checks,
+                self.optimization_level,
+            )
+            .with_context(|| format!("Failed to compile {} shader to bytecode", self.entry_point_name))
+    }
+}
+
 /// Opaque token tying surface work to an acquired swapchain frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameToken {
@@ -495,6 +562,9 @@ pub struct SubmitSync {
     pub prologue: crate::task_graph::BarrierSet,
     /// Cross-context GPU queue-waits on producer timeline values.
     pub waits: Vec<crate::timeline::Epoch>,
+    /// Device-timeline queue-waits on the shared device fence (present easement reads
+    /// completed on the device queue before compute on a per-context queue).
+    pub device_queue_waits: Vec<crate::timeline::TimelineValue>,
     /// CPU-observed fence waits before host-visible writes (not ordered by GPU queue-wait alone).
     pub host_observed_waits: Vec<crate::timeline::Epoch>,
     /// Host writes performed on the submission worker after `host_observed_waits` retire.
@@ -505,6 +575,7 @@ impl SubmitSync {
     pub fn is_empty(&self) -> bool {
         self.prologue.is_empty()
             && self.waits.is_empty()
+            && self.device_queue_waits.is_empty()
             && self.host_observed_waits.is_empty()
             && self.deferred_host_writes.is_empty()
     }
@@ -523,6 +594,7 @@ impl SubmitSync {
         Self {
             prologue: cross.prologue.clone(),
             waits: cross.waits.clone(),
+            device_queue_waits: cross.device_queue_waits.clone(),
             host_observed_waits: Vec::new(),
             deferred_host_writes: Vec::new(),
         }
@@ -766,8 +838,8 @@ pub trait ContextPollReader: Send + Sync {
 }
 
 /// Device-scoped timeline horizon (retired floor + device sync primitive) cloned out of
-/// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can combine
-/// it with per-context readers without the global backend mutex.
+/// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can read
+/// device-fence progress without the global backend mutex. Excludes per-context compute fences.
 #[doc(hidden)]
 pub trait DeviceTimelineReader: Send + Sync {
     /// Floor and device-level sync completion; excludes per-context fence/semaphore progress.
@@ -1552,18 +1624,17 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// `gpu_progress() >= value`).
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue;
 
-    /// Latest device-global submission sequence retired on the GPU (shared queue / seq space).
+    /// Latest [`DeviceTv`](crate::backend::dx12::tv::DeviceTv) retired on the device sync fence
+    /// (present copies, surface sync, teardown on DX12). Does not include per-context compute
+    /// fence progress — use [`Self::gpu_progress`] for that.
     ///
-    /// `value` is done when `device_timeline_retired() >= value`. This is the max over live
-    /// context completion primitives, the device sync fence (DX12), and the post-destroy floor.
+    /// `value` is done when `device_timeline_retired() >= value` for device-queue epochs only.
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
 
-    /// Block until the device-global timeline has retired at least `value`.
+    /// Block until the device sync fence has retired at least `value` ([`DeviceTv`] space).
     ///
-    /// Unlike [`Self::wait_until`] (which is per-context), this searches across all live contexts on
-    /// `device` for the one that signaled `value` and waits on its native primitive. Use this
-    /// when the `TimelineValue` was produced by an arbitrary context — e.g. from outside the
-    /// allocator — so you don't need a matching `ContextHandle`.
+    /// Unlike [`Self::wait_until`] (per-context [`CtxTv`] on the context fence), this waits only
+    /// on the shared device fence used by present copies and other device-queue work.
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).
@@ -1745,6 +1816,39 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     fn end_frame(&mut self, frame: FrameToken) -> Result<crate::timeline::TimelineValue> {
         let submit_tv = self.submit_frame(&frame)?;
         self.present_frame(frame, submit_tv)
+    }
+
+    /// Best-effort pre-warm: snapshot the inputs needed to compile `stage`'s bytecode for
+    /// `shader`, without holding this backend's exclusive per-device lock for the (possibly
+    /// slow) compile itself.
+    ///
+    /// The caller should drop its lock on this backend, call
+    /// [`ShaderStagePrecompilePrep::compile`] (which serializes only against other compiles,
+    /// via a dedicated shader-compilation lock), then re-lock and call
+    /// [`Self::store_precompiled_shader_stage`] with the result before proceeding to the
+    /// normal `create_*_pipeline` call.
+    ///
+    /// Returns `Ok(None)` when there's nothing to precompile (already cached) or when this
+    /// backend doesn't support pre-warming — callers should just proceed straight to
+    /// pipeline creation, which will compile under the backend lock as before.
+    fn prepare_shader_stage_precompile(
+        &self,
+        _shader: ShaderHandle,
+        _stage: crate::slang::SlangStage,
+    ) -> Result<Option<ShaderStagePrecompilePrep>> {
+        Ok(None)
+    }
+
+    /// Store the result of [`ShaderStagePrecompilePrep::compile`] for `stage`. No-op by
+    /// default (backends that don't implement [`Self::prepare_shader_stage_precompile`]
+    /// never call this).
+    fn store_precompiled_shader_stage(
+        &mut self,
+        _shader: ShaderHandle,
+        _stage: crate::slang::SlangStage,
+        _compiled: crate::slang::CompiledShaderWithReflection,
+    ) -> Result<()> {
+        Ok(())
     }
 
     // Compute pipeline management

@@ -19,7 +19,7 @@ mod submission;
 mod upload;
 
 use goldy::{
-    types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
+    types::{BufferFlags, DispatchShape, ResourceAccess, TextureFlags, TextureFormat, TextureKind},
     BufferKind, ComputePipeline, Device, Grant, GrantBuffer, NodeAccess, Parcel, ReadGrant, RetainedPool, Sampler,
     Scheme, ShaderModule, StructuredBufferElement, Submission,
 };
@@ -1603,6 +1603,7 @@ fn scheme_cpu_readable_write_to_parcel_roundtrip() {
 
 #[test]
 fn scheme_scattered_typed_variable_assignment() {
+
     let device = make_device();
     let ctx = submission_context(&device);
 
@@ -3803,7 +3804,7 @@ fn cross_scheme_submit_order_steady_state_is_stable() {
     let ctx = submission_context(&device);
     let pipeline = cross_retention_copy_pipeline(&device);
 
-    let run = |reader_first: bool| -> Scheme {
+    let run = |reader_first: bool| -> (Scheme, CrossRetentionBuffers) {
         let buffers = cross_retention_buffers(&device);
         let mut worker = cross_retention_buffer_writer(&ctx, &pipeline, &buffers);
         let (mut reader, _dst) = cross_retention_copy_reader(&ctx, &buffers.shared);
@@ -3816,11 +3817,11 @@ fn cross_scheme_submit_order_steady_state_is_stable() {
                 cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
             }
         }
-        worker
+        (worker, buffers)
     };
 
     for reader_first in [true, false] {
-        let mut worker = run(reader_first);
+        let (mut worker, _buffers) = run(reader_first);
         let warmup_records = worker.replay_stats().records;
         assert!(
             warmup_records <= 2,

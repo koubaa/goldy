@@ -19,7 +19,7 @@ use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::AtomicU64,
     Arc, Mutex, RwLock,
 };
 use windows::Win32::Foundation::HANDLE;
@@ -229,6 +229,7 @@ impl ResourceRegistry {
 #[allow(clippy::items_after_test_module)]
 mod registry_tests {
     use super::*;
+    use crate::backend::dx12::CtxTv;
 
     fn free_buffer_slots(reg: &mut ResourceRegistry, handle: BufferHandle) {
         for slot in reg.extract_buffer_slots(handle) {
@@ -355,7 +356,7 @@ mod registry_tests {
 
         let mut pending = vec![PendingSlotReclamation {
             slot: DeferredSlot::CbvSrvUav(slot),
-            requirements: vec![(CTX_A, SEQ)],
+            requirements: vec![(CTX_A, CtxTv::from_public(SEQ))],
         }];
 
         assert_eq!(reg.cbv_srv_uav.free_count(), 0, "slot must not be freed yet");
@@ -369,7 +370,7 @@ mod registry_tests {
                 let ready = pending[i]
                     .requirements
                     .iter()
-                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= seq.raw());
                 if ready {
                     let entry = pending.swap_remove(i);
                     reg.free_deferred_slot(entry.slot);
@@ -399,7 +400,10 @@ mod registry_tests {
 
         let mut pending = vec![PendingSlotReclamation {
             slot: DeferredSlot::CbvSrvUav(slot),
-            requirements: vec![(CTX_A, 3), (CTX_B, 7)],
+            requirements: vec![
+                (CTX_A, CtxTv::from_public(3)),
+                (CTX_B, CtxTv::from_public(7)),
+            ],
         }];
         reg.extract_buffer_slots(handle);
 
@@ -413,7 +417,7 @@ mod registry_tests {
                 let ready = pending[i]
                     .requirements
                     .iter()
-                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= *seq);
+                    .all(|(ctx, seq)| retired.get(ctx).copied().unwrap_or(0) >= seq.raw());
                 if ready {
                     let entry = pending.swap_remove(i);
                     reg.free_deferred_slot(entry.slot);
@@ -454,7 +458,7 @@ pub(crate) struct DxgiAdapterInfo {
 pub(crate) struct ComputeAllocatorSlot {
     pub allocator: Direct3D12::ID3D12CommandAllocator,
     /// Fence value when this slot was last used (for reuse detection)
-    pub fence_value: u64,
+    pub fence_value: super::tv::CtxTv,
     /// Reusable command list (created on first use, then reset with allocator).
     pub command_list: Option<Direct3D12::ID3D12GraphicsCommandList>,
     /// When `true`, this slot holds a retained command list that must not be reset
@@ -469,9 +473,17 @@ pub(crate) struct ComputeAllocatorSlot {
 /// Per-context async submission stream (fence, poller, compute allocator pool).
 pub(crate) struct Dx12SubmissionContext {
     pub device: super::DeviceHandle,
+    /// Dedicated DIRECT queue for this context's compute submissions (not shared with other contexts).
+    pub command_queue: Direct3D12::ID3D12CommandQueue,
+    /// Serialises `Wait`/`ExecuteCommandLists`/`Signal` on [`Self::command_queue`].
+    pub queue_lock: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Async FIFO worker for this context's compute `ExecuteCommandLists` + `Signal` pairs.
+    pub submission_worker: std::sync::Arc<super::super::submission_worker::SubmissionWorker>,
     pub fence: Direct3D12::ID3D12Fence,
-    /// Last device-global seq value submitted on this context.
-    pub last_submitted_seq: u64,
+    /// Monotonic [`super::tv::CtxTv`] allocator for this context's fence.
+    pub timeline_next: super::tv::CtxTimelineNext,
+    /// Last [`super::tv::CtxTv`] submitted on this context.
+    pub last_submitted_seq: super::tv::CtxTv,
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
@@ -488,13 +500,23 @@ pub(crate) struct Dx12SubmissionContext {
     /// Per-context deferred deletion queue — resources whose lifetime is bounded by this
     /// context's timeline (dispatch-batch arg buffers, user buffers destroyed with context
     /// attribution). Drained by this context's own completed fence value.
-    pub deletion_queue: DeletionQueue,
+    pub deletion_queue: ContextDeletionQueue,
     /// Thread-scoped reclamation epoch from [`ContextReclamationScope::set_epoch`].
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// GPU profile readbacks deferred until the context timeline retires each submit TV.
     pub pending_gpu_profiles: Vec<(u64, super::compute::Dx12GpuProfileResources)>,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
     pub frame_table: SharedFrameTableDevice,
+}
+
+impl Dx12SubmissionContext {
+    pub(crate) fn allocate_ctx_tv(&self) -> super::tv::CtxTv {
+        self.timeline_next.allocate()
+    }
+
+    pub(crate) fn ctx_horizon(&self) -> super::tv::CtxTv {
+        self.timeline_next.horizon()
+    }
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
@@ -567,8 +589,8 @@ pub(crate) enum DeferredSlot {
 /// Ready when every `(context, required_seq)` pair has retired.
 pub(crate) struct PendingSlotReclamation {
     pub slot: DeferredSlot,
-    /// `(context_handle, min_seq_that_must_retire)`
-    pub requirements: Vec<(super::ContextHandle, u64)>,
+    /// `(context_handle, min_ctx_seq_that_must_retire)`
+    pub requirements: Vec<(super::ContextHandle, super::tv::CtxTv)>,
 }
 
 /// GPU buffer resources held until bindless slot requirements retire.
@@ -576,7 +598,7 @@ pub(crate) struct PendingBufferGpuRelease {
     #[allow(dead_code)]
     pub buffer_handle: BufferHandle,
     #[allow(dead_code)]
-    pub requirements: Vec<(super::ContextHandle, u64)>,
+    pub requirements: Vec<(super::ContextHandle, super::tv::CtxTv)>,
     pub resource: Direct3D12::ID3D12Resource,
     pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
     pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
@@ -584,44 +606,63 @@ pub(crate) struct PendingBufferGpuRelease {
 }
 
 fn slot_requirements_met(
-    requirements: &[(super::ContextHandle, u64)],
+    requirements: &[(super::ContextHandle, super::tv::CtxTv)],
     context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
 ) -> bool {
     requirements.iter().all(|(ctx_id, required_seq)| {
         context_fences
             .get(ctx_id)
-            .is_none_or(|(_, fence)| unsafe { fence.GetCompletedValue() >= *required_seq })
+            .is_none_or(|(_, fence)| unsafe { fence.GetCompletedValue() >= required_seq.raw() })
     })
 }
 
-/// Deferred deletion queue for a DX12 device.
-pub(crate) struct DeletionQueue {
-    inner: super::super::shared::DeferredQueue<u64, PendingDeletion>,
+/// Deferred deletion queue keyed by timeline tokens on a specific fence space.
+pub(crate) struct DeletionQueue<K> {
+    inner: super::super::shared::DeferredQueue<K, PendingDeletion>,
 }
 
-impl DeletionQueue {
+impl<K: PartialOrd + Copy> DeletionQueue<K> {
+    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
+        self.inner.flush_all().collect()
+    }
+}
+
+impl<K> DeletionQueue<K> {
     pub fn new() -> Self {
         Self {
             inner: super::super::shared::DeferredQueue::new(),
         }
     }
 
-    pub fn queue(&mut self, fence_value: u64, resource: PendingDeletion) {
-        self.inner.push(fence_value, resource);
-    }
-
-    pub(crate) fn drain_up_to_completed(&mut self, completed: u64) -> Vec<PendingDeletion> {
-        self.inner.drain_up_to(completed)
-    }
-
-    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
-        self.inner.flush_all().collect()
-    }
-
     pub(crate) fn pending_len(&self) -> usize {
         self.inner.len()
     }
 }
+
+impl DeletionQueue<super::tv::CtxTv> {
+    pub fn queue(&mut self, fence_value: super::tv::CtxTv, resource: PendingDeletion) {
+        self.inner.push(fence_value, resource);
+    }
+
+    pub(crate) fn drain_up_to_completed(&mut self, completed: u64) -> Vec<PendingDeletion> {
+        self.inner.drain_up_to(super::tv::CtxTv::from_public(completed))
+    }
+}
+
+impl DeletionQueue<super::tv::DeviceTv> {
+    pub fn queue(&mut self, fence_value: super::tv::DeviceTv, resource: PendingDeletion) {
+        self.inner.push(fence_value, resource);
+    }
+
+    pub(crate) fn drain_up_to_completed(&mut self, completed: u64) -> Vec<PendingDeletion> {
+        self.inner.drain_up_to(super::tv::DeviceTv::from_public(completed))
+    }
+}
+
+/// Context-scoped deferred deletion (keyed by per-context fence [`super::tv::CtxTv`]).
+pub(crate) type ContextDeletionQueue = DeletionQueue<super::tv::CtxTv>;
+/// Device-scoped deferred deletion (keyed by device fence [`super::tv::DeviceTv`]).
+pub(crate) type DeviceDeletionQueue = DeletionQueue<super::tv::DeviceTv>;
 
 /// Device-shared descriptor registry.
 ///
@@ -653,11 +694,14 @@ impl DescriptorRegistry {
     pub(crate) fn record_slot_usage(
         &mut self,
         ctx: super::ContextHandle,
-        seq: u64,
+        seq: super::tv::CtxTv,
         slots: impl IntoIterator<Item = DeferredSlot>,
     ) {
         for slot in slots {
-            self.slot_last_seen.entry(slot).or_default().mark_max(ctx, seq);
+            self.slot_last_seen
+                .entry(slot)
+                .or_default()
+                .mark_max(ctx, seq.raw());
         }
     }
 
@@ -666,7 +710,11 @@ impl DescriptorRegistry {
         let requirements: Vec<_> = self
             .slot_last_seen
             .remove(&slot)
-            .map(|m| m.iter().collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(ctx, seq)| (ctx, super::tv::CtxTv::from_public(seq)))
+                    .collect()
+            })
             .unwrap_or_default();
         if requirements.is_empty() {
             self.resource_registry.free_deferred_slot(slot);
@@ -678,7 +726,10 @@ impl DescriptorRegistry {
 
     /// Union of per-context last-seen seqs for all bindless slots owned by `handle`.
     /// Must be called before [`Self::reclaim_buffer_slots`] removes `slot_last_seen` entries.
-    pub(crate) fn snapshot_buffer_slot_requirements(&self, handle: BufferHandle) -> Vec<(super::ContextHandle, u64)> {
+    pub(crate) fn snapshot_buffer_slot_requirements(
+        &self,
+        handle: BufferHandle,
+    ) -> Vec<(super::ContextHandle, super::tv::CtxTv)> {
         let rr = &self.resource_registry;
         let mut merged: FxHashMap<super::ContextHandle, u64> = FxHashMap::default();
         let mut slots = Vec::new();
@@ -695,7 +746,10 @@ impl DescriptorRegistry {
                 }
             }
         }
-        merged.into_iter().collect()
+        merged
+            .into_iter()
+            .map(|(ctx, seq)| (ctx, super::tv::CtxTv::from_public(seq)))
+            .collect()
     }
 
     /// Reclaim all descriptor slots for a destroyed buffer handle.
@@ -809,8 +863,8 @@ pub(crate) struct LogicalDevice {
     pub sampler_descriptor_size: u32,
     /// Device fence for synchronous Signal+wait paths only (not per-submit timeline).
     pub fence: Direct3D12::ID3D12Fence,
-    /// Device-global submission sequence (shared value space; contexts signal their own fences).
-    pub timeline_next: Arc<AtomicU64>,
+    /// Device-fence timeline counter for [`super::tv::DeviceTv`] (present, surface sync, teardown).
+    pub device_timeline_next: Arc<super::tv::DeviceTimelineNext>,
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     pub retired_floor: AtomicU64,
 
@@ -835,7 +889,7 @@ pub(crate) struct LogicalDevice {
     pub zero_buffer: Direct3D12::ID3D12Resource,
     /// Deferred deletion queue — resources are dropped only after the GPU finishes
     /// the command list that was last submitted when the resource was queued.
-    pub deletion_queue: Mutex<DeletionQueue>,
+    pub deletion_queue: Mutex<DeviceDeletionQueue>,
     /// Buffer GPU memory held until bindless slot `slot_last_seen` requirements retire.
     pub pending_buffer_gpu_releases: Mutex<Vec<PendingBufferGpuRelease>>,
     /// Shared with [`Dx12State::device_removed`] — first `u64::MAX` fence triggers DRED once.
@@ -872,12 +926,28 @@ pub(crate) type SharedContextMap = Arc<std::sync::RwLock<HashMap<super::ContextH
 pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
 
 impl LogicalDevice {
+    pub(crate) fn allocate_device_tv(&self) -> super::tv::DeviceTv {
+        self.device_timeline_next.allocate_device()
+    }
+
+    /// Completed [`super::tv::DeviceTv`] on the device sync fence (present / teardown queue only).
+    pub(crate) fn device_sync_retired(&self) -> super::tv::DeviceTv {
+        use std::sync::atomic::Ordering;
+        let floor = self.retired_floor.load(Ordering::Relaxed);
+        let sync = unsafe { self.fence.GetCompletedValue() };
+        super::tv::DeviceTv::from_public(floor.max(sync))
+    }
+
     pub(crate) fn process_deletion_queue_up_to(
         &self,
         completed: u64,
         context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     ) {
-        let batch = self.deletion_queue.lock().unwrap().drain_up_to_completed(completed);
+        let batch = self
+            .deletion_queue
+            .lock()
+            .unwrap()
+            .drain_up_to_completed(completed);
         if batch.is_empty() {
             self.drain_pending_buffer_gpu_releases(context_fences);
             return;
@@ -944,8 +1014,8 @@ fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelea
         let mut pool = ld.tile_heap_pool.lock().unwrap();
         super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
     }
-    let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-    let signaled = super::utils::with_queue_lock(ld, || {
+    let fv = ld.device_timeline_next.allocate_device().raw();
+    let signaled = super::utils::with_queue_lock(&ld.queue_lock, || {
         unsafe { ld.command_queue.Signal(&ld.fence, fv) }
             .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
     });
@@ -1010,8 +1080,8 @@ pub(crate) fn destroy_pending_deletion(
             }
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
-            let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            let signaled = super::utils::with_queue_lock(ld, || {
+            let fv = ld.device_timeline_next.allocate_device().raw();
+            let signaled = super::utils::with_queue_lock(&ld.queue_lock, || {
                 unsafe { ld.command_queue.Signal(&ld.fence, fv) }
                     .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
             });
@@ -1224,7 +1294,7 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
 pub(crate) struct FrameSync {
     pub command_list: Direct3D12::ID3D12GraphicsCommandList7,
     pub command_allocator: Direct3D12::ID3D12CommandAllocator,
-    pub fence_value: u64,
+    pub fence_value: super::tv::DeviceTv,
     /// Set after `surface::render` submits. When false, `present` copies the compute scratch texture.
     pub render_pass_submitted: bool,
 }
@@ -1370,8 +1440,14 @@ pub(super) struct Dx12State {
     pub next_dsv_offset: u32,
     /// Recycled DSV descriptor slots available for reuse
     pub free_dsv_offsets: Vec<u32>,
-    /// Per-backend Slang compiler instance
-    pub slang_compiler: crate::slang::SlangCompiler,
+    /// Per-backend Slang compiler instance. `Arc`-wrapped so shader compilation can run
+    /// under [`Self::shader_compile_lock`] alone, without needing exclusive access to
+    /// `Dx12State` (i.e. without holding the backend's per-device lock for the duration of
+    /// the compile).
+    pub slang_compiler: std::sync::Arc<crate::slang::SlangCompiler>,
+    /// Dedicated lock serializing shader compiles against each other, separate from this
+    /// backend's exclusive per-device lock. See [`crate::backend::GpuBackend::prepare_shader_stage_precompile`].
+    pub shader_compile_lock: std::sync::Arc<std::sync::Mutex<()>>,
     /// Set to `true` when a TDR / device-removal is detected (fence completed with `u64::MAX`
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.

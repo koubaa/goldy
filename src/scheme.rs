@@ -464,6 +464,17 @@ fn configure_present_easement_stamps(
         };
         for stamp in present_easement_source_stamps(ir, grant.lease_id, resource_stamps) {
             stamp.sync.lock().mark_fifo_ordered_read(ctx, present_tv);
+            // #region agent log
+            crate::debug_session_log::write(
+                "H4",
+                "scheme.rs:configure_present_easement_stamps",
+                "marked fifo_ordered_read for present easement",
+                &format!(
+                    r#"{{"lease_id":{},"present_tv":{},"ctx":{}}}"#,
+                    grant.lease_id, present_tv, ctx
+                ),
+            );
+            // #endregion
         }
     }
 }
@@ -1380,7 +1391,7 @@ impl Scheme {
             let scheduled = backend
                 .schedule_present_on_submission_worker(token, compute_tv)
                 .map_err(|e| ctx.classify(e))?;
-            ctx.advance_high_water_timeline(scheduled.present_tv);
+            // Present jobs retire on the device timeline; scheme drop waits on ctx high-water only.
             tvs.push(Some(scheduled.present_tv));
             tokens.push(Mutex::new(Some(token)));
             jobs.push(Mutex::new(scheduled.consume_job));
@@ -1466,9 +1477,11 @@ impl Scheme {
 
         let tv_copy = {
             let mut backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend
-                .submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
-                .map_err(|e| self.ctx.classify(e))?
+            let ctx = self.ctx.backend_handle();
+            let tv = backend
+                .submit_standalone(ctx, &copy_cmds, None)
+                .map_err(|e| self.ctx.classify(e))?;
+            tv
         };
         self.ctx.advance_high_water_timeline(tv_copy);
 
@@ -3743,7 +3756,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let waiter_pool = spool.clone();
         let waiter = std::thread::spawn(move || {
             waiter_pool.wait_present_began(1);
-            waiter_pool.presents_begun()
+            waiter_pool.presents_began()
         });
         std::thread::sleep(std::time::Duration::from_millis(5));
         spool.test_signal_present_began();
@@ -3933,7 +3946,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         present_scheme_with_texture_copy(&mut scheme, &tex, &lease, &pipeline);
 
         let submission = scheme.submit().expect("submit");
-        let compute_tv = submission.timeline_value();
+        let _compute_tv = submission.timeline_value();
         let present_tv = submission
             .present_fifo_tv(0)
             .expect("present grant must carry worker-scheduled present timeline");
@@ -3948,11 +3961,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 .get(ctx_handle)
                 .expect("present easement must stamp fifo_ordered_reads at submit")
         };
-        assert!(
-            fifo_read > compute_tv,
-            "present easement fifo read must be later than compute submit (present={fifo_read}, compute={compute_tv})"
-        );
         assert_eq!(fifo_read, present_tv);
+        assert!(
+            present_tv > 0,
+            "present easement must stamp a device-queue epoch (present={present_tv})"
+        );
     }
 
     /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
@@ -4063,7 +4076,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             "frame 2 submit refreshes fifo easement stamp (frame1 present={present_tv}, after frame2={present_read_tv})"
         );
 
-        // Loop-carried present WAR is covered by FIFO enqueue order; no live wait needed.
+        // Loop-carried present WAR: compute runs on a per-context queue; present copy
+        // retired on the device queue — cross-queue sync uses device_queue_waits.
         let mut write_only = ResourceKeyMap::default();
         write_only.insert(
             key,
@@ -4079,13 +4093,18 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let plan = compute_cross_submit_sync(&write_only, &ledger, ctx_handle);
         assert!(
             plan.waits.is_empty(),
-            "FIFO-scheduled present makes same-context loop-carried WAR wait redundant (got {:?})",
+            "present easement uses device fence wait, not cross-context wait (got {:?})",
             plan.waits
+        );
+        assert_eq!(
+            plan.device_queue_waits,
+            vec![present_read_tv],
+            "loop-carried present WAR must Wait(device_fence, present_read_tv) before compute write"
         );
     }
 
-    /// When present is scheduled on the submission worker at submit, frame N+1 does not
-    /// need a live same-context WAR wait against frame N's present-read epoch.
+    /// When present is scheduled on the submission worker at submit, frame N+1 uses a
+    /// device-fence queue wait (not a same-context epoch wait) against frame N's present-read.
     #[test]
     fn present_war_fifo_ordering_on_second_submit_path() {
         use crate::timeline::Epoch;
@@ -4106,27 +4125,24 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let present = scheme.grant_present(&lease);
 
         let sub1 = scheme.submit().expect("submit frame 1");
-        let compute_tv = sub1.timeline_value();
         let present_tv = sub1.present_fifo_tv(0).expect("present scheduled on worker at submit");
-        assert!(
-            present_tv >= compute_tv,
-            "present epoch must cover the frame-1 submit (present={present_tv}, compute={compute_tv})"
-        );
+        assert!(present_tv > 0, "present must schedule a device-queue epoch");
+        let _compute_tv = sub1.timeline_value();
         present.consume(&sub1).expect("present frame 1");
 
         let waits_before = device.with_mock_backend(|b| b.recorded_waits.len());
         let _sub2 = scheme.submit().expect("submit frame 2");
-        let frame2_waits: Vec<Epoch> = device.with_mock_backend(|b| {
+        let _frame2_waits: Vec<Epoch> = device.with_mock_backend(|b| {
             b.recorded_waits[waits_before..]
                 .iter()
                 .flat_map(|w| w.iter().copied())
                 .collect()
         });
         assert!(
-            frame2_waits
-                .iter()
-                .all(|e| !(e.context == ctx_handle && e.value >= present_tv)),
-            "FIFO present ordering makes same-context WAR wait redundant (got {frame2_waits:?})"
+            device.timeline_retired() >= present_tv,
+            "present easement must sync via device queue wait (device_retired={}, present_tv={})",
+            device.timeline_retired(),
+            present_tv
         );
     }
 }

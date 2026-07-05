@@ -555,8 +555,22 @@ impl Device {
     // VramAllocator
     // =======================================================================
 
-    pub(crate) fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
-        self.inner.vram_allocator.defer_release(epoch, payload);
+    pub(crate) fn defer_release(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        epoch: TimelineValue,
+        payload: crate::vram_allocator::DeferredPayload,
+    ) {
+        self.inner
+            .vram_allocator
+            .defer_release_ctx(ctx, epoch, payload);
+    }
+
+    pub(crate) fn boundary_crossed_deferred(
+        &self,
+        progress_at: &dyn Fn(crate::backend::ContextHandle) -> TimelineValue,
+    ) -> usize {
+        self.inner.vram_allocator.boundary_crossed_ctx(progress_at)
     }
 
     /// Returns the currently installed [`VramAllocator`].
@@ -773,18 +787,12 @@ impl Device {
         crate::context::Context::new(self.clone())
     }
 
-    /// Latest device-global submission sequence retired on the GPU.
+    /// Latest device sync-fence progress retired on the GPU (present / surface / teardown queue).
     ///
-    /// Epochs from any [`crate::context::Context::submit`] on this device share one value space; use this
-    /// when reclaiming deferred frees keyed by timeline value (e.g. heap transient allocator).
+    /// Per-context compute progress is tracked separately on each context's fence — use
+    /// [`Context::gpu_progress`](crate::Context::gpu_progress) for that.
     pub fn timeline_retired(&self) -> crate::timeline::TimelineValue {
-        let horizon = self.inner.device_timeline_reader.device_horizon();
-        let reader_clones: Vec<_> = {
-            let readers = self.inner.context_readers.lock().unwrap();
-            readers.values().cloned().collect()
-        };
-        let max_ctx = reader_clones.iter().map(|r| r.gpu_progress()).max().unwrap_or(0);
-        horizon.max(max_ctx)
+        self.inner.device_timeline_reader.device_horizon()
     }
 
     /// Lock-free GPU progress for a live context on this device (for ledger / parcel queries).
@@ -797,6 +805,12 @@ impl Device {
             readers.get(&ctx).cloned()
         }?;
         Some(reader.gpu_progress())
+    }
+
+    /// Maximum retired epoch across all live contexts on this device (compute fences).
+    pub(crate) fn max_context_gpu_progress(&self) -> crate::timeline::TimelineValue {
+        let readers = self.inner.context_readers.lock().unwrap();
+        readers.values().map(|r| r.gpu_progress()).max().unwrap_or(0)
     }
 
     pub(crate) fn register_context_timeline_reader(

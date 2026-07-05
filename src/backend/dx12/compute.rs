@@ -8,7 +8,6 @@ use super::shader;
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
-use crate::backend::submission_worker::allocate_timeline_value;
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
@@ -456,7 +455,10 @@ pub(super) fn dx12_readback_gpu_profile(
 /// is written to the info queue before the HRESULT bubbles up. Without
 /// this drain the debug-layer text goes to `OutputDebugString` and is
 /// invisible to anyone not attached with a debugger.
-fn drain_info_queue(device: &ID3D12Device10) -> Option<String> {
+///
+/// Run with `GOLDY_DX12_DEBUG=1` (enables the debug layer + `ID3D12InfoQueue`) and
+/// optionally `GOLDY_DX12_GBV=1` (GPU-Based Validation) to populate this.
+pub(super) fn drain_info_queue(device: &ID3D12Device10) -> Option<String> {
     let info_queue: ID3D12InfoQueue = device.cast().ok()?;
     let count = unsafe { info_queue.GetNumStoredMessages() };
     if count == 0 {
@@ -496,6 +498,16 @@ fn drain_info_queue(device: &ID3D12Device10) -> Option<String> {
     } else {
         Some(out)
     }
+}
+
+/// Format a `Close()` (or similar D3D12 call) failure together with whatever the debug-layer
+/// info queue captured for it. Call `drain_info_queue` immediately after the failing call —
+/// the info queue is a small ring and later driver activity can evict the relevant message.
+pub(super) fn describe_dx12_failure(device: &ID3D12Device10, what: &str, err: &windows::core::Error) -> String {
+    let diag = drain_info_queue(device).unwrap_or_else(|| "  (no debug-layer messages; enable GOLDY_DX12_DEBUG=1, \
+         and GOLDY_DX12_GBV=1 for GPU-Based Validation)\n"
+        .to_string());
+    format!("{what}: {err}\nDebug layer messages:\n{diag}")
 }
 
 /// Create a compute pipeline.
@@ -629,22 +641,6 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 // Shared submit helpers
 // ---------------------------------------------------------------------------
 
-/// Latest device-global seq retired on the scope's device.
-fn device_retired_for_scope(scope: &Dx12SubmitScope<'_>) -> u64 {
-    let device = scope.device_handle;
-    let floor = scope.ld().retired_floor.load(std::sync::atomic::Ordering::Relaxed);
-    let fences = scope.context_fences.read().unwrap();
-    let max_ctx = fences
-        .values()
-        .filter(|(dev, _)| *dev == device)
-        .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
-        .max()
-        .unwrap_or(0);
-    drop(fences);
-    let device_sync = unsafe { scope.ld().fence.GetCompletedValue() };
-    floor.max(max_ctx).max(device_sync)
-}
-
 pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<Dx12SubmitScope<'_>> {
     let sc = std::sync::Arc::clone(
         state
@@ -680,7 +676,12 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
 ///
 /// Returns `(command_list, slot_idx)`.  The slot is taken from the
 /// pool when its fence has already signalled; otherwise a fresh one is created.
-fn find_recyclable_allocator_slot(pool: &[ComputeAllocatorSlot], start: usize, completed: u64) -> Option<usize> {
+fn find_recyclable_allocator_slot(
+    pool: &[ComputeAllocatorSlot],
+    start: usize,
+    completed: u64,
+    retained_slot_idxs: &std::collections::HashSet<usize>,
+) -> Option<usize> {
     let len = pool.len();
     if len == 0 {
         return None;
@@ -688,7 +689,24 @@ fn find_recyclable_allocator_slot(pool: &[ComputeAllocatorSlot], start: usize, c
     for offset in 0..len {
         let idx = (start + offset) % len;
         let slot = &pool[idx];
-        if completed >= slot.fence_value && !slot.retained && !slot.in_recording {
+        if completed >= slot.fence_value.raw()
+            && !slot.retained
+            && !slot.in_recording
+            && !retained_slot_idxs.contains(&idx)
+        {
+            // #region agent log
+            crate::debug_session_log::write(
+                "H17",
+                "dx12/compute.rs:find_recyclable_allocator_slot",
+                "recycling allocator slot",
+                &format!(
+                    r#"{{"slot_idx":{},"slot_fence":{},"ctx_completed":{}}}"#,
+                    idx,
+                    slot.fence_value.raw(),
+                    completed
+                ),
+            );
+            // #endregion
             return Some(idx);
         }
     }
@@ -723,7 +741,7 @@ pub(super) fn finish_compute_slot_submit(
     if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
         slot.in_recording = false;
     }
-    pre_reset_retired_compute_slots(logical_device, sc, ctx_fence)
+    pre_reset_retired_compute_slots(logical_device, sc, ctx_fence, Some(slot_idx))
 }
 
 /// Reset pool slots whose GPU work has retired so the render thread can skip `Reset` on acquire.
@@ -731,14 +749,26 @@ pub(super) fn pre_reset_retired_compute_slots(
     logical_device: &types::LogicalDevice,
     sc: &mut types::Dx12SubmissionContext,
     ctx_fence: &ID3D12Fence,
+    skip_slot_idx: Option<usize>,
 ) -> Result<()> {
     let _tz = tracy_zone!("dx12.submit_worker.pre_reset_slots");
     let completed = unsafe { ctx_fence.GetCompletedValue() };
-    for slot in &mut sc.compute_allocator_pool {
-        if slot.retained || slot.pre_reset || slot.in_recording || slot.fence_value == 0 {
+    let retained_slot_idxs: std::collections::HashSet<usize> = sc
+        .retained_graphs
+        .values()
+        .map(|g| g.slot_idx)
+        .collect();
+    for (idx, slot) in sc.compute_allocator_pool.iter_mut().enumerate() {
+        if skip_slot_idx == Some(idx) {
             continue;
         }
-        if completed >= slot.fence_value {
+        if slot.retained || slot.pre_reset || slot.in_recording || slot.fence_value == super::tv::CtxTv::ZERO {
+            continue;
+        }
+        if retained_slot_idxs.contains(&idx) {
+            continue;
+        }
+        if completed >= slot.fence_value.raw() {
             reset_compute_allocator_slot(logical_device, slot)?;
         }
     }
@@ -766,11 +796,36 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
             sc.allocator_recycle_hint % pool_len
         }
     };
+    let retained_slot_idxs: std::collections::HashSet<usize> = sc
+        .retained_graphs
+        .values()
+        .map(|g| g.slot_idx)
+        .collect();
     let pool = &mut sc.compute_allocator_pool;
+    // `find_recyclable_allocator_slot` already excludes `retained_slot_idxs` (the backing
+    // allocators for live retained command lists), so it's always safe to try recycling first —
+    // even while retained graphs are live on this context. Previously this unconditionally grew
+    // a brand-new `ID3D12CommandAllocator`/`ID3D12GraphicsCommandList` on every call whenever any
+    // retained graph existed, which for the (common) present-easement live-prologue path means
+    // every single frame: an unbounded per-frame leak of D3D12 objects that eventually exhausts a
+    // driver-side resource limit and device-removes (H13).
     let slot_idx = {
         let _tz = tracy_zone!("dx12.submit.acquire_allocator.find");
-        find_recyclable_allocator_slot(pool, start, completed)
+        find_recyclable_allocator_slot(pool, start, completed, &retained_slot_idxs)
     };
+    // #region agent log
+    crate::debug_session_log::write(
+        "H13",
+        "dx12/compute.rs:acquire_allocator_slot",
+        "allocator slot acquisition outcome",
+        &format!(
+            r#"{{"pool_len":{},"recycled":{},"retained_slot_count":{}}}"#,
+            pool.len(),
+            slot_idx.is_some(),
+            retained_slot_idxs.len()
+        ),
+    );
+    // #endregion
     let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
         let _tz = tracy_zone!("dx12.submit.acquire_allocator.reuse");
         let slot = &mut pool[idx];
@@ -827,7 +882,7 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
         };
         pool.push(ComputeAllocatorSlot {
             allocator: new_allocator,
-            fence_value: 0,
+            fence_value: super::tv::CtxTv::ZERO,
             command_list: Some(new_list.clone()),
             retained: false,
             pre_reset: false,
@@ -1258,14 +1313,76 @@ fn record_gpu_command(
                     .collect();
             }
 
+            for (h, usage) in tex_entries {
+                // #region agent log
+                {
+                    let last_layout = scope
+                        .textures()
+                        .read()
+                        .unwrap()
+                        .entries
+                        .get(h)
+                        .map(|ts| format!("{:?}", ts.last_layout));
+                    crate::debug_session_log::write(
+                        "H2",
+                        "dx12/compute.rs:ResourceBarrier",
+                        "recording texture prologue barrier",
+                        &format!(
+                            r#"{{"texture":{},"src_kinds":"{:?}","dst_kinds":"{:?}","last_layout":{}}}"#,
+                            h,
+                            usage.src.kinds,
+                            usage.dst.kinds,
+                            last_layout
+                                .map(|l| format!("\"{}\"", l))
+                                .unwrap_or_else(|| "null".to_string())
+                        ),
+                    );
+                }
+                // #endregion
+            }
             let mut tex_barriers: Vec<D3D12_TEXTURE_BARRIER> = tex_entries
                 .iter()
                 .filter_map(|(h, usage)| {
                     scope.textures().read().unwrap().entries.get(h).map(|ts| {
                         let (tex_sync_after, tex_access_after, tex_layout_after) =
                             texture_barrier_state_for_usage(&usage.dst, ts.is_storage);
+                        let transfer_read = SlotUsageSet {
+                            access: crate::task_graph::NodeAccessUnion::ReadOnly,
+                            kinds: UsageKindFlags::TRANSFER,
+                        };
+                        // Present-easement write barriers (TRANSFER→COMPUTE) must always declare
+                        // copy-source as the before-state: the device-queue present copy read the
+                        // resource as TRANSFER, but `last_layout` still reflects the ctx-queue
+                        // CopyTexture restore (UAV) from the prior frame — log line 2076 proved
+                        // `still_copy_source=false` + `last_layout=UAV` produces `0x887A002B`.
+                        // This branch only matches dst=COMPUTE *write*; CopyTexture's own
+                        // COMPUTE→TRANSFER barriers use a different dst and fall through below.
+                        let still_copy_source = ts.last_layout == D3D12_BARRIER_LAYOUT_COPY_SOURCE;
                         let (tex_sync_before, tex_access_before, tex_layout_before) =
-                            texture_barrier_state_for_layout(ts.last_layout);
+                            if usage.src.kinds.contains(UsageKindFlags::TRANSFER)
+                                && usage.dst.kinds.contains(UsageKindFlags::COMPUTE)
+                                && usage.dst.access.writes()
+                            {
+                                texture_barrier_state_for_usage(&transfer_read, ts.is_storage)
+                            } else if usage.src.kinds.contains(UsageKindFlags::TRANSFER)
+                                && !usage.src.access.writes()
+                                && still_copy_source
+                            {
+                                texture_barrier_state_for_usage(&usage.src, ts.is_storage)
+                            } else {
+                                texture_barrier_state_for_layout(ts.last_layout)
+                            };
+                        // #region agent log
+                        crate::debug_session_log::write(
+                            "H11",
+                            "dx12/compute.rs:ResourceBarrier",
+                            "resolved texture barrier before-state",
+                            &format!(
+                                r#"{{"texture":{},"still_copy_source":{},"last_layout":"{:?}","tex_layout_before":"{:?}"}}"#,
+                                h, still_copy_source, ts.last_layout, tex_layout_before
+                            ),
+                        );
+                        // #endregion
                         (
                             barriers::texture_barrier_full(
                                 &ts.resource,
@@ -1780,20 +1897,21 @@ fn execute_signal_and_finish(
     );
 
     if let Err(e) = unsafe { command_list.Close() } {
-        let diag = scope
+        let msg = scope
             .devices()
             .get(&device_handle)
-            .and_then(|dev| drain_info_queue(&dev.device))
-            .unwrap_or_else(|| "  (no debug-layer messages; enable GOLDY_DX12_DEBUG=1)\n".to_string());
-        return Err(anyhow::anyhow!(
-            "Failed to close command list: {e}\nDebug layer messages:\n{diag}"
-        ));
+            .map(|dev| describe_dx12_failure(&dev.device, "Failed to close command list", &e))
+            .unwrap_or_else(|| format!("Failed to close command list: {e}\n(device handle not found for diag)"));
+        return Err(anyhow::anyhow!(msg));
     }
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
 
     let logical_device = scope.ld();
-    let fence_value = allocate_timeline_value(&logical_device.timeline_next);
+    let fence_value = {
+        let sc = scope.sc.lock().unwrap();
+        sc.allocate_ctx_tv()
+    };
 
     logical_device
         .descriptors
@@ -1848,10 +1966,17 @@ fn execute_signal_and_finish(
                 );
             }
         }
-        sc.last_submitted_seq = fence_value;
     }
 
     let ctx_fence = scope.ctx_fence.clone();
+    let (command_queue, queue_lock, submission_worker) = {
+        let sc_guard = scope.sc.lock().unwrap();
+        (
+            sc_guard.command_queue.clone(),
+            std::sync::Arc::clone(&sc_guard.queue_lock),
+            std::sync::Arc::clone(&sc_guard.submission_worker),
+        )
+    };
 
     {
         let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
@@ -1874,6 +1999,9 @@ fn execute_signal_and_finish(
 
     if let Err(err) = super::pending_submit::enqueue_compute_submit(
         logical_device,
+        command_queue,
+        queue_lock,
+        submission_worker,
         scope.context_fences,
         scope.buffers(),
         scope.sc.clone(),
@@ -1889,20 +2017,25 @@ fn execute_signal_and_finish(
         return Err(err);
     }
 
+    {
+        let mut sc = scope.sc.lock().unwrap();
+        sc.last_submitted_seq = fence_value;
+    }
+
     if let Some(prof) = gpu_profile {
-        scope.sc.lock().unwrap().pending_gpu_profiles.push((fence_value, prof));
+        scope.sc.lock().unwrap().pending_gpu_profiles.push((fence_value.raw(), prof));
     }
 
     {
         let _tz = crate::tracy_zone!("goldy.submit.dx12.staging_finish");
         let mut sc = scope.sc.lock().unwrap();
-        sc.staging_belt.finish(fence_value);
+        sc.staging_belt.finish(fence_value.raw());
         if !staged_texture_entries.is_empty() {
-            sc.texture_staging_pool.release(fence_value, staged_texture_entries);
+            sc.texture_staging_pool.release(fence_value.raw(), staged_texture_entries);
         }
     }
 
-    Ok(fence_value)
+    Ok(fence_value.to_public())
 }
 
 // ---------------------------------------------------------------------------
@@ -1940,10 +2073,10 @@ pub(super) fn submit_with_scope(
     });
     if has_upload {
         let _tz_reclaim = tracy_zone!("dx12.submit.staging_reclaim");
-        let completed = device_retired_for_scope(scope);
+        let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
         let mut sc = scope.sc.lock().unwrap();
         sc.staging_belt.reclaim(ctx_fence)?;
-        sc.texture_staging_pool.reclaim(completed);
+        sc.texture_staging_pool.reclaim(ctx_completed);
     }
 
     let command_list7: ID3D12GraphicsCommandList7 =
@@ -2196,10 +2329,10 @@ pub(super) fn submit_graph_with_scope(
         )
     });
     if has_upload {
-        let completed = device_retired_for_scope(scope);
+        let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
         let mut sc = scope.sc.lock().unwrap();
         sc.staging_belt.reclaim(ctx_fence)?;
-        sc.texture_staging_pool.reclaim(completed);
+        sc.texture_staging_pool.reclaim(ctx_completed);
     }
 
     let command_list7: ID3D12GraphicsCommandList7 =
@@ -2503,6 +2636,78 @@ pub(super) fn submit_graph(
     submit_graph_with_scope(&scope_from_state(state, ctx)?, ctx, commands, retain_key, sync)
 }
 
+/// Record a one-shot command list for cross-submit prologue barriers on retained resubmit.
+fn record_live_sync_prologue_list(
+    scope: &Dx12SubmitScope<'_>,
+    ctx: ContextHandle,
+    prologue: &crate::task_graph::BarrierSet,
+) -> Result<Option<(ID3D12GraphicsCommandList, usize)>> {
+    if prologue.is_empty() {
+        return Ok(None);
+    }
+    let (command_list, slot_idx) = acquire_allocator_slot(scope)?;
+    let command_list7: ID3D12GraphicsCommandList7 = command_list.cast().context("ID3D12GraphicsCommandList7 required")?;
+    let device_handle = scope.device_handle;
+    let logical_device_ref = scope.ld();
+    unsafe {
+        command_list.SetDescriptorHeaps(&[
+            Some(logical_device_ref.cbv_srv_uav_heap.clone()),
+            Some(logical_device_ref.sampler_heap.clone()),
+        ]);
+    }
+    let barrier = GpuCommand::ResourceBarrier {
+        buffers: prologue.buffers.clone(),
+        textures: prologue.textures.clone(),
+    };
+    let mut cmd_ctx = CmdCtx {
+        command_list: &command_list,
+        command_list7: &command_list7,
+        use_global_buffer_barriers: scope.use_global_buffer_barriers,
+        belt_slices: &[],
+        belt_idx: 0,
+        staged_texture_uploads: &[],
+        texture_upload_idx: 0,
+        gpu_profile: &mut None,
+        dispatch_idx: 0,
+        current_compute_pipeline: None,
+        pending_deletions: Vec::new(),
+        frame_table_row: None,
+    };
+    record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, &barrier)?;
+    if let Err(e) = unsafe { command_list.Close() } {
+        let msg = scope
+            .devices()
+            .get(&device_handle)
+            .map(|dev| describe_dx12_failure(&dev.device, "Failed to close live prologue command list", &e))
+            .unwrap_or_else(|| format!("Failed to close live prologue command list: {e}\n(device handle not found for diag)"));
+        return Err(anyhow::anyhow!(msg));
+    }
+    {
+        let mut sc = scope.sc.lock().unwrap();
+        if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
+            slot.in_recording = false;
+            // NOT `pre_reset = true`: that flag means "already `Reset()`'d, hand back as-is",
+            // but this list was just `Close()`'d, not `Reset()`. The caller stamps this slot's
+            // `fence_value` once it knows the tv this command list will be submitted+signaled
+            // under, so the pool only recycles (and properly `Reset()`s) it after that GPU work
+            // actually retires (see H13 fix in `acquire_allocator_slot`).
+        }
+    }
+    // #region agent log
+    crate::debug_session_log::write(
+        "H3",
+        "dx12/compute.rs:record_live_sync_prologue_list",
+        "recorded live prologue CL for retained resubmit",
+        &format!(
+            r#"{{"texture_barriers":{},"buffer_barriers":{}}}"#,
+            prologue.textures.len(),
+            prologue.buffers.len()
+        ),
+    );
+    // #endregion
+    Ok(Some((command_list, slot_idx)))
+}
+
 /// Re-execute a previously retained command list without re-recording.
 ///
 /// Calls `ExecuteCommandLists` on the closed list stored by a prior
@@ -2538,22 +2743,44 @@ pub(super) fn try_resubmit_retained_with_scope(
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast retained command list")?;
 
+    let mut command_lists = Vec::new();
+    let mut prologue_slot_idx: Option<usize> = None;
+    if let Some(s) = sync {
+        if let Some((prologue_cl, p_slot_idx)) = record_live_sync_prologue_list(scope, ctx, &s.prologue)? {
+            command_lists.push(Some(prologue_cl.cast().context("Failed to cast prologue command list")?));
+            prologue_slot_idx = Some(p_slot_idx);
+        }
+    }
+    command_lists.push(Some(cmd_list));
+
     let ctx_fence = scope.ctx_fence.clone();
     let logical_device = scope.ld();
-    let fence_value = allocate_timeline_value(&logical_device.timeline_next);
-
-    logical_device
-        .descriptors
-        .lock()
-        .unwrap()
-        .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
+    let (command_queue, queue_lock, submission_worker) = {
+        let sc_guard = scope.sc.lock().unwrap();
+        (
+            sc_guard.command_queue.clone(),
+            std::sync::Arc::clone(&sc_guard.queue_lock),
+            std::sync::Arc::clone(&sc_guard.submission_worker),
+        )
+    };
+    let fence_value = {
+        let sc = scope.sc.lock().unwrap();
+        sc.allocate_ctx_tv()
+    };
 
     {
         let mut sc = scope.sc.lock().unwrap();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
-        sc.last_submitted_seq = fence_value;
+        // The prologue command list (if any) is submitted in the same `ExecuteCommandLists`
+        // batch and retires under this same `fence_value` — stamp its allocator slot too so
+        // the pool doesn't consider it recyclable before that GPU work actually completes.
+        if let Some(p_idx) = prologue_slot_idx {
+            if let Some(slot) = sc.compute_allocator_pool.get_mut(p_idx) {
+                slot.fence_value = fence_value;
+            }
+        }
     }
 
     {
@@ -2570,17 +2797,25 @@ pub(super) fn try_resubmit_retained_with_scope(
         let _tz = tracy_zone!("dx12.resubmit_retained.enqueue");
         super::pending_submit::enqueue_retained_resubmit(
             logical_device,
+            command_queue,
+            queue_lock,
+            submission_worker,
             scope.context_fences,
             scope.buffers(),
             scope.sc.clone(),
             ctx_fence,
-            vec![Some(cmd_list)],
+            command_lists,
             sync,
             fence_value,
         )?;
     }
 
-    Ok(Some(fence_value))
+    {
+        let mut sc = scope.sc.lock().unwrap();
+        sc.last_submitted_seq = fence_value;
+    }
+
+    Ok(Some(fence_value.to_public()))
 }
 
 pub(super) fn try_resubmit_retained(

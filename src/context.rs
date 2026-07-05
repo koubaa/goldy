@@ -240,6 +240,7 @@ impl Context {
                 let _block = crate::tracy_zone!("context.wait_until.block");
                 wait.block().map_err(|e| self.classify(e))?;
             }
+        } else {
         }
         {
             let _lock = crate::tracy_zone!("context.wait_until.lock");
@@ -339,10 +340,9 @@ impl Context {
     /// Process deferred GPU deletions and reclaim VRAM-ring payloads whose epoch has retired.
     ///
     /// The device-installed deferred VRAM ring ([`Device::vram_allocator`]) is drained
-    /// against [`Device::timeline_retired`] (max completed over all live contexts). Any
-    /// context may call this after a `BoundaryCrossed` signal; defer/release epochs are
-    /// device-global submission sequence values, so `device_retired >= epoch` proves the GPU
-    /// work is done regardless of which context originally submitted the payload.
+    /// against [`Device::timeline_retired`] (device sync-fence progress in device-queue
+    /// timeline space). Device-queue epochs from present copies use this space; per-context
+    /// compute epochs use each context's own fence — see [`Self::gpu_progress`].
     ///
     /// The placement-heap ring is reclaimed against the signal `epoch` itself rather than
     /// `device_retired`. Placement-heap regions are stamped with the exact submission epoch
@@ -373,7 +373,13 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_vram");
-            self.device().vram_allocator().boundary_crossed(retired);
+            let readers = self.device().inner.context_readers.lock().unwrap();
+            self.device().boundary_crossed_deferred(&|ctx| {
+                readers
+                    .get(&ctx)
+                    .map(|r| r.gpu_progress())
+                    .unwrap_or(0)
+            });
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
@@ -415,13 +421,15 @@ impl Context {
     }
 
     pub fn defer_release(&self, epoch: TimelineValue, payload: crate::vram_allocator::DeferredPayload) {
-        self.device().vram_allocator().defer_release(epoch, payload);
+        self.device()
+            .defer_release(self.inner.handle, epoch, payload);
     }
 
     pub fn defer_until<T: Send + 'static>(&self, epoch: TimelineValue, resource: T) {
         let mut payload = crate::vram_allocator::DeferredPayload::new();
         payload.push(resource);
-        self.device().vram_allocator().defer_release(epoch, payload);
+        self.device()
+            .defer_release(self.inner.handle, epoch, payload);
     }
 
     #[doc(hidden)]
@@ -599,7 +607,7 @@ impl Context {
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * Self::DEFAULT_PIPELINE_DEPTH);
             *heap_guard = Some(
-                crate::placement_heap::PlacementHeap::with_capacity(device, cap)
+                crate::placement_heap::PlacementHeap::with_capacity(device, self.backend_handle(), cap)
                     .context("failed to create device placement heap")?,
             );
         }
@@ -821,10 +829,10 @@ mod tests {
         assert_eq!(ctx_b.gpu_progress(), tv);
     }
 
-    /// Deferred payloads are reclaimed when `device_retired` passes their epoch, even if
-    /// another context drives `boundary_crossed` with a lower per-context signal epoch.
+    /// Deferred payloads are reclaimed when any context drives `boundary_crossed` once the
+    /// deferring context's fence has retired past the registered epoch.
     #[test]
-    fn multi_context_deferred_reclamation_uses_device_retired() {
+    fn multi_context_deferred_reclamation_uses_origin_ctx_progress() {
         let device = test_device();
         let ctx_a = device.create_context().unwrap();
         let ctx_b = device.create_context().unwrap();
@@ -833,20 +841,23 @@ mod tests {
         let _tv1 = ctx_a.submit(&mut graph).unwrap();
         let _tv2 = ctx_b.submit(&mut graph).unwrap();
         let tv3 = ctx_a.submit(&mut graph).unwrap();
-        assert_eq!(tv3, 3);
+        assert_eq!(tv3, 2, "per-context timeline: third submit on A is epoch 2");
 
         let alive = std::sync::Arc::new(42u32);
         let weak = std::sync::Arc::downgrade(&alive);
         ctx_a.defer_until(tv3, alive);
 
-        // Context B's latest boundary epoch is 2; per-context progress alone would not drain 3.
-        assert_eq!(ctx_b.gpu_progress(), 2);
-        assert!(device.timeline_retired() >= tv3);
+        assert_eq!(ctx_b.gpu_progress(), 1);
+        assert_eq!(ctx_a.gpu_progress(), tv3);
+        assert!(
+            device.timeline_retired() < tv3,
+            "device timeline must not mirror unrelated context submits"
+        );
 
-        ctx_b.boundary_crossed(2);
+        ctx_b.boundary_crossed(1);
         assert!(
             weak.upgrade().is_none(),
-            "epoch 3 should reclaim when boundary_crossed uses device_retired (>= 3)"
+            "epoch 2 should reclaim when boundary_crossed reads ctx A progress (2)"
         );
     }
 }

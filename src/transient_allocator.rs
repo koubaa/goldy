@@ -250,10 +250,27 @@ impl TransientAllocator for BumpResetAllocator {
             // primitive has already fired). The opposite direction (stale-low read
             // on a poller backend) causes an unnecessary but correct wait of ≤1 ms.
             //
-            // We use device-level primitives here because `tv` may have been
-            // produced by any context on this device, not necessarily one we own.
-            if device.timeline_retired() < tv {
-                device.wait_until_retired(tv).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // `tv` is stamped from the submitting context's compute fence.
+            let retired = device.max_context_gpu_progress();
+            if retired < tv {
+                let ctx_lag = tv.saturating_sub(retired);
+                if ctx_lag > 0 {
+                    // Block until the slowest context on the device catches up — conservative
+                    // when multiple contexts share one bump allocator.
+                    for handle in {
+                        let readers = device.inner.context_readers.lock().unwrap();
+                        readers.keys().copied().collect::<Vec<_>>()
+                    } {
+                        if let Some(progress) = device.context_gpu_progress(handle) {
+                            if progress < tv {
+                                let mut backend = device.inner.backend.lock().unwrap();
+                                backend
+                                    .wait_until(handle, tv)
+                                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -370,7 +387,7 @@ impl HeapTransientAllocator {
 
     /// Return deferred frees whose epoch has retired to the coalescing free list.
     fn reclaim_retired_frees(&mut self, device: &Device) {
-        let progress = device.timeline_retired();
+        let progress = device.max_context_gpu_progress();
         let mut i = 0;
         while i < self.deferred.len() {
             if self.deferred[i].epoch.is_some_and(|epoch| epoch <= progress) {
@@ -751,7 +768,8 @@ mod tests {
         assert_ne!(v2.offset(), v1_off, "epoch not retired — should not reuse");
 
         // Now advance GPU timeline past epoch=5.
-        device.create_context().unwrap().wait_until(5).unwrap();
+        let ctx = device.create_context().unwrap();
+        ctx.wait_until(5).unwrap();
 
         alloc.begin_frame(&device, 0).unwrap();
 
@@ -815,7 +833,8 @@ mod tests {
         assert_ne!(v3.offset(), v1_off, "range should not be reused before epoch retires");
 
         // Advance past epoch=1.
-        device.create_context().unwrap().wait_until(1).unwrap();
+        let ctx = device.create_context().unwrap();
+        ctx.wait_until(1).unwrap();
         alloc.begin_frame(&device, 0).unwrap();
         let v4 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         assert_eq!(v4.offset(), v1_off, "range should be reused after epoch retires");
@@ -884,12 +903,13 @@ mod tests {
         let v1 = alloc.alloc(&device, 1024, Some(4)).unwrap();
         let offset = v1.offset();
         let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
+        let ctx = device.create_context().unwrap();
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         alloc.free(offset, 1024, Some(tv));
         alloc.end_frame(&device, tv);
 
-        device.create_context().unwrap().wait_until(tv).expect("wait");
+        ctx.wait_until(tv).expect("wait");
         alloc.begin_frame(&device, 0).unwrap();
         let v2 = alloc.alloc(&device, 1024, Some(4)).expect("alloc after reclaim");
         assert_eq!(v2.offset(), offset, "freed range should be reused after epoch retires");
@@ -904,10 +924,11 @@ mod tests {
         a.begin_frame(&device, 0).expect("begin 1");
         let _v = a.alloc(&device, 512, Some(4)).expect("alloc");
         let mut graph = crate::task_graph::TaskGraph::new();
-        let tv = device.create_context().unwrap().submit(&mut graph).expect("submit");
+        let ctx = device.create_context().unwrap();
+        let tv = ctx.submit(&mut graph).expect("submit");
 
         a.end_frame(&device, tv);
-        device.create_context().unwrap().wait_until(tv).expect("wait");
+        ctx.wait_until(tv).expect("wait");
         a.begin_frame(&device, 0).expect("begin 2 should not block");
     }
 

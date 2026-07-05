@@ -59,7 +59,8 @@ pub(crate) fn enable_dred_settings() {
                 settings1.SetWatsonDumpEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                 settings1.SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             }
-            tracing::info!("D3D12 DRED enabled (ID3D12DeviceRemovedExtendedDataSettings1)");
+            // warn!, not info!: default `RUST_LOG` filter is "warn"; see process_shared.rs.
+            tracing::warn!("D3D12 DRED enabled (ID3D12DeviceRemovedExtendedDataSettings1)");
             return;
         }
     }
@@ -72,7 +73,7 @@ pub(crate) fn enable_dred_settings() {
                 settings.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                 settings.SetWatsonDumpEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             }
-            tracing::info!("D3D12 DRED enabled (ID3D12DeviceRemovedExtendedDataSettings)");
+            tracing::warn!("D3D12 DRED enabled (ID3D12DeviceRemovedExtendedDataSettings)");
             return;
         }
     }
@@ -114,6 +115,19 @@ pub(crate) fn first_touch_device_removed(
             completed,
             "GPU device removed"
         );
+        // #region agent log
+        crate::debug_session_log::write(
+            "H5",
+            "dx12/diagnostic.rs:first_touch_device_removed",
+            "GPU device removed first touch",
+            &format!(
+                r#"{{"location":"{}","wait_value":{},"completed":{}}}"#,
+                location.replace('"', "\\\""),
+                wait_value,
+                completed
+            ),
+        );
+        // #endregion
         log_dred_on_device_removed(device);
     }
 }

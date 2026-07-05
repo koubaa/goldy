@@ -523,7 +523,7 @@ impl Surface {
         if heap_guard.is_none() {
             let cap = (256 * 1024 * 1024u64).max(alloc_size * GpuContext::DEFAULT_PIPELINE_DEPTH);
             *heap_guard =
-                Some(PlacementHeap::with_capacity(device, cap).context("failed to create context placement heap")?);
+                Some(PlacementHeap::with_capacity(device, self.context.backend_handle(), cap).context("failed to create context placement heap")?);
         }
         let heap = heap_guard.as_mut().unwrap();
 

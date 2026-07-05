@@ -274,10 +274,10 @@ mod tests {
             original_offset,
             "bump should reset to 0 after wait + begin_frame"
         );
-        // Device-global retirement must reach far_epoch (begin_frame wait_until on allocator ctx).
+        // Context retirement must reach far_epoch (begin_frame wait_until on compute fence).
         assert!(
-            device.timeline_retired() >= far_epoch,
-            "begin_frame must have called wait_until to advance device retirement"
+            ctx.gpu_progress() >= far_epoch,
+            "begin_frame must have called wait_until to advance context retirement"
         );
     }
 }

@@ -299,6 +299,7 @@ pub(super) fn enqueue_vulkan_submit(
     let host_observed_waits = sync.map(|s| s.host_observed_waits.clone()).unwrap_or_default();
     let deferred_host_writes = sync.map(|s| s.deferred_host_writes.clone()).unwrap_or_default();
     validate_deferred_host_writes(buffers, &deferred_host_writes)?;
+
     ld.submission_worker.enqueue(
         signal_value,
         Box::new(VulkanQueueSubmitPending {

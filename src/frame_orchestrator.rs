@@ -33,6 +33,8 @@ pub struct RetiredFrame<T> {
 
 struct FrameSlot<T> {
     timeline: Option<TimelineValue>,
+    /// `true` when `timeline` is a device-queue epoch (present/copy); otherwise context submit.
+    timeline_is_device: bool,
     data: T,
 }
 
@@ -209,6 +211,7 @@ impl<T> FrameOrchestrator<T> {
         };
         self.ring.push_back(FrameSlot {
             timeline: Some(tv),
+            timeline_is_device: false,
             data: cleanup,
         });
         self.open = None;
@@ -232,6 +235,7 @@ impl<T> FrameOrchestrator<T> {
         self.expect_open(handle)?;
         self.ring.push_back(FrameSlot {
             timeline: None,
+            timeline_is_device: false,
             data: cleanup,
         });
         self.open = None;
@@ -314,6 +318,7 @@ impl<T> FrameOrchestrator<T> {
         };
         self.ring.push_back(FrameSlot {
             timeline: None,
+            timeline_is_device: false,
             data: cleanup,
         });
         self.open = None;
@@ -341,6 +346,7 @@ impl<T> FrameOrchestrator<T> {
         };
         self.ring.push_back(FrameSlot {
             timeline: None,
+            timeline_is_device: false,
             data: cleanup,
         });
         self.open = None;
@@ -348,10 +354,13 @@ impl<T> FrameOrchestrator<T> {
     }
 
     /// After [`Frame::present`], stamp the most recent surface slot with the returned timeline.
+    ///
+    /// Present timelines retire on the device queue, not the owning context's compute fence.
     pub fn note_presented(&mut self, tv: TimelineValue) {
         if let Some(back) = self.ring.back_mut() {
             if back.timeline.is_none() {
                 back.timeline = Some(tv);
+                back.timeline_is_device = true;
             }
         }
     }
@@ -371,7 +380,14 @@ impl<T> FrameOrchestrator<T> {
                 Some(t) => t,
                 None => self.context.high_water_timeline().max(self.context.gpu_progress()),
             };
-            if self.context.gpu_progress() < timeline {
+            if slot.timeline_is_device {
+                let device = self.context.device();
+                if device.timeline_retired() < timeline {
+                    device
+                        .wait_until_retired(timeline)
+                        .map_err(|e| GoldyError::Backend(anyhow!("{e}")))?;
+                }
+            } else if self.context.gpu_progress() < timeline {
                 self.context.wait_until(timeline)?;
             }
             retire(
@@ -404,23 +420,36 @@ impl<T> FrameOrchestrator<T> {
         F: FnMut(&Device, RetiredFrame<T>) -> Result<(), E>,
     {
         let _tz = tracy_zone!("orchestrator.drain_ring");
-        let mut progress = {
+        let device = self.context.device();
+        let mut ctx_progress = {
             let _pg = tracy_zone!("orchestrator.drain_ring.gpu_progress");
             self.context.gpu_progress()
         };
+        let mut device_progress = device.timeline_retired();
         while let Some(front) = self.ring.front() {
             let done = match front.timeline {
-                Some(tv) => progress >= tv,
+                Some(tv) if front.timeline_is_device => device_progress >= tv,
+                Some(tv) => ctx_progress >= tv,
                 None => false,
             };
             let must_wait = !done && self.ring.len() >= self.max_depth;
             if done || must_wait {
                 let slot = self.ring.pop_front().unwrap();
                 if let Some(tv) = slot.timeline {
-                    if progress < tv && must_wait && !self.skip_ring_gpu_wait {
-                        let _wz = tracy_zone!("orchestrator.wait_gpu");
-                        self.context.wait_until(tv)?;
-                        progress = tv;
+                    if must_wait && !self.skip_ring_gpu_wait {
+                        if slot.timeline_is_device {
+                            if device_progress < tv {
+                                let _wz = tracy_zone!("orchestrator.wait_gpu");
+                                device
+                                    .wait_until_retired(tv)
+                                    .map_err(|e| GoldyError::Backend(anyhow!("{e}")))?;
+                                device_progress = device.timeline_retired().max(tv);
+                            }
+                        } else if ctx_progress < tv {
+                            let _wz = tracy_zone!("orchestrator.wait_gpu");
+                            self.context.wait_until(tv)?;
+                            ctx_progress = self.context.gpu_progress().max(tv);
+                        }
                     }
                 }
                 let timeline = slot.timeline.unwrap_or(0);

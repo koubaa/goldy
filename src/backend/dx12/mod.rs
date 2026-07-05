@@ -50,8 +50,12 @@ mod staging;
 mod submit_session;
 mod surface;
 mod texture;
+mod tv;
 mod types;
 mod utils;
+
+pub(crate) use tv::CtxTv;
+use tv::DeviceTv;
 
 use types::{Dx12State, LogicalDevice};
 
@@ -176,7 +180,9 @@ impl Dx12Backend {
         install_debug_layer_exception_handler();
 
         // Create Slang compiler
-        let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
+        let slang_compiler =
+            Arc::new(crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?);
+        let shader_compile_lock = Arc::new(Mutex::new(()));
 
         let state = Dx12State {
             factory: shared.factory.clone(),
@@ -201,6 +207,7 @@ impl Dx12Backend {
             next_dsv_offset: 0,
             free_dsv_offsets: Vec::new(),
             slang_compiler,
+            shader_compile_lock,
             device_removed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_present_finishes: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
@@ -210,7 +217,7 @@ impl Dx12Backend {
 
     /// Wait for the GPU to finish all work on a device (sync fence path).
     fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
-        let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+        let fence_value = device.device_timeline_next.peek_next().raw();
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
         utils::wait_for_fence_on_device(&device.fence, fence_value, Some(device))
     }
@@ -226,9 +233,7 @@ impl Dx12Backend {
             // fence values. Without this, PendingDeletion::Buffer re-signals the same value
             // that wait_for_gpu already used, violating D3D12's monotonic fence requirement
             // and causing an abnormal process exit (exit code 2173) on teardown.
-            logical_device
-                .timeline_next
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            logical_device.device_timeline_next.bump();
             let fences = self.state.context_fences.read().unwrap();
             logical_device.flush_deletion_queue(&fences);
 
@@ -384,15 +389,26 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             return Ok(None);
         }
         let device_handle = context::context_device(&self.state, ctx);
-        let Some(ld) = self.state.devices.get(&device_handle) else {
+        if !self.state.devices.contains_key(&device_handle) {
             return Ok(None);
+        }
+        let horizon = {
+            let contexts = self.state.contexts.read().unwrap();
+            let sc_arc = contexts.get(&ctx).context("Invalid context handle")?;
+            let h = sc_arc.lock().unwrap().ctx_horizon().raw();
+            h
         };
-        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
         if value == 0 || value > horizon {
             return Ok(None);
         }
+        let submission_worker = {
+            let contexts = self.state.contexts.read().unwrap();
+            let sc_arc = contexts.get(&ctx).context("Invalid context handle")?;
+            let worker = std::sync::Arc::clone(&sc_arc.lock().unwrap().submission_worker);
+            worker
+        };
         Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
-            std::sync::Arc::clone(&ld.submission_worker),
+            submission_worker,
             value,
             horizon,
         )))
@@ -415,22 +431,30 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             .context("Invalid context handle")?
             .1
             .clone();
-        Ok(Some(Box::new(Dx12TimelineBlockingWait { fence, value })))
+        Ok(Some(Box::new(Dx12TimelineBlockingWait {
+            fence,
+            value: CtxTv::from_public(value),
+        })))
     }
 
     fn check_submission_worker_for_context(&self, ctx: ContextHandle) -> Result<()> {
-        let device_handle = self.context_device(ctx);
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            ld.submission_worker.check_error()
-        } else {
-            Ok(())
+        let contexts = self.state.contexts.read().unwrap();
+        if let Some(sc_arc) = contexts.get(&ctx) {
+            sc_arc.lock().unwrap().submission_worker.check_error()?;
         }
+        Ok(())
     }
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            ld.submission_worker.flush()?;
+        {
+            let submission_worker = {
+                let contexts = self.state.contexts.read().unwrap();
+                let sc_arc = contexts.get(&ctx).context("Invalid context handle")?;
+                let worker = std::sync::Arc::clone(&sc_arc.lock().unwrap().submission_worker);
+                worker
+            };
+            submission_worker.flush()?;
         }
         let fence = self
             .state
@@ -465,7 +489,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
                 context::drain_pending_gpu_profiles_up_to(ld, &mut sc, completed);
             }
             let fences = self.state.context_fences.read().unwrap();
-            ld.process_deletion_queue_up_to(value.min(retired), &fences);
+            ld.process_deletion_queue_up_to(retired, &fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
@@ -577,8 +601,9 @@ impl GpuBackend for Dx12Backend {
         &self,
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
+        let sc = std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?);
         Some(std::sync::Arc::new(Dx12ContextTimelineReader {
-            sc: std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?),
+            sc,
         }))
     }
 
@@ -961,34 +986,22 @@ impl GpuBackend for Dx12Backend {
             return Ok(());
         }
         if let Some(ld) = self.state.devices.get(&device) {
+            // Flush every worker so pending ExecuteCommandLists reach the GPU before fence
+            // waits. Per-context workers only track their own [`CtxTv`] queue; device waits
+            // are always on [`DeviceTv`] / the shared device fence.
+            for ctx_handle in context::contexts_on_device(&self.state, device) {
+                let submission_worker = {
+                    let contexts = self.state.contexts.read().unwrap();
+                    let sc_arc = contexts
+                        .get(&ctx_handle)
+                        .context("Invalid context handle during device_wait_until flush")?;
+                    let worker = std::sync::Arc::clone(&sc_arc.lock().unwrap().submission_worker);
+                    worker
+                };
+                submission_worker.flush()?;
+            }
             ld.submission_worker.flush()?;
-            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            if value <= horizon {
-                ld.submission_worker.wait_submitted(value)?;
-            }
-        }
-        let fence = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .values()
-            .filter_map(|sc_arc| {
-                let sc = sc_arc.lock().unwrap();
-                if sc.device == device && sc.last_submitted_seq >= value {
-                    Some(sc.fence.clone())
-                } else {
-                    None
-                }
-            })
-            .next();
-        if let Some(fence) = fence {
-            utils::wait_for_fence(&fence, value)?;
-        } else if context::device_retired(&self.state, device) < value {
-            // Present copies and other device-fence work may not map to a context fence.
-            if let Some(ld) = self.state.devices.get(&device) {
-                utils::wait_for_fence(&ld.fence, value)?;
-            }
+            utils::wait_for_device_fence(&ld.fence, DeviceTv::from_public(value))?;
         }
         Ok(())
     }
@@ -996,7 +1009,7 @@ impl GpuBackend for Dx12Backend {
     fn poll_signals(
         &mut self,
         ctx: ContextHandle,
-        progress: crate::timeline::TimelineValue,
+        _progress: crate::timeline::TimelineValue,
     ) -> Vec<crate::signal::Signal> {
         let device_handle = self.context_device(ctx);
         // Drain any present jobs the submission worker has already executed. This is
@@ -1005,9 +1018,9 @@ impl GpuBackend for Dx12Backend {
         // fence is stamped eagerly at enqueue time (see `schedule_present_on_submission_worker`),
         // so this drain only needs to keep the capacity-only bookkeeping moving.
         surface::drain_pending_present_finishes(&mut self.state);
-        // Present copy/signal uses the device sync fence; per-context `progress` alone
-        // can lag behind `return_fence` values stored in pending_swapchain_returns.
-        let swapchain_retire_progress = progress.max(context::device_retired(&self.state, device_handle));
+        // Present copy/signal uses the device sync fence; swapchain return fences are
+        // [`super::tv::DeviceTv`] values — compare against device-fence progress only.
+        let device_retire = context::device_retired(&self.state, device_handle);
         let signal_queue = self
             .state
             .contexts
@@ -1023,7 +1036,7 @@ impl GpuBackend for Dx12Backend {
                 continue;
             }
             surface.pending_swapchain_returns.retain(|r| {
-                if swapchain_retire_progress >= r.return_fence {
+                if device_retire >= r.return_fence {
                     signal_queue.push(crate::signal::Signal::SwapchainReturned {
                         image_index: r.image_index,
                     });
@@ -1042,7 +1055,7 @@ impl GpuBackend for Dx12Backend {
         let sc_arc = contexts.get(&ctx)?;
         let sc = sc_arc.lock().unwrap();
         let progress = unsafe { sc.fence.GetCompletedValue() };
-        if progress < sc.last_submitted_seq {
+        if progress < sc.last_submitted_seq.raw() {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -1109,15 +1122,23 @@ impl GpuBackend for Dx12Backend {
         timeout_ms: u32,
     ) -> Result<bool> {
         let device_handle = self.context_device(ctx);
-        if let Some(ld) = self.state.devices.get(&device_handle) {
-            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
-            if !ld
-                .submission_worker
-                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
-            {
+        if let Some(_ld) = self.state.devices.get(&device_handle) {
+            let horizon = {
+                let contexts = self.state.contexts.read().unwrap();
+                let sc_arc = contexts.get(&ctx).context("Invalid context handle")?;
+                let h = sc_arc.lock().unwrap().ctx_horizon().raw();
+                h
+            };
+            let submission_worker = {
+                let contexts = self.state.contexts.read().unwrap();
+                let sc_arc = contexts.get(&ctx).context("Invalid context handle")?;
+                let worker = std::sync::Arc::clone(&sc_arc.lock().unwrap().submission_worker);
+                worker
+            };
+            if !submission_worker.wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)? {
                 return Ok(false);
             }
-            ld.submission_worker.check_error()?;
+            submission_worker.check_error()?;
         }
         let fence = self
             .state
@@ -1154,7 +1175,7 @@ impl GpuBackend for Dx12Backend {
                     context::drain_pending_gpu_profiles_up_to(dev, &mut sc, completed);
                 }
                 let fences = self.state.context_fences.read().unwrap();
-                dev.process_deletion_queue_up_to(value.min(retired), &fences);
+                dev.process_deletion_queue_up_to(retired, &fences);
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
                 descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
             }
@@ -1320,6 +1341,23 @@ impl GpuBackend for Dx12Backend {
         sampler::bindless_index(&self.state, sampler_handle)
     }
 
+    fn prepare_shader_stage_precompile(
+        &self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+    ) -> Result<Option<crate::backend::ShaderStagePrecompilePrep>> {
+        shader::prepare_stage_precompile(&self.state, shader, stage)
+    }
+
+    fn store_precompiled_shader_stage(
+        &mut self,
+        shader: ShaderHandle,
+        stage: crate::slang::SlangStage,
+        compiled: crate::slang::CompiledShaderWithReflection,
+    ) -> Result<()> {
+        shader::store_precompiled_stage(&mut self.state, shader, stage, compiled)
+    }
+
     fn create_compute_pipeline(
         &mut self,
         device_handle: DeviceHandle,
@@ -1445,7 +1483,7 @@ impl crate::backend::GpuBackendSubmitSession for Dx12Backend {
 
 struct Dx12TimelineBlockingWait {
     fence: windows::Win32::Graphics::Direct3D12::ID3D12Fence,
-    value: crate::timeline::TimelineValue,
+    value: CtxTv,
 }
 
 /// Blocks until the present-copy job for a flip-model return fence has issued and retired.
@@ -1477,13 +1515,14 @@ struct Dx12ContextTimelineReader {
 
 impl crate::backend::ContextTimelineReader for Dx12ContextTimelineReader {
     fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        unsafe { self.sc.lock().unwrap().fence.GetCompletedValue() }
+        let sc = self.sc.lock().unwrap();
+        unsafe { sc.fence.GetCompletedValue() }
     }
 
     fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
         let sc = self.sc.lock().unwrap();
         let progress = unsafe { sc.fence.GetCompletedValue() };
-        if progress < sc.last_submitted_seq {
+        if progress < sc.last_submitted_seq.raw() {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -1493,11 +1532,12 @@ impl crate::backend::ContextTimelineReader for Dx12ContextTimelineReader {
 
 impl crate::backend::TimelineBlockingWait for Dx12TimelineBlockingWait {
     fn block(self: Box<Self>) -> Result<()> {
-        utils::wait_for_fence(&self.fence, self.value)
+        utils::wait_for_ctx_fence(&self.fence, self.value)?;
+        Ok(())
     }
 
     fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
-        utils::wait_for_fence_timeout(&self.fence, self.value, timeout_ms)
+        utils::wait_for_fence_timeout(&self.fence, self.value.raw(), timeout_ms)
     }
 }
 
@@ -1507,11 +1547,7 @@ struct Dx12DeviceTimelineReader {
 
 impl crate::backend::DeviceTimelineReader for Dx12DeviceTimelineReader {
     fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        use std::sync::atomic::Ordering;
-        let floor = self.ld.retired_floor.load(Ordering::Relaxed);
-        // Device sync fence shares the per-context timeline value space (`timeline_next`).
-        let device_sync = unsafe { self.ld.fence.GetCompletedValue() };
-        floor.max(device_sync)
+        self.ld.device_sync_retired().to_public()
     }
 }
 

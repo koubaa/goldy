@@ -275,6 +275,26 @@ pub trait VramAllocator: Send + Sync {
 /// Crate-internal buffer and texture allocation hooks for [`Device::alloc_buffer`] /
 /// [`Device::alloc_texture`].
 pub(crate) trait VramAllocatorAlloc: VramAllocator {
+    /// Register `payload` for deferred dropping after context `ctx`'s timeline `epoch` retires.
+    fn defer_release_ctx(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        epoch: TimelineValue,
+        payload: DeferredPayload,
+    ) {
+        let _ = ctx;
+        self.defer_release(epoch, payload);
+    }
+
+    /// Reclaim deferred payloads whose origin context has retired past their epoch.
+    fn boundary_crossed_ctx(
+        &self,
+        progress_at: &dyn Fn(crate::backend::ContextHandle) -> TimelineValue,
+    ) -> usize {
+        let _ = progress_at;
+        self.boundary_crossed(0)
+    }
+
     /// Allocate a GPU buffer.
     fn alloc_buffer(
         &self,
@@ -326,12 +346,11 @@ pub(crate) trait VramAllocatorAlloc: VramAllocator {
 ///
 /// **Device-owned ring:** the ring is device-installed and keyed by device-global timeline
 /// epochs from [`crate::context::Context::defer_release`].
-/// [`crate::context::Context::boundary_crossed`] drains entries
-/// when `epoch <= device_retired` (max completed over all live contexts). Any context may
-/// poll boundaries; multi-context deferral is sound under this conservative collapse.
-/// Per-handle last-touch reclamation (tighter than `device_retired`) is a future optimization.
+/// [`crate::context::Context::boundary_crossed`] drains entries when the deferring
+/// context's fence has retired past `epoch`. Any context may poll boundaries; entries
+/// from other contexts are reclaimed when their origin context's progress catches up.
 pub struct DefaultVramAllocator {
-    deferred: Mutex<VecDeque<(TimelineValue, DeferredPayload)>>,
+    deferred: Mutex<VecDeque<(crate::backend::ContextHandle, TimelineValue, DeferredPayload)>>,
     policy: RwLock<Arc<dyn AllocationPolicy>>,
 }
 
@@ -449,6 +468,38 @@ impl VramAllocatorAlloc for DefaultVramAllocator {
         });
         Ok(tex)
     }
+
+    fn defer_release_ctx(
+        &self,
+        ctx: crate::backend::ContextHandle,
+        epoch: TimelineValue,
+        payload: DeferredPayload,
+    ) {
+        if payload.is_empty() {
+            return;
+        }
+        self.deferred.lock().unwrap().push_back((ctx, epoch, payload));
+    }
+
+    fn boundary_crossed_ctx(
+        &self,
+        progress_at: &dyn Fn(crate::backend::ContextHandle) -> TimelineValue,
+    ) -> usize {
+        let mut ring = self.deferred.lock().unwrap();
+        let mut count = 0usize;
+        let mut i = 0;
+        while i < ring.len() {
+            let (ctx, epoch, _) = &ring[i];
+            if *epoch <= progress_at(*ctx) {
+                let (_, _, payload) = ring.remove(i).expect("deferred ring index");
+                drop(payload);
+                count += 1;
+            } else {
+                i += 1;
+            }
+        }
+        count
+    }
 }
 
 impl VramAllocator for DefaultVramAllocator {
@@ -482,28 +533,11 @@ impl VramAllocator for DefaultVramAllocator {
     }
 
     fn defer_release(&self, epoch: TimelineValue, payload: DeferredPayload) {
-        if payload.is_empty() {
-            return;
-        }
-        self.deferred.lock().unwrap().push_back((epoch, payload));
+        VramAllocatorAlloc::defer_release_ctx(self, 0, epoch, payload);
     }
 
     fn boundary_crossed(&self, gpu_progress: TimelineValue) -> usize {
-        let drained: Vec<(TimelineValue, DeferredPayload)> = {
-            let mut ring = self.deferred.lock().unwrap();
-            let mut drained = Vec::new();
-            while let Some((epoch, _)) = ring.front() {
-                if *epoch <= gpu_progress {
-                    drained.push(ring.pop_front().unwrap());
-                } else {
-                    break;
-                }
-            }
-            drained
-        };
-        let count = drained.len();
-        drop(drained);
-        count
+        VramAllocatorAlloc::boundary_crossed_ctx(self, &|_| gpu_progress)
     }
 
     fn has_deferred_payloads(&self) -> bool {
@@ -511,7 +545,7 @@ impl VramAllocator for DefaultVramAllocator {
     }
 
     fn oldest_deferred_epoch(&self) -> Option<TimelineValue> {
-        self.deferred.lock().unwrap().front().map(|(epoch, _)| *epoch)
+        self.deferred.lock().unwrap().front().map(|(_, epoch, _)| *epoch)
     }
 
     fn drain(&self) {

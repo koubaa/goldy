@@ -2,13 +2,13 @@
 //!
 //! Format conversions and helpers.
 
-use super::types::LogicalDevice;
+use super::tv::{CtxTv, DeviceTv};
+use super::types::{LogicalDevice, SharedSubmissionContext};
 use anyhow::{Context, Result};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use windows::Win32::{
     Foundation::{CloseHandle, WAIT_OBJECT_0},
-    Graphics::Direct3D12::{ID3D12CommandList, ID3D12Fence},
+    Graphics::Direct3D12::{ID3D12CommandList, ID3D12CommandQueue, ID3D12Fence},
     System::Threading::{CreateEventA, WaitForSingleObject, INFINITE},
 };
 
@@ -182,46 +182,51 @@ pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADD
 pub(super) fn execute_command_lists_and_signal_device(
     logical_device: &LogicalDevice,
     command_lists: &[Option<ID3D12CommandList>],
-) -> Result<u64> {
+) -> Result<DeviceTv> {
     let queue_lock = Arc::clone(&logical_device.queue_lock);
     let _guard = queue_lock.lock().unwrap();
-    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+    let fence_value = logical_device.device_timeline_next.allocate_device();
     unsafe {
         logical_device.command_queue.ExecuteCommandLists(command_lists);
     }
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal device fence")?;
+    unsafe {
+        logical_device
+            .command_queue
+            .Signal(&logical_device.fence, fence_value.raw())
+    }
+    .context("Failed to signal device fence")?;
     Ok(fence_value)
 }
 
-/// Run `f` while holding the device command queue lock.
+/// Run `f` while holding a command queue lock.
 ///
 /// D3D12 marks the queue parameter of `Wait`/`ExecuteCommandLists`/`Signal` as externally
 /// synchronized; all queue operations must share this lock across threads.
-pub(super) fn with_queue_lock<F, R>(logical_device: &LogicalDevice, f: F) -> Result<R>
+pub(super) fn with_queue_lock<F, R>(queue_lock: &Arc<Mutex<()>>, f: F) -> Result<R>
 where
     F: FnOnce() -> Result<R>,
 {
-    let _guard = logical_device.queue_lock.lock().unwrap();
+    let _guard = queue_lock.lock().unwrap();
     f()
 }
 
 /// GPU-side queue waits, execute, and context-fence signal under a single queue lock.
-/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+/// Caller must pre-allocate `tv` from the submitting context's [`super::types::Dx12SubmissionContext::allocate_ctx_tv`].
 pub(super) fn execute_preallocated_context_submit(
-    logical_device: &LogicalDevice,
+    command_queue: &ID3D12CommandQueue,
+    queue_lock: &Arc<Mutex<()>>,
     ctx_fence: &ID3D12Fence,
     command_lists: &[Option<ID3D12CommandList>],
     queue_waits: &[(ID3D12Fence, u64)],
-    tv: u64,
+    tv: super::tv::CtxTv,
 ) -> Result<()> {
-    with_queue_lock(logical_device, || {
+    with_queue_lock(queue_lock, || {
+        let _tz_outer = crate::tracy_zone!("goldy.submit_worker.dx12.execute_preallocated_context_submit");
         if !queue_waits.is_empty() {
             let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.queue_wait");
             for (fence, value) in queue_waits {
                 unsafe {
-                    logical_device
-                        .command_queue
+                    command_queue
                         .Wait(fence, *value)
                         .context("cross-submit GPU queue Wait")?;
                 }
@@ -229,11 +234,28 @@ pub(super) fn execute_preallocated_context_submit(
         }
         {
             let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
-            unsafe {
-                logical_device.command_queue.ExecuteCommandLists(command_lists);
+            let ctx_completed_before = unsafe { ctx_fence.GetCompletedValue() };
+            if ctx_completed_before > tv.raw() && ctx_completed_before != u64::MAX {
+                // #region agent log
+                crate::debug_session_log::write(
+                    "H14",
+                    "dx12/utils.rs:execute_preallocated_context_submit",
+                    "REWIND_RISK: ctx_fence completed exceeds signal value",
+                    &format!(
+                        r#"{{"ctx_completed":{},"signal_tv":{},"queue_waits_len":{}}}"#,
+                        ctx_completed_before,
+                        tv.raw(),
+                        queue_waits.len()
+                    ),
+                );
+                // #endregion
             }
             unsafe {
-                logical_device.command_queue.Signal(ctx_fence, tv)
+                command_queue.ExecuteCommandLists(command_lists);
+            }
+            unsafe {
+                let _tz_inner = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal.Signal");
+                command_queue.Signal(ctx_fence, tv.raw())
             }
             .context("Failed to signal context fence")?;
         }
@@ -241,61 +263,148 @@ pub(super) fn execute_preallocated_context_submit(
     })
 }
 
-/// Advance a context fence to `retire_tv` after the matching device-fence value has retired.
+/// Advance a context fence after the matching device-fence value has retired.
 ///
 /// Scheduled present work signals the device fence but not the per-context fence. Ledger
 /// settlement (`is_settled` / `wait_until_parcel_ready`) keys off context progress, so
 /// present easement reads would otherwise stall prepare forever while scanout has finished.
+///
+/// This deliberately signals `ctx_fence` from the *context's own* queue (`sc.command_queue`),
+/// not the device-global queue, and serializes the decision + the raw `Signal` call under the
+/// context's own `queue_lock` — the same lock every other submission on this context takes for
+/// its `Signal` on this fence (see [`execute_preallocated_context_submit`]). Two independent
+/// queues calling `Signal` on one fence is inherently racy: D3D12 `Signal` *sets* the value
+/// unconditionally (no max-with-current-value semantics), and GPU completion order across two
+/// queues is not guaranteed to match CPU issue order — so if this ran on the device queue, a
+/// real, larger-valued submission already in flight on the context queue could complete *after*
+/// this catch-up signal, silently rewinding `ctx_fence`'s completed value backwards. Everything
+/// keyed on `GetCompletedValue()` (allocator-slot recycling, deletion-queue draining, ledger
+/// settlement) would then misbehave.
+///
+/// `sc.last_submitted_seq` is bumped synchronously at *enqueue* time for every real submission
+/// (before its actual `ExecuteCommandLists`/`Signal` reaches the GPU via the async submission
+/// worker), so checking it while holding `queue_lock` — the same lock that real submission's
+/// eventual raw call must also acquire — lets us safely skip whenever a real, equal-or-larger
+/// submission has already been enqueued (its own signal will carry `ctx_fence` past `ctx_sync`
+/// once it executes), and otherwise guarantees our smaller value is appended to the queue before
+/// any subsequent larger one can be.
 pub(super) fn sync_context_fence_after_device_retire(
-    logical_device: &LogicalDevice,
+    sc: &SharedSubmissionContext,
     device_fence: &ID3D12Fence,
-    ctx_fence: &ID3D12Fence,
-    retire_tv: u64,
+    device_retire: DeviceTv,
+    ctx_sync: CtxTv,
 ) -> Result<()> {
-    if retire_tv == 0 {
+    if device_retire == DeviceTv::ZERO || ctx_sync == CtxTv::ZERO {
         return Ok(());
     }
-    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    if ctx_completed >= retire_tv {
-        return Ok(());
-    }
-    with_queue_lock(logical_device, || {
-        unsafe {
-            logical_device
-                .command_queue
-                .Wait(device_fence, retire_tv)
-                .context("context fence sync: Wait device fence")?;
-            logical_device
-                .command_queue
-                .Signal(ctx_fence, retire_tv)
-                .context("context fence sync: Signal context fence")?;
+    let queue_lock = Arc::clone(&sc.lock().unwrap().queue_lock);
+    with_queue_lock(&queue_lock, || {
+        let (command_queue, ctx_fence, superseded) = {
+            let sc_guard = sc.lock().unwrap();
+            if ctx_sync.raw() <= sc_guard.last_submitted_seq.raw() {
+                (None, None, true)
+            } else {
+                (Some(sc_guard.command_queue.clone()), Some(sc_guard.fence.clone()), false)
+            }
+        };
+        if superseded {
+            // #region agent log
+            crate::debug_session_log::write(
+                "H12",
+                "dx12/utils.rs:sync_context_fence_after_device_retire",
+                "skipped stale catch-up signal: superseded by an already-enqueued real submission",
+                &format!(r#"{{"ctx_sync":{}}}"#, ctx_sync.raw()),
+            );
+            // #endregion
+            return Ok(());
+        }
+        let command_queue = command_queue.expect("checked above");
+        let ctx_fence = ctx_fence.expect("checked above");
+        let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+        let last_submitted_seq = sc.lock().unwrap().last_submitted_seq.raw();
+        // #region agent log
+        crate::debug_session_log::write(
+            "H14",
+            "dx12/utils.rs:sync_context_fence_after_device_retire",
+            if ctx_completed > ctx_sync.raw() && ctx_completed != u64::MAX {
+                "REWIND_RISK before catch-up signal"
+            } else if ctx_completed < ctx_sync.raw() {
+                "catch-up signal enqueued"
+            } else {
+                "catch-up skipped: ctx_fence already at target"
+            },
+            &format!(
+                r#"{{"ctx_completed":{},"ctx_sync":{},"device_retire":{},"last_submitted_seq":{}}}"#,
+                ctx_completed,
+                ctx_sync.raw(),
+                device_retire.raw(),
+                last_submitted_seq
+            ),
+        );
+        // #endregion
+        if ctx_completed < ctx_sync.raw() {
+            unsafe {
+                command_queue
+                    .Wait(device_fence, device_retire.raw())
+                    .context("context fence sync: Wait device fence")?;
+                command_queue
+                    .Signal(&ctx_fence, ctx_sync.raw())
+                    .context("context fence sync: Signal context fence")?;
+            }
+        }
+        let mut sc_guard = sc.lock().unwrap();
+        if ctx_sync.raw() > sc_guard.last_submitted_seq.raw() {
+            sc_guard.last_submitted_seq = ctx_sync;
         }
         Ok(())
     })
 }
 
 /// Execute command lists and signal the device fence under [`LogicalDevice::queue_lock`].
-/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+/// Caller must pre-allocate `tv` via [`LogicalDevice::allocate_device_tv`].
 pub(super) fn signal_preallocated_device(
     logical_device: &LogicalDevice,
     command_lists: &[Option<ID3D12CommandList>],
-    tv: u64,
+    tv: super::tv::DeviceTv,
 ) -> Result<()> {
-    with_queue_lock(logical_device, || {
+    with_queue_lock(&logical_device.queue_lock, || {
         let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
         unsafe {
             logical_device.command_queue.ExecuteCommandLists(command_lists);
         }
-        unsafe { logical_device.command_queue.Signal(&logical_device.fence, tv) }
-            .context("Failed to signal device fence")?;
+        unsafe {
+            logical_device
+                .command_queue
+                .Signal(&logical_device.fence, tv.raw())
+        }
+        .context("Failed to signal device fence")?;
         Ok(())
     })
+}
+
+/// Set a D3D12 object's debug name so PIX captures and DRED breadcrumb/page-fault dumps show
+/// the same identifier used in Goldy's own diagnostics (e.g. `crate::debug_session_log`
+/// texture/queue/fence handles), instead of an opaque, unnamed resource. Best-effort: naming
+/// failures are swallowed since this is diagnostics-only and must never affect submission.
+pub(super) fn set_resource_debug_name<T: windows::core::Interface>(obj: &T, name: &str) {
+    if let Ok(named) = obj.cast::<Direct3D12::ID3D12Object>() {
+        let hname: windows::core::HSTRING = name.into();
+        let _ = unsafe { named.SetName(&hname) };
+    }
 }
 
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
     wait_for_fence_on_device(fence, value, None)
+}
+
+pub(super) fn wait_for_ctx_fence(fence: &ID3D12Fence, value: CtxTv) -> Result<()> {
+    wait_for_fence(fence, value.raw())
+}
+
+pub(super) fn wait_for_device_fence(fence: &ID3D12Fence, value: DeviceTv) -> Result<()> {
+    wait_for_fence(fence, value.raw())
 }
 
 /// Like [`wait_for_fence`] but logs DRED on first `u64::MAX` when `ld` is provided.

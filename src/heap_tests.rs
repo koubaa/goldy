@@ -494,6 +494,7 @@ mod heap_tests {
 
         // Wait for the first frame and flush.
         ctx.wait_until(timelines[0]).unwrap();
+
         ctx.flush_deferred_deletions();
 
         let oldest_after = ctx.oldest_deferred_epoch();

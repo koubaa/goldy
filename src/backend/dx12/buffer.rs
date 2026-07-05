@@ -418,7 +418,8 @@ pub(super) fn resize(
         .get(&device_handle)
         .context("resize_buffer: invalid device")?;
 
-    let mut deletion_fence_marker = unsafe { logical_device_ro.fence.GetCompletedValue() };
+    let mut deletion_fence_marker =
+        super::tv::DeviceTv::from_public(unsafe { logical_device_ro.fence.GetCompletedValue() });
 
     if old.coherent_readback_mapped.is_some() {
         if let Some(ref rb) = old.coherent_readback {
@@ -568,7 +569,7 @@ pub(super) fn resize(
         unsafe { cmd.Close() }.context("resize_buffer: Close")?;
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-        super::utils::wait_for_fence(&device.fence, fence_value)?;
+        super::utils::wait_for_device_fence(&device.fence, fence_value)?;
         deletion_fence_marker = fence_value;
     } else if !old.is_storage && preserve_contents && copy_len > 0 {
         let mut src: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -1399,11 +1400,18 @@ fn queue_pending_deletion(
 ) {
     if let Some(ctx_h) = ctx_h {
         if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx_h) {
-            sc_arc.lock().unwrap().deletion_queue.queue(last_fence, deletion);
+            sc_arc.lock().unwrap().deletion_queue.queue(
+                super::tv::CtxTv::from_public(last_fence),
+                deletion,
+            );
             return;
         }
     }
-    device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
+    device
+        .deletion_queue
+        .lock()
+        .unwrap()
+        .queue(super::tv::DeviceTv::from_public(last_fence), deletion);
 }
 
 /// Hint unused reserved tiles at/above `offset` (bytes).
@@ -1894,7 +1902,7 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-        super::utils::wait_for_fence(&device.fence, fence_value)?;
+        super::utils::wait_for_device_fence(&device.fence, fence_value)?;
 
         written += this_chunk;
     }
@@ -2039,7 +2047,7 @@ fn standalone_copy_coherent_readback(
 
     let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
     let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-    super::utils::wait_for_fence(&device.fence, fence_value)?;
+    super::utils::wait_for_device_fence(&device.fence, fence_value)?;
 
     Ok(())
 }
@@ -2192,7 +2200,7 @@ pub(super) fn read_to_cpu(
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(copy_list.cast().context("Failed to cast command list")?)];
         let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-        super::utils::wait_for_fence(&device.fence, fence_value)?;
+        super::utils::wait_for_device_fence(&device.fence, fence_value)?;
 
         // Map readback buffer and copy to output
         let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -2333,7 +2341,7 @@ pub(super) fn clear(
 
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd_list.cast().context("Failed to cast command list")?)];
         let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
-        super::utils::wait_for_fence(&device.fence, fence_value)?;
+        super::utils::wait_for_device_fence(&device.fence, fence_value)?;
 
         let removed_reason = unsafe { device.device.GetDeviceRemovedReason() };
         if removed_reason.is_err() {

@@ -2,7 +2,7 @@
 
 use super::barriers;
 use super::types::{Dx12State, PendingDeletion, TextureState};
-use super::utils::{execute_command_lists_and_signal_device, format_to_dxgi, wait_for_fence};
+use super::utils::{execute_command_lists_and_signal_device, format_to_dxgi, wait_for_device_fence};
 use super::{BufferHandle, DeviceHandle, TextureHandle};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
@@ -111,7 +111,7 @@ pub(super) fn init_storage_texture_uav_layout(
 
     let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast init command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
-    super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
+    super::utils::wait_for_device_fence(&logical_device.fence, fence_value)?;
 
     Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
 }
@@ -189,6 +189,10 @@ pub(super) fn create(
 
     // Get texture handle first (needed for registry)
     let handle = state.textures.write().unwrap().alloc_handle();
+    // Named after the same numeric handle used throughout NDJSON debug logging
+    // (`crate::debug_session_log`) and cross-submit hazard tracking, so a DRED page-fault
+    // dump or PIX capture can be matched directly back to "texture <handle>" in the logs.
+    super::utils::set_resource_debug_name(&resource, &format!("Texture#{handle}"));
 
     // Create SRV - use unified resource registry to avoid descriptor heap collisions
     // (textures and buffers share the same CBV/SRV/UAV heap)
@@ -829,7 +833,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
     let logical_device = state.devices.get(&device_handle).unwrap();
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
-    wait_for_fence(&logical_device.fence, fence_value)?;
+    wait_for_device_fence(&logical_device.fence, fence_value)?;
 
     // Release and reclaim the staging entries back to the pool immediately.
     // The GPU is idle for this submission (we just waited), so we can safely destroy them.
@@ -1134,7 +1138,7 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, 
 
     let cmd_list: ID3D12CommandList = command_list.cast().context("Failed to cast command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
-    wait_for_fence(&logical_device.fence, fence_value)?;
+    wait_for_device_fence(&logical_device.fence, fence_value)?;
 
     if let Some(dev) = state.devices.get(&device_handle) {
         // Check for device removal (compute passes may have caused TDR)
@@ -1176,10 +1180,7 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
                 dev.descriptors.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;
             }
-            let last_fence = dev
-                .timeline_next
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_sub(1);
+            let last_fence = dev.device_timeline_next.device_horizon();
             dev.deletion_queue.lock().unwrap().queue(
                 last_fence,
                 PendingDeletion::Texture {

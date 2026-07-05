@@ -5,28 +5,15 @@ use super::{ContextHandle, DeviceHandle};
 use anyhow::{Context as _, Result};
 use windows::Win32::Graphics::Direct3D12::*;
 
-/// Latest device-global seq retired on `device` (max over live context fences, device sync fence, floored).
+/// Latest [`super::tv::DeviceTv`] retired on the device sync fence (present copies, surface
+/// sync, teardown). Does **not** include per-context compute fence progress — those live in
+/// [`super::tv::CtxTv`] space on each context's own fence.
 pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
-    let floor = state
+    let retired = state
         .devices
         .get(&device)
-        .map(|d| d.retired_floor.load(std::sync::atomic::Ordering::Relaxed))
+        .map(|d| d.device_sync_retired().raw())
         .unwrap_or(0);
-    // Use context_fences for a lock-free scan over per-context fence completion values.
-    let fences = state.context_fences.read().unwrap();
-    let max_ctx = fences
-        .values()
-        .filter(|(dev, _)| *dev == device)
-        .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
-        .max()
-        .unwrap_or(0);
-    drop(fences);
-    let device_sync = state
-        .devices
-        .get(&device)
-        .map(|d| unsafe { d.fence.GetCompletedValue() })
-        .unwrap_or(0);
-    let retired = floor.max(max_ctx).max(device_sync);
     if retired == u64::MAX {
         if let Some(ld) = state.devices.get(&device) {
             super::diagnostic::first_touch_device_removed(
@@ -47,12 +34,26 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     let fence: ID3D12Fence = unsafe { ld.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create per-context DX12 fence")?;
 
+    let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+        Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+        Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+        Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+        NodeMask: 0,
+    };
+    let command_queue: ID3D12CommandQueue =
+        unsafe { ld.device.CreateCommandQueue(&queue_desc) }
+            .context("Failed to create per-context DX12 command queue")?;
+    let queue_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let submission_worker = std::sync::Arc::new(crate::backend::submission_worker::SubmissionWorker::new(
+        crate::backend::submission_worker::SUBMISSION_QUEUE_CAPACITY,
+    ));
+
     let compute_initial_allocator: ID3D12CommandAllocator =
         unsafe { ld.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
             .context("Failed to create per-context compute command allocator")?;
     let compute_allocator_pool = vec![super::types::ComputeAllocatorSlot {
         allocator: compute_initial_allocator,
-        fence_value: 0,
+        fence_value: super::tv::CtxTv::ZERO,
         command_list: None,
         retained: false,
         pre_reset: false,
@@ -76,6 +77,11 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);
 
+    // Named so a DRED breadcrumb/page-fault dump or PIX capture can be matched directly back
+    // to this context's handle in `crate::debug_session_log` NDJSON output.
+    super::utils::set_resource_debug_name(&command_queue, &format!("Ctx#{id}.CommandQueue"));
+    super::utils::set_resource_debug_name(&fence, &format!("Ctx#{id}.Fence"));
+
     let frame_table = super::frame_table::init_context(state, device, &ld)?;
 
     // Register the fence in the lock-free index before inserting the context so that
@@ -89,8 +95,12 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         id,
         std::sync::Arc::new(std::sync::Mutex::new(Dx12SubmissionContext {
             device,
+            command_queue,
+            queue_lock,
+            submission_worker,
             fence,
-            last_submitted_seq: 0,
+            timeline_next: super::tv::CtxTimelineNext::new(1),
+            last_submitted_seq: super::tv::CtxTv::ZERO,
             signal_queue,
             fence_shutdown,
             fence_thread,
@@ -99,7 +109,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             retained_graphs: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
-            deletion_queue: super::types::DeletionQueue::new(),
+            deletion_queue: super::types::ContextDeletionQueue::new(),
             pending_gpu_profiles: Vec::new(),
             frame_table,
             reclamation_context: None,
@@ -116,7 +126,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 /// every `sc_arc` just to filter by device would serialize buffer destroys against
 /// unrelated, concurrently-running tests' in-flight GPU waits (see issue: `cargo test`
 /// runs tests in parallel by default, each with its own `Device`/contexts).
-fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHandle> {
+pub(super) fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHandle> {
     let result: Vec<ContextHandle> = state
         .context_fences
         .read()
@@ -179,7 +189,7 @@ pub(super) fn reclamation_barrier(state: &Dx12State, device: DeviceHandle) -> u6
     state
         .devices
         .get(&device)
-        .map(|d| d.timeline_next.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1))
+        .map(|d| d.device_timeline_next.device_horizon().raw())
         .unwrap_or(0)
 }
 
@@ -192,30 +202,38 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
             return;
         };
         let sc = sc_arc.lock().expect("context Mutex poisoned");
-        (sc.device, sc.last_submitted_seq, sc.fence.clone())
+        (
+            sc.device,
+            sc.last_submitted_seq,
+            sc.fence.clone(),
+            std::sync::Arc::clone(&sc.submission_worker),
+        )
     };
-    let (device, last_submitted_seq, ctx_fence) = drain;
-    if let Some(ld) = state.devices.get(&device) {
-        match ld.submission_worker.flush() {
-            Ok(()) if last_submitted_seq > 0 => {
-                if let Err(e) = ld.submission_worker.wait_submitted(last_submitted_seq) {
+    let (device, last_submitted_seq, ctx_fence, submission_worker) = drain;
+    match submission_worker.flush() {
+        Ok(()) if last_submitted_seq.raw() > 0 => {
+            let submitted = submission_worker
+                .submitted_epoch()
+                .load(std::sync::atomic::Ordering::Acquire);
+            let worker_wait = last_submitted_seq.raw().min(submitted);
+            if worker_wait > 0 {
+                if let Err(e) = submission_worker.wait_submitted(worker_wait) {
                     tracing::warn!("context {ctx} destroy: wait_submitted failed: {e:#}");
                 } else {
-                    let submitted = ld
-                        .submission_worker
-                        .submitted_epoch()
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let fence_wait = last_submitted_seq.min(submitted);
+                    let fence_wait = worker_wait;
                     if fence_wait > 0 {
-                        let _ = super::utils::wait_for_fence(&ctx_fence, fence_wait);
+                        let _ = super::utils::wait_for_ctx_fence(
+                            &ctx_fence,
+                            super::tv::CtxTv::from_public(fence_wait),
+                        );
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!("context {ctx} destroy: submission worker flush failed: {e:#}");
-            }
-            Ok(()) => {}
         }
+        Err(e) => {
+            tracing::warn!("context {ctx} destroy: submission worker flush failed: {e:#}");
+        }
+        Ok(()) => {}
     }
 
     // Remove from both maps; the fence index must not outlive the context.
@@ -236,8 +254,11 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
     if let Some(ld) = state.devices.get(&device) {
+        // Preserve device-fence progress after this context's fence is removed from the index.
+        // `retired_floor` is in [`super::tv::DeviceTv`] space — never stamp ctx-fence values here.
+        let device_sync = unsafe { ld.fence.GetCompletedValue() };
         ld.retired_floor
-            .fetch_max(completed, std::sync::atomic::Ordering::Relaxed);
+            .fetch_max(device_sync, std::sync::atomic::Ordering::Relaxed);
     }
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());

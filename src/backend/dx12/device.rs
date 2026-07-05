@@ -382,6 +382,11 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
+    // Named so a DRED breadcrumb/page-fault dump or PIX capture can be matched directly back
+    // to this device's handle in `crate::debug_session_log` NDJSON output.
+    utils::set_resource_debug_name(&command_queue, &format!("Device#{handle}.CommandQueue"));
+    utils::set_resource_debug_name(&fence, &format!("Device#{handle}.Fence"));
+
     let (graphics_pso_blobs, compute_pso_blobs) = dirs::cache_dir().map_or_else(
         || (HashMap::new(), HashMap::new()),
         |cache_root| pso_cache::load_maps(&cache_root.join("goldy").join(format!("dx12_pso_{adapter_id}.bin"))),
@@ -403,7 +408,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             sampler_heap,
             sampler_descriptor_size,
             fence,
-            timeline_next: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            device_timeline_next: std::sync::Arc::new(super::tv::DeviceTimelineNext::new(1)),
             retired_floor: std::sync::atomic::AtomicU64::new(0),
             supports_reserved_buffers,
             tile_heap_pool: std::sync::Mutex::new(if supports_reserved_buffers {
@@ -415,7 +420,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             compute_dispatch_indirect_signature,
             compute_batch_dispatch_signature,
             zero_buffer,
-            deletion_queue: std::sync::Mutex::new(super::types::DeletionQueue::new()),
+            deletion_queue: std::sync::Mutex::new(super::types::DeviceDeletionQueue::new()),
             pending_buffer_gpu_releases: std::sync::Mutex::new(Vec::new()),
             device_removed: std::sync::Arc::clone(&state.device_removed),
             descriptors: std::sync::Arc::new(std::sync::Mutex::new(super::types::DescriptorRegistry::new())),

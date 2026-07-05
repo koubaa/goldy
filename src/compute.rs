@@ -51,6 +51,21 @@ impl ComputePipeline {
     /// Create a new compute pipeline.
     pub fn new(device: &Device, compute_shader: &ShaderModule) -> Result<Self> {
         tracing::debug!("Creating compute pipeline");
+
+        // Pre-warm compilation of the compute shader's bytecode using a dedicated
+        // shader-compilation lock instead of the backend's exclusive per-device lock, so a
+        // slow Slang compile here doesn't stall every other thread's backend calls (submits,
+        // buffer ops, waits, other shader compiles) for the duration of this compile.
+        let precompile_prep = {
+            let backend = device.inner.backend.lock().unwrap();
+            backend.prepare_shader_stage_precompile(compute_shader.handle, crate::slang::SlangStage::Compute)?
+        };
+        if let Some(prep) = precompile_prep {
+            let compiled = prep.compile()?;
+            let mut backend = device.inner.backend.lock().unwrap();
+            backend.store_precompiled_shader_stage(compute_shader.handle, crate::slang::SlangStage::Compute, compiled)?;
+        }
+
         let mut backend = device.inner.backend.lock().unwrap();
 
         let handle = {

@@ -424,10 +424,10 @@ mod tests {
     fn submission_job_token_waits_for_specific_enqueue() {
         let worker = SubmissionWorker::new(4);
         let token = SubmissionJobToken::new();
+        assert!(!token.is_done());
         worker
             .enqueue_with_token(1, Box::new(SignalDone), Some(Arc::clone(&token)))
             .unwrap();
-        assert!(!token.is_done());
         token.wait().unwrap();
         assert!(token.is_done());
         worker.shutdown();

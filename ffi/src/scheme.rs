@@ -235,7 +235,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_with_parcel(
         Ok(n) => n,
         Err(e) => return e,
     };
-    match node.with_parcel(&(*parcel).inner, map_node_access(node_access)) {
+    match node.with_parcel((*parcel).as_parcel(), map_node_access(node_access)) {
         Some(_) => GoldyResult::Ok,
         None => {
             set_last_error("Parcel has no bindless slot for the shader binding");
@@ -452,8 +452,8 @@ pub unsafe extern "C" fn goldy_scheme_grant_read(
         set_last_error("Cannot grant_read while recording a compute node");
         return std::ptr::null_mut();
     }
-    match (*parcel).inner.kind() {
-        ParcelType::Texture => match (*scheme).inner.grant_read_texture(&(*parcel).inner) {
+    match (*parcel).as_parcel().kind() {
+        ParcelType::Texture => match (*scheme).inner.grant_read_texture((*parcel).as_parcel()) {
             Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
                 inner: ReadGrantInner::Texture(grant),
             })),
@@ -462,7 +462,7 @@ pub unsafe extern "C" fn goldy_scheme_grant_read(
                 std::ptr::null_mut()
             }
         },
-        ParcelType::Buffer => match (*scheme).inner.grant_read(&(*parcel).inner) {
+        ParcelType::Buffer => match (*scheme).inner.grant_read((*parcel).as_parcel()) {
             Ok(grant) => Box::into_raw(Box::new(GoldyReadGrant {
                 inner: ReadGrantInner::Buffer(grant),
             })),

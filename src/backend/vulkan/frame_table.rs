@@ -339,16 +339,15 @@ fn prologue_post_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer) {
 
 fn record_table_copies(
     ft: &FrameTableDevice,
-    buffers: &SharedBufferTable,
+    buffer_entries: &HashMap<BufferHandle, BufferState>,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     row: u32,
     copy_u32s: usize,
     copy_selector: bool,
 ) -> Result<()> {
-    let buffers_read = buffers.read().unwrap();
-    let device_table = buffers_read.entries.get(&ft.device_table).context("device table")?;
-    let selector_state = buffers_read.entries.get(&ft.selector).context("selector")?;
+    let device_table = buffer_entries.get(&ft.device_table).context("device table")?;
+    let selector_state = buffer_entries.get(&ft.selector).context("selector")?;
     let row_bytes = (FRAME_TABLE_ROW_STRIDE as u64) * 4;
     let dest_offset = (row as u64) * row_bytes;
     let src_payload = crate::frame_table::staging_row_payload_byte_offset(row);
@@ -441,6 +440,24 @@ fn write_staging_for_submission(
 /// assumes every submission for the context runs on the same FIFO queue so
 /// command buffers retire in submit order and a later prologue cannot clobber
 /// the selector while an earlier buffer's dispatches are still executing.
+/// Like [`record_prologue`], but uses an already-locked buffer table snapshot so
+/// callers holding `buffers.read()` do not re-enter the `RwLock`.
+pub(crate) fn record_prologue_entries(
+    contexts: &SharedContextMap,
+    ctx: super::ContextHandle,
+    frame_table: &FrameTableDevice,
+    buffer_entries: &HashMap<BufferHandle, BufferState>,
+    ld: &LogicalDevice,
+    cmd: vk::CommandBuffer,
+    data: &[u32],
+) -> Result<u32> {
+    let row = write_staging_for_submission(contexts, ctx, frame_table, data)?;
+    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
+    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
+    record_table_copies(frame_table, buffer_entries, ld, cmd, row, copy_u32s, true)?;
+    Ok(row)
+}
+
 pub(crate) fn record_prologue(
     contexts: &SharedContextMap,
     ctx: super::ContextHandle,
@@ -450,11 +467,8 @@ pub(crate) fn record_prologue(
     cmd: vk::CommandBuffer,
     data: &[u32],
 ) -> Result<u32> {
-    let row = write_staging_for_submission(contexts, ctx, frame_table, data)?;
-    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
-    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true)?;
-    Ok(row)
+    let buffers_read = buffers.read().unwrap();
+    record_prologue_entries(contexts, ctx, frame_table, &buffers_read.entries, ld, cmd, data)
 }
 
 /// Refresh the active row in the device-local table without advancing the selector.
@@ -475,7 +489,8 @@ pub(crate) fn sync_table_row_to_device(
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, false)
+    let buffers_read = buffers.read().unwrap();
+    record_table_copies(frame_table, &buffers_read.entries, ld, cmd, row, copy_u32s, false)
 }
 
 /// Lower render commands and build staging for standalone render passes (not graph submit).

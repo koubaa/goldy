@@ -88,6 +88,8 @@ struct CachedTexture {
 /// GPU safety when shapes or placements change.
 pub struct PlacementHeap {
     buffer: Allocation,
+    /// Context that owns transient resources evicted from this heap (for epoch-gated defer).
+    owner_ctx: crate::backend::ContextHandle,
     page_size: u64,
     /// Paged allocation state. Set by [`Self::configure_pages`].
     pages: Option<PagedState>,
@@ -137,7 +139,7 @@ impl PlacementHeap {
     ///
     /// `capacity` is rounded up to `page_size` alignment. The backing buffer is
     /// allocated immediately. Call [`Self::configure_pages`] before [`Self::advance_page`].
-    pub fn new(device: &Device, capacity: u64, page_size: u64) -> Result<Self> {
+    pub fn new(device: &Device, owner_ctx: crate::backend::ContextHandle, capacity: u64, page_size: u64) -> Result<Self> {
         let page_size = page_size.max(256);
         let capacity = round_up(capacity.max(page_size), page_size);
         let buffer = device
@@ -145,6 +147,7 @@ impl PlacementHeap {
             .context("PlacementHeap: failed to allocate backing buffer")?;
         Ok(Self {
             buffer,
+            owner_ctx,
             page_size,
             pages: None,
             view_cache: HashMap::new(),
@@ -155,8 +158,8 @@ impl PlacementHeap {
     }
 
     /// Create with the default page size (4 MiB).
-    pub fn with_capacity(device: &Device, capacity: u64) -> Result<Self> {
-        Self::new(device, capacity, DEFAULT_PAGE_SIZE)
+    pub fn with_capacity(device: &Device, owner_ctx: crate::backend::ContextHandle, capacity: u64) -> Result<Self> {
+        Self::new(device, owner_ctx, capacity, DEFAULT_PAGE_SIZE)
     }
 
     /// Total capacity in bytes.
@@ -371,7 +374,7 @@ impl PlacementHeap {
                     for ct in surplus {
                         payload.push(ct.texture);
                     }
-                    device.defer_release(epoch, payload);
+                    device.defer_release(self.owner_ctx, epoch, payload);
                 }
                 // if no in-flight epoch the textures can be dropped synchronously
             }
@@ -425,7 +428,7 @@ impl PlacementHeap {
                         },
                     );
                     payload.push(old.texture);
-                    device.defer_release(epoch, payload);
+                    device.defer_release(self.owner_ctx, epoch, payload);
                     handles.push(h);
                 } else {
                     // No in-flight work; safe to replace synchronously.
@@ -487,7 +490,7 @@ impl PlacementHeap {
                 }
             }
             if let Some(epoch) = epoch {
-                device.defer_release(epoch, payload);
+                device.defer_release(self.owner_ctx, epoch, payload);
             }
             // if epoch is None all in-flight work is retired; drop synchronously
         }
@@ -554,7 +557,7 @@ impl PlacementHeap {
         if let Some(epoch) = self.max_in_flight_timeline() {
             let mut payload = DeferredPayload::new();
             payload.push(view);
-            device.defer_release(epoch, payload);
+            device.defer_release(self.owner_ctx, epoch, payload);
         }
         // If there is no stamped timeline, no GPU work references this view;
         // dropping synchronously is safe.
@@ -576,10 +579,15 @@ mod tests {
         Device::from_backend(Box::new(MockBackend::new())).unwrap()
     }
 
+    fn test_ctx(device: &Device) -> crate::backend::ContextHandle {
+        device.create_context().unwrap().backend_handle()
+    }
+
     #[test]
     fn grow_increases_capacity() {
         let device = test_device();
-        let mut heap = PlacementHeap::new(&device, 4096, 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::new(&device, ctx, 4096, 1024).unwrap();
         assert_eq!(heap.capacity(), 4096);
 
         heap.grow(&device, 8192).unwrap();
@@ -589,7 +597,8 @@ mod tests {
     #[test]
     fn advance_page_rotates_offsets() {
         let device = test_device();
-        let mut heap = PlacementHeap::new(&device, 4096, 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::new(&device, ctx, 4096, 1024).unwrap();
         heap.configure_pages(1024, 3, &device).unwrap();
 
         assert_eq!(heap.advance_page(), 0);
@@ -605,7 +614,8 @@ mod tests {
     #[test]
     fn transient_view_cache_hit_in_steady_state() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024 * 1024).unwrap();
 
         let specs: Vec<(u32, u64, u32)> = vec![(0, 256, 4), (1, 512, 4), (2, 128, 4)];
         let base_offset = 0u64;
@@ -634,7 +644,8 @@ mod tests {
     #[test]
     fn transient_view_cache_evicts_on_shape_change() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024 * 1024).unwrap();
 
         heap.get_or_create_view(0, 0, 256, 4, &device).unwrap();
         assert_eq!(heap.view_create_count(), 1);
@@ -647,7 +658,8 @@ mod tests {
     #[test]
     fn transient_view_cache_invalidates_on_grow() {
         let device = test_device();
-        let mut heap = PlacementHeap::new(&device, 4 * 1024 * 1024, DEFAULT_PAGE_SIZE).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::new(&device, ctx, 4 * 1024 * 1024, DEFAULT_PAGE_SIZE).unwrap();
 
         heap.get_or_create_view(0, 0, 256, 4, &device).unwrap();
         assert_eq!(heap.view_create_count(), 1);
@@ -663,7 +675,8 @@ mod tests {
     #[test]
     fn transient_view_cache_handles_zero_size() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024 * 1024).unwrap();
 
         let result = heap.get_or_create_view(0, 0, 1, 4, &device);
         assert!(result.is_ok(), "size=1 (minimum) must not panic");
@@ -678,7 +691,8 @@ mod tests {
     #[test]
     fn steady_state_transient_resolution_zero_cost() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024 * 1024).unwrap();
 
         let frame_specs: Vec<(u32, u64, u32)> = vec![(0, 1024, 4), (1, 2048, 4), (2, 512, 4)];
         let offsets: Vec<u64> = vec![0, 1024, 3072];
@@ -715,7 +729,8 @@ mod tests {
     #[test]
     fn transient_texture_cache_hit_in_steady_state() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024 * 1024).unwrap();
 
         let keys = vec![
             TransientTextureKey {
@@ -755,7 +770,8 @@ mod tests {
     #[test]
     fn texture_slot_gate_withholds_until_retired() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024).unwrap();
         heap.configure_pages(1024, 2, &device).unwrap();
 
         let keys = sample_texture_keys();
@@ -802,7 +818,8 @@ mod tests {
     #[test]
     fn texture_slot_gate_concurrent_wraparound_race() {
         let device = test_device();
-        let mut heap = PlacementHeap::with_capacity(&device, 64 * 1024).unwrap();
+        let ctx = test_ctx(&device);
+        let mut heap = PlacementHeap::with_capacity(&device, ctx, 64 * 1024).unwrap();
         heap.configure_pages(1024, 2, &device).unwrap();
 
         let keys = sample_texture_keys();

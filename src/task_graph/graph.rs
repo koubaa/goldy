@@ -2,8 +2,9 @@
 
 use super::analysis;
 use super::cross_submit::{
-    apply_resource_sync_updates, apply_stamp_targets_legacy, prepend_prologue, BufferStampIndex, CrossSubmitScratch,
-    NetAccess, ResourceKey, ResourceKeyMap,
+    apply_resource_sync_updates, apply_stamp_targets_legacy, partition_has_active_read_edges, prepend_prologue,
+    resource_barrier_redundant_with_prologue,
+    BufferStampIndex, CrossSubmitScratch, NetAccess, ResourceKey, ResourceKeyMap,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
@@ -216,6 +217,7 @@ fn backend_submit_standalone(
     let waits_only = sync.map(|s| SubmitSync {
         prologue: Default::default(),
         waits: s.waits.clone(),
+        device_queue_waits: s.device_queue_waits.clone(),
         host_observed_waits: s.host_observed_waits.clone(),
         deferred_host_writes: s.deferred_host_writes.clone(),
     });
@@ -239,7 +241,35 @@ fn graph_commands_with_sync_prologue<'a>(
             };
             let mut v = Vec::with_capacity(1 + commands.len());
             v.push(crate::backend::GraphCommand::Compute(barrier));
-            v.extend_from_slice(commands);
+            let mut skip = 0usize;
+            while skip < commands.len() {
+                if let crate::backend::GraphCommand::Compute(crate::backend::GpuCommand::ResourceBarrier {
+                    buffers,
+                    textures,
+                }) = &commands[skip]
+                {
+                    if resource_barrier_redundant_with_prologue(buffers, textures, &s.prologue) {
+                        // #region agent log
+                        crate::debug_session_log::write(
+                            "H19",
+                            "graph.rs:graph_commands_with_sync_prologue",
+                            "skipped redundant leading ResourceBarrier already covered by cross-submit prologue",
+                            &format!(
+                                r#"{{"cmd_buffers":{},"cmd_textures":{},"prologue_buffers":{},"prologue_textures":{}}}"#,
+                                buffers.len(),
+                                textures.len(),
+                                s.prologue.buffers.len(),
+                                s.prologue.textures.len()
+                            ),
+                        );
+                        // #endregion
+                        skip += 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+            v.extend_from_slice(&commands[skip..]);
             return std::borrow::Cow::Owned(v);
         }
     }
@@ -250,9 +280,54 @@ fn submit_sync_waits_only(sync: Option<&SubmitSync>) -> Option<SubmitSync> {
     sync.map(|s| SubmitSync {
         prologue: Default::default(),
         waits: s.waits.clone(),
+        device_queue_waits: s.device_queue_waits.clone(),
         host_observed_waits: s.host_observed_waits.clone(),
         deferred_host_writes: s.deferred_host_writes.clone(),
     })
+}
+
+/// Retained resubmit replays a CB whose barriers were baked at record time. Loop-carried
+/// WAW hazards must still be enforced on resubmit as ledger queue-waits so overlapping
+/// `SIMULTANEOUS_USE` instances serialize on the GPU. When reader edges remain on the
+/// interaction set, same-context WAR is already ordered by FIFO and must not add a wait.
+fn sync_for_retained_resubmit(
+    sync: Option<&SubmitSync>,
+    ctx: crate::backend::ContextHandle,
+    prior_partition_tv: Option<crate::timeline::TimelineValue>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: Option<&ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>>,
+) -> Option<SubmitSync> {
+    let base = sync?;
+    let mut out = submit_sync_waits_only(Some(base))?;
+    if !base.device_queue_waits.is_empty() {
+        out.prologue = crate::task_graph::cross_submit::present_easement_live_prologue(
+            &base.prologue,
+            &base.device_queue_waits,
+        );
+        // #region agent log
+        crate::debug_session_log::write(
+            "H18",
+            "graph.rs:sync_for_retained_resubmit",
+            "live present-easement prologue for resubmit",
+            &format!(
+                r#"{{"live_texture_barriers":{},"baked_texture_barriers":{},"device_queue_waits":{:?}}}"#,
+                out.prologue.textures.len(),
+                base.prologue.textures.len(),
+                base.device_queue_waits
+            ),
+        );
+        // #endregion
+    }
+    let foreign_reads_active = resource_stamps
+        .map(|stamps| partition_has_active_read_edges(net, stamps))
+        .unwrap_or(false);
+    let promote_waw_wait = !base.prologue.is_empty() && !foreign_reads_active;
+    if promote_waw_wait {
+        if let Some(tv) = prior_partition_tv {
+            out.merge_queue_waits(&[crate::timeline::Epoch { context: ctx, value: tv }]);
+        }
+    }
+    Some(out)
 }
 
 /// Per-scheme submit sidecars relocated from the render thread to the submission worker.
@@ -333,7 +408,24 @@ fn backend_try_resubmit_retained(
         return Ok(None);
     }
     // Prologue is baked into the retained body; host sidecars and cross-context waits stay live.
-    session.try_resubmit_retained(ctx, key, sync)
+    let result = session.try_resubmit_retained(ctx, key, sync);
+    // #region agent log
+    if let Ok(Some(tv)) = &result {
+        let device_waits = sync.map(|s| s.device_queue_waits.as_slice()).unwrap_or(&[]);
+        if !device_waits.is_empty() {
+            crate::debug_session_log::write(
+                "H3",
+                "graph.rs:backend_try_resubmit_retained",
+                "retained resubmit with device_queue_waits (prologue baked in CB)",
+                &format!(
+                    r#"{{"ctx":{},"retain_key":{},"tv":{},"device_queue_waits":{:?}}}"#,
+                    ctx, key, tv, device_waits
+                ),
+            );
+        }
+    }
+    // #endregion
+    result
 }
 
 fn ensure_partition_cache_vecs(entry: &mut CompiledCacheEntry, partition_count: usize) {
@@ -1071,7 +1163,17 @@ pub(crate) fn submit_resolved_ir_and_retain(
 
             if cached_key == Some(merged_fp) {
                 let _tz = crate::tracy_zone!("goldy.resubmit.merged");
-                if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, merged_sync.as_ref())? {
+                let prior_tv = cache.as_ref().unwrap().partition_last_tv[part_idx];
+                let resubmit_sync = sync_for_retained_resubmit(
+                    merged_sync.as_ref(),
+                    ctx,
+                    prior_tv,
+                    &net,
+                    submit_state.map(|s| &s.resource_stamps),
+                );
+                if let Some(tv) =
+                    backend_try_resubmit_retained(session, ctx, merged_fp, resubmit_sync.as_ref())?
+                {
                     last_tv = tv;
                     result.resubmit_hits += 1;
                     record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1155,7 +1257,17 @@ pub(crate) fn submit_resolved_ir_and_retain(
         // Try to resubmit from the retained cache if the fingerprint matches.
         if cached_key == Some(part_fp) {
             let _tz = crate::tracy_zone!("goldy.resubmit.partition");
-            if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, merged_sync.as_ref())? {
+            let prior_tv = cache.as_ref().unwrap().partition_last_tv[part_idx];
+            let resubmit_sync = sync_for_retained_resubmit(
+                merged_sync.as_ref(),
+                ctx,
+                prior_tv,
+                &net,
+                submit_state.map(|s| &s.resource_stamps),
+            );
+            if let Some(tv) =
+                backend_try_resubmit_retained(session, ctx, part_fp, resubmit_sync.as_ref())?
+            {
                 last_tv = tv;
                 result.resubmit_hits += 1;
                 record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1342,7 +1454,17 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
                 if cached_key == Some(merged_fp) {
                     let _tz = crate::tracy_zone!("goldy.resubmit.merged");
-                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, merged_fp, merged.as_ref())? {
+                    let prior_tv = cache.as_ref().unwrap().partition_last_tv[part_idx];
+                    let resubmit_sync = sync_for_retained_resubmit(
+                        merged.as_ref(),
+                        ctx,
+                        prior_tv,
+                        &net,
+                        Some(resource_stamps),
+                    );
+                    if let Some(tv) =
+                        backend_try_resubmit_retained(session, ctx, merged_fp, resubmit_sync.as_ref())?
+                    {
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1482,7 +1604,17 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
                 if already_retained {
                     let _tz = crate::tracy_zone!("goldy.resubmit.present_slot");
-                    if let Some(tv) = backend_try_resubmit_retained(session, ctx, slot_key, merged.as_ref())? {
+                    let prior_tv = cache.as_ref().unwrap().partition_last_tv[part_idx];
+                    let resubmit_sync = sync_for_retained_resubmit(
+                        merged.as_ref(),
+                        ctx,
+                        prior_tv,
+                        &net,
+                        Some(resource_stamps),
+                    );
+                    if let Some(tv) =
+                        backend_try_resubmit_retained(session, ctx, slot_key, resubmit_sync.as_ref())?
+                    {
                         last_tv = tv;
                         result.resubmit_hits += 1;
                         record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1528,7 +1660,17 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
             if cached_key == Some(part_fp) {
                 let _tz = crate::tracy_zone!("goldy.resubmit.partition");
-                if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, merged.as_ref())? {
+                let prior_tv = cache.as_ref().unwrap().partition_last_tv[part_idx];
+                let resubmit_sync = sync_for_retained_resubmit(
+                    merged.as_ref(),
+                    ctx,
+                    prior_tv,
+                    &net,
+                    Some(resource_stamps),
+                );
+                if let Some(tv) =
+                    backend_try_resubmit_retained(session, ctx, part_fp, resubmit_sync.as_ref())?
+                {
                     last_tv = tv;
                     result.resubmit_hits += 1;
                     {

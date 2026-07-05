@@ -4,7 +4,7 @@
 
 use super::barriers;
 use super::types::RenderTargetState;
-use super::utils::{depth_format_to_dxgi, execute_command_lists_and_signal_device, format_to_dxgi, wait_for_fence};
+use super::utils::{depth_format_to_dxgi, execute_command_lists_and_signal_device, format_to_dxgi, wait_for_device_fence};
 use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
 use crate::backend::ContextHandle;
 use crate::backend::RenderCommand;
@@ -501,7 +501,7 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, out
     let cmd_list: ID3D12CommandList = cmd.cast().context("Failed to cast command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     // Wait for copy to complete
-    wait_for_fence(&logical_device.fence, fence_value)?;
+    wait_for_device_fence(&logical_device.fence, fence_value)?;
 
     // Map and copy data
     let mut mapped_data: *mut u8 = std::ptr::null_mut();

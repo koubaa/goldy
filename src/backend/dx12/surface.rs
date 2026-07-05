@@ -34,6 +34,7 @@ use super::types::{
     FrameSync, LogicalDevice, PendingSwapchainReturn, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT,
 };
 use super::utils::{depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device};
+use super::tv::DeviceTv;
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};
 use crate::types::{Color, DepthFormat, TextureFlags, TextureFormat, TextureKind};
@@ -99,6 +100,7 @@ pub(super) fn create(
     for i in 0..MAX_FRAMES_IN_FLIGHT {
         let buffer: ID3D12Resource =
             unsafe { swapchain.GetBuffer(i as u32) }.context("Failed to get swapchain buffer")?;
+        super::utils::set_resource_debug_name(&buffer, &format!("Backbuffer#{i}"));
 
         let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
             let off = state.next_rtv_offset;
@@ -211,7 +213,7 @@ pub(super) fn create(
         frame_sync.push(FrameSync {
             command_list,
             command_allocator,
-            fence_value: 0,
+            fence_value: DeviceTv::ZERO,
             render_pass_submitted: false,
         });
     }
@@ -465,7 +467,7 @@ pub(super) fn acquire(
     // longer in use by the GPU before we reset and reuse them.  With
     // MAX_FRAMES_IN_FLIGHT=2 this is almost always a near-zero stall because
     // roughly two CPU frames have elapsed since the slot was last submitted.
-    if prev_fence > 0 {
+    if prev_fence > DeviceTv::ZERO {
         {
             let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
             let logical_device = state
@@ -478,13 +480,13 @@ pub(super) fn acquire(
                 .and_then(|s| s.acquire_abort.as_ref())
                 .is_some()
             {
-                wait_for_fence_interruptible(&logical_device.fence, prev_fence, state, surface_handle)?;
+                wait_for_fence_interruptible(&logical_device.fence, prev_fence.raw(), state, surface_handle)?;
             } else {
-                wait_for_fence(&logical_device.fence, prev_fence)?;
+                wait_for_fence(&logical_device.fence, prev_fence.raw())?;
             }
         }
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
-            surf.frame_sync[present_slot].fence_value = 0;
+            surf.frame_sync[present_slot].fence_value = DeviceTv::ZERO;
         }
     }
 
@@ -530,6 +532,17 @@ pub(super) fn acquire(
             device_handle,
         )?
     };
+    // #region agent log
+    crate::debug_session_log::write(
+        "H10",
+        "dx12/surface.rs:acquire",
+        "acquired rotated scratch texture for this frame",
+        &format!(
+            r#"{{"tex_handle":{},"present_slot":{},"ctx":{}}}"#,
+            tex_handle, present_slot, ctx
+        ),
+    );
+    // #endregion
 
     {
         let surface = state.surfaces.get_mut(&surface_handle).unwrap();
@@ -591,12 +604,6 @@ pub(super) fn record_gpu_work(
 }
 
 pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<u64> {
-    let device_handle = state
-        .surfaces
-        .get(&frame.surface)
-        .context("Invalid surface handle")?
-        .device_handle;
-
     let pending = {
         let surf = state
             .surfaces
@@ -609,14 +616,15 @@ pub(super) fn submit_frame(state: &mut Dx12State, frame: &FrameToken) -> Result<
         return super::compute::submit(state, frame.context, &pending, None);
     }
 
-    let dev = state
-        .devices
-        .get(&device_handle)
-        .context("Surface's device is invalid")?;
-    Ok(dev
-        .timeline_next
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .saturating_sub(1))
+    // No compute work this frame: return this context's fence progress ([`CtxTv`] space), not
+    // the device-fence horizon ([`DeviceTv`] space).
+    Ok(state
+        .contexts
+        .read()
+        .unwrap()
+        .get(&frame.context)
+        .map(|sc| unsafe { sc.lock().unwrap().fence.GetCompletedValue() })
+        .unwrap_or(0))
 }
 
 /// Get the texture handle for the currently acquired surface frame.
@@ -861,7 +869,7 @@ struct Dx12PresentPlan {
     swapchain: IDXGISwapChain3,
     present_mode: crate::types::PresentMode,
     allow_tearing: bool,
-    existing_fence: u64,
+    existing_fence: DeviceTv,
 }
 
 impl Dx12PresentPlan {
@@ -960,13 +968,19 @@ impl Dx12PresentPlan {
         let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&self.cmd7) };
         {
             let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.close");
-            unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
+            if let Err(e) = unsafe { cmd_gfx.Close() } {
+                return Err(anyhow::anyhow!(super::compute::describe_dx12_failure(
+                    &self.logical_device.device,
+                    "Failed to close present copy command list",
+                    &e
+                )));
+            }
         }
 
         let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
         let copy_tv = {
             let _tz = crate::tracy_zone!("goldy.dx12.present.record_copy.allocate_tv");
-            crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next)
+            self.logical_device.allocate_device_tv().raw()
         };
         Ok((vec![Some(cmd_list)], copy_tv))
     }
@@ -980,9 +994,9 @@ impl Dx12PresentPlan {
             return_fence
         } else {
             self.logical_device
-                .timeline_next
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_sub(1)
+                .device_timeline_next
+                .device_horizon()
+                .raw()
         };
         crate::backend::PresentFinishState {
             frame: self.frame,
@@ -1090,12 +1104,32 @@ pub(super) fn schedule_present_on_submission_worker(
     // here would only cover prior render-pass work, not the in-flight present job — and
     // with lazy finish there is no blocking wait at consume to restore ordering.
     let (return_fence, preallocated_present_tv) = if copy_tv > 0 {
-        (copy_tv, None)
+        let tv = DeviceTv::from_public(copy_tv);
+        (tv, None)
     } else {
-        let present_only_tv =
-            crate::backend::submission_worker::allocate_timeline_value(&plan.logical_device.timeline_next);
+        let present_only_tv = plan.logical_device.allocate_device_tv();
         (present_only_tv, Some(present_only_tv))
     };
+
+    let sc_for_ctx_fence_sync = state.contexts.read().unwrap().get(&frame.context).cloned();
+    let ctx_sync_tv = sc_for_ctx_fence_sync
+        .as_ref()
+        .map(|sc| sc.lock().unwrap().allocate_ctx_tv())
+        .unwrap_or(super::tv::CtxTv::ZERO);
+    // #region agent log
+    crate::debug_session_log::write(
+        "H12",
+        "dx12/surface.rs:schedule_present_on_submission_worker",
+        "allocated ctx_sync_tv for present-copy device-queue wait",
+        &format!(
+            r#"{{"ctx":{},"ctx_sync_tv":{},"copy_tv":{},"scratch_layout_updated":{}}}"#,
+            frame.context,
+            ctx_sync_tv.raw(),
+            copy_tv,
+            scratch_layout_updated
+        ),
+    );
+    // #endregion
 
     // Eagerly stamp the allocator-reuse fence target now, synchronously, instead of
     // waiting for the async present job's completion to flow back through
@@ -1106,7 +1140,7 @@ pub(super) fn schedule_present_on_submission_worker(
     // recording it eagerly means `acquire()` always waits on the correct, fresh target
     // rather than racing a value that only gets refreshed once the job (on TID_SUBMIT)
     // happens to have finished and bookkeeping happens to have run.
-    if return_fence > 0 {
+    if return_fence > DeviceTv::ZERO {
         let issue_token = crate::backend::submission_worker::SubmissionJobToken::new();
         if let Some(surf) = state.surfaces.get_mut(&frame.surface) {
             let slot = &mut surf.frame_sync[frame.present_slot as usize];
@@ -1116,8 +1150,8 @@ pub(super) fn schedule_present_on_submission_worker(
                 "present_slot {} allocator-reuse fence target regressed: {} -> {} \
                  (would let acquire() Reset() a still-in-use command allocator)",
                 frame.present_slot,
-                prev_fence,
-                return_fence,
+                prev_fence.raw(),
+                return_fence.raw(),
             );
             slot.fence_value = return_fence;
             // Eagerly register the flip-slot return so `wait_for_acquire_capacity` can
@@ -1129,7 +1163,7 @@ pub(super) fn schedule_present_on_submission_worker(
             if let Some(existing) = surf
                 .pending_swapchain_returns
                 .iter_mut()
-                .find(|r| r.image_index == image_index && r.return_fence == return_fence)
+                .find(|r| r.image_index == image_index && r.return_fence == return_fence.to_public())
             {
                 if existing.issue_token.is_none() {
                     existing.issue_token = Some(std::sync::Arc::clone(&issue_token));
@@ -1137,27 +1171,22 @@ pub(super) fn schedule_present_on_submission_worker(
             } else {
                 surf.pending_swapchain_returns.push(PendingSwapchainReturn {
                     image_index,
-                    return_fence,
+                    return_fence: return_fence.to_public(),
                     issue_token: Some(std::sync::Arc::clone(&issue_token)),
                 });
             }
         }
 
-        let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
-        let ctx_fence = state
-            .context_fences
-            .read()
-            .unwrap()
-            .get(&frame.context)
-            .map(|(_, fence)| fence.clone());
+        let finish = plan.build_finish_state(return_fence.to_public(), scratch_layout_updated);
         let result = {
             let _tz = crate::tracy_zone!("goldy.dx12.present.enqueue_scheduled_present");
             super::pending_submit::enqueue_scheduled_present(
                 &plan.logical_device,
                 command_lists,
-                copy_tv,
-                ctx_fence,
+                super::tv::DeviceTv::from_public(copy_tv),
+                sc_for_ctx_fence_sync.clone(),
                 return_fence,
+                ctx_sync_tv,
                 plan.swapchain,
                 plan.present_mode,
                 plan.allow_tearing,
@@ -1171,21 +1200,16 @@ pub(super) fn schedule_present_on_submission_worker(
         return Ok(result);
     }
 
-    let finish = plan.build_finish_state(return_fence, scratch_layout_updated);
-    let ctx_fence = state
-        .context_fences
-        .read()
-        .unwrap()
-        .get(&frame.context)
-        .map(|(_, fence)| fence.clone());
+    let finish = plan.build_finish_state(return_fence.to_public(), scratch_layout_updated);
     let result = {
         let _tz = crate::tracy_zone!("goldy.dx12.present.enqueue_scheduled_present");
         super::pending_submit::enqueue_scheduled_present(
             &plan.logical_device,
             command_lists,
-            copy_tv,
-            ctx_fence,
+            super::tv::DeviceTv::from_public(copy_tv),
+            sc_for_ctx_fence_sync,
             return_fence,
+            ctx_sync_tv,
             plan.swapchain,
             plan.present_mode,
             plan.allow_tearing,
@@ -1225,11 +1249,7 @@ fn synthesize_scheduled_present_finish(
         state
             .devices
             .get(&surface.device_handle)
-            .map(|d| {
-                d.timeline_next
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    .saturating_sub(1)
-            })
+            .map(|d| d.device_timeline_next.device_horizon().raw())
             .unwrap_or(return_fence)
     };
     Ok(crate::backend::PresentFinishState {
@@ -1341,7 +1361,7 @@ pub(super) fn apply_scheduled_present_bookkeeping(
         // This is the only call site for flush_swapchain_returns_to_progress. If the
         // copy blit has not retired yet, entries remain in pending_swapchain_returns;
         // poll_signals (mod.rs) is the recovery path — it re-scans those entries against
-        // max(context progress, device_retired()) on every wait_for_acquire_capacity poll.
+        // device_retired() on every wait_for_acquire_capacity poll.
         let device_handle = state
             .surfaces
             .get(&surface_handle)
@@ -1421,8 +1441,9 @@ pub(super) fn finish_present(
     if finish.return_fence > 0 {
         if let Some(surf) = state.surfaces.get_mut(&surface_handle) {
             let prev_fence = surf.frame_sync[present_slot].fence_value;
-            if finish.return_fence > prev_fence {
-                surf.frame_sync[present_slot].fence_value = finish.return_fence;
+            let finish_fence = DeviceTv::from_public(finish.return_fence);
+            if finish_fence > prev_fence {
+                surf.frame_sync[present_slot].fence_value = finish_fence;
             }
         }
     }
@@ -1435,6 +1456,19 @@ pub(super) fn finish_present(
             .entries
             .get_mut(&finish.scratch_texture.expect("scratch texture"))
         {
+            // #region agent log
+            crate::debug_session_log::write(
+                "H9",
+                "dx12/surface.rs:finish_present",
+                "async present-finish overwriting tracked last_layout to UAV",
+                &format!(
+                    r#"{{"texture":{},"ctx":{},"old_last_layout":"{:?}"}}"#,
+                    finish.scratch_texture.expect("scratch texture"),
+                    ctx,
+                    tex.last_layout
+                ),
+            );
+            // #endregion
             tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
         }
     }
@@ -1482,12 +1516,12 @@ struct Dx12PresentGpuWork {
     swapchain: IDXGISwapChain3,
     present_mode: crate::types::PresentMode,
     allow_tearing: bool,
-    existing_fence: u64,
+    existing_fence: DeviceTv,
 }
 
 impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
     fn run(self: Box<Self>) -> Result<crate::backend::PresentFinishState> {
-        let mut return_fence = self.existing_fence;
+        let mut return_fence = self.existing_fence.raw();
         let mut scratch_layout_updated = false;
 
         if self.render_pass_submitted {
@@ -1553,14 +1587,20 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
             unsafe { barriers::barrier_textures(&self.cmd7, &post_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
 
-            unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
+            if let Err(e) = unsafe { cmd_gfx.Close() } {
+                return Err(anyhow::anyhow!(super::compute::describe_dx12_failure(
+                    &self.logical_device.device,
+                    "Failed to close present copy command list",
+                    &e
+                )));
+            }
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-            let tv = crate::backend::submission_worker::allocate_timeline_value(&self.logical_device.timeline_next);
+            let tv = self.logical_device.allocate_device_tv();
             super::pending_submit::enqueue_present_copy(&self.logical_device, vec![Some(cmd_list)], tv)?;
-            self.logical_device.submission_worker.wait_submitted(tv)?;
+            self.logical_device.submission_worker.wait_submitted(tv.raw())?;
             self.logical_device.submission_worker.check_error()?;
-            return_fence = tv;
+            return_fence = tv.raw();
             scratch_layout_updated = true;
         }
 
@@ -1575,9 +1615,9 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
 
         let present_timeline = self
             .logical_device
-            .timeline_next
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(1);
+            .device_timeline_next
+            .device_horizon()
+            .raw();
 
         Ok(crate::backend::PresentFinishState {
             frame: self.frame,
@@ -1742,6 +1782,7 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
                 .GetBuffer(i as u32)
         }
         .context("Failed to get swapchain buffer")?;
+        super::utils::set_resource_debug_name(&buffer, &format!("Backbuffer#{surface_handle}.{i}"));
 
         let rtv_offset = state.free_rtv_offsets.pop().unwrap_or_else(|| {
             let off = state.next_rtv_offset;
@@ -2036,7 +2077,7 @@ fn wait_for_fence_interruptible(
 }
 
 fn wait_for_gpu(device: &LogicalDevice) -> Result<()> {
-    let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+    let fence_value = device.device_timeline_next.peek_next().raw();
     unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
     wait_for_fence(&device.fence, fence_value)
 }

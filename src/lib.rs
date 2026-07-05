@@ -49,6 +49,7 @@ pub mod tracy;
 pub use tracy_client as _tracy_client;
 pub mod allocation_policy;
 mod buffer_alloc_tests;
+mod debug_session_log;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
