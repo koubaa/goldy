@@ -186,12 +186,6 @@ enum class NodeAccess {
     ReadWrite = GOLDY_NODE_ACCESS_READ_WRITE,
 };
 
-enum class ResourceAccess {
-    Read = GOLDY_RESOURCE_ACCESS_READ,
-    Write = GOLDY_RESOURCE_ACCESS_WRITE,
-    ReadWrite = GOLDY_RESOURCE_ACCESS_READ_WRITE,
-};
-
 /**
  * @brief Texture flags for copy and render operations.
  */
@@ -666,15 +660,6 @@ public:
 
     uint64_t unit_byte_size(uint32_t unit) const {
         return goldy_buffer_unit_byte_size(ptr_.get(), unit);
-    }
-
-    uint32_t unit_resource_index(uint32_t unit, ResourceAccess access) const {
-        uint32_t idx = goldy_buffer_unit_resource_index(
-            ptr_.get(), unit, static_cast<GoldyResourceAccess>(access));
-        if (idx == UINT32_MAX) {
-            throw Exception::from_last_error();
-        }
-        return idx;
     }
 
     std::vector<uint8_t> unit_read_to_cpu(uint32_t unit, const Device& device) const {
@@ -1497,25 +1482,22 @@ public:
     ComputeNode(ComputeNode&&) = delete;
     ComputeNode& operator=(ComputeNode&&) = delete;
 
-    ComputeNode& with_parcel(const Parcel& parcel, NodeAccess node_access, ResourceAccess resource_access) {
+    ComputeNode& with_parcel(const Parcel& parcel, NodeAccess node_access) {
         detail::throw_on_result(goldy_scheme_compute_node_with_parcel(
             scheme_.ptr_.get(), parcel.get(),
-            static_cast<GoldyNodeAccess>(node_access),
-            static_cast<GoldyResourceAccess>(resource_access)));
+            static_cast<GoldyNodeAccess>(node_access)));
         return *this;
     }
 
-    ComputeNode& with_field(const Buffer& buffer, uint32_t unit,
-                            NodeAccess node_access, ResourceAccess resource_access) {
+    ComputeNode& with_field(const Buffer& buffer, uint32_t unit, NodeAccess node_access) {
         detail::throw_on_result(goldy_scheme_compute_node_with_field(
             scheme_.ptr_.get(), buffer.get(), unit,
-            static_cast<GoldyNodeAccess>(node_access),
-            static_cast<GoldyResourceAccess>(resource_access)));
+            static_cast<GoldyNodeAccess>(node_access)));
         return *this;
     }
 
-    ComputeNode& with_buffer(const Buffer& buffer, NodeAccess node_access, ResourceAccess resource_access) {
-        return with_field(buffer, 0, node_access, resource_access);
+    ComputeNode& with_buffer(const Buffer& buffer, NodeAccess node_access) {
+        return with_field(buffer, 0, node_access);
     }
 
     ComputeNode& with_param(uint32_t value) {

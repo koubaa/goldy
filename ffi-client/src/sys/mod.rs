@@ -113,14 +113,6 @@ pub unsafe fn goldy_buffer_unit_byte_size(buffer: *const GoldyBuffer, unit: u32)
     (lib().goldy_buffer_unit_byte_size)(buffer, unit)
 }
 
-pub unsafe fn goldy_buffer_unit_resource_index(
-    buffer: *const GoldyBuffer,
-    unit: u32,
-    access: GoldyResourceAccess,
-) -> u32 {
-    (lib().goldy_buffer_unit_resource_index)(buffer, unit, access)
-}
-
 pub unsafe fn goldy_buffer_unit_read_to_cpu(
     buffer: *const GoldyBuffer,
     unit: u32,
@@ -346,9 +338,8 @@ pub unsafe fn goldy_scheme_compute_node_with_parcel(
     scheme: *mut GoldyScheme,
     parcel: *const GoldyParcel,
     node_access: GoldyNodeAccess,
-    resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
-    (lib().goldy_scheme_compute_node_with_parcel)(scheme, parcel, node_access, resource_access)
+    (lib().goldy_scheme_compute_node_with_parcel)(scheme, parcel, node_access)
 }
 
 pub unsafe fn goldy_scheme_compute_node_with_buffer_unit(
@@ -356,9 +347,8 @@ pub unsafe fn goldy_scheme_compute_node_with_buffer_unit(
     buffer: *const GoldyBuffer,
     unit: u32,
     node_access: GoldyNodeAccess,
-    resource_access: GoldyResourceAccess,
 ) -> GoldyResult {
-    (lib().goldy_scheme_compute_node_with_buffer_unit)(scheme, buffer, unit, node_access, resource_access)
+    (lib().goldy_scheme_compute_node_with_buffer_unit)(scheme, buffer, unit, node_access)
 }
 
 pub unsafe fn goldy_scheme_compute_node_with_param(scheme: *mut GoldyScheme, value: u32) -> GoldyResult {

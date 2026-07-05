@@ -21,14 +21,9 @@ pub type FnGoldySchemeReplayStats = unsafe extern "C" fn(*const GoldyScheme, *mu
 pub type FnGoldySchemeComputeNodeBegin =
     unsafe extern "C" fn(*mut GoldyScheme, *const c_char, *const GoldyComputePipeline) -> GoldyResult;
 pub type FnGoldySchemeComputeNodeWithParcel =
-    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyNodeAccess, GoldyResourceAccess) -> GoldyResult;
-pub type FnGoldySchemeComputeNodeWithBufferUnit = unsafe extern "C" fn(
-    *mut GoldyScheme,
-    *const GoldyBuffer,
-    u32,
-    GoldyNodeAccess,
-    GoldyResourceAccess,
-) -> GoldyResult;
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyParcel, GoldyNodeAccess) -> GoldyResult;
+pub type FnGoldySchemeComputeNodeWithBufferUnit =
+    unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer, u32, GoldyNodeAccess) -> GoldyResult;
 pub type FnGoldySchemeRenderPassWithBufferUnit =
     unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer, u32, GoldyNodeAccess) -> GoldyResult;
 pub type FnGoldySchemeGrantRead = unsafe extern "C" fn(*mut GoldyScheme, *const GoldyBuffer) -> *mut GoldyReadGrant;
@@ -181,7 +176,6 @@ pub type FnGoldyBufferDestroy = unsafe extern "C" fn(*mut GoldyBuffer);
 pub type FnGoldyBufferByteSize = unsafe extern "C" fn(*const GoldyBuffer) -> u64;
 pub type FnGoldyBufferUnitCount = unsafe extern "C" fn(*const GoldyBuffer) -> u32;
 pub type FnGoldyBufferUnitByteSize = unsafe extern "C" fn(*const GoldyBuffer, u32) -> u64;
-pub type FnGoldyBufferUnitResourceIndex = unsafe extern "C" fn(*const GoldyBuffer, u32, GoldyResourceAccess) -> u32;
 pub type FnGoldyBufferUnitReadToCpu =
     unsafe extern "C" fn(*const GoldyBuffer, u32, *const GoldyDevice, *mut u8, usize) -> GoldyResult;
 pub type FnGoldyBufferField = unsafe extern "C" fn(*const GoldyBuffer, u32) -> *mut GoldyParcel;

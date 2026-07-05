@@ -4,12 +4,10 @@
 //!
 //! Run with: cargo run --example multi_window
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use goldy::{
-    shaders, write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
-    RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget,
+    NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 mod common;
 
@@ -393,7 +391,9 @@ impl WindowState {
         }
 
         let vertices = create_quad(self.current_time());
-        write_to_parcel(ctx, &self.vertex_parcel, 0, bytemuck::cast_slice(&vertices))?;
+        let mut upload = Scheme::new(ctx);
+        upload.commit_write_parcel(&self.vertex_parcel, 0, bytemuck::cast_slice(&vertices).to_vec())?;
+        upload.submit()?;
 
         let submission = self.scheme.submit()?;
         self.present.consume(&submission)?;

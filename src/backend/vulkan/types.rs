@@ -881,6 +881,8 @@ pub(crate) struct TextureState {
     pub current_layout: AtomicI32,
     /// Sub-allocated from a transient heap; `memory` is shared with the heap.
     pub transient_heap_suballoc: bool,
+    /// Human-readable name from [`Texture::set_debug_name`], for layout diagnostics.
+    pub debug_name: Mutex<Option<String>>,
 }
 
 impl TextureState {
@@ -889,6 +891,23 @@ impl TextureState {
     }
 
     pub fn set_image_layout(&self, layout: vk::ImageLayout) {
+        let old = self.image_layout();
+        if layout != old && layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
+            let name = self
+                .debug_name
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "<unnamed>".to_owned());
+            tracing::warn!(
+                target: "goldy::layout",
+                name = %name,
+                ?old,
+                new = ?layout,
+                image = ?self.image,
+                "texture layout transition"
+            );
+        }
         self.current_layout.store(layout.as_raw(), Ordering::Relaxed);
     }
 }
@@ -1340,6 +1359,9 @@ pub(super) struct VulkanState {
     /// Set to `true` when any Vulkan call returns `VK_ERROR_DEVICE_LOST`.
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_lost: std::sync::atomic::AtomicBool,
+    /// `true` when `VK_EXT_debug_utils` was loaded (i.e. validation layers are
+    /// active).  Guards `set_texture_debug_name` so we never call a null fp.
+    pub enable_validation: bool,
     /// Per-device frame-table GPU resources (selector, device table, upload staging).
     pub frame_tables: HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
 }

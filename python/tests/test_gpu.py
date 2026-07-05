@@ -109,11 +109,9 @@ class TestRetainedPool:
             goldy.BufferKind.SCATTERED,
         )
         ctx = device.create_context()
-        frame = goldy.write_to_parcel(
-            ctx,
-            buffer[0],
-            np.array([1, 2, 3, 4], dtype=np.uint32).tobytes(),
-        )
+        upload = goldy.Scheme(ctx)
+        upload.commit_write_parcel(buffer[0], np.array([1, 2, 3, 4], dtype=np.uint32).tobytes())
+        frame = upload.submit()
         frame.wait(ctx)
 
 
@@ -176,7 +174,7 @@ class TestComputePipeline:
         ctx = device.create_context()
         scheme = goldy.Scheme(ctx)
         scheme.node("fill", pipeline).with_parcel(
-            buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+            buffer[0], goldy.NodeAccess.WRITE
         ).dispatch(1, 1, 1)
         grant = scheme.grant_read(buffer[0])
         frame = scheme.submit()
@@ -213,7 +211,7 @@ class TestComputePipeline:
         ctx = device.create_context()
         scheme = goldy.Scheme(ctx)
         scheme.node("write_tex", pipeline).with_parcel(
-            parcel, goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+            parcel, goldy.NodeAccess.WRITE
         ).dispatch(2, 2, 1)
         grant = scheme.grant_read_texture(parcel)
         frame = scheme.submit()

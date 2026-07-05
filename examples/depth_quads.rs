@@ -5,14 +5,12 @@
 //!
 //! Run with: cargo run --example depth_quads
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use bytemuck::{Pod, Zeroable};
 use goldy::{
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState,
-    DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline,
-    RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, Grant,
+    Instance, Lease, LeaseRenderTarget, NodeAccess, PresentGrant, RenderPipeline, RenderPipelineDesc,
+    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 use std::sync::Arc;
 use winit::{
@@ -219,18 +217,18 @@ impl App {
         }
 
         let ctx = self.ctx.as_ref().unwrap();
-        write_to_parcel(
-            ctx,
+        let mut upload = Scheme::new(ctx);
+        upload.commit_write_parcel(
             self.warm_parcel.as_ref().unwrap(),
             0,
-            bytemuck::cast_slice(&warm_verts),
+            bytemuck::cast_slice(&warm_verts).to_vec(),
         )?;
-        write_to_parcel(
-            ctx,
+        upload.commit_write_parcel(
             self.cool_parcel.as_ref().unwrap(),
             0,
-            bytemuck::cast_slice(&cool_verts),
+            bytemuck::cast_slice(&cool_verts).to_vec(),
         )?;
+        upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
         let submission = scheme.submit()?;

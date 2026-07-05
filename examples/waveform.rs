@@ -4,12 +4,10 @@
 //!
 //! Run with: `cargo run --example waveform`
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use goldy::{
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -226,11 +224,13 @@ impl App {
         ];
         let y_offsets = [0.6, 0.2, -0.2, -0.6];
 
+        let mut upload = Scheme::new(ctx);
         for ch in 0..NUM_CHANNELS {
             let samples = generate_waveform(time, ch);
             let vertices = waveform_to_vertices(&samples, y_offsets[ch], colors[ch]);
-            write_to_parcel(ctx, &channel_parcels[ch], 0, bytemuck::cast_slice(&vertices))?;
+            upload.commit_write_parcel(&channel_parcels[ch], 0, bytemuck::cast_slice(&vertices).to_vec())?;
         }
+        upload.submit()?;
 
         let present = self.present.as_ref().unwrap();
         let submission = scheme.submit()?;

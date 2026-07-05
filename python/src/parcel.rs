@@ -1,7 +1,5 @@
 //! Python wrapper for retained [`goldy::Parcel`].
 
-use crate::error::GoldyError;
-use crate::types::PyResourceAccess;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -45,13 +43,6 @@ impl PyParcel {
     #[getter]
     fn byte_size(&self) -> u64 {
         self.inner.as_parcel().byte_size()
-    }
-
-    fn resource_index(&self, access: PyResourceAccess) -> PyResult<u32> {
-        self.inner
-            .as_parcel()
-            .resource_index(access.into())
-            .ok_or_else(|| GoldyError::new_err("bindless resource index unavailable"))
     }
 
     fn __repr__(&self) -> String {

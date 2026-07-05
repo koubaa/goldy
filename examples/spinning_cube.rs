@@ -4,12 +4,10 @@
 //!
 //! Run with: cargo run --example spinning_cube
 
-#![allow(deprecated)] // write_to_parcel migration deferred
-
 use goldy::{
-    write_to_parcel, Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease,
-    LeaseRenderTarget, NodeAccess, PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
-    RequestAdapterOptions, RetainedPool, Scheme, ShaderModule, SwapchainPool, Vertex2D,
+    Buffer, BufferFlags, BufferKind, Color, DeviceDescriptor, Grant, Instance, Lease, LeaseRenderTarget, NodeAccess,
+    PresentGrant, PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RetainedPool, Scheme,
+    ShaderModule, SwapchainPool, Vertex2D,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -220,12 +218,13 @@ impl App {
         }
 
         let ctx = self.ctx.as_ref().unwrap();
-        write_to_parcel(
-            ctx,
+        let mut upload = Scheme::new(ctx);
+        upload.commit_write_parcel(
             self.vertex_parcel.as_ref().unwrap(),
             0,
-            bytemuck::cast_slice(&vertices),
+            bytemuck::cast_slice(&vertices).to_vec(),
         )?;
+        upload.submit()?;
 
         let scheme = self.scheme.as_mut().unwrap();
         let submission = scheme.submit()?;

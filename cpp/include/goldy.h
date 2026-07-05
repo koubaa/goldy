@@ -41,13 +41,6 @@ typedef enum GoldyResult {
     GOLDY_RESULT_INTERNAL_ERROR = 6,
 } GoldyResult;
 
-// Shader resource binding access (SRV vs UAV).
-typedef enum GoldyResourceAccess {
-    GOLDY_RESOURCE_ACCESS_READ = 0,
-    GOLDY_RESOURCE_ACCESS_WRITE = 1,
-    GOLDY_RESOURCE_ACCESS_READ_WRITE = 2,
-} GoldyResourceAccess;
-
 // Graphics backend type.
 typedef enum GoldyBackendType {
     GOLDY_BACKEND_TYPE_VULKAN = 0,
@@ -335,10 +328,6 @@ enum GoldyResult goldy_buffer_unit_read_to_cpu(const struct GoldyBuffer *buffer,
                                                const struct GoldyDevice *device,
                                                uint8_t *output,
                                                size_t output_size);
-
-uint32_t goldy_buffer_unit_resource_index(const struct GoldyBuffer *buffer,
-                                          uint32_t unit,
-                                          enum GoldyResourceAccess access);
 
 // Clear the last error message.
 void goldy_clear_error(void);
@@ -676,15 +665,13 @@ enum GoldyResult goldy_scheme_compute_node_dispatch(struct GoldyScheme *scheme,
 enum GoldyResult goldy_scheme_compute_node_with_buffer_unit(struct GoldyScheme *scheme,
                                                             const struct GoldyBuffer *buffer,
                                                             uint32_t unit,
-                                                            enum GoldyNodeAccess node_access,
-                                                            enum GoldyResourceAccess resource_access);
+                                                            enum GoldyNodeAccess node_access);
 
 // Bind one field of a partitioned retained buffer to the active compute node.
 enum GoldyResult goldy_scheme_compute_node_with_field(struct GoldyScheme *scheme,
                                                       const struct GoldyBuffer *buffer,
                                                       uint32_t unit,
-                                                      enum GoldyNodeAccess node_access,
-                                                      enum GoldyResourceAccess resource_access);
+                                                      enum GoldyNodeAccess node_access);
 
 // Append one scalar virtual-main parameter for the active compute node.
 //
@@ -701,8 +688,7 @@ enum GoldyResult goldy_scheme_compute_node_with_param(struct GoldyScheme *scheme
 // All pointers must be valid.
 enum GoldyResult goldy_scheme_compute_node_with_parcel(struct GoldyScheme *scheme,
                                                        const struct GoldyParcel *parcel,
-                                                       enum GoldyNodeAccess node_access,
-                                                       enum GoldyResourceAccess resource_access);
+                                                       enum GoldyNodeAccess node_access);
 
 // Copy a scheme-held render target into a present lease drawable.
 //

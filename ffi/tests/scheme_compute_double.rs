@@ -12,8 +12,7 @@ use goldy_ffi::{
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
     goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_parcel, goldy_scheme_create,
     goldy_scheme_destroy, goldy_scheme_grant_read, goldy_scheme_len, goldy_scheme_submission_destroy,
-    goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess,
-    GoldyResourceAccess, GoldyResult,
+    goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -41,7 +40,7 @@ unsafe fn record_compute_node(
     scheme: *mut goldy_ffi::GoldyScheme,
     label: &str,
     pipeline: *const goldy_ffi::GoldyComputePipeline,
-    parcel_bindings: &[(*const goldy_ffi::GoldyParcel, GoldyNodeAccess, GoldyResourceAccess)],
+    parcel_bindings: &[(*const goldy_ffi::GoldyParcel, GoldyNodeAccess)],
     workgroups: (u32, u32, u32),
 ) {
     let label = CString::new(label).unwrap();
@@ -51,9 +50,9 @@ unsafe fn record_compute_node(
         "{}",
         last_ffi_message()
     );
-    for &(parcel, node_access, resource_access) in parcel_bindings {
+    for &(parcel, node_access) in parcel_bindings {
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(scheme, parcel, node_access, resource_access),
+            goldy_scheme_compute_node_with_parcel(scheme, parcel, node_access),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
@@ -120,8 +119,8 @@ fn scheme_compute_double_then_add_ten() {
             "double",
             double_pipeline,
             &[
-                (src_parcel, GoldyNodeAccess::Read, GoldyResourceAccess::ReadWrite),
-                (dst_parcel, GoldyNodeAccess::Write, GoldyResourceAccess::Write),
+                (src_parcel, GoldyNodeAccess::Read),
+                (dst_parcel, GoldyNodeAccess::Write),
             ],
             (1, 1, 1),
         );
@@ -129,7 +128,7 @@ fn scheme_compute_double_then_add_ten() {
             scheme,
             "add_ten",
             add_pipeline,
-            &[(dst_parcel, GoldyNodeAccess::ReadWrite, GoldyResourceAccess::ReadWrite)],
+            &[(dst_parcel, GoldyNodeAccess::ReadWrite)],
             (1, 1, 1),
         );
 

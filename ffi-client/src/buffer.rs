@@ -2,7 +2,6 @@ use crate::device::Device;
 use crate::error::{check, non_null, Result};
 use crate::parcel::Parcel;
 use crate::sys::{self, GoldyBuffer};
-use crate::types::ResourceAccess;
 
 /// Acquired retained GPU buffer (possibly partitioned into bindable units).
 pub struct Buffer {
@@ -24,16 +23,6 @@ impl Buffer {
 
     pub fn unit_byte_size(&self, unit: u32) -> u64 {
         unsafe { sys::goldy_buffer_unit_byte_size(self.ptr, unit) }
-    }
-
-    pub fn unit_resource_index(&self, unit: u32, access: ResourceAccess) -> Result<u32> {
-        let idx = unsafe { sys::goldy_buffer_unit_resource_index(self.ptr, unit, access.into()) };
-        if idx == u32::MAX {
-            return Err(crate::error::GoldyError::from_message(
-                "buffer unit resource index unavailable for requested access",
-            ));
-        }
-        Ok(idx)
     }
 
     pub fn unit_read_to_cpu(&self, unit: u32, device: &Device) -> Result<Vec<u8>> {

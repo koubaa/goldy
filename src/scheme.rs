@@ -599,6 +599,118 @@ impl Scheme {
         Ok(())
     }
 
+    /// Append a zero-fill node for `parcel[offset..offset+size]`.
+    ///
+    /// Mirrors [`crate::TaskGraph::clear_parcel`].
+    pub fn commit_clear_parcel(&mut self, parcel: &Parcel, offset: u64, size: u64) -> Result<(), GoldyError> {
+        self.dirty = true;
+        let buffer = parcel
+            .buffer_handle()
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_clear_parcel: requires a buffer parcel")))?;
+        let abs_offset = match parcel.resource_id() {
+            ResourceId::BufferRange { offset: base, .. } => base + offset,
+            _ => offset,
+        };
+        let clear_size = if size == 0 {
+            parcel.byte_size().saturating_sub(offset)
+        } else {
+            size
+        };
+        self.submit_state.register_parcel_stamp(parcel);
+        self.ir.nodes.push(TaskNode {
+            label: "clear_parcel",
+            bindings: vec![ResourceBinding {
+                resource: parcel.resource_id(),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::ClearBuffer {
+                buffer,
+                offset: abs_offset,
+                size: clear_size,
+            },
+        });
+        Ok(())
+    }
+
+    /// Append a CPU→GPU full-texture upload node.
+    ///
+    /// Mirrors [`crate::TaskGraph::write_texture`].
+    pub fn commit_write_texture(&mut self, texture: &crate::Texture, data: Vec<u8>) -> Result<(), GoldyError> {
+        let expected = texture.byte_size();
+        if data.len() != expected {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "commit_write_texture: expected {} bytes, got {}",
+                expected,
+                data.len()
+            )));
+        }
+        self.dirty = true;
+        let th = texture.gpu_handle();
+        self.ir.nodes.push(TaskNode {
+            label: "write_texture",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(th),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTexture {
+                texture: th,
+                data: std::sync::Arc::from(data),
+                width: texture.width(),
+                height: texture.height(),
+            },
+        });
+        Ok(())
+    }
+
+    /// Append a CPU→GPU partial-texture upload node for a rectangular sub-region.
+    ///
+    /// Mirrors [`crate::TaskGraph::write_texture_region`].
+    pub fn commit_write_texture_region(
+        &mut self,
+        texture: &crate::Texture,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    ) -> Result<(), GoldyError> {
+        let x_end = x
+            .checked_add(width)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: x+width overflow")))?;
+        let y_end = y
+            .checked_add(height)
+            .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("commit_write_texture_region: y+height overflow")))?;
+        if x_end > texture.width() || y_end > texture.height() {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "commit_write_texture_region: {}x{} at ({},{}) exceeds {}x{} texture",
+                width,
+                height,
+                x,
+                y,
+                texture.width(),
+                texture.height()
+            )));
+        }
+        self.dirty = true;
+        let th = texture.gpu_handle();
+        self.ir.nodes.push(TaskNode {
+            label: "write_texture_region",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(th),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::WriteTextureRegion {
+                texture: th,
+                data: std::sync::Arc::from(data),
+                x,
+                y,
+                width,
+                height,
+            },
+        });
+        Ok(())
+    }
+
     /// Append a compute dispatch node to the scheme IR.
     pub(crate) fn commit_compute_dispatch(
         &mut self,
@@ -999,6 +1111,36 @@ impl Scheme {
         });
     }
 
+    /// Copy a texture (UAV-writable parcel) into a present lease drawable.
+    ///
+    /// Analogous to [`TaskGraph::copy_texture_to_swapchain`](crate::TaskGraph::copy_texture_to_swapchain)
+    /// but targets a scheme [`PresentLease`] instead of the task-graph swapchain output.
+    ///
+    /// Record this after all compute nodes that write `src`. The present slot is
+    /// resolved by [`Self::submit`] at acquire time — the same partition-slot-key
+    /// mechanism used by [`Self::copy_to_present`].
+    pub fn copy_texture_to_present(&mut self, src: &crate::Texture, dst: &PresentLease) {
+        self.dirty = true;
+        let src_h = src.handle;
+        self.ir.nodes.push(TaskNode {
+            label: "copy_texture_to_present",
+            bindings: vec![
+                ResourceBinding {
+                    resource: ResourceId::Texture(src_h),
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: ResourceId::PresentLease(dst.id),
+                    access: NodeAccess::Write,
+                },
+            ],
+            kind: NodeKind::CopyTexture {
+                src: src_h,
+                dst: ResourceId::PresentLease(dst.id),
+            },
+        });
+    }
+
     /// Copy an offscreen render target into a texture deed parcel (for CPU readback via
     /// [`Self::grant_read_texture`]).
     ///
@@ -1257,7 +1399,7 @@ impl Scheme {
     }
 }
 
-fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
+pub(crate) fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
     match access {
         NodeAccess::Read => ResourceAccess::Read,
         NodeAccess::Write => ResourceAccess::Write,
@@ -1355,54 +1497,43 @@ impl IntoDispatch for &Parcel {
 }
 
 /// Binding surface for [`SchemeNodeBuilder::with_parcel`]: deeds, acquired buffers, scheme-held
-/// leases, and samplers.
+/// leases, samplers, and textures.
 ///
 /// Returns a `(resource_identity, bindless_slot_index)` pair where:
-/// - `resource_identity` is `Some((ResourceId, ParcelStamp))` for resources that participate in
-///   barrier generation and cross-scheme hazard tracking (buffers, textures). `None` for
-///   barrier-free resources such as samplers, which only need a bindless slot index.
+/// - `resource_identity` is `Some((ResourceId, Option<ParcelStamp>))` for resources that
+///   participate in barrier generation. The stamp is `Some` for resources that also participate in
+///   cross-scheme hazard tracking (buffers, parcel-wrapped textures). It is `None` for resources
+///   that need barriers but carry no stamp, such as [`crate::Texture`] objects. `resource_identity`
+///   is `None` for barrier-free resources such as samplers, which only need a bindless slot.
 /// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
+type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>;
+type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
+
 pub(crate) trait SchemeBindable {
-    fn resolve(
-        &self,
-        scheme: &Scheme,
-        access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>);
+    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult;
 }
 
 impl SchemeBindable for Parcel {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         (
-            Some((self.resource_id(), self.stamp_handle())),
+            Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
         )
     }
 }
 
 impl SchemeBindable for crate::Buffer {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = self.whole();
         (
-            Some((parcel.resource_id(), parcel.stamp_handle())),
+            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
         )
     }
 }
 
 impl<T> SchemeBindable for Lease<T> {
-    fn resolve(
-        &self,
-        scheme: &Scheme,
-        access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = &scheme.leases[self.id.0 as usize];
         // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
         // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
@@ -1410,21 +1541,39 @@ impl<T> SchemeBindable for Lease<T> {
         // This requires a per-scheme "has-been-written" bit per lease slot; deferred until
         // the unique-minimal-write shape-check lands (design §8).
         (
-            Some((parcel.resource_id(), parcel.stamp_handle())),
+            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
             parcel.resource_index(access),
         )
     }
 }
 
 impl SchemeBindable for crate::Sampler {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (Option<(ResourceId, Arc<crate::parcel::ParcelStamp>)>, Option<u32>) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
+    }
+}
+
+impl SchemeBindable for crate::Texture {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
+        // Raw textures participate in barrier generation but carry no ParcelStamp because
+        // they are not parcel-wrapped (e.g. TexturePool-managed). Cross-submit hazard
+        // tracking is handled by frame pipeline depth, matching the classic TaskGraph path.
+        //
+        // `TextureKind::Direct` storage images have no SRV; when a shader slot is reflected
+        // as read-only (ResourceAccess::Read) but the texture only has a UAV descriptor,
+        // fall back to the UAV bindless index — mirroring the TaskGraph path's behaviour in
+        // `collect_bindless_indices_into`.
+        let slot = self.resource_index(access).or_else(|| {
+            if access == ResourceAccess::Read {
+                self.resource_index(ResourceAccess::Write)
+                    .or_else(|| self.resource_index(ResourceAccess::ReadWrite))
+            } else {
+                None
+            }
+        });
+        (Some((ResourceId::Texture(self.handle), None)), slot)
     }
 }
 
@@ -1467,8 +1616,10 @@ impl<'a> SchemeNodeBuilder<'a> {
                  check BufferKind/TextureKind is compatible with NodeAccess"
             );
         });
-        if let Some((resource, stamp)) = resource_identity {
-            self.scheme.submit_state.register_stamp_parts(resource, stamp);
+        if let Some((resource, maybe_stamp)) = resource_identity {
+            if let Some(stamp) = maybe_stamp {
+                self.scheme.submit_state.register_stamp_parts(resource, stamp);
+            }
             self.bindings.push(ResourceBinding { resource, access });
         }
         self.resource_slots.push(slot);
@@ -1773,51 +1924,7 @@ impl<'a> SchemeRenderPassBuilder<'a> {
     }
 }
 
-/// Upload CPU bytes to a buffer parcel without mutating scheme structure.
-///
-/// Performs a standalone GPU write so retained schemes stay clean across frames.
-///
-/// If the parcel was previously referenced by GPU work on `ctx`, this function
-/// waits for that work to complete before issuing the write, preventing a race
-/// between the in-flight GPU read and the incoming CPU upload.
-///
-/// # Deprecation
-///
-/// This function is obsolete. Parcel writes should be expressed as
-/// [`Scheme::commit_write_parcel`] nodes inside the scheme that consumes them.
-/// Schemes do not CPU-stall on submission; the staging belt handles cross-
-/// submission hazards without a blocking wait.
-#[deprecated(
-    since = "0.0.0",
-    note = "use Scheme::commit_write_parcel instead; parcel writes belong inside the scheme that consumes them"
-)]
-pub fn write_to_parcel(ctx: &Context, parcel: &Parcel, offset: u64, data: &[u8]) -> Result<(), GoldyError> {
-    // Ensure the GPU has finished any prior use of this parcel before overwriting it.
-    if let Some(last_tv) = parcel.last_referenced_on(ctx.backend_handle()) {
-        if ctx.gpu_progress() < last_tv {
-            ctx.wait_until(last_tv)?;
-        }
-    }
-
-    let (buffer, _) = parcel.write_buffer_target().map_err(|e| ctx.classify(e))?;
-    let cmd = GpuCommand::WriteBuffer {
-        buffer,
-        offset,
-        data: Arc::from(data.to_vec()),
-    };
-    let tv = {
-        let mut backend = ctx.device().inner.backend.lock().unwrap();
-        backend
-            .submit_standalone(ctx.backend_handle(), &[cmd], None)
-            .map_err(|e| ctx.classify(e))?
-    };
-    ctx.advance_high_water_timeline(tv);
-    parcel.mark_referenced(ctx.backend_handle(), tv);
-    Ok(())
-}
-
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
@@ -3109,111 +3216,6 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             depth,
             scheme.replay_stats()
         );
-    }
-
-    #[test]
-    fn write_to_parcel_does_not_dirty_scheme() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-
-        scheme.submit().expect("initial submit");
-        assert!(!scheme.is_dirty(), "clean after first submit");
-
-        write_to_parcel(&ctx, &parcel, 0, &[1u8; 8]).expect("write_to_parcel");
-        assert!(!scheme.is_dirty(), "write_to_parcel must not dirty the scheme");
-    }
-
-    #[test]
-    fn write_to_parcel_stamps_parcel_reference() {
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let parcel = pool
-            .acquire_buffer(
-                32,
-                crate::types::BufferKind::Scattered,
-                None,
-                crate::types::BufferFlags::empty(),
-                None,
-            )
-            .expect("parcel");
-
-        let before = parcel.last_referenced_on(ctx.backend_handle());
-        assert!(before.is_none(), "fresh parcel has no stamp");
-
-        write_to_parcel(&ctx, &parcel, 0, &[0u8; 8]).expect("write");
-        let after = parcel.last_referenced_on(ctx.backend_handle());
-        assert!(after.is_some(), "write_to_parcel must stamp last_referenced_on");
-        assert!(after.unwrap() > 0, "stamp must be a non-zero timeline value");
-    }
-
-    #[test]
-    fn write_to_parcel_round_trips_data() {
-        // write_to_parcel must cause a WriteBuffer command to be dispatched.
-        // We verify indirectly: the parcel's reference epoch advances only
-        // after write_to_parcel is called, confirming a submit occurred.
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let parcel = pool
-            .acquire_buffer(
-                32,
-                crate::types::BufferKind::Scattered,
-                None,
-                crate::types::BufferFlags::empty(),
-                None,
-            )
-            .expect("parcel");
-
-        let tv_before = parcel.last_referenced_on(ctx.backend_handle());
-        write_to_parcel(&ctx, &parcel, 0, &[0xABu8; 8]).expect("write");
-        let tv_after = parcel.last_referenced_on(ctx.backend_handle());
-
-        assert!(
-            tv_after > tv_before,
-            "timeline must advance after write_to_parcel; before={tv_before:?} after={tv_after:?}"
-        );
-    }
-
-    #[test]
-    fn write_to_parcel_waits_for_prior_gpu_reference() {
-        // Verify that write_to_parcel waits when the parcel's last GPU reference is
-        // still in flight, preventing a write-after-read hazard.
-        let device = mock_device();
-        let mut pool = RetainedPool::new(device.clone());
-        let ctx = device.create_context().unwrap();
-        let (mut scheme, parcel) = recording_scheme_with_parcel(&device, &mut pool, &ctx);
-
-        let _frame = scheme.submit().expect("submit");
-        let tv = parcel.last_referenced_on(ctx.backend_handle()).expect("stamped");
-        assert!(tv > 0, "parcel must be stamped after submit");
-
-        let wait_before = {
-            let backend = device.inner.backend.lock().unwrap();
-            backend.test_wait_until_count()
-        };
-
-        write_to_parcel(&ctx, &parcel, 0, &[0u8; 8]).expect("write after submit");
-
-        let wait_after = {
-            let backend = device.inner.backend.lock().unwrap();
-            backend.test_wait_until_count()
-        };
-
-        if ctx.gpu_progress() < tv {
-            assert_eq!(
-                wait_after,
-                wait_before + 1,
-                "write_to_parcel must wait when the prior GPU reference is still in flight"
-            );
-        } else {
-            assert_eq!(
-                wait_after, wait_before,
-                "write_to_parcel must skip wait when GPU progress already covers the stamp"
-            );
-        }
     }
 
     #[test]

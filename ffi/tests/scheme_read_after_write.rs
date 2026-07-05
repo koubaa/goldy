@@ -13,7 +13,7 @@ use goldy_ffi::{
     goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
     goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_parcel, goldy_scheme_create,
     goldy_scheme_destroy, goldy_scheme_grant_read, goldy_scheme_submission_destroy, goldy_scheme_submit,
-    goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResourceAccess, GoldyResult,
+    goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -75,23 +75,13 @@ fn scheme_read_after_acquire_then_copy() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(
-                scheme,
-                src_parcel,
-                GoldyNodeAccess::Read,
-                GoldyResourceAccess::ReadWrite
-            ),
+            goldy_scheme_compute_node_with_parcel(scheme, src_parcel, GoldyNodeAccess::Read,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_parcel(
-                scheme,
-                dst_parcel,
-                GoldyNodeAccess::Write,
-                GoldyResourceAccess::Write
-            ),
+            goldy_scheme_compute_node_with_parcel(scheme, dst_parcel, GoldyNodeAccess::Write,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

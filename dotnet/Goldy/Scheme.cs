@@ -166,11 +166,11 @@ public sealed class SchemeComputeNodeScope : IDisposable
 
     internal SchemeComputeNodeScope(Scheme scheme) => _scheme = scheme;
 
-    public SchemeComputeNodeScope WithParcel(Parcel parcel, NodeAccess nodeAccess, ResourceAccess resourceAccess)
+    public SchemeComputeNodeScope WithParcel(Parcel parcel, NodeAccess nodeAccess)
     {
         EnsureOpen();
         var result = NativeMethods.SchemeComputeNodeWithParcel(
-            _scheme.Handle, parcel.Handle, nodeAccess, resourceAccess);
+            _scheme.Handle, parcel.Handle, nodeAccess);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme compute_node_with_parcel");
         return this;
@@ -179,13 +179,12 @@ public sealed class SchemeComputeNodeScope : IDisposable
     public SchemeComputeNodeScope WithField(
         Buffer buffer,
         uint unit,
-        NodeAccess nodeAccess,
-        ResourceAccess resourceAccess)
+        NodeAccess nodeAccess)
     {
         EnsureOpen();
         ArgumentNullException.ThrowIfNull(buffer);
         var result = NativeMethods.SchemeComputeNodeWithField(
-            _scheme.Handle, buffer.Handle, unit, nodeAccess, resourceAccess);
+            _scheme.Handle, buffer.Handle, unit, nodeAccess);
         if (result != GoldyResult.Ok)
             throw GoldyException.FromLastError("Scheme compute_node_with_field");
         return this;
@@ -194,9 +193,8 @@ public sealed class SchemeComputeNodeScope : IDisposable
     public SchemeComputeNodeScope WithBufferUnit(
         Buffer buffer,
         uint unit,
-        NodeAccess nodeAccess,
-        ResourceAccess resourceAccess) =>
-        WithField(buffer, unit, nodeAccess, resourceAccess);
+        NodeAccess nodeAccess) =>
+        WithField(buffer, unit, nodeAccess);
 
     public SchemeComputeNodeScope WithParam(uint value)
     {

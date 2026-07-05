@@ -16,7 +16,7 @@ use goldy_ffi::{
     goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline, goldy_scheme_render_pass_with_field,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
     goldy_shader_create, goldy_shader_destroy, GoldyColor, GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc,
-    GoldyResourceAccess, GoldyResult, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
+    GoldyResult, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
 
@@ -134,25 +134,13 @@ fn scheme_game_of_life_hybrid_simulate_and_render() {
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_field(
-                scheme,
-                cells,
-                SLOT_A,
-                GoldyNodeAccess::Read,
-                GoldyResourceAccess::ReadWrite,
-            ),
+            goldy_scheme_compute_node_with_field(scheme, cells, SLOT_A, GoldyNodeAccess::Read,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()
         );
         assert_eq!(
-            goldy_scheme_compute_node_with_field(
-                scheme,
-                cells,
-                SLOT_B,
-                GoldyNodeAccess::Write,
-                GoldyResourceAccess::Write,
-            ),
+            goldy_scheme_compute_node_with_field(scheme, cells, SLOT_B, GoldyNodeAccess::Write,),
             GoldyResult::Ok,
             "{}",
             last_ffi_message()

@@ -50,18 +50,6 @@ public sealed class Buffer : IDisposable
     }
 
     /// <summary>
-    /// Bindless resource slot index for one buffer unit.
-    /// </summary>
-    public uint UnitResourceIndex(uint unit, ResourceAccess access)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        var idx = NativeMethods.BufferUnitResourceIndex(Handle, unit, access);
-        if (idx == uint.MaxValue)
-            throw GoldyException.FromLastError("Buffer unit_resource_index");
-        return idx;
-    }
-
-    /// <summary>
     /// Borrow one bindable unit as an owned parcel handle.
     /// </summary>
     public Parcel Field(uint unit)

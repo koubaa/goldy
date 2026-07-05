@@ -1640,6 +1640,59 @@ fn scheme_compute_write_to_texture() {
     assert_eq!(output[3], 255, "A channel");
 }
 
+/// Verify that a raw [`goldy::Texture`] (not a `Parcel`-wrapped texture from [`RetainedPool`])
+/// can be bound via [`goldy::scheme::SchemeNodeBuilder::with_parcel`].
+///
+/// `SchemeBindable for Texture` registers the barrier binding without a `ParcelStamp`
+/// (matching the classic `TaskGraph::NodeBuilder::with_texture` behaviour).
+#[test]
+fn scheme_with_parcel_raw_texture() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, WRITE_TEXTURE_SHADER).expect("shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
+
+    let width = 8u32;
+    let height = 8u32;
+    let wg_x = width.div_ceil(8);
+    let wg_y = height.div_ceil(8);
+
+    let zeros = vec![0u8; (width * height * 4) as usize];
+    #[allow(deprecated)]
+    let texture = goldy::Texture::with_data(
+        &device,
+        &zeros,
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    )
+    .expect("texture");
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_tex_raw", &pipeline)
+        .with_parcel(&texture, NodeAccess::Write)
+        .dispatch(wg_x, wg_y, 1);
+    let frame = scheme.submit().expect("submit");
+    frame.wait(&ctx).expect("wait");
+
+    let mut output = vec![0u8; texture.byte_size()];
+    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+
+    assert_eq!(output[0], 255, "R channel");
+    assert_eq!(output[1], 0, "G channel");
+    assert_eq!(output[2], 0, "B channel");
+    assert_eq!(output[3], 255, "A channel");
+    let nonzero = output.iter().filter(|&&b| b != 0).count();
+    assert!(
+        nonzero > 0,
+        "texture readback all zeros — barrier not recorded correctly"
+    );
+}
+
 #[test]
 fn scheme_wave_inclusive_scan_uniform_64() {
     let device = make_device();

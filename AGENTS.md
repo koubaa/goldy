@@ -2,6 +2,16 @@
 
 Legacy compatibility is not relevant before the 0.2 release. Make breaking changes as required for clean code and update all clients locally in the workspace.
 
+## Design considerations
+
+There is churn happening now, it is important to keep certain architectural principles in mind.
+
+- A "parcel" is a unit of property, generic enough to span lifecycle (leased vs owned) and property type (buffers, textures, images, ...).
+- A "grant" is a verb for easements (external systems) only.
+- All allocations and schemes are threaded through a "context".
+- There are two kinds of pools associated with a device: "retained" and "transient". These are shared across contexts.
+- We are refactoring in the direction of removing imperative APIs (like read_to_cpu) in favor of scheme submissions as the only way to affect property.
+
 ## Development
 
 useful precommit commands:

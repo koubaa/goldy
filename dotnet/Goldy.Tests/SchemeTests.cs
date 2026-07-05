@@ -33,7 +33,7 @@ public class SchemeTests
             using (var node = scheme.ComputeNode("fill", pipeline))
             {
                 node
-                    .WithField(buffer, 0, NodeAccess.Write, ResourceAccess.Write)
+                    .WithField(buffer, 0, NodeAccess.Write)
                     .Dispatch(1, 1, 1);
             }
 
@@ -87,7 +87,7 @@ public class SchemeTests
             using (var node = scheme.ComputeNode("write_tex", pipeline))
             {
                 node
-                    .WithParcel(parcel, NodeAccess.Write, ResourceAccess.Write)
+                    .WithParcel(parcel, NodeAccess.Write)
                     .Dispatch(2, 2, 1);
             }
 

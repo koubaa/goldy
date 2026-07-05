@@ -266,6 +266,7 @@ impl VulkanBackend {
             slang_compiler,
             compute_fence_pool: Mutex::new(HashMap::new()),
             device_lost: std::sync::atomic::AtomicBool::new(false),
+            enable_validation,
             frame_tables: HashMap::new(),
         };
 
@@ -977,6 +978,19 @@ impl GpuBackend for VulkanBackend {
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
         texture::destroy(&self.state.devices, &mut self.state.textures, texture_handle);
+    }
+
+    fn set_texture_debug_name(&mut self, handle: TextureHandle, name: &str) {
+        if !self.state.enable_validation {
+            return;
+        }
+        texture::set_debug_name(
+            &self.state.instance,
+            &self.state.devices,
+            &self.state.textures,
+            handle,
+            name,
+        );
     }
 
     fn read_texture_to_cpu(&mut self, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {

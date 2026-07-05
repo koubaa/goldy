@@ -8,7 +8,7 @@ use crate::sys::{
     self, GoldyPresentGrant, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme,
     GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
-use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, ResourceAccess, TextureFormat};
+use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, TextureFormat};
 use std::ffi::CString;
 use std::ops::Range;
 
@@ -244,49 +244,22 @@ pub struct ComputeNodeBuilder<'a> {
 }
 
 impl ComputeNodeBuilder<'_> {
-    pub fn with_parcel(
-        &mut self,
-        parcel: &Parcel,
-        node_access: NodeAccess,
-        resource_access: ResourceAccess,
-    ) -> &mut Self {
+    pub fn with_parcel(&mut self, parcel: &Parcel, node_access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_with_parcel(
-                self.scheme.ptr,
-                parcel.as_ptr(),
-                node_access.into(),
-                resource_access.into(),
-            )
+            sys::goldy_scheme_compute_node_with_parcel(self.scheme.ptr, parcel.as_ptr(), node_access.into())
         });
         self
     }
 
-    pub fn with_buffer_unit(
-        &mut self,
-        buffer: &Buffer,
-        unit: u32,
-        node_access: NodeAccess,
-        resource_access: ResourceAccess,
-    ) -> &mut Self {
+    pub fn with_buffer_unit(&mut self, buffer: &Buffer, unit: u32, node_access: NodeAccess) -> &mut Self {
         expect_ok(unsafe {
-            sys::goldy_scheme_compute_node_with_buffer_unit(
-                self.scheme.ptr,
-                buffer.as_ptr(),
-                unit,
-                node_access.into(),
-                resource_access.into(),
-            )
+            sys::goldy_scheme_compute_node_with_buffer_unit(self.scheme.ptr, buffer.as_ptr(), unit, node_access.into())
         });
         self
     }
 
-    pub fn with_buffer(
-        &mut self,
-        buffer: &Buffer,
-        node_access: NodeAccess,
-        resource_access: ResourceAccess,
-    ) -> &mut Self {
-        self.with_buffer_unit(buffer, 0, node_access, resource_access)
+    pub fn with_buffer(&mut self, buffer: &Buffer, node_access: NodeAccess) -> &mut Self {
+        self.with_buffer_unit(buffer, 0, node_access)
     }
 
     pub fn with_param(&mut self, value: u32) -> &mut Self {

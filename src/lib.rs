@@ -68,10 +68,9 @@ pub use frame_orchestrator::{FrameHandle, FrameOrchestrator, RetiredFrame};
 pub use gpu_guard::GpuGuard;
 pub use parcel::{field, ordinal, Buffer, BytesByKind, Init, Parcel, RecordField};
 pub use retained_pool::{RetainedHold, RetainedPool, StampedParcel};
-#[allow(deprecated)]
 pub use scheme::{
-    write_to_parcel, Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget,
-    LeaseTexture, Loan, PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission,
+    Grant, GrantBuffer, GrantTexture, IntoDispatch, Lease, LeaseBuffer, LeaseRenderTarget, LeaseTexture, Loan,
+    PresentGrant, ReadGrant, ReplayStats, Scheme, SchemeRenderPassBuilder, Submission,
 };
 pub use swapchain_pool::{PresentLease, SwapchainPool};
 pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;

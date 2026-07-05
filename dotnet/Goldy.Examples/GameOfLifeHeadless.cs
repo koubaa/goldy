@@ -63,8 +63,8 @@ static class GameOfLifeHeadless
         using (var node = scheme.ComputeNode("game_of_life", computePipeline))
         {
             node
-                .WithParcel(read, NodeAccess.Read, ResourceAccess.ReadWrite)
-                .WithParcel(write, NodeAccess.Write, ResourceAccess.Write);
+                .WithParcel(read, NodeAccess.Read)
+                .WithParcel(write, NodeAccess.Write);
             node.Dispatch(WorkgroupsX, WorkgroupsY, 1);
         }
 

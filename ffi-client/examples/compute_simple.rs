@@ -3,8 +3,8 @@
 //! Run from `goldy/ffi-client`: `cargo run --example compute_simple`
 
 use goldy_ffi_client::{
-    BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions,
-    ResourceAccess, RetainedPool, Scheme, ShaderModule,
+    BufferKind, ComputePipeline, Context, DeviceDescriptor, Instance, NodeAccess, RequestAdapterOptions, RetainedPool,
+    Scheme, ShaderModule,
 };
 
 const COMPUTE_SRC: &str = r#"
@@ -39,7 +39,7 @@ fn main() -> goldy_ffi_client::Result<()> {
     let ctx = Context::new(&device)?;
     let mut scheme = Scheme::new(&ctx)?;
     let mut node = scheme.compute_node("double", &pipeline);
-    node.with_buffer(&buffer, NodeAccess::ReadWrite, ResourceAccess::Write);
+    node.with_buffer(&buffer, NodeAccess::ReadWrite);
     node.dispatch(1, 1, 1);
     let grant = scheme.grant_read(&buffer)?;
     let submission = scheme.submit()?;

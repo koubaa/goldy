@@ -81,7 +81,7 @@ def test_parcel_creation_numpy(device):
 
 
 def test_parcel_write(device):
-    """Upload bytes into a parcel through write_to_parcel."""
+    """Upload bytes into a parcel via an upload micro-scheme."""
     import goldy
 
     pool = goldy.RetainedPool(device)
@@ -90,11 +90,9 @@ def test_parcel_write(device):
         goldy.BufferKind.SCATTERED,
     )
     ctx = device.create_context()
-    frame = goldy.write_to_parcel(
-        ctx,
-        buffer[0],
-        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes(),
-    )
+    upload = goldy.Scheme(ctx)
+    upload.commit_write_parcel(buffer[0], np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
+    frame = upload.submit()
     frame.wait(ctx)
 
 
@@ -212,7 +210,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     ctx = device.create_context()
     scheme = goldy.Scheme(ctx)
     scheme.node("fill", pipeline).with_parcel(
-        buffer[0], goldy.NodeAccess.WRITE, goldy.ResourceAccess.WRITE
+        buffer[0], goldy.NodeAccess.WRITE
     ).dispatch(1, 1, 1)
     grant = scheme.grant_read(buffer[0])
     frame = scheme.submit()
