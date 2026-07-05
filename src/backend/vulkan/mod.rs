@@ -56,7 +56,7 @@ static VK_INSTANCE_LOCK: Mutex<()> = Mutex::new(());
 /// Extract push-constant slot categories for a render pipeline from shader
 /// reflection. Fragment shader data takes precedence; vertex is a fallback.
 fn render_reflection_data(
-    shaders: &HashMap<ShaderHandle, ShaderState>,  // caller passes entries snapshot
+    shaders: &HashMap<ShaderHandle, ShaderState>, // caller passes entries snapshot
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
 ) -> (Vec<Option<crate::types::ResourceCategory>>, Vec<Option<u32>>) {
@@ -303,7 +303,10 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
         let device_handle = self.context_device(ctx);
         let sem = self
             .state
-            .contexts.read().unwrap().get(&ctx)
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
             .context("Invalid context handle")?
             .lock()
             .unwrap()
@@ -389,7 +392,10 @@ impl GpuBackend for VulkanBackend {
     fn destroy_device(&mut self, device_handle: DeviceHandle) {
         let ctxs: Vec<ContextHandle> = self
             .state
-            .contexts.read().unwrap().iter()
+            .contexts
+            .read()
+            .unwrap()
+            .iter()
             .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
             .collect();
@@ -787,7 +793,11 @@ impl GpuBackend for VulkanBackend {
         let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
         let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (cats, strides) = render_reflection_data(&self.state.shaders.read().unwrap().entries, vertex_shader, fragment_shader);
+        let (cats, strides) = render_reflection_data(
+            &self.state.shaders.read().unwrap().entries,
+            vertex_shader,
+            fragment_shader,
+        );
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
@@ -931,7 +941,10 @@ impl GpuBackend for VulkanBackend {
     fn record_render(&mut self, frame: &FrameToken, commands: &[RenderCommand]) -> Result<()> {
         let timeline_sem = self
             .state
-            .contexts.read().unwrap().get(&frame.context)
+            .contexts
+            .read()
+            .unwrap()
+            .get(&frame.context)
             .context("Invalid context handle")?
             .lock()
             .unwrap()
@@ -1007,7 +1020,11 @@ impl GpuBackend for VulkanBackend {
 
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        let (cats, strides) = render_reflection_data(&self.state.shaders.read().unwrap().entries, vertex_shader, fragment_shader);
+        let (cats, strides) = render_reflection_data(
+            &self.state.shaders.read().unwrap().entries,
+            vertex_shader,
+            fragment_shader,
+        );
 
         let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
             .with_depth_stencil(depth_stencil);
@@ -1144,12 +1161,7 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         desc: &crate::types::SamplerDesc,
     ) -> Result<SamplerHandle> {
-        sampler::create(
-            &self.state.devices,
-            &self.state.samplers,
-            device_handle,
-            desc,
-        )
+        sampler::create(&self.state.devices, &self.state.samplers, device_handle, desc)
     }
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
@@ -1229,7 +1241,10 @@ impl GpuBackend for VulkanBackend {
         let device_handle = self.context_device(ctx);
         let signal_queue = self
             .state
-            .contexts.read().unwrap().get(&ctx)
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
             .map(|sc| std::sync::Arc::clone(&sc.lock().unwrap().signal_queue));
         let Some(signal_queue) = signal_queue else {
             return Vec::new();
@@ -1282,7 +1297,10 @@ impl GpuBackend for VulkanBackend {
         let device_handle = self.context_device(ctx);
         let sem = self
             .state
-            .contexts.read().unwrap().get(&ctx)
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
             .context("Invalid context handle")?
             .lock()
             .unwrap()
@@ -1424,7 +1442,10 @@ impl GpuBackend for VulkanBackend {
         // Per-context queue: resources whose lifetime is bounded by this context.
         let ctx_batch: Vec<_> = self
             .state
-            .contexts.read().unwrap().get(&ctx)
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
             .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
         if let Some(ld) = self.state.devices.get(&device_handle) {

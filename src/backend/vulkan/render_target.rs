@@ -2,7 +2,7 @@
 //!
 //! Handles creation, destruction, rendering, and readback of off-screen render targets.
 
-use super::types::{SharedRenderTargetTable, LogicalDevice, RenderTargetState};
+use super::types::{LogicalDevice, RenderTargetState, SharedRenderTargetTable};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk};
 use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::RenderCommand;
@@ -374,7 +374,10 @@ where
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let render_targets_guard = render_targets.read().unwrap();
-    let render_target = render_targets_guard.entries.get(&target).context("Invalid render target handle")?;
+    let render_target = render_targets_guard
+        .entries
+        .get(&target)
+        .context("Invalid render target handle")?;
 
     if render_target.device_handle != device_handle {
         anyhow::bail!("Render target belongs to a different device");
@@ -633,7 +636,10 @@ pub(super) fn read_to_cpu(
     // Get render target info and device
     let (device_handle, width, height, format, image, physical_device) = {
         let render_targets_guard = render_targets.read().unwrap();
-    let render_target = render_targets_guard.entries.get(&target).context("Invalid render target handle")?;
+        let render_target = render_targets_guard
+            .entries
+            .get(&target)
+            .context("Invalid render target handle")?;
 
         if !render_target.has_rendered.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("Cannot read from render target that hasn't been rendered to");
@@ -661,7 +667,7 @@ pub(super) fn read_to_cpu(
     // Ensure staging buffer exists (lazy creation)
     let needs_staging = {
         let render_targets_guard = render_targets.read().unwrap();
-    let render_target = render_targets_guard.entries.get(&target).unwrap();
+        let render_target = render_targets_guard.entries.get(&target).unwrap();
         render_target.staging_buffer.is_none()
     };
 

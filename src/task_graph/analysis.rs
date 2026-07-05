@@ -1124,12 +1124,7 @@ pub(crate) fn partition_copy_texture_layout_fingerprint(
     let mut h = DefaultHasher::new();
     for wave in partition_waves {
         for &ni in &wave.node_indices {
-            if let NodeKind::CopyBufferToTexture {
-                src_row_pitch,
-                dst,
-                ..
-            } = &ir.nodes[ni].kind
-            {
+            if let NodeKind::CopyBufferToTexture { src_row_pitch, dst, .. } = &ir.nodes[ni].kind {
                 if *src_row_pitch > 0 {
                     layout_tag(*dst).hash(&mut h);
                 }
@@ -1631,7 +1626,11 @@ mod tests {
             ],
         };
         let waves = graph_node_waves(&ir).unwrap();
-        assert_eq!(waves, vec![0, 1], "buffer uploads must precede texture uploads in separate waves");
+        assert_eq!(
+            waves,
+            vec![0, 1],
+            "buffer uploads must precede texture uploads in separate waves"
+        );
     }
 
     #[test]
@@ -1646,7 +1645,11 @@ mod tests {
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
         let ranges = partition_wave_ranges(&ir, &schedule);
-        assert_eq!(ranges.len(), 2, "buffer-only and texture upload waves must be separate partitions");
+        assert_eq!(
+            ranges.len(),
+            2,
+            "buffer-only and texture upload waves must be separate partitions"
+        );
         assert!(waves_can_retain(&ir, &schedule.waves[ranges[0].clone()]));
         assert!(!waves_can_retain(&ir, &schedule.waves[ranges[1].clone()]));
     }

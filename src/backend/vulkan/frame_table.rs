@@ -1,6 +1,9 @@
 //! Vulkan frame-table buffers and prologue (staging upload + device-local copy).
 
-use super::types::{self, BufferState, LogicalDevice, SharedBufferTable, SharedContextMap, SharedFrameTableMap, SharedFrameTableDevice, SharedPipelineTable, VulkanState};
+use super::types::{
+    self, BufferState, LogicalDevice, SharedBufferTable, SharedContextMap, SharedFrameTableDevice, SharedFrameTableMap,
+    SharedPipelineTable, VulkanState,
+};
 use super::utils::find_memory_type;
 use super::BufferHandle;
 use crate::backend::GpuCommand;
@@ -46,8 +49,22 @@ pub(crate) fn init_device(
 
     let (staging, staging_memory, staging_mapped) = create_upload_table_buffer(instance, ld)?;
 
-    state.buffers.write().unwrap().entries.get_mut(&selector).unwrap().element_stride = Some(4);
-    state.buffers.write().unwrap().entries.get_mut(&device_table).unwrap().element_stride = Some(4);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&selector)
+        .unwrap()
+        .element_stride = Some(4);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&device_table)
+        .unwrap()
+        .element_stride = Some(4);
 
     {
         let dev = state.devices.get(&device_handle).context("init frame table")?;

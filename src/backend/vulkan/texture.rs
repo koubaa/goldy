@@ -1,6 +1,6 @@
 //! Texture management logic.
 
-use super::types::{self, TextureState, SharedTextureTable};
+use super::types::{self, SharedTextureTable, TextureState};
 use super::utils::format_to_vk;
 use super::{DeviceHandle, TextureHandle};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
@@ -272,7 +272,10 @@ pub(super) fn write(
     height: u32,
 ) -> Result<()> {
     let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&texture_handle).context("Invalid texture handle")?;
+    let texture = textures_guard
+        .entries
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let old_layout = texture.image_layout();
@@ -502,7 +505,10 @@ pub(super) fn write_region(
     data: &[u8],
 ) -> Result<()> {
     let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&texture_handle).context("Invalid texture handle")?;
+    let texture = textures_guard
+        .entries
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let image = texture.image;
@@ -730,7 +736,9 @@ pub(super) fn record_copy_texture_to_readback(
 ) -> Result<()> {
     let (image, old_layout) = {
         let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&src)
+        let texture = textures_guard
+            .entries
+            .get(&src)
             .context("CopyTextureToReadback: src texture not found")?;
         (texture.image, texture.image_layout())
     };
@@ -830,7 +838,10 @@ pub(super) fn read_to_cpu(
 ) -> Result<()> {
     let (device_handle, width, height, format, image, old_layout, existing_sb, existing_sm) = {
         let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&texture_handle).context("Invalid texture handle")?;
+        let texture = textures_guard
+            .entries
+            .get(&texture_handle)
+            .context("Invalid texture handle")?;
         (
             texture.device_handle,
             texture.width,
@@ -1186,7 +1197,9 @@ pub(super) fn allocate_compute_texture_staging(
     height: u32,
 ) -> Result<ComputeTextureScratch> {
     let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&texture_handle)
+    let texture = textures_guard
+        .entries
+        .get(&texture_handle)
         .context("allocate_compute_texture_staging: invalid texture")?;
 
     if x + width > texture.width || y + height > texture.height {
@@ -1249,7 +1262,9 @@ pub(super) fn allocate_copy_buffer_to_texture_staging(
     height: u32,
 ) -> Result<ComputeTextureScratch> {
     let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&texture_handle)
+    let texture = textures_guard
+        .entries
+        .get(&texture_handle)
         .context("allocate_copy_buffer_to_texture_staging: invalid texture")?;
     let bpp = texture.format.bytes_per_pixel();
     let flat_len = (width as usize)
@@ -1280,7 +1295,9 @@ pub(super) fn record_compute_texture_upload(
 ) -> Result<()> {
     let (device_handle, width, height, format, image, old_layout, settled_layout) = {
         let textures_guard = textures.read().unwrap();
-    let texture = textures_guard.entries.get(&scratch.texture_handle)
+        let texture = textures_guard
+            .entries
+            .get(&scratch.texture_handle)
             .context("record_compute_texture_upload: invalid texture")?;
         (
             texture.device_handle,
@@ -1393,19 +1410,23 @@ pub(super) fn record_compute_texture_upload(
 }
 
 /// Get the bindless descriptor index for a texture, if any.
-pub(super) fn bindless_index(
-    textures: &SharedTextureTable,
-    texture_handle: TextureHandle,
-) -> Option<u32> {
-    textures.read().unwrap().entries.get(&texture_handle).and_then(|t| t.bindless_index)
+pub(super) fn bindless_index(textures: &SharedTextureTable, texture_handle: TextureHandle) -> Option<u32> {
+    textures
+        .read()
+        .unwrap()
+        .entries
+        .get(&texture_handle)
+        .and_then(|t| t.bindless_index)
 }
 
 /// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
-pub(super) fn bindless_sampled_index(
-    textures: &SharedTextureTable,
-    texture_handle: TextureHandle,
-) -> Option<u32> {
-    textures.read().unwrap().entries.get(&texture_handle).and_then(|t| t.sampled_bindless_index)
+pub(super) fn bindless_sampled_index(textures: &SharedTextureTable, texture_handle: TextureHandle) -> Option<u32> {
+    textures
+        .read()
+        .unwrap()
+        .entries
+        .get(&texture_handle)
+        .and_then(|t| t.sampled_bindless_index)
 }
 
 /// Set a human-readable debug name on the underlying `VkImage` via
@@ -1420,7 +1441,9 @@ pub(super) fn set_debug_name(
 ) {
     let (device_handle, image) = {
         let textures_read = textures.read().unwrap();
-        let Some(ts) = textures_read.entries.get(&handle) else { return };
+        let Some(ts) = textures_read.entries.get(&handle) else {
+            return;
+        };
         *ts.debug_name.lock().unwrap() = Some(name.to_owned());
         (ts.device_handle, ts.image)
     };

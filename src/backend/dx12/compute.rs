@@ -5,8 +5,8 @@ use super::super::shared::{PushLayout, DISPATCH_BATCH_STRIDE};
 use super::barriers;
 use super::pso_cache;
 use super::shader;
-use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
+use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
@@ -656,10 +656,7 @@ fn queue_wait_for_epochs(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>)
 /// Latest device-global seq retired on the scope's device.
 fn device_retired_for_scope(scope: &Dx12SubmitScope<'_>) -> u64 {
     let device = scope.device_handle;
-    let floor = scope
-        .ld()
-        .retired_floor
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let floor = scope.ld().retired_floor.load(std::sync::atomic::Ordering::Relaxed);
     let fences = scope.context_fences.read().unwrap();
     let max_ctx = fences
         .values()
@@ -698,9 +695,7 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
 ///
 /// Returns `(command_list, slot_idx)`.  The slot is taken from the
 /// pool when its fence has already signalled; otherwise a fresh one is created.
-fn acquire_allocator_slot(
-    scope: &Dx12SubmitScope<'_>,
-) -> Result<(ID3D12GraphicsCommandList, usize)> {
+fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
     let _device_handle = scope.device_handle;
     let logical_device = scope.ld();
 
@@ -858,11 +853,13 @@ fn record_gpu_command(
                         crate::backend::validate_bindless_slot_kinds(
                             raw_indices,
                             &pipeline.push_constant_slot_kinds,
-                            |idx| super::buffer::bindless_slot_kind_for_index(
-                                &scope.buffers().read().unwrap().entries,
-                                device_handle,
-                                idx,
-                            ),
+                            |idx| {
+                                super::buffer::bindless_slot_kind_for_index(
+                                    &scope.buffers().read().unwrap().entries,
+                                    device_handle,
+                                    idx,
+                                )
+                            },
                             &pipeline.shader_debug_name,
                         )
                     })?;
@@ -893,11 +890,13 @@ fn record_gpu_command(
                         crate::backend::validate_bindless_slot_kinds(
                             &indices,
                             &pipeline.push_constant_slot_kinds,
-                            |idx| super::buffer::bindless_slot_kind_for_index(
-                                &scope.buffers().read().unwrap().entries,
-                                device_handle,
-                                idx,
-                            ),
+                            |idx| {
+                                super::buffer::bindless_slot_kind_for_index(
+                                    &scope.buffers().read().unwrap().entries,
+                                    device_handle,
+                                    idx,
+                                )
+                            },
                             &pipeline.shader_debug_name,
                         )
                     })?;
@@ -1697,11 +1696,12 @@ fn execute_signal_and_finish(
         super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
     };
 
-    scope.ld().descriptors.lock().unwrap().record_slot_usage(
-        ctx,
-        fence_value,
-        used_slots.iter().copied(),
-    );
+    scope
+        .ld()
+        .descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
 
     if !pending_deletions.is_empty() {
         let mut sc = scope.sc.lock().unwrap();
@@ -2026,8 +2026,7 @@ pub(super) fn submit_with_scope(
         }
     }
 
-    let used_slots =
-        collect_bindless_slots_from_gpu_commands(&commands, &scope.buffers().read().unwrap().entries);
+    let used_slots = collect_bindless_slots_from_gpu_commands(&commands, &scope.buffers().read().unwrap().entries);
     let tv = execute_signal_and_finish(
         scope,
         &command_list,
@@ -2361,8 +2360,7 @@ pub(super) fn submit_graph_with_scope(
         }
     }
 
-    let used_slots =
-        collect_bindless_slots_from_graph_commands(commands, &scope.buffers().read().unwrap().entries);
+    let used_slots = collect_bindless_slots_from_graph_commands(commands, &scope.buffers().read().unwrap().entries);
     let result = execute_signal_and_finish(
         scope,
         &command_list,
@@ -2563,7 +2561,11 @@ pub(super) fn evict_retained_pinning_row(
                     .filter(|(_, g)| g.frame_table_row == Some(row))
                     .map(|(k, _)| *k)
                     .collect();
-                if keys.is_empty() { None } else { Some((*ctx_h, keys)) }
+                if keys.is_empty() {
+                    None
+                } else {
+                    Some((*ctx_h, keys))
+                }
             })
             .collect()
     }; // contexts_read dropped here — no read guard held during eviction

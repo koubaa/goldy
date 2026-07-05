@@ -12,7 +12,7 @@ use std::collections::HashMap;
 pub(super) struct VulkanGraphicsPipelineCreateBundle<'a> {
     pub devices: &'a HashMap<DeviceHandle, types::SharedLogicalDevice>,
     pub pipelines: &'a SharedPipelineTable,
-    
+
     pub device_handle: DeviceHandle,
     pub vs_module: vk::ShaderModule,
     pub fs_module: vk::ShaderModule,

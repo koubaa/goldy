@@ -2,9 +2,12 @@
 
 use super::super::shared;
 use super::super::shared::DISPATCH_BATCH_STRIDE;
-use super::submit_session::{VulkanSubmitScope, VulkanSubmitView};
 use super::staging;
-use super::types::{SharedComputePipelineTable, SharedBufferTable, SharedPipelineTable, ComputePipelineState, LogicalDevice, PushLayout, SlotKey};
+use super::submit_session::{VulkanSubmitScope, VulkanSubmitView};
+use super::types::{
+    ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable, SharedComputePipelineTable,
+    SharedPipelineTable, SlotKey,
+};
 use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::gpu_profiler::{self, DispatchGpuNs};
@@ -457,7 +460,12 @@ pub(super) fn ctx_completed_value(
     ctx: super::ContextHandle,
     device_handle: super::DeviceHandle,
 ) -> u64 {
-    let sem = view.contexts.read().unwrap().get(&ctx).map(|sc| sc.lock().unwrap().timeline_semaphore);
+    let sem = view
+        .contexts
+        .read()
+        .unwrap()
+        .get(&ctx)
+        .map(|sc| sc.lock().unwrap().timeline_semaphore);
     let dev = view.devices.get(&device_handle).map(|ld| &ld.device);
     match (dev, sem) {
         (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
@@ -633,8 +641,8 @@ pub(super) fn submit_with_scope(
         if has_write_buffer {
             {
                 scope.sc.lock().unwrap().staging_belt.reclaim(
-                    &view.compute_fence_pool,
-                    &view.devices,
+                    view.compute_fence_pool,
+                    view.devices,
                     completed_timeline,
                 )?;
             }
@@ -643,7 +651,12 @@ pub(super) fn submit_with_scope(
 
         if has_write_texture {
             {
-                scope.sc.lock().unwrap().texture_staging_pool.reclaim(completed_timeline);
+                scope
+                    .sc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -688,7 +701,7 @@ pub(super) fn submit_with_scope(
                 } else {
                     let dev = view.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                     let mut sc = scope.sc.lock().unwrap();
-                    let (stg_buf, stg_off) = sc.staging_belt.write(&view.instance, dev, data)?;
+                    let (stg_buf, stg_off) = sc.staging_belt.write(view.instance, dev, data)?;
                     belt_slices.push((stg_buf, stg_off));
                 }
             }
@@ -758,9 +771,9 @@ pub(super) fn submit_with_scope(
                 let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                    &view.instance,
-                    &view.devices,
-                    &view.textures,
+                    view.instance,
+                    view.devices,
+                    view.textures,
                     pool,
                     *texture,
                     data,
@@ -781,9 +794,9 @@ pub(super) fn submit_with_scope(
                 let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                    &view.instance,
-                    &view.devices,
-                    &view.textures,
+                    view.instance,
+                    view.devices,
+                    view.textures,
                     pool,
                     *texture,
                     data,
@@ -806,10 +819,10 @@ pub(super) fn submit_with_scope(
                 let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
-                    &view.instance,
-                    &view.devices,
-                    &view.textures,
-                    &view.buffers,
+                    view.instance,
+                    view.devices,
+                    view.textures,
+                    view.buffers,
                     pool,
                     *src,
                     *src_offset,
@@ -914,9 +927,9 @@ pub(super) fn submit_with_scope(
             match command {
                 GpuCommand::FrameTableStaging { data } => {
                     super::frame_table::record_prologue(
-                        &view.contexts,
-                        &view.frame_tables,
-                        &view.buffers,
+                        view.contexts,
+                        view.frame_tables,
+                        view.buffers,
                         device_handle,
                         logical_device,
                         cmd,
@@ -1048,7 +1061,11 @@ pub(super) fn submit_with_scope(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let vk_buf = buffers_read.entries.get(buffer).context("DispatchIndirect: invalid buffer handle")?.buffer;
+                    let vk_buf = buffers_read
+                        .entries
+                        .get(buffer)
+                        .context("DispatchIndirect: invalid buffer handle")?
+                        .buffer;
                     unsafe {
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -1059,9 +1076,7 @@ pub(super) fn submit_with_scope(
                                 base,
                             );
                         }
-                        logical_device
-                            .device
-                            .cmd_dispatch_indirect(cmd, vk_buf, *offset);
+                        logical_device.device.cmd_dispatch_indirect(cmd, vk_buf, *offset);
 
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -1154,7 +1169,10 @@ pub(super) fn submit_with_scope(
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
                     let (vk_buf, buf_size) = {
-                        let bs = buffers_read.entries.get(buffer).context("ClearBuffer: invalid buffer handle")?;
+                        let bs = buffers_read
+                            .entries
+                            .get(buffer)
+                            .context("ClearBuffer: invalid buffer handle")?;
                         (bs.buffer, bs.size)
                     };
                     let clear_size = if *size == 0 {
@@ -1186,7 +1204,10 @@ pub(super) fn submit_with_scope(
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
                     let (is_storage, host_mapped, vk_buf) = {
-                        let bs = buffers_read.entries.get(buf_handle).context("WriteBuffer: invalid buffer handle")?;
+                        let bs = buffers_read
+                            .entries
+                            .get(buf_handle)
+                            .context("WriteBuffer: invalid buffer handle")?;
                         (bs.is_storage, bs.host_mapped, bs.buffer)
                     };
                     // HOST_VISIBLE / CPU_READABLE paths were handled in the pre-pass;
@@ -1202,12 +1223,9 @@ pub(super) fn submit_with_scope(
                             size: data.len() as u64,
                         };
                         unsafe {
-                            logical_device.device.cmd_copy_buffer(
-                                cmd,
-                                *stg,
-                                vk_buf,
-                                std::slice::from_ref(&region),
-                            );
+                            logical_device
+                                .device
+                                .cmd_copy_buffer(cmd, *stg, vk_buf, std::slice::from_ref(&region));
 
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
@@ -1228,13 +1246,16 @@ pub(super) fn submit_with_scope(
                         .get(texture_upload_idx)
                         .context("WriteTexture: scratch missing (internal)")?;
                     texture_upload_idx += 1;
-                    super::texture::record_compute_texture_upload(&view.devices, &view.textures, cmd, scratch)?;
+                    super::texture::record_compute_texture_upload(view.devices, view.textures, cmd, scratch)?;
                 }
                 GpuCommand::CopyTexture { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_texture");
                     let (src_image, width, height, dst_image) = {
                         let textures_read = view.textures.read().unwrap();
-                        let ts = textures_read.entries.get(src).context("CopyTexture: src texture not found")?;
+                        let ts = textures_read
+                            .entries
+                            .get(src)
+                            .context("CopyTexture: src texture not found")?;
                         let dst_image = textures_read
                             .entries
                             .get(dst)
@@ -1341,12 +1362,16 @@ pub(super) fn submit_with_scope(
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");
                     let staging_buffer = {
                         let buffers_read = view.buffers.read().unwrap();
-                        buffers_read.entries.get(dst).context("CopyTextureToReadback: invalid dst")?.buffer
+                        buffers_read
+                            .entries
+                            .get(dst)
+                            .context("CopyTextureToReadback: invalid dst")?
+                            .buffer
                     };
                     super::texture::record_copy_texture_to_readback(
                         cmd,
                         logical_device,
-                        &view.textures,
+                        view.textures,
                         staging_buffer,
                         *src,
                         *layout,
@@ -1478,7 +1503,7 @@ pub(super) fn submit_with_scope(
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
-    let used_slots = collect_slot_keys_from_gpu_commands(&commands, &view.compute_pipelines, &view.buffers);
+    let used_slots = collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.buffers);
     if let Some(ld) = view.devices.get(&device_handle) {
         ld.descriptors
             .lock()
@@ -1537,7 +1562,8 @@ pub(super) fn submit_with_scope(
     if !texture_upload_scratch.is_empty() {
         let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch.into_iter().map(|s| s.entry).collect();
         {
-            scope.sc
+            scope
+                .sc
                 .lock()
                 .unwrap()
                 .texture_staging_pool
@@ -1577,7 +1603,7 @@ pub(super) fn submit_with_scope(
                     super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, &view.contexts, device_handle);
+                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -1592,7 +1618,12 @@ pub(super) fn submit(
     commands: &[GpuCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    submit_with_scope(&super::submit_session::scope_from_state(state, ctx)?, ctx, commands, sync)
+    submit_with_scope(
+        &super::submit_session::scope_from_state(state, ctx)?,
+        ctx,
+        commands,
+        sync,
+    )
 }
 
 /// Submit mixed compute + render graph commands in a single command buffer.
@@ -1669,8 +1700,8 @@ pub(super) fn submit_graph_with_scope(
         {
             {
                 scope.sc.lock().unwrap().staging_belt.reclaim(
-                    &view.compute_fence_pool,
-                    &view.devices,
+                    view.compute_fence_pool,
+                    view.devices,
                     completed_timeline,
                 )?;
             }
@@ -1679,7 +1710,12 @@ pub(super) fn submit_graph_with_scope(
 
         if has_write_texture_graph {
             {
-                scope.sc.lock().unwrap().texture_staging_pool.reclaim(completed_timeline);
+                scope
+                    .sc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -1724,7 +1760,7 @@ pub(super) fn submit_graph_with_scope(
                         } else {
                             let dev = view.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                             let mut sc = scope.sc.lock().unwrap();
-                            let (stg_buf, stg_off) = sc.staging_belt.write(&view.instance, dev, data)?;
+                            let (stg_buf, stg_off) = sc.staging_belt.write(view.instance, dev, data)?;
                             belt_slices.push((stg_buf, stg_off));
                         }
                     }
@@ -1737,9 +1773,9 @@ pub(super) fn submit_graph_with_scope(
                         let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                            &view.instance,
-                            &view.devices,
-                            &view.textures,
+                            view.instance,
+                            view.devices,
+                            view.textures,
                             pool,
                             *texture,
                             data,
@@ -1760,9 +1796,9 @@ pub(super) fn submit_graph_with_scope(
                         let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                            &view.instance,
-                            &view.devices,
-                            &view.textures,
+                            view.instance,
+                            view.devices,
+                            view.textures,
                             pool,
                             *texture,
                             data,
@@ -1785,10 +1821,10 @@ pub(super) fn submit_graph_with_scope(
                         let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
-                            &view.instance,
-                            &view.devices,
-                            &view.textures,
-                            &view.buffers,
+                            view.instance,
+                            view.devices,
+                            view.textures,
+                            view.buffers,
                             pool,
                             *src,
                             *src_offset,
@@ -1908,9 +1944,9 @@ pub(super) fn submit_graph_with_scope(
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table_prologue_in_cb = true;
                     super::frame_table::record_prologue(
-                        &view.contexts,
-                        &view.frame_tables,
-                        &view.buffers,
+                        view.contexts,
+                        view.frame_tables,
+                        view.buffers,
                         device_handle,
                         logical_device,
                         cmd,
@@ -1935,7 +1971,9 @@ pub(super) fn submit_graph_with_scope(
                     user: raw_user,
                     frame_table_base,
                 } => {
-                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p)) {
+                    if let Some(pipeline) =
+                        current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p))
+                    {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
@@ -1959,7 +1997,9 @@ pub(super) fn submit_graph_with_scope(
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p)) {
+                    if let Some(pipeline) =
+                        current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p))
+                    {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,
@@ -2042,7 +2082,11 @@ pub(super) fn submit_graph_with_scope(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let vk_buf = buffers_read.entries.get(buffer).context("DispatchIndirect: invalid buffer handle")?.buffer;
+                    let vk_buf = buffers_read
+                        .entries
+                        .get(buffer)
+                        .context("DispatchIndirect: invalid buffer handle")?
+                        .buffer;
                     unsafe {
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -2053,9 +2097,7 @@ pub(super) fn submit_graph_with_scope(
                                 base,
                             );
                         }
-                        logical_device
-                            .device
-                            .cmd_dispatch_indirect(cmd, vk_buf, *offset);
+                        logical_device.device.cmd_dispatch_indirect(cmd, vk_buf, *offset);
 
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -2148,7 +2190,10 @@ pub(super) fn submit_graph_with_scope(
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
                     let (vk_buf, buf_size) = {
-                        let bs = buffers_read.entries.get(buffer).context("ClearBuffer: invalid buffer handle")?;
+                        let bs = buffers_read
+                            .entries
+                            .get(buffer)
+                            .context("ClearBuffer: invalid buffer handle")?;
                         (bs.buffer, bs.size)
                     };
                     let clear_size = if *size == 0 {
@@ -2179,7 +2224,10 @@ pub(super) fn submit_graph_with_scope(
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
                     let (is_storage, host_mapped, vk_buf) = {
-                        let bs = buffers_read.entries.get(buf_handle).context("WriteBuffer: invalid buffer handle")?;
+                        let bs = buffers_read
+                            .entries
+                            .get(buf_handle)
+                            .context("WriteBuffer: invalid buffer handle")?;
                         (bs.is_storage, bs.host_mapped, bs.buffer)
                     };
                     if is_storage && host_mapped.is_none() {
@@ -2193,12 +2241,9 @@ pub(super) fn submit_graph_with_scope(
                             size: data.len() as u64,
                         };
                         unsafe {
-                            logical_device.device.cmd_copy_buffer(
-                                cmd,
-                                *stg,
-                                vk_buf,
-                                std::slice::from_ref(&region),
-                            );
+                            logical_device
+                                .device
+                                .cmd_copy_buffer(cmd, *stg, vk_buf, std::slice::from_ref(&region));
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -2218,13 +2263,16 @@ pub(super) fn submit_graph_with_scope(
                         .get(texture_upload_idx)
                         .context("WriteTexture: scratch missing (internal)")?;
                     texture_upload_idx += 1;
-                    super::texture::record_compute_texture_upload(&view.devices, &view.textures, cmd, scratch)?;
+                    super::texture::record_compute_texture_upload(view.devices, view.textures, cmd, scratch)?;
                 }
                 GpuCommand::CopyTexture { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_texture");
                     let (src_image, width, height, dst_image) = {
                         let textures_read = view.textures.read().unwrap();
-                        let ts = textures_read.entries.get(src).context("CopyTexture: src texture not found")?;
+                        let ts = textures_read
+                            .entries
+                            .get(src)
+                            .context("CopyTexture: src texture not found")?;
                         let dst_image = textures_read
                             .entries
                             .get(dst)
@@ -2324,12 +2372,16 @@ pub(super) fn submit_graph_with_scope(
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");
                     let staging_buffer = {
                         let buffers_read = view.buffers.read().unwrap();
-                        buffers_read.entries.get(dst).context("CopyTextureToReadback: invalid dst")?.buffer
+                        buffers_read
+                            .entries
+                            .get(dst)
+                            .context("CopyTextureToReadback: invalid dst")?
+                            .buffer
                     };
                     super::texture::record_copy_texture_to_readback(
                         cmd,
                         logical_device,
-                        &view.textures,
+                        view.textures,
                         staging_buffer,
                         *src,
                         *layout,
@@ -2431,7 +2483,7 @@ pub(super) fn submit_graph_with_scope(
                 }
 
                 let (staging_data, lowered, has_render_bindings) =
-                    super::frame_table::prepare_render_commands(buffers, &view.pipelines, render_cmds)?;
+                    super::frame_table::prepare_render_commands(buffers, view.pipelines, render_cmds)?;
                 if has_render_bindings {
                     if frame_table_prologue_in_cb {
                         let graph_staging = super::frame_table::extract_staging_from_graph(commands)
@@ -2441,16 +2493,16 @@ pub(super) fn submit_graph_with_scope(
                             super::frame_table::merge_staging_for_render_sync(&graph_staging, &staging_data);
                         super::frame_table::sync_table_row_to_device(
                             &scope.frame_table,
-                            &view.buffers,
+                            view.buffers,
                             logical_device,
                             cmd,
                             &sync_data,
                         )?;
                     } else {
                         super::frame_table::record_prologue(
-                            &view.contexts,
-                            &view.frame_tables,
-                            &view.buffers,
+                            view.contexts,
+                            view.frame_tables,
+                            view.buffers,
                             device_handle,
                             logical_device,
                             cmd,
@@ -2460,8 +2512,8 @@ pub(super) fn submit_graph_with_scope(
                 }
 
                 super::render_target::record_render_pass_to_buffer(
-                    &view.devices,
-                    &view.render_targets,
+                    view.devices,
+                    view.render_targets,
                     device_handle,
                     *target,
                     &lowered,
@@ -2552,7 +2604,7 @@ pub(super) fn submit_graph_with_scope(
     };
 
     let used_slots =
-        collect_slot_keys_from_graph_commands(commands, &view.compute_pipelines, &view.pipelines, &view.buffers);
+        collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.pipelines, view.buffers);
     if let Some(ld) = view.devices.get(&device_handle) {
         ld.descriptors
             .lock()
@@ -2639,7 +2691,8 @@ pub(super) fn submit_graph_with_scope(
     if !texture_upload_scratch.is_empty() {
         let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch.into_iter().map(|s| s.entry).collect();
         {
-            scope.sc
+            scope
+                .sc
                 .lock()
                 .unwrap()
                 .texture_staging_pool
@@ -2680,7 +2733,7 @@ pub(super) fn submit_graph_with_scope(
                     super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, &view.contexts, device_handle);
+                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -2805,7 +2858,7 @@ pub(super) fn try_resubmit_retained_with_scope(
                     super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, &view.contexts, device_handle);
+                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -2871,7 +2924,7 @@ pub(super) fn evict_retained_pinning_row(
                 .collect()
         };
         for key in keys {
-            evict_retained_on_context(&*contexts, &*frame_tables, ctx, key);
+            evict_retained_on_context(&contexts, &frame_tables, ctx, key);
         }
     }
 }
@@ -2881,7 +2934,7 @@ pub(super) fn evict_retained_with_scope(scope: &VulkanSubmitScope<'_>, ctx: supe
     scope.assert_ctx(ctx);
     let contexts = scope.view.contexts.read().unwrap();
     let frame_tables = scope.view.frame_tables.read().unwrap();
-    evict_retained_on_context(&*contexts, &*frame_tables, ctx, key);
+    evict_retained_on_context(&contexts, &frame_tables, ctx, key);
 }
 
 pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {

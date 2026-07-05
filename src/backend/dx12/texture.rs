@@ -514,7 +514,9 @@ pub(super) fn stage_copy_buffer_to_texture_upload(
 
     if src_row_pitch > 0 {
         // Fast path: source buffer already has footprint-aligned rows.  Use it directly.
-        let buffer_state = buffers.get(&src).context("CopyBufferToTexture: invalid source buffer")?;
+        let buffer_state = buffers
+            .get(&src)
+            .context("CopyBufferToTexture: invalid source buffer")?;
         let upload_resource = buffer_state
             .upload_buffer
             .as_ref()

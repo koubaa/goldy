@@ -45,7 +45,9 @@
 //! `swapchain_render_present_command_buffers`).  The scratch texture is not
 //! touched in that path.
 
-use super::types::{self, SharedTextureTable, FrameSync, LogicalDevice, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT};
+use super::types::{
+    self, FrameSync, LogicalDevice, SharedTextureTable, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
+};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type};
 use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
@@ -372,7 +374,7 @@ pub(super) fn create(
         let th = register_surface_texture(
             devices,
             textures,
-                        device_handle,
+            device_handle,
             image,
             format.format,
             goldy_format,
@@ -764,7 +766,10 @@ pub(super) fn acquire(
     {
         let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
         let ctxs: Vec<_> = state
-            .contexts.read().unwrap().iter()
+            .contexts
+            .read()
+            .unwrap()
+            .iter()
             .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
             .collect();
@@ -1544,7 +1549,7 @@ pub(super) fn resize(
         let th = register_surface_texture(
             devices,
             textures,
-                        device_handle,
+            device_handle,
             image,
             format,
             goldy_format,

@@ -3447,19 +3447,12 @@ fn scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles() {
 
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let staging = pool
-        .acquire_buffer(
-            byte_size,
-            BufferKind::Scattered,
-            None,
-            BufferFlags::CPU_WRITABLE,
-            None,
-        )
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
         .expect("staging");
 
     let write_pitched = |buf: &goldy::Buffer| {
         if footprint.row_pitch == footprint.tight_row_bytes() {
-            buf.write(footprint.footprint_offset, &pixels)
-                .expect("write tight");
+            buf.write(footprint.footprint_offset, &pixels).expect("write tight");
         } else {
             let row_bytes = footprint.tight_row_bytes() as usize;
             for row in 0..H {

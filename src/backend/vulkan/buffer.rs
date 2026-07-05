@@ -478,7 +478,13 @@ pub(super) fn hint_unused_above(
 
 /// Byte size of the underlying VkBuffer allocation.
 pub(super) fn capacity(buffers: &SharedBufferTable, buffer_handle: BufferHandle) -> u64 {
-    buffers.read().unwrap().entries.get(&buffer_handle).map(|b| b.allocation_size).unwrap_or(0)
+    buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .map(|b| b.allocation_size)
+        .unwrap_or(0)
 }
 
 pub(super) fn set_logical_size(
@@ -490,7 +496,11 @@ pub(super) fn set_logical_size(
 ) -> Result<()> {
     let is_sparse = {
         let buffers_guard = buffers.read().unwrap();
-        buffers_guard.entries.get(&buffer_handle).map(|b| b.is_sparse).unwrap_or(false)
+        buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .map(|b| b.is_sparse)
+            .unwrap_or(false)
     };
     if is_sparse {
         return set_logical_size_sparse(devices, buffers, device_handle, buffer_handle, new_logical_size);
@@ -498,7 +508,10 @@ pub(super) fn set_logical_size(
 
     let (bindless_index, is_storage, vkbuf, old_logical) = {
         let buffers_guard = buffers.read().unwrap();
-    let buf = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buf = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if buf.is_view {
             anyhow::bail!("cannot set logical size on buffer views");
         }
@@ -595,7 +608,10 @@ fn set_logical_size_sparse(
 ) -> Result<()> {
     let (bindless_index, is_storage, vkbuf, old_logical, block) = {
         let buffers_guard = buffers.read().unwrap();
-    let buf = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buf = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if buf.is_view {
             anyhow::bail!("cannot set logical size on buffer views");
         }
@@ -971,7 +987,11 @@ pub(super) fn resize(
 ) -> Result<()> {
     let old_state = {
         let buffers_guard = buffers.read().unwrap();
-        buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?.clone()
+        buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?
+            .clone()
     };
 
     if old_state.is_view {
@@ -1136,7 +1156,7 @@ pub(super) fn resize(
         for vh in view_handles {
             let (off, view_size, idx) = {
                 let buffers_guard = buffers.read().unwrap();
-    let st = buffers_guard.entries.get(&vh).context("view missing")?;
+                let st = buffers_guard.entries.get(&vh).context("view missing")?;
                 (
                     st.view_byte_offset.context("internal: view byte offset")?,
                     st.size,
@@ -1247,7 +1267,10 @@ pub(super) fn create_view(
 ) -> Result<BufferHandle> {
     let (device_handle, vk_buffer, is_storage, parent_flags, parent_allocation_size) = {
         let buffers_guard = buffers.read().unwrap();
-        let parent = buffers_guard.entries.get(&parent_handle).context("Invalid parent buffer handle")?;
+        let parent = buffers_guard
+            .entries
+            .get(&parent_handle)
+            .context("Invalid parent buffer handle")?;
 
         if offset + size > parent.size {
             anyhow::bail!(
@@ -1362,19 +1385,19 @@ pub(super) fn ensure_staging(
 ) -> Result<()> {
     let (size, device_handle, needs_staging) = {
         let buffers_guard = buffers.read().unwrap();
-        let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
-        let needs = buffer.is_storage
-            && buffer.staging_buffer.is_none()
-            && !buffer.flags.contains(BufferFlags::CPU_READABLE);
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        let needs =
+            buffer.is_storage && buffer.staging_buffer.is_none() && !buffer.flags.contains(BufferFlags::CPU_READABLE);
         (buffer.size, buffer.device_handle, needs)
     };
     if !needs_staging {
         return Ok(());
     }
 
-    let device = devices
-        .get(&device_handle)
-        .context("Buffer's device is invalid")?;
+    let device = devices.get(&device_handle).context("Buffer's device is invalid")?;
 
     let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
     let staging_info = vk::BufferCreateInfo::default()
@@ -1461,7 +1484,10 @@ pub(super) fn write(
 
     {
         let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if offset + data.len() as u64 > buffer.size {
             anyhow::bail!("Write would exceed buffer bounds");
         }
@@ -1469,7 +1495,10 @@ pub(super) fn write(
 
     {
         let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if let Some(base) = buffer.host_mapped {
             let p = base as *mut u8;
             unsafe {
@@ -1481,7 +1510,10 @@ pub(super) fn write(
     ensure_staging(instance, devices, buffers, buffer_handle)?;
 
     let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     let device = devices
         .get(&buffer.device_handle)
@@ -1518,12 +1550,23 @@ pub(super) fn write(
 
 /// Get the size of a buffer in bytes.
 pub(super) fn size(buffers: &SharedBufferTable, buffer_handle: BufferHandle) -> u64 {
-    buffers.read().unwrap().entries.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
+    buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .map(|b| b.size)
+        .unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
 pub(super) fn bindless_index(buffers: &SharedBufferTable, buffer_handle: BufferHandle) -> Option<u32> {
-    buffers.read().unwrap().entries.get(&buffer_handle).and_then(|b| b.bindless_index)
+    buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .and_then(|b| b.bindless_index)
 }
 
 /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
@@ -1542,7 +1585,10 @@ pub(super) fn read_to_cpu(
     {
         let _validate = crate::tracy_zone!("vk.buffer.read_to_cpu.validate");
         let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if buffer.device_handle != device_handle {
             anyhow::bail!("Buffer belongs to different device");
         }
@@ -1631,7 +1677,10 @@ pub(super) fn clear(
     size: u64,
 ) -> Result<()> {
     let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     let device = devices.get(&device_handle).context("Invalid device handle")?;
 
@@ -1795,7 +1844,10 @@ pub(super) fn read_texture_readback_staging(
         anyhow::bail!("read_texture_readback_staging size mismatch");
     }
     let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
     if !buffer.is_grant_readback {
         anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
     }
@@ -1820,7 +1872,10 @@ pub(super) fn read_readback_buffer(
     output: &mut [u8],
 ) -> Result<()> {
     let buffers_guard = buffers.read().unwrap();
-    let buffer = buffers_guard.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
     if !buffer.is_grant_readback {
         anyhow::bail!("read_readback_buffer requires a grant readback buffer");
     }

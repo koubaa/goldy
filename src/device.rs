@@ -1049,7 +1049,7 @@ impl Device {
         let backend = self.inner.backend.lock().unwrap();
         backend
             .query_texture_copy_footprint(self.inner.handle, width, height, format)
-            .map_err(|e| GoldyError::Backend(e))
+            .map_err(GoldyError::Backend)
     }
 
     /// Get search paths for shader compilation (internal use).

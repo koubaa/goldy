@@ -594,7 +594,15 @@ fn compute_partition_fps(
 }
 
 fn texture_copy_layout_tag(context: &crate::Context) -> impl Fn(crate::backend::TextureHandle) -> u64 + '_ {
-    move |texture| context.device().inner.backend.lock().unwrap().texture_copy_retention_tag(texture)
+    move |texture| {
+        context
+            .device()
+            .inner
+            .backend
+            .lock()
+            .unwrap()
+            .texture_copy_retention_tag(texture)
+    }
 }
 
 /// True when all nodes in the given waves are retainable (no uploads).
@@ -1081,8 +1089,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         use std::hash::{Hash, Hasher};
                         let waves = &schedule.waves[wave_ranges[i].clone()];
                         let raw_fp = partition_fingerprint(ir, schedule, waves);
-                        let layout_fp =
-                            analysis::partition_copy_texture_layout_fingerprint(ir, waves, &layout_tag);
+                        let layout_fp = analysis::partition_copy_texture_layout_fingerprint(ir, waves, &layout_tag);
                         let mut h = DefaultHasher::new();
                         raw_fp.hash(&mut h);
                         layout_fp.hash(&mut h);

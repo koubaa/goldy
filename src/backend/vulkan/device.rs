@@ -498,13 +498,48 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     "lost Vulkan device — skipping per-object destroy, calling vkDestroyDevice only (driver may be in an invalid state)"
                 );
                 // Drop map entries without calling Vulkan (handles become invalid).
-                state.buffers.write().unwrap().entries.retain(|_, b| b.device_handle != device_handle);
-                state.shaders.write().unwrap().entries.retain(|_, s| s.device_handle != device_handle);
-                state.pipelines.write().unwrap().entries.retain(|_, p| p.device_handle != device_handle);
-                state.compute_pipelines.write().unwrap().entries.retain(|_, p| p.device_handle != device_handle);
-                state.render_targets.write().unwrap().entries.retain(|_, t| t.device_handle != device_handle);
-                state.textures.write().unwrap().entries.retain(|_, t| t.device_handle != device_handle);
-                state.samplers.write().unwrap().entries.retain(|_, s| s.device_handle != device_handle);
+                state
+                    .buffers
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, b| b.device_handle != device_handle);
+                state
+                    .shaders
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, s| s.device_handle != device_handle);
+                state
+                    .pipelines
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, p| p.device_handle != device_handle);
+                state
+                    .compute_pipelines
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, p| p.device_handle != device_handle);
+                state
+                    .render_targets
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, t| t.device_handle != device_handle);
+                state
+                    .textures
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, t| t.device_handle != device_handle);
+                state
+                    .samplers
+                    .write()
+                    .unwrap()
+                    .entries
+                    .retain(|_, s| s.device_handle != device_handle);
                 state
                     .compute_fence_pool
                     .lock()
@@ -513,7 +548,11 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                 // Per-context staging belt and texture pool: device is being lost so just
                 // drop entries without Vulkan destroy calls (handles are invalid after
                 // device loss). Drop the entire context entries for this device.
-                state.contexts.write().unwrap().retain(|_, sc| sc.lock().unwrap().device != device_handle);
+                state
+                    .contexts
+                    .write()
+                    .unwrap()
+                    .retain(|_, sc| sc.lock().unwrap().device != device_handle);
                 logical_device.device.destroy_device(None);
                 return;
             }
@@ -524,7 +563,11 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // Destroy per-context staging belt and texture pool for this device.
             // Command pools/semaphores in the context are intentionally NOT destroyed
             // here — they are child objects of the device and reclaimed by vkDestroyDevice.
-            let ctx_keys: Vec<_> = state.contexts.read().unwrap().iter()
+            let ctx_keys: Vec<_> = state
+                .contexts
+                .read()
+                .unwrap()
+                .iter()
                 .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
                 .map(|(k, _)| *k)
                 .collect();
@@ -539,7 +582,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             super::frame_table::destroy_device(state, device_handle, &logical_device);
 
             // Destroy buffers owned by this device
-            let buffer_handles: Vec<_> = state.buffers.read().unwrap().entries.iter()
+            let buffer_handles: Vec<_> = state
+                .buffers
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, b)| b.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
@@ -560,7 +608,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Destroy shaders owned by this device
-            let shader_handles: Vec<_> = state.shaders.read().unwrap().entries.iter()
+            let shader_handles: Vec<_> = state
+                .shaders
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
@@ -579,7 +632,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Destroy graphics pipelines owned by this device
-            let pipeline_handles: Vec<_> = state.pipelines.read().unwrap().entries.iter()
+            let pipeline_handles: Vec<_> = state
+                .pipelines
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, p)| p.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
@@ -596,7 +654,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Destroy compute pipelines owned by this device
-            let compute_pipeline_handles: Vec<_> = state.compute_pipelines.read().unwrap().entries.iter()
+            let compute_pipeline_handles: Vec<_> = state
+                .compute_pipelines
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, p)| p.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
@@ -640,7 +703,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Destroy render targets owned by this device
-            let target_handles: Vec<_> = state.render_targets.read().unwrap().entries.iter()
+            let target_handles: Vec<_> = state
+                .render_targets
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, t)| t.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
@@ -685,14 +753,19 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     &logical_device,
                     &state.devices,
                     &mut state.surfaces,
-                    &mut state.textures,
+                    &state.textures,
                     handle,
                     true,
                 );
             }
 
             // Destroy textures owned by this device
-            let texture_handles: Vec<_> = state.textures.read().unwrap().entries.iter()
+            let texture_handles: Vec<_> = state
+                .textures
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, t)| t.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();
@@ -711,7 +784,12 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             }
 
             // Destroy samplers owned by this device
-            let sampler_handles: Vec<_> = state.samplers.read().unwrap().entries.iter()
+            let sampler_handles: Vec<_> = state
+                .samplers
+                .read()
+                .unwrap()
+                .entries
+                .iter()
                 .filter(|(_, s)| s.device_handle == device_handle)
                 .map(|(h, _)| *h)
                 .collect();

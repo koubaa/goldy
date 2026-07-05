@@ -58,7 +58,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Adapter ID for the WARP device from [`IDXGIFactory4::EnumWarpAdapter`].
+/// Adapter ID for the WARP device from `IDXGIFactory4::EnumWarpAdapter`.
 /// Used when `GOLDY_DX12_FORCE_WARP=1`.
 pub const WARP_ADAPTER_ID: u32 = u32::MAX;
 
@@ -136,9 +136,9 @@ pub fn is_debug_mode() -> bool {
 
 /// Get or create a DX12 backend for one [`crate::Instance`].
 ///
-/// Each instance owns independent [`Dx12State`] (resource tables, contexts, devices) so
+/// Each instance owns independent `Dx12State` (resource tables, contexts, devices) so
 /// lock-free submit sessions never share mutable backend state across concurrent clients.
-/// DXGI factory + adapter enumeration are process-wide via [`process_shared::process_shared`].
+/// DXGI factory + adapter enumeration are process-wide via `process_shared::process_shared`.
 pub fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>> {
     let backend = Dx12Backend::new()?;
     Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))

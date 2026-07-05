@@ -611,11 +611,7 @@ pub(super) fn resize(
         if preserve_contents && copy_len > 0 {
             if let Some(old_mapped) = old.cpu_writable_upload_mapped {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        old_mapped as *const u8,
-                        mapped as *mut u8,
-                        copy_len as usize,
-                    );
+                    std::ptr::copy_nonoverlapping(old_mapped as *const u8, mapped as *mut u8, copy_len as usize);
                 }
             }
         }

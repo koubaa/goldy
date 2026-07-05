@@ -29,7 +29,10 @@ pub(super) fn prepare_present_work(
         .clone();
 
     let timeline_sem = state
-        .contexts.read().unwrap().get(&frame.context)
+        .contexts
+        .read()
+        .unwrap()
+        .get(&frame.context)
         .context("Invalid context handle")?
         .lock()
         .unwrap()

@@ -5,11 +5,11 @@
 
 use super::compute;
 use super::types::{
-    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextMap,
-    SharedFrameTableDevice, SharedFrameTableMap, SharedLogicalDevice, SharedPipelineTable,
-    SharedRenderTargetTable, SharedSubmissionContext, SharedTextureTable, VulkanState,
+    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextMap, SharedFrameTableDevice,
+    SharedFrameTableMap, SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext,
+    SharedTextureTable, VulkanState,
 };
-use super::{ContextHandle, DeviceHandle, GraphCommand, GpuCommand, SubmitSync};
+use super::{ContextHandle, DeviceHandle, GpuCommand, GraphCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
@@ -61,11 +61,7 @@ pub(crate) struct VulkanSubmitScope<'a> {
 impl<'a> VulkanSubmitScope<'a> {
     /// Session methods pass a redundant `ctx`; must match the scope's bound context.
     pub(crate) fn assert_ctx(&self, ctx: ContextHandle) {
-        debug_assert_eq!(
-            self.ctx,
-            ctx,
-            "ContextSubmitSession invoked with wrong context handle"
-        );
+        debug_assert_eq!(self.ctx, ctx, "ContextSubmitSession invoked with wrong context handle");
     }
 
     pub(crate) fn completed_timeline_value(&self) -> u64 {
@@ -162,11 +158,7 @@ impl VulkanSubmitSession {
     }
 
     fn dispatch_scope(&self, ctx: ContextHandle) -> VulkanSubmitScope<'_> {
-        debug_assert_eq!(
-            ctx,
-            self.ctx,
-            "ContextSubmitSession invoked with wrong context handle"
-        );
+        debug_assert_eq!(ctx, self.ctx, "ContextSubmitSession invoked with wrong context handle");
         self.scope()
     }
 }
