@@ -268,7 +268,6 @@ pub(super) fn create(
             dsv_offset,
             current_frame: 0,
             current_image_index: None,
-            last_presented_image_index: None,
             frame_sync,
             current_texture_handle: None,
             compute_scratch_textures: vec![None; MAX_FRAMES_IN_FLIGHT],
@@ -394,12 +393,6 @@ pub(super) fn acquire(
     surface.pending_frame_compute.clear();
 
     let image_index = unsafe { surface.swapchain.GetCurrentBackBufferIndex() };
-    if surface.last_presented_image_index == Some(image_index) {
-        tracing::warn!(
-            "dx12::surface::acquire ACQUIRE RACE: image={} matches last presented index",
-            image_index
-        );
-    }
     surface.current_image_index = Some(image_index);
 
     let width = surface.width;
@@ -734,12 +727,6 @@ pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) 
     if render_pass_submitted {
         // fence_value was stored in frame_sync[present_slot].fence_value by
         // surface::render; acquire() waits for it on the next cycle through this slot.
-        tracing::warn!(
-            "dx12::surface::present SKIP-COPY: present_slot={} image={} render_pass_submitted=true \
-             (presents backbuffer without scratch copy)",
-            present_slot,
-            image_index
-        );
     } else {
         let _tz = crate::tracy_zone!("dx12.present.copy_to_backbuffer");
         let logical_device = state
@@ -848,7 +835,6 @@ pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) 
         if hr.is_err() {
             anyhow::bail!("Present failed with HRESULT: {:?}", hr);
         }
-        surface.last_presented_image_index = Some(image_index as u32);
     }
 
     let (return_fence, return_image) = {
@@ -983,9 +969,6 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
         surface.rtv_offsets.push(rtv_offset);
     }
 
-    // Diagnostic: magenta-clear new swapchain buffers so uninitialized flashes are visible.
-    clear_swapchain_backbuffers_diagnostic(state, surface_handle, device_handle)?;
-
     // Recreate depth buffer if the surface had one
     if let Some(df) = depth_format {
         let logical_device = state
@@ -1062,13 +1045,12 @@ pub(super) fn resize(state: &mut Dx12State, surface_handle: SurfaceHandle, width
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
     surface.current_frame = 0;
     surface.current_image_index = None;
-    surface.last_presented_image_index = None;
     surface.current_texture_handle = None;
     surface.compute_scratch_textures = vec![None; MAX_FRAMES_IN_FLIGHT];
     surface.pending_acquire_count = 0;
     surface.pending_swapchain_returns.clear();
 
-    tracing::warn!("dx12::surface::resize complete: {}x{}", width, height);
+    tracing::debug!("Resized surface to {}x{}", width, height);
     Ok(())
 }
 
@@ -1103,10 +1085,6 @@ fn ensure_compute_scratch_texture(
         surface.compute_scratch_textures[idx] = None;
     }
 
-    tracing::warn!(
-        "dx12::surface: (re)creating scratch[{}] {}x{} {:?}",
-        idx, width, height, format
-    );
     let h = texture::create(
         state,
         device_handle,
@@ -1116,104 +1094,9 @@ fn ensure_compute_scratch_texture(
         TextureKind::Direct,
         TextureFlags::empty(),
     )?;
-    texture::clear_storage_uav_diagnostic_magenta(state, device_handle, h)?;
     let surface = state.surfaces.get_mut(&surface_handle).unwrap();
     surface.compute_scratch_textures[idx] = Some(h);
     Ok(h)
-}
-
-/// Magenta-clear all swapchain backbuffers after `ResizeBuffers`.
-///
-/// If the resize flash stays **green**, the culprit is outside our scratch/out_image path
-/// (typically an uninitialized flip-model backbuffer). If it turns **magenta**, one of
-/// our intermediates is being shown before the worker overwrites it.
-fn clear_swapchain_backbuffers_diagnostic(
-    state: &mut Dx12State,
-    surface_handle: SurfaceHandle,
-    device_handle: DeviceHandle,
-) -> Result<()> {
-    const MAGENTA: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
-
-    let logical_device = state
-        .devices
-        .get(&device_handle)
-        .context("clear_swapchain_backbuffers_diagnostic: invalid device")?;
-
-    let (render_targets, rtv_offsets, _width, _height) = {
-        let surface = state
-            .surfaces
-            .get(&surface_handle)
-            .context("clear_swapchain_backbuffers_diagnostic: invalid surface")?;
-        (
-            surface.render_targets.clone(),
-            surface.rtv_offsets.clone(),
-            surface.width,
-            surface.height,
-        )
-    };
-
-    unsafe { logical_device.command_allocator.Reset() }
-        .context("clear_swapchain_backbuffers_diagnostic: Reset allocator")?;
-    let init_cmd: ID3D12GraphicsCommandList = unsafe {
-        logical_device.device.CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            &logical_device.command_allocator,
-            None,
-        )
-    }
-    .context("clear_swapchain_backbuffers_diagnostic: CreateCommandList")?;
-    let init_cmd7: ID3D12GraphicsCommandList7 = init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
-    let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&init_cmd) };
-
-    for (rt, rtv_offset) in render_targets.iter().zip(rtv_offsets.iter()) {
-        let rtv_handle = unsafe {
-            let mut handle = logical_device.rtv_heap.GetCPUDescriptorHandleForHeapStart();
-            handle.ptr += (*rtv_offset * logical_device.rtv_descriptor_size) as usize;
-            handle
-        };
-
-        let mut to_rt = vec![barriers::texture_barrier_full(
-            rt,
-            D3D12_BARRIER_SYNC_NONE,
-            D3D12_BARRIER_SYNC_RENDER_TARGET,
-            D3D12_BARRIER_ACCESS_NO_ACCESS,
-            D3D12_BARRIER_ACCESS_RENDER_TARGET,
-            D3D12_BARRIER_LAYOUT_UNDEFINED,
-            D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-        )];
-        unsafe { barriers::barrier_textures(&init_cmd7, &to_rt) };
-        unsafe { barriers::drop_texture_barriers(&mut to_rt) };
-
-        unsafe {
-            cmd_gfx.ClearRenderTargetView(rtv_handle, &MAGENTA, None);
-        }
-
-        let mut to_present = vec![barriers::texture_barrier_full(
-            rt,
-            D3D12_BARRIER_SYNC_RENDER_TARGET,
-            D3D12_BARRIER_SYNC_NONE,
-            D3D12_BARRIER_ACCESS_RENDER_TARGET,
-            D3D12_BARRIER_ACCESS_NO_ACCESS,
-            D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-            D3D12_BARRIER_LAYOUT_PRESENT,
-        )];
-        unsafe { barriers::barrier_textures(&init_cmd7, &to_present) };
-        unsafe { barriers::drop_texture_barriers(&mut to_present) };
-    }
-
-    unsafe { init_cmd.Close() }.context("clear_swapchain_backbuffers_diagnostic: Close")?;
-
-    let cmd_list: ID3D12CommandList = init_cmd.cast().context("Failed to cast clear command list")?;
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("clear_swapchain_backbuffers_diagnostic: Signal")?;
-    wait_for_fence(&logical_device.fence, fence_value)
 }
 
 /// Get surface dimensions.
