@@ -2,8 +2,8 @@
 
 use super::super::DeviceHandle;
 use super::types::{
-    DeletionQueue, DescriptorRegistry, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState, TextureHeapAllocator,
-    ARGUMENT_BUFFER_SIZE,
+    DeletionQueue, DescriptorRegistry, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
+    TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
 use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use ::metal as mtl;

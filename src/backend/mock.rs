@@ -257,11 +257,7 @@ impl MockBackend {
     }
 
     fn context_state(&self, ctx: ContextHandle) -> std::sync::MutexGuard<'_, MockContextState> {
-        self.contexts
-            .get(&ctx)
-            .expect("invalid context handle")
-            .lock()
-            .unwrap()
+        self.contexts.get(&ctx).expect("invalid context handle").lock().unwrap()
     }
 
     fn context_state_mut(&mut self, ctx: ContextHandle) -> std::sync::MutexGuard<'_, MockContextState> {
@@ -423,11 +419,7 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
         Ok(None)
     }
 
-    fn finish_timeline_wait(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         self.wait_until_count += 1;
         let cur = self.gpu_progress(ctx);
         if value > cur {
@@ -443,11 +435,6 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         frame: FrameToken,
         _submit_tv: crate::timeline::TimelineValue,
     ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
-        let device = self
-            .surfaces
-            .get(&frame.surface)
-            .ok_or_else(|| anyhow::anyhow!("Invalid surface handle"))?
-            .device_handle;
         if let Some(tex_handle) = self
             .surfaces
             .get_mut(&frame.surface)
@@ -457,7 +444,7 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
         {
             self.textures.remove(&tex_handle);
         }
-        Ok(Box::new(MockPresentGpuWork { frame, device }))
+        Ok(Box::new(MockPresentGpuWork { frame }))
     }
 
     fn finish_present(
@@ -493,7 +480,6 @@ impl crate::backend::GpuBackendPresentSplit for MockBackend {
 
 struct MockPresentGpuWork {
     frame: FrameToken,
-    device: DeviceHandle,
 }
 
 impl crate::backend::PresentGpuWork for MockPresentGpuWork {

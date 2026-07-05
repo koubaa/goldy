@@ -583,7 +583,10 @@ pub(super) fn create(
 
     let (cats, slot_kinds, strides) = state
         .shaders
-        .read().unwrap().entries.get(&compute_shader)
+        .read()
+        .unwrap()
+        .entries
+        .get(&compute_shader)
         .and_then(|s| s.reflection.as_ref())
         .map(|r| {
             (
@@ -614,7 +617,12 @@ pub(super) fn create(
 
 /// Destroy a compute pipeline.
 pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHandle) {
-    state.compute_pipelines.write().unwrap().entries.remove(&pipeline_handle);
+    state
+        .compute_pipelines
+        .write()
+        .unwrap()
+        .entries
+        .remove(&pipeline_handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -812,7 +820,14 @@ fn record_gpu_command(
                             raw_indices,
                             &pipeline.push_constant_categories,
                             &pipeline.binding_element_strides,
-                            |idx, cat| buffer_stride_for_bindless_index(&state.buffers.read().unwrap().entries, device_handle, idx, cat),
+                            |idx, cat| {
+                                buffer_stride_for_bindless_index(
+                                    &state.buffers.read().unwrap().entries,
+                                    device_handle,
+                                    idx,
+                                    cat,
+                                )
+                            },
                             &pipeline.shader_debug_name,
                         )?;
                         crate::backend::validate_bindless_slot_kinds(
@@ -889,7 +904,9 @@ fn record_gpu_command(
                 .get(&device_handle)
                 .context("DispatchIndirect: invalid device")?;
             let buffers_read = state.buffers.read().unwrap();
-                let buf_state = buffers_read.entries.get(buffer)
+            let buf_state = buffers_read
+                .entries
+                .get(buffer)
                 .context("DispatchIndirect: invalid buffer handle")?;
             let signature = logical_device
                 .compute_dispatch_indirect_signature
@@ -1070,7 +1087,7 @@ fn record_gpu_command(
                     // Clamp access against the resource's real capabilities: a
                     // non-storage (upload) buffer can never carry UAV/COPY_DEST.
                     let buffers_read = state.buffers.read().unwrap();
-    let is_storage = buffers_read.entries.get(h).map(|bs| bs.is_storage).unwrap_or(false);
+                    let is_storage = buffers_read.entries.get(h).map(|bs| bs.is_storage).unwrap_or(false);
                     let access_before = slot_usage_to_dx12_access_for_buffer(&usage.src, is_storage);
                     let mut access_after = slot_usage_to_dx12_access_for_buffer(&usage.dst, is_storage);
                     // WARP validation (ID 1331): global barriers with AccessBefore=COMMON
@@ -1154,7 +1171,9 @@ fn record_gpu_command(
         GpuCommand::ClearBuffer { buffer, offset, size } => {
             let _tz = tracy_zone!("dx12.clear_buffer");
             let buffers_read = state.buffers.read().unwrap();
-                let buf_state = buffers_read.entries.get(buffer)
+            let buf_state = buffers_read
+                .entries
+                .get(buffer)
                 .context("ClearBuffer: invalid buffer handle")?;
             let clear_size = if *size == 0 {
                 buf_state.size.saturating_sub(*offset)
@@ -1221,7 +1240,9 @@ fn record_gpu_command(
         } => {
             let _tz = tracy_zone!("dx12.write_buffer");
             let buffers_read = state.buffers.read().unwrap();
-                let buf_state = buffers_read.entries.get(buf_handle)
+            let buf_state = buffers_read
+                .entries
+                .get(buf_handle)
                 .context("WriteBuffer: invalid buffer handle")?;
             if !buf_state.is_storage {
                 let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -1245,7 +1266,7 @@ fn record_gpu_command(
                 let upload_src = belt_entry.0.clone();
                 let upload_off = belt_entry.1;
                 let buffers_read = state.buffers.read().unwrap();
-    let buf_state = buffers_read.entries.get(buf_handle).unwrap();
+                let buf_state = buffers_read.entries.get(buf_handle).unwrap();
 
                 if ctx.use_global_buffer_barriers {
                     let pre = D3D12_GLOBAL_BARRIER {
@@ -1283,18 +1304,29 @@ fn record_gpu_command(
                 .get(ctx.texture_upload_idx)
                 .context("WriteTexture: staged upload missing (internal)")?;
             ctx.texture_upload_idx += 1;
-            super::texture::record_staged_texture_upload(cl, cl7, &mut state.textures.write().unwrap().entries, upload)?;
+            super::texture::record_staged_texture_upload(
+                cl,
+                cl7,
+                &mut state.textures.write().unwrap().entries,
+                upload,
+            )?;
         }
         GpuCommand::CopyTexture { src, dst } => {
             let _tz = tracy_zone!("dx12.copy_texture");
             let (src_res, src_layout, src_is_storage) = {
                 let textures_read = state.textures.read().unwrap();
-    let ts = textures_read.entries.get(src).context("CopyTexture: src texture not found")?;
+                let ts = textures_read
+                    .entries
+                    .get(src)
+                    .context("CopyTexture: src texture not found")?;
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
             let (dst_res, dst_layout, dst_is_storage) = {
                 let textures_read = state.textures.read().unwrap();
-    let ts = textures_read.entries.get(dst).context("CopyTexture: dst texture not found")?;
+                let ts = textures_read
+                    .entries
+                    .get(dst)
+                    .context("CopyTexture: dst texture not found")?;
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
 
@@ -1457,13 +1489,17 @@ fn record_gpu_command(
             let _tz = tracy_zone!("dx12.copy_render_target");
             let src_res = {
                 let render_targets_read = state.render_targets.read().unwrap();
-                    let rt = render_targets_read.entries.get(src)
+                let rt = render_targets_read
+                    .entries
+                    .get(src)
                     .context("CopyRenderTarget: src render target not found")?;
                 rt.texture.clone()
             };
             let (dst_res, dst_layout, dst_is_storage) = {
                 let textures_read = state.textures.read().unwrap();
-                    let ts = textures_read.entries.get(dst)
+                let ts = textures_read
+                    .entries
+                    .get(dst)
                     .context("CopyRenderTarget: dst texture not found")?;
                 (ts.resource.clone(), ts.last_layout, ts.is_storage)
             };
@@ -1718,7 +1754,7 @@ fn execute_signal_and_finish(
             types::destroy_pending_deletion(dev, &mut registry, resource);
         }
         let fences = state.context_fences.read().unwrap();
-        registry.drain_ready_slot_reclamations(&*fences);
+        registry.drain_ready_slot_reclamations(&fences);
     }
 
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1821,7 +1857,9 @@ pub(super) fn submit(
                     ..
                 } => {
                     let buffers_read = state.buffers.read().unwrap();
-                        let buf = buffers_read.entries.get(buf_handle)
+                    let buf = buffers_read
+                        .entries
+                        .get(buf_handle)
                         .context("WriteBuffer pre-pass: invalid handle")?;
                     if buf.is_storage {
                         let buf_dev = buf.device_handle;
@@ -2084,7 +2122,9 @@ pub(super) fn submit_graph(
                         ..
                     } => {
                         let buffers_read = state.buffers.read().unwrap();
-                            let buf = buffers_read.entries.get(buf_handle)
+                        let buf = buffers_read
+                            .entries
+                            .get(buf_handle)
                             .context("WriteBuffer pre-pass: invalid handle")?;
                         if buf.is_storage {
                             let buf_dev = buf.device_handle;
@@ -2464,7 +2504,7 @@ pub(super) fn try_resubmit_retained(
             types::destroy_pending_deletion(dev, &mut registry, resource);
         }
         let fences = state.context_fences.read().unwrap();
-        registry.drain_ready_slot_reclamations(&*fences);
+        registry.drain_ready_slot_reclamations(&fences);
     }
 
     Ok(Some(fence_value))

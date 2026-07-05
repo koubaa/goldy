@@ -615,16 +615,12 @@ impl PresentGpuWork for MetalPresentGpuWork {
         let command_buffer = owned_command_buffer.as_ref();
         let queue_lock = self.logical_device.queue_lock.clone();
         let drawable_ptr = self.drawable_ptr as id;
-        let drawable_ref: &mtl::DrawableRef =
-            unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
+        let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
 
         let signal_value = {
             let _queue_guard = queue_lock.lock().unwrap();
             let signal_value = {
-                let v = self
-                    .logical_device
-                    .timeline_next
-                    .fetch_add(1, Ordering::Relaxed);
+                let v = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
                 self.logical_device
                     .timeline_scheduled_max
                     .fetch_max(v, Ordering::Relaxed);
@@ -639,8 +635,7 @@ impl PresentGpuWork for MetalPresentGpuWork {
             let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
                 waiter.signal(signal_value);
                 if let Some(idx) = return_image {
-                    signal_queue_present
-                        .push(crate::signal::Signal::SwapchainReturned { image_index: idx });
+                    signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
                     if let Ok(mut pending) = return_pending.lock() {
                         pending.push((surface, idx));
                     }
@@ -683,10 +678,7 @@ impl PresentGpuWork for MetalPresentGpuWork {
 }
 
 /// Present the acquired drawable (legacy single-lock entry — prefer split path).
-pub(super) fn present(
-    state: &mut MetalState,
-    frame: crate::backend::FrameToken,
-) -> Result<TimelineValue> {
+pub(super) fn present(state: &mut MetalState, frame: crate::backend::FrameToken) -> Result<TimelineValue> {
     let work = prepare_present_work(state, frame, 0)?;
     let finish = work.run()?;
     finish_present(state, finish, 0)

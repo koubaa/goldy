@@ -233,7 +233,7 @@ fn patch_buffer_views_after_parent_resize(state: &mut Dx12State, parent_handle: 
     for vh in view_handles {
         let (device_handle, stride, byte_off, view_size, uav_off, srv_off) = {
             let buffers_read = state.buffers.read().unwrap();
-    let v = buffers_read.entries.get(&vh).context("patch_buffer_views: view")?;
+            let v = buffers_read.entries.get(&vh).context("patch_buffer_views: view")?;
             (
                 v.device_handle,
                 v.element_stride.unwrap_or(4),
@@ -314,7 +314,10 @@ fn patch_buffer_views_after_parent_resize(state: &mut Dx12State, parent_handle: 
 
         state
             .buffers
-            .write().unwrap().entries.get_mut(&vh)
+            .write()
+            .unwrap()
+            .entries
+            .get_mut(&vh)
             .context("patch_buffer_views: view mut")?
             .resource = new_resource.clone();
     }
@@ -1051,7 +1054,12 @@ pub(super) fn create_reserved_with_capacity(
 
     let (bindless_offset, bindless_srv_offset) = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let uav_offset = ld.descriptors.lock().unwrap().resource_registry.register_buffer_uav(handle);
+        let uav_offset = ld
+            .descriptors
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_buffer_uav(handle);
         let uav_desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
             Format: DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
@@ -1075,7 +1083,12 @@ pub(super) fn create_reserved_with_capacity(
                 .CreateUnorderedAccessView(&resource, None, Some(&uav_desc), uav_cpu_handle);
         }
 
-        let srv_offset = ld.descriptors.lock().unwrap().resource_registry.register_buffer_srv(handle);
+        let srv_offset = ld
+            .descriptors
+            .lock()
+            .unwrap()
+            .resource_registry
+            .register_buffer_srv(handle);
         let srv_desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
             Format: DXGI_FORMAT_UNKNOWN,
             ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
@@ -1161,7 +1174,10 @@ pub(super) fn create_with_capacity(
 pub(super) fn capacity(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
     state
         .buffers
-        .read().unwrap().entries.get(&buffer_handle)
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
         .map(|b| b.allocation_size)
         .unwrap_or(0)
 }
@@ -1216,7 +1232,10 @@ pub(super) fn set_logical_size(
             let pool = pool_guard.as_mut().context("set_logical_size: tile heap pool")?;
             let queue = ld.command_queue.clone();
             let mut buffers_write = state.buffers.write().unwrap();
-    let buf = buffers_write.entries.get_mut(&buffer_handle).expect("set_logical_size: buffer");
+            let buf = buffers_write
+                .entries
+                .get_mut(&buffer_handle)
+                .expect("set_logical_size: buffer");
             if new_pages > old_pages {
                 let mut mappings = Vec::with_capacity((new_pages - old_pages) as usize);
                 for i in old_pages..new_pages {
@@ -1241,13 +1260,27 @@ pub(super) fn set_logical_size(
             let buf = buffers_read.entries.get(&buffer_handle).unwrap();
             rewrite_root_buffer_descriptors(logical_device, &buf.resource, new_logical_size, buf)?;
         }
-        state.buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+        state
+            .buffers
+            .write()
+            .unwrap()
+            .entries
+            .get_mut(&buffer_handle)
+            .unwrap()
+            .size = new_logical_size;
         return Ok(());
     }
 
     let logical_device = state.devices.get(&device_handle).context("set_logical_size: device")?;
     rewrite_root_buffer_descriptors(logical_device, &old.resource, new_logical_size, &old)?;
-    state.buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&buffer_handle)
+        .unwrap()
+        .size = new_logical_size;
     Ok(())
 }
 
@@ -1331,7 +1364,7 @@ pub(super) fn hint_unused_above(state: &mut Dx12State, buffer_handle: BufferHand
     };
     let queue = &ld.command_queue;
     let mut buffers_write = state.buffers.write().unwrap();
-        let Some(buf_mut) = buffers_write.entries.get_mut(&buffer_handle) else {
+    let Some(buf_mut) = buffers_write.entries.get_mut(&buffer_handle) else {
         return;
     };
     let mut i = first_tile;
@@ -1560,7 +1593,7 @@ pub(super) const ZERO_BUFFER_SIZE: u64 = UPLOAD_CHUNK_SIZE;
 /// Called by `ComputeCommand::WriteBuffer` handling in `compute::submit` so the
 /// upload resource is ready before command recording begins.
 pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferHandle, min_size: u64) -> Result<()> {
-    let (device_handle, needs_upload) = {
+    let device_handle = {
         let buffers_read = state.buffers.read().unwrap();
         let buffer = buffers_read
             .entries
@@ -1569,9 +1602,8 @@ pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferH
         if buffer.upload_buffer.is_some() {
             return Ok(());
         }
-        (buffer.device_handle, ())
+        buffer.device_handle
     };
-    let _ = needs_upload;
     let chunk_size = min_size.min(UPLOAD_CHUNK_SIZE);
     let logical_device = state
         .devices
@@ -1608,7 +1640,14 @@ pub(super) fn ensure_upload_buffer(state: &mut Dx12State, buffer_handle: BufferH
         )
     }
     .context("ensure_upload_buffer: create failed")?;
-    state.buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().upload_buffer = Some(upload.context("Upload buffer is null")?);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&buffer_handle)
+        .unwrap()
+        .upload_buffer = Some(upload.context("Upload buffer is null")?);
     Ok(())
 }
 
@@ -1645,7 +1684,10 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
     }
 
     let buffers_read = state.buffers.read().unwrap();
-    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_read
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     if offset + data.len() as u64 > buffer.size {
         anyhow::bail!("Write would exceed buffer bounds");
@@ -1815,12 +1857,25 @@ pub(super) fn write(state: &mut Dx12State, buffer_handle: BufferHandle, offset: 
 
 /// Get the size of a buffer in bytes.
 pub(super) fn size(state: &Dx12State, buffer_handle: BufferHandle) -> u64 {
-    state.buffers.read().unwrap().entries.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
+    state
+        .buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .map(|b| b.size)
+        .unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
 pub(super) fn bindless_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
-    state.buffers.read().unwrap().entries.get(&buffer_handle).and_then(|b| b.bindless_offset)
+    state
+        .buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .and_then(|b| b.bindless_offset)
 }
 
 /// Resolve which SRV/UAV/CBV view a bindless heap index refers to.
@@ -1853,7 +1908,10 @@ pub(super) fn bindless_slot_kind_for_index(
 pub(super) fn bindless_srv_index(state: &Dx12State, buffer_handle: BufferHandle) -> Option<u32> {
     state
         .buffers
-        .read().unwrap().entries.get(&buffer_handle)
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
         .and_then(|b| b.bindless_srv_offset.or(b.bindless_offset))
 }
 
@@ -1869,7 +1927,10 @@ pub(super) fn emit_copy_coherent_readback_on_command_list(
 
     let (main_resource, readback, len) = {
         let buffers_read = state.buffers.read().unwrap();
-    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffer = buffers_read
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if !buffer.flags.contains(BufferFlags::CPU_READABLE) || !buffer.is_storage {
             return Ok(());
         }
@@ -1984,16 +2045,17 @@ pub(super) fn read_to_cpu(
 
     let coherent_readback = {
         let buffers_read = state.buffers.read().unwrap();
-        let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffer = buffers_read
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
 
         let len = output.len() as u64;
         if len > buffer.size {
             anyhow::bail!("Read would exceed buffer bounds");
         }
 
-        buffer.is_storage
-            && buffer.flags.contains(BufferFlags::CPU_READABLE)
-            && buffer.coherent_readback.is_some()
+        buffer.is_storage && buffer.flags.contains(BufferFlags::CPU_READABLE) && buffer.coherent_readback.is_some()
     };
 
     if coherent_readback {
@@ -2002,7 +2064,10 @@ pub(super) fn read_to_cpu(
     }
 
     let buffers_read = state.buffers.read().unwrap();
-    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_read
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     let len = output.len() as u64;
     if len > buffer.size {
@@ -2142,7 +2207,10 @@ pub(super) fn clear(
     size: u64,
 ) -> Result<()> {
     let buffers_read = state.buffers.read().unwrap();
-    let buffer = buffers_read.entries.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffer = buffers_read
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     let clear_size = super::super::shared::resolve_clear_size(buffer.size, offset, size);
 

@@ -46,8 +46,22 @@ pub(crate) fn init_device(state: &mut Dx12State, device_handle: super::DeviceHan
 
     let (staging, staging_mapped) = create_upload_table_buffer(ld)?;
 
-    state.buffers.write().unwrap().entries.get_mut(&selector).unwrap().element_stride = Some(4);
-    state.buffers.write().unwrap().entries.get_mut(&device_table).unwrap().element_stride = Some(4);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&selector)
+        .unwrap()
+        .element_stride = Some(4);
+    state
+        .buffers
+        .write()
+        .unwrap()
+        .entries
+        .get_mut(&device_table)
+        .unwrap()
+        .element_stride = Some(4);
 
     {
         let dev = state.devices.get(&device_handle).context("init frame table")?;
@@ -501,10 +515,21 @@ pub(crate) fn prepare_render_commands(
             |h| {
                 state
                     .pipelines
-                    .read().unwrap().entries.get(&h)
+                    .read()
+                    .unwrap()
+                    .entries
+                    .get(&h)
                     .map(|p| (p.binding_element_strides.clone(), p.shader_debug_name.clone()))
             },
-            |h| state.buffers.read().unwrap().entries.get(&h).and_then(|b| b.element_stride),
+            |h| {
+                state
+                    .buffers
+                    .read()
+                    .unwrap()
+                    .entries
+                    .get(&h)
+                    .and_then(|b| b.element_stride)
+            },
         )
     })?;
 
@@ -518,7 +543,10 @@ pub(crate) fn prepare_render_commands(
                     .map(|h| {
                         state
                             .buffers
-                            .read().unwrap().entries.get(h)
+                            .read()
+                            .unwrap()
+                            .entries
+                            .get(h)
                             .and_then(|b| b.bindless_offset)
                             .with_context(|| format!("BindResources: buffer handle {h:?} has no bindless offset"))
                     })

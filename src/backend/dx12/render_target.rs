@@ -229,7 +229,9 @@ pub(super) fn record_render_pass_to_list(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let render_targets_read = state.render_targets.read().unwrap();
-        let render_target = render_targets_read.entries.get(&target)
+    let render_target = render_targets_read
+        .entries
+        .get(&target)
         .context("Invalid render target handle")?;
 
     if render_target.device_handle != device_handle {
@@ -393,7 +395,9 @@ pub(super) fn render(
     unsafe { logical_device.command_allocator.Reset() }.context("Failed to reset command allocator")?;
 
     let render_targets_read = state.render_targets.read().unwrap();
-        let render_target = render_targets_read.entries.get(&target)
+    let render_target = render_targets_read
+        .entries
+        .get(&target)
         .context("Invalid render target handle")?;
 
     if render_target.device_handle != device_handle {
@@ -518,7 +522,9 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, out
 
     // Get render target again (borrow checker)
     let render_targets_read = state.render_targets.read().unwrap();
-        let render_target = render_targets_read.entries.get(&target)
+    let render_target = render_targets_read
+        .entries
+        .get(&target)
         .context("Invalid render target handle")?;
 
     let staging_buffer = render_target

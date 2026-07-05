@@ -64,7 +64,11 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
 
     // Register the fence in the lock-free index before inserting the context so that
     // any concurrent drain_ready_slot_reclamations sees a consistent view.
-    state.context_fences.write().unwrap().insert(id, (device, fence.clone()));
+    state
+        .context_fences
+        .write()
+        .unwrap()
+        .insert(id, (device, fence.clone()));
 
     state.contexts.insert(
         id,

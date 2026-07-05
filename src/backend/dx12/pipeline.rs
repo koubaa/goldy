@@ -199,7 +199,12 @@ pub(super) fn create(
         .entries
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| shaders_read.entries.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .or_else(|| {
+            shaders_read
+                .entries
+                .get(&vertex_shader)
+                .and_then(|s| s.reflection.as_ref())
+        })
         .map(|r| {
             (
                 r.push_constant_categories.clone(),
@@ -448,7 +453,12 @@ pub(super) fn create_with_depth(
         .entries
         .get(&fragment_shader)
         .and_then(|s| s.reflection.as_ref())
-        .or_else(|| shaders_read.entries.get(&vertex_shader).and_then(|s| s.reflection.as_ref()))
+        .or_else(|| {
+            shaders_read
+                .entries
+                .get(&vertex_shader)
+                .and_then(|s| s.reflection.as_ref())
+        })
         .map(|r| {
             (
                 r.push_constant_categories.clone(),

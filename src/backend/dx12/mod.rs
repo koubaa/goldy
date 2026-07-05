@@ -515,11 +515,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         Ok(Some(Box::new(Dx12TimelineBlockingWait { fence, value })))
     }
 
-    fn finish_timeline_wait(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         let fence = self
             .state
@@ -547,10 +543,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             ld.process_deletion_queue_up_to(value.min(retired));
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             let fences = self.state.context_fences.read().unwrap();
-            descriptors_arc
-                .lock()
-                .unwrap()
-                .drain_ready_slot_reclamations(&*fences);
+            descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
         Ok(())
     }
@@ -1102,10 +1095,7 @@ impl GpuBackend for Dx12Backend {
                 dev.process_deletion_queue_up_to(value.min(retired));
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
                 let fences = self.state.context_fences.read().unwrap();
-                descriptors_arc
-                    .lock()
-                    .unwrap()
-                    .drain_ready_slot_reclamations(&*fences);
+                descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
             }
         }
         Ok(ok)
@@ -1279,7 +1269,10 @@ impl GpuBackend for Dx12Backend {
         let (cats, slot_kinds, strides) = self
             .state
             .shaders
-            .read().unwrap().entries.get(&compute_shader)
+            .read()
+            .unwrap()
+            .entries
+            .get(&compute_shader)
             .and_then(|s| s.reflection.as_ref())
             .map(|r| {
                 (
@@ -1337,7 +1330,13 @@ impl GpuBackend for Dx12Backend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| ld.descriptors.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| {
+                ld.descriptors
+                    .lock()
+                    .unwrap()
+                    .resource_registry
+                    .available_slots(category)
+            })
             .unwrap_or(0)
     }
 
@@ -1356,10 +1355,7 @@ impl GpuBackend for Dx12Backend {
             ld.process_deletion_queue_up_to(retired);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             let fences = self.state.context_fences.read().unwrap();
-            descriptors_arc
-                .lock()
-                .unwrap()
-                .drain_ready_slot_reclamations(&*fences);
+            descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
     }
 
@@ -1442,12 +1438,7 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             .get(&self.ctx)
             .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
             .unwrap_or(0);
-        let ctx_batch: Vec<_> = self
-            .sc
-            .lock()
-            .unwrap()
-            .deletion_queue
-            .drain_up_to_completed(completed);
+        let ctx_batch: Vec<_> = self.sc.lock().unwrap().deletion_queue.drain_up_to_completed(completed);
         let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
         let fences = self.context_fences.read().unwrap();
         {
@@ -1455,7 +1446,7 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             for r in ctx_batch {
                 types::destroy_pending_deletion(&self.ld, &mut registry, r);
             }
-            registry.drain_ready_slot_reclamations(&*fences);
+            registry.drain_ready_slot_reclamations(&fences);
         }
         self.ld.process_deletion_queue_up_to(device_retired);
     }

@@ -95,23 +95,19 @@ impl Context {
             let backend = device.inner.backend.lock().unwrap();
             backend
                 .clone_context_timeline_reader(handle)
-                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader").into()))?
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader")))?
         };
         device.register_context_timeline_reader(handle, Arc::clone(&timeline_reader));
         let (deletion_flush, reclamation_scope) = {
             let backend = device.inner.backend.lock().unwrap();
             let deletion_flush = backend
                 .clone_context_deletion_flush(handle, Arc::clone(&device.inner.context_readers))
-                .ok_or_else(|| {
-                    GoldyError::Backend(anyhow::anyhow!("missing context deletion flush").into())
-                })?;
+                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context deletion flush")))?;
             let reclamation_scope = backend.clone_context_reclamation_scope(handle);
             (deletion_flush, reclamation_scope)
         };
-        let submit_session = crate::backend::LockedSubmitSession::new(
-            Arc::clone(&device.inner.backend),
-            handle,
-        );
+        let submit_session =
+            crate::backend::LockedSubmitSession::from_backend(Arc::clone(&device.inner.backend), handle);
         Ok(Self {
             inner: Arc::new(ContextInner {
                 device,
@@ -137,11 +133,7 @@ impl Context {
     }
 
     pub(crate) fn submit_session(&self) -> &dyn crate::backend::ContextSubmitSession {
-        self.inner
-            .submit_session
-            .as_ref()
-            .expect("submit session")
-            .as_ref()
+        self.inner.submit_session.as_ref().expect("submit session").as_ref()
     }
 
     /// Test-only access to the backend context id.
@@ -205,10 +197,7 @@ impl Context {
         let already_complete = if ctx == self.inner.handle {
             self.gpu_progress() >= value
         } else {
-            self.inner
-                .device
-                .context_gpu_progress(ctx)
-                .is_some_and(|p| p >= value)
+            self.inner.device.context_gpu_progress(ctx).is_some_and(|p| p >= value)
         };
         let backend_mutex = &self.inner.device.inner.backend;
         if !already_complete {
@@ -624,12 +613,8 @@ impl Context {
         // stamping creates a window where a concurrent submit sees last_timeline = None
         // and evicts in-flight transient textures synchronously, causing GPU UAF.
         // Lock order is always heap → backend; no other code path reverses this.
-        let tv = graph.submit_ir_with_resolver(
-            self,
-            self.submit_session(),
-            &resolver,
-            wait_for_transient_completion,
-        )?;
+        let tv =
+            graph.submit_ir_with_resolver(self, self.submit_session(), &resolver, wait_for_transient_completion)?;
 
         if let Some(heap) = heap_guard.as_mut() {
             heap.stamp_pending(tv);

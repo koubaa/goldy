@@ -675,6 +675,7 @@ pub(super) fn render(
     Ok(())
 }
 
+#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
 pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, submit_tv: u64) -> Result<u64> {
     let work = prepare_present_work(state, frame, submit_tv)?;
     let finish = work.run()?;
@@ -717,7 +718,9 @@ pub(super) fn prepare_present_work(
         .context("Surface's device is invalid")?
         .clone();
     let textures_read = state.textures.read().unwrap();
-        let scratch_res = textures_read.entries.get(&scratch_handle)
+    let scratch_res = textures_read
+        .entries
+        .get(&scratch_handle)
         .context("Scratch texture not found")?
         .resource
         .clone();
@@ -725,10 +728,8 @@ pub(super) fn prepare_present_work(
 
     Ok(Box::new(Dx12PresentGpuWork {
         frame,
-        surface_handle,
         image_index,
         present_slot,
-        ctx: frame.context,
         scratch_handle,
         render_pass_submitted,
         logical_device,
@@ -762,7 +763,10 @@ pub(super) fn finish_present(
     if finish.scratch_layout_updated {
         if let Some(tex) = state
             .textures
-            .write().unwrap().entries.get_mut(&finish.scratch_texture.expect("scratch texture"))
+            .write()
+            .unwrap()
+            .entries
+            .get_mut(&finish.scratch_texture.expect("scratch texture"))
         {
             tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
         }
@@ -789,10 +793,8 @@ pub(super) fn finish_present(
 
 struct Dx12PresentGpuWork {
     frame: crate::backend::FrameToken,
-    surface_handle: SurfaceHandle,
     image_index: usize,
     present_slot: usize,
-    ctx: super::ContextHandle,
     scratch_handle: TextureHandle,
     render_pass_submitted: bool,
     logical_device: std::sync::Arc<LogicalDevice>,
@@ -878,17 +880,19 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
             unsafe {
-                self.logical_device
-                    .command_queue
-                    .ExecuteCommandLists(&[Some(cmd_list)]);
+                self.logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
             }
 
             return_fence = self
                 .logical_device
                 .timeline_next
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            unsafe { self.logical_device.command_queue.Signal(&self.logical_device.fence, return_fence) }
-                .context("Failed to signal fence after present copy")?;
+            unsafe {
+                self.logical_device
+                    .command_queue
+                    .Signal(&self.logical_device.fence, return_fence)
+            }
+            .context("Failed to signal fence after present copy")?;
             scratch_layout_updated = true;
         }
 
@@ -913,7 +917,11 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
             scratch_texture: Some(self.scratch_handle),
             scratch_layout_updated,
             present_timeline,
-            copy_timeline: if scratch_layout_updated { Some(return_fence) } else { None },
+            copy_timeline: if scratch_layout_updated {
+                Some(return_fence)
+            } else {
+                None
+            },
             frame_compute_timeline: None,
             signal_timeline: None,
             render_pass_submitted: self.render_pass_submitted,
@@ -923,6 +931,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
 }
 
 /// Present a rendered surface (legacy single-lock entry — prefer split path).
+#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
 pub(super) fn present(state: &mut Dx12State, frame: crate::backend::FrameToken) -> Result<()> {
     present_frame(state, frame, 0)?;
     Ok(())

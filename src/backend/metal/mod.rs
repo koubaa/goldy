@@ -30,8 +30,8 @@ mod utils;
 
 use super::*;
 use crate::{goldy_event, goldy_span};
-use anyhow::{Context, Result};
 use ::metal as mtl;
+use anyhow::{Context, Result};
 use types::MetalState;
 
 /// Returns `true` when each device's GPU timeline has caught up to all scheduled work.
@@ -49,7 +49,12 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
-        device.descriptors.lock().unwrap().resource_registry.drain_pending_slots();
+        device
+            .descriptors
+            .lock()
+            .unwrap()
+            .resource_registry
+            .drain_pending_slots();
     }
 }
 
@@ -228,11 +233,7 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
         })))
     }
 
-    fn finish_timeline_wait(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         use std::sync::atomic::Ordering;
         let device = self.context_device(ctx);
         let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
@@ -945,7 +946,13 @@ impl GpuBackend for MetalBackend {
         self.state
             .devices
             .get(&device)
-            .map(|ld| ld.descriptors.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| {
+                ld.descriptors
+                    .lock()
+                    .unwrap()
+                    .resource_registry
+                    .available_slots(category)
+            })
             .unwrap_or(0)
     }
 
@@ -1073,8 +1080,7 @@ impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
 
     fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
         use mtl::MTLCommandBufferStatus;
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
         loop {
             match self.cb.status() {
                 MTLCommandBufferStatus::Completed => return Ok(true),

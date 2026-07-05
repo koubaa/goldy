@@ -266,7 +266,7 @@ pub trait VramAllocator: Send + Sync {
         anyhow::bail!("this VramAllocator does not support allocation policies")
     }
 
-    /// Like [`set_allocation_policy`] but succeeds when a policy is already installed.
+    /// Like [`Self::set_allocation_policy`] but succeeds when a policy is already installed.
     fn ensure_allocation_policy(&self, policy: Arc<dyn AllocationPolicy>) -> Result<()> {
         self.set_allocation_policy(policy)
     }

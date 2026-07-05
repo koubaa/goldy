@@ -1142,7 +1142,11 @@ impl DeletionQueue {
 ///
 /// `registry` must be the already-locked `DescriptorRegistry` from `ld.descriptors`; passing it separately
 /// avoids holding the descriptors lock while the caller re-locks it (double-lock hazard).
-pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, registry: &mut DescriptorRegistry, resource: PendingDeletion) {
+pub(crate) fn destroy_pending_deletion(
+    ld: &LogicalDevice,
+    registry: &mut DescriptorRegistry,
+    resource: PendingDeletion,
+) {
     match &resource {
         PendingDeletion::Buffer { buffer_handle, .. } | PendingDeletion::BufferView { buffer_handle } => {
             registry.reclaim_buffer_slots(*buffer_handle);

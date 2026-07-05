@@ -73,10 +73,7 @@ pub(super) fn prepare_present_work(
     }))
 }
 
-pub(super) fn finish_present(
-    state: &mut VulkanState,
-    finish: crate::backend::PresentFinishState,
-) -> Result<u64> {
+pub(super) fn finish_present(state: &mut VulkanState, finish: crate::backend::PresentFinishState) -> Result<u64> {
     let surface_handle = finish.frame.surface;
     let present_slot = finish.frame.present_slot as usize;
     let ctx = finish.frame.context;
@@ -275,7 +272,9 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
 
                 let post_barriers = [scratch_back, swapchain_to_present];
                 let dep_post = vk::DependencyInfo::default().image_memory_barriers(&post_barriers);
-                self.logical_device.device.cmd_pipeline_barrier2(self.copy_cb, &dep_post);
+                self.logical_device
+                    .device
+                    .cmd_pipeline_barrier2(self.copy_cb, &dep_post);
 
                 self.logical_device
                     .device
@@ -294,10 +293,7 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
             .image_indices(&image_indices);
 
         let copy_signal_timeline = if !self.render_pass_submitted {
-            let signal_timeline_value = self
-                .logical_device
-                .timeline_next
-                .fetch_add(1, Ordering::Relaxed);
+            let signal_timeline_value = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
             signal_timeline = Some(signal_timeline_value);
             copy_timeline = Some(signal_timeline_value);
             Some(signal_timeline_value)
@@ -358,8 +354,7 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
 
         let present_ok = matches!(result, Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR));
         if let Err(e) = &result {
-            let expected_during_resize =
-                matches!(*e, vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR);
+            let expected_during_resize = matches!(*e, vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR);
             if expected_during_resize {
                 tracing::debug!(
                     self.surface_handle,

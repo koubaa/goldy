@@ -1244,6 +1244,7 @@ pub(super) fn submit_frame(
     Ok(ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
 }
 
+#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
 pub(super) fn present_frame(
     state: &mut super::types::VulkanState,
     frame: crate::backend::FrameToken,
@@ -1255,6 +1256,7 @@ pub(super) fn present_frame(
 }
 
 /// Present the rendered image to the screen (legacy entry — uses lock-split path).
+#[allow(dead_code)] // legacy single-lock entry; GpuBackendPresentSplit is preferred
 pub(super) fn present(
     state: &mut super::types::VulkanState,
     frame: crate::backend::FrameToken,
@@ -1996,7 +1998,11 @@ fn unregister_swapchain_texture_with_device(
     tex_handle: TextureHandle,
 ) {
     if let Some(tex_state) = textures.remove(&tex_handle) {
-        logical_device.descriptors.lock().unwrap().reclaim_texture_slots(tex_handle);
+        logical_device
+            .descriptors
+            .lock()
+            .unwrap()
+            .reclaim_texture_slots(tex_handle);
         unsafe {
             logical_device.device.destroy_image_view(tex_state.view, None);
         }

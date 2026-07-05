@@ -3808,9 +3808,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     /// read on that cell so cross-frame WAR enforcement can key off `last_reads`.
     #[test]
     fn out_image_fine_write_and_present_copy_share_ledger_identity() {
-        use crate::task_graph::cross_submit::{
-            compute_cross_submit_sync, net_access_per_resource, ResourceKey,
-        };
+        use crate::task_graph::cross_submit::{compute_cross_submit_sync, net_access_per_resource, ResourceKey};
         use crate::task_graph::ResourceId;
         use std::collections::HashMap;
 
@@ -3848,8 +3846,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             .find(|n| n.label == "copy_texture_to_present")
             .and_then(|n| {
                 n.bindings.iter().find(|b| {
-                    matches!(b.resource, ResourceId::Texture(h) if h == tex_handle)
-                        && b.access == NodeAccess::Read
+                    matches!(b.resource, ResourceId::Texture(h) if h == tex_handle) && b.access == NodeAccess::Read
                 })
             })
             .expect("present copy must read out_image");
@@ -3869,7 +3866,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
 
         let net = net_access_per_resource(&scheme.ir);
-        assert!(net[&key].reads && net[&key].writes, "scheme net access must include both sides");
+        assert!(
+            net[&key].reads && net[&key].writes,
+            "scheme net access must include both sides"
+        );
 
         let sub1 = scheme.submit().expect("submit frame 1");
         let frame1_tv = sub1.timeline_value();

@@ -818,7 +818,11 @@ impl LogicalDevice {
     }
 }
 
-pub(crate) fn destroy_pending_deletion(ld: &LogicalDevice, registry: &mut DescriptorRegistry, resource: PendingDeletion) {
+pub(crate) fn destroy_pending_deletion(
+    ld: &LogicalDevice,
+    registry: &mut DescriptorRegistry,
+    resource: PendingDeletion,
+) {
     match resource {
         PendingDeletion::Buffer {
             buffer_handle,
@@ -1191,11 +1195,8 @@ pub(super) struct Dx12State {
     ///
     /// Shared via [`Arc<RwLock<>>`] so [`ContextDeferredDeletionFlush`] clones can drain slots
     /// without the global backend mutex.
-    pub context_fences: std::sync::Arc<
-        std::sync::RwLock<
-            HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
-        >,
-    >,
+    pub context_fences:
+        std::sync::Arc<std::sync::RwLock<HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>>>,
     pub buffers: SharedBufferTable,
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,

@@ -30,43 +30,37 @@ pub(super) fn record(
                 // TODO: Implement depth clear
             }
             RenderCommand::SetPipeline(pipeline_handle) => {
-                {
-                    let pipelines_read = state.pipelines.read().unwrap();
-                    if let Some(pipeline) = pipelines_read.entries.get(pipeline_handle) {
-                        current_vertex_stride = pipeline.vertex_stride;
-                        current_pipeline_handle = Some(*pipeline_handle);
-                        unsafe {
-                            cmd.SetGraphicsRootSignature(&pipeline.root_signature);
-                            cmd.SetPipelineState(&pipeline.pipeline_state);
-                            cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
-                        }
+                let pipelines_read = state.pipelines.read().unwrap();
+                if let Some(pipeline) = pipelines_read.entries.get(pipeline_handle) {
+                    current_vertex_stride = pipeline.vertex_stride;
+                    current_pipeline_handle = Some(*pipeline_handle);
+                    unsafe {
+                        cmd.SetGraphicsRootSignature(&pipeline.root_signature);
+                        cmd.SetPipelineState(&pipeline.pipeline_state);
+                        cmd.IASetPrimitiveTopology(topology_to_d3d12(pipeline.topology));
                     }
                 }
             }
             RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
-                {
-                    let buffers_read = state.buffers.read().unwrap();
-                    if let Some(buf_state) = buffers_read.entries.get(buffer) {
-                        let view = D3D12_VERTEX_BUFFER_VIEW {
-                            BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
-                            SizeInBytes: (buf_state.size - offset) as u32,
-                            StrideInBytes: current_vertex_stride,
-                        };
-                        unsafe { cmd.IASetVertexBuffers(*slot, Some(&[view])) };
-                    }
+                let buffers_read = state.buffers.read().unwrap();
+                if let Some(buf_state) = buffers_read.entries.get(buffer) {
+                    let view = D3D12_VERTEX_BUFFER_VIEW {
+                        BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
+                        SizeInBytes: (buf_state.size - offset) as u32,
+                        StrideInBytes: current_vertex_stride,
+                    };
+                    unsafe { cmd.IASetVertexBuffers(*slot, Some(&[view])) };
                 }
             }
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
-                {
-                    let buffers_read = state.buffers.read().unwrap();
-                    if let Some(buf_state) = buffers_read.entries.get(buffer) {
-                        let view = D3D12_INDEX_BUFFER_VIEW {
-                            BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
-                            SizeInBytes: (buf_state.size - offset) as u32,
-                            Format: index_format_to_dxgi(*format),
-                        };
-                        unsafe { cmd.IASetIndexBuffer(Some(&view)) };
-                    }
+                let buffers_read = state.buffers.read().unwrap();
+                if let Some(buf_state) = buffers_read.entries.get(buffer) {
+                    let view = D3D12_INDEX_BUFFER_VIEW {
+                        BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
+                        SizeInBytes: (buf_state.size - offset) as u32,
+                        Format: index_format_to_dxgi(*format),
+                    };
+                    unsafe { cmd.IASetIndexBuffer(Some(&view)) };
                 }
             }
             RenderCommand::BindResources { .. } => {

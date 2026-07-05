@@ -934,7 +934,10 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, texture_handle: TextureHandle, 
     use windows::Win32::Graphics::Direct3D12::*;
 
     let textures_read = state.textures.read().unwrap();
-    let texture = textures_read.entries.get(&texture_handle).context("Invalid texture handle")?;
+    let texture = textures_read
+        .entries
+        .get(&texture_handle)
+        .context("Invalid texture handle")?;
 
     let device_handle = texture.device_handle;
     let width = texture.width;
@@ -1140,13 +1143,22 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
 
 /// Get the bindless index for a texture.
 pub(super) fn bindless_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
-    state.textures.read().unwrap().entries.get(&texture_handle).and_then(|t| t.bindless_offset)
+    state
+        .textures
+        .read()
+        .unwrap()
+        .entries
+        .get(&texture_handle)
+        .and_then(|t| t.bindless_offset)
 }
 
 /// For `TextureKind::DirectInterpolated` textures, return the sampled-texture (SRV) slot.
 pub(super) fn bindless_sampled_index(state: &Dx12State, texture_handle: TextureHandle) -> Option<u32> {
     state
         .textures
-        .read().unwrap().entries.get(&texture_handle)
+        .read()
+        .unwrap()
+        .entries
+        .get(&texture_handle)
         .and_then(|t| t.sampled_bindless_offset)
 }

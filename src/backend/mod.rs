@@ -759,6 +759,7 @@ impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
 }
 
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
+#[allow(dead_code)] // fields read by present-split impls behind backend feature flags
 pub(crate) struct PresentFinishState {
     pub frame: FrameToken,
     /// Fence/timeline guarding swapchain image return (0 when immediate return).
@@ -815,6 +816,7 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>>;
+    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 }
 
@@ -823,25 +825,16 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
 /// with a lock-free session cloned from `Arc<RwLock<State>>` sub-handles.
 pub(crate) struct LockedSubmitSession {
     backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
-    ctx: ContextHandle,
     backend_type: BackendType,
 }
 
 impl LockedSubmitSession {
-    pub fn new(
+    pub fn from_backend(
         backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
-        ctx: ContextHandle,
+        _ctx: ContextHandle,
     ) -> std::sync::Arc<dyn ContextSubmitSession> {
         let backend_type = backend.lock().unwrap().backend_type();
-        std::sync::Arc::new(Self {
-            backend,
-            ctx,
-            backend_type,
-        })
-    }
-
-    pub fn backend_type(&self) -> BackendType {
-        self.backend_type
+        std::sync::Arc::new(Self { backend, backend_type })
     }
 }
 
@@ -890,6 +883,7 @@ impl ContextSubmitSession for LockedSubmitSession {
         self.backend.lock().unwrap().try_resubmit_retained(ctx, key, sync)
     }
 
+    #[allow(dead_code)] // retained-pool eviction API; callers not wired yet
     fn evict_retained(&self, ctx: ContextHandle, key: u64) {
         self.backend.lock().unwrap().evict_retained(ctx, key);
     }
@@ -920,11 +914,7 @@ pub(crate) trait GpuBackendTimelineWait {
         value: crate::timeline::TimelineValue,
     ) -> Result<Option<Box<dyn TimelineBlockingWait>>>;
 
-    fn finish_timeline_wait(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()>;
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
@@ -963,10 +953,7 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// Called once from [`Context::new`](crate::Context::new) so hot-path progress
     /// queries avoid the global backend mutex.
     #[doc(hidden)]
-    fn clone_context_timeline_reader(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
+    fn clone_context_timeline_reader(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
 
     /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
     #[doc(hidden)]
@@ -974,28 +961,20 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         &self,
         ctx: ContextHandle,
         context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn ContextTimelineReader>>,
-            >,
+            std::sync::Mutex<std::collections::HashMap<ContextHandle, std::sync::Arc<dyn ContextTimelineReader>>>,
         >,
     ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>>;
 
     /// Clone the per-context reclamation scope for [`Context::boundary_crossed`].
     #[doc(hidden)]
-    fn clone_context_reclamation_scope(
-        &self,
-        ctx: ContextHandle,
-    ) -> std::sync::Arc<dyn ContextReclamationScope> {
+    fn clone_context_reclamation_scope(&self, ctx: ContextHandle) -> std::sync::Arc<dyn ContextReclamationScope> {
         let _ = ctx;
         std::sync::Arc::new(NoOpReclamationScope)
     }
 
     /// Clone the device-scoped timeline horizon reader for lock-free retirement queries.
     #[doc(hidden)]
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<std::sync::Arc<dyn DeviceTimelineReader>>;
+    fn clone_device_timeline_reader(&self, device: DeviceHandle) -> Option<std::sync::Arc<dyn DeviceTimelineReader>>;
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///

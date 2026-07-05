@@ -37,7 +37,7 @@ use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Mutex;
 
 /// Process-global lock serialising `vkCreateInstance` and `vkDestroyInstance`.
 ///
@@ -324,11 +324,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
         })))
     }
 
-    fn finish_timeline_wait(
-        &mut self,
-        ctx: ContextHandle,
-        value: crate::timeline::TimelineValue,
-    ) -> Result<()> {
+    fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device_handle);
         {
@@ -1405,7 +1401,13 @@ impl GpuBackend for VulkanBackend {
         self.state
             .devices
             .get(&device_handle)
-            .map(|ld| ld.descriptors.lock().unwrap().resource_registry.available_slots(category))
+            .map(|ld| {
+                ld.descriptors
+                    .lock()
+                    .unwrap()
+                    .resource_registry
+                    .available_slots(category)
+            })
             .unwrap_or(0)
     }
 
@@ -1491,8 +1493,7 @@ impl crate::backend::TimelineBlockingWait for VulkanTimelineBlockingWait {
             .values(std::slice::from_ref(&self.value));
         if let Err(e) = unsafe { self.device.wait_semaphores(&wait, u64::MAX) } {
             if e == vk::Result::ERROR_DEVICE_LOST {
-                self.device_lost
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             anyhow::bail!("wait_semaphores: {:?}", e);
         }
@@ -1510,8 +1511,7 @@ impl crate::backend::TimelineBlockingWait for VulkanTimelineBlockingWait {
             Err(vk::Result::TIMEOUT) => Ok(false),
             Err(e) => {
                 if e == vk::Result::ERROR_DEVICE_LOST {
-                    self.device_lost
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(anyhow::anyhow!("wait_semaphores: {:?}", e))
             }
@@ -1545,22 +1545,14 @@ impl crate::backend::ContextDeferredDeletionFlush for VulkanContextDeferredDelet
     fn flush(&self, device_retired: crate::timeline::TimelineValue) {
         let (completed, completed_values) = {
             let readers = self.context_readers.lock().unwrap();
-            let completed = readers
-                .get(&self.ctx)
-                .map(|r| r.gpu_progress())
-                .unwrap_or(0);
+            let completed = readers.get(&self.ctx).map(|r| r.gpu_progress()).unwrap_or(0);
             let completed_values = readers
                 .iter()
                 .map(|(&ctx, reader)| (ctx, reader.gpu_progress()))
                 .collect();
             (completed, completed_values)
         };
-        let ctx_batch: Vec<_> = self
-            .sc
-            .lock()
-            .unwrap()
-            .deletion_queue
-            .drain_up_to(completed);
+        let ctx_batch: Vec<_> = self.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
         let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
         {
             let mut registry = descriptors_arc.lock().unwrap();

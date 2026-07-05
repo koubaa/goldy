@@ -11,7 +11,7 @@ use super::{
     TransientTextureSpec,
 };
 use crate::backend::{
-    BufferHandle, GpuBackend, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, SubmitSync, TextureHandle,
+    BufferHandle, GpuCommand, GraphCommand, RenderCommand, RenderTargetHandle, SubmitSync, TextureHandle,
 };
 use crate::buffer::{Allocation, BufferSource, BufferView};
 use crate::compute::ComputePipeline;
@@ -308,10 +308,7 @@ fn record_merged_partition_last_tvs(entry: &mut CompiledCacheEntry, part_idx: us
 }
 
 /// Re-record allocates a fresh CB/allocator; backends must not reuse in-flight retained storage.
-fn ensure_partition_retired_before_rerecord(
-    context: &crate::Context,
-    prev_tv: Option<TimelineValue>,
-) -> Result<()> {
+fn ensure_partition_retired_before_rerecord(context: &crate::Context, prev_tv: Option<TimelineValue>) -> Result<()> {
     if let Some(prev_tv) = prev_tv {
         if context.gpu_progress() < prev_tv {
             context.wait_until(prev_tv)?;
@@ -917,10 +914,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-            ensure_partition_retired_before_rerecord(
-                context,
-                cache.as_ref().unwrap().partition_last_tv[part_idx],
-            )?;
+            ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
             last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, sync)?;
             {
                 let entry = cache.as_mut().unwrap();
@@ -986,10 +980,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
             partition_graph_commands_for_retain(ir, cache_entry, &waves, part_idx, has_render, None)
         };
         let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-        ensure_partition_retired_before_rerecord(
-            context,
-            cache.as_ref().unwrap().partition_last_tv[part_idx],
-        )?;
+        ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
         last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync)?;
         {
             let entry = cache.as_mut().unwrap();
@@ -1014,6 +1005,14 @@ pub(crate) struct ResolvedPresentSlot {
     pub uav_index: u32,
 }
 
+/// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir_and_retain_with_presents`].
+pub(crate) struct PresentSubmitOptions<'a> {
+    pub present_slots: &'a [ResolvedPresentSlot],
+    pub resource_stamps: &'a HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
+    pub ir_clean: bool,
+}
+
 /// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
 /// bindings through `present_slots` and retains present-touching partitions per
 /// backing slot (immutable CB per swapchain image index).
@@ -1022,12 +1021,16 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     context: &crate::Context,
     session: &dyn crate::backend::ContextSubmitSession,
     ir: &GraphIR,
-    present_slots: &[ResolvedPresentSlot],
-    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
-    stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
-    ir_clean: bool,
+    options: &PresentSubmitOptions<'_>,
 ) -> Result<(TimelineValue, PartitionSubmitResult)> {
     use super::{ResolvedSwapchain, SlotResolver};
+
+    let &PresentSubmitOptions {
+        present_slots,
+        resource_stamps,
+        stamp_targets,
+        ir_clean,
+    } = options;
 
     let _tz = crate::tracy_zone!("goldy.submit_resolved_with_presents");
 
@@ -1145,10 +1148,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-                ensure_partition_retired_before_rerecord(
-                    context,
-                    cache.as_ref().unwrap().partition_last_tv[part_idx],
-                )?;
+                ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, sync)?;
                 {
                     let entry = cache.as_mut().unwrap();
@@ -1266,10 +1266,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     )
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
-                ensure_partition_retired_before_rerecord(
-                    context,
-                    cache.as_ref().unwrap().partition_last_tv[part_idx],
-                )?;
+                ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, slot_key, sync)?;
                 {
                     let entry = cache.as_mut().unwrap();
@@ -1304,10 +1301,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-            ensure_partition_retired_before_rerecord(
-                context,
-                cache.as_ref().unwrap().partition_last_tv[part_idx],
-            )?;
+            ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
             last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync)?;
             {
                 let entry = cache.as_mut().unwrap();
@@ -1438,10 +1432,12 @@ impl IrSubmitState {
             ctx,
             ctx.submit_session(),
             ir,
-            present_slots,
-            &self.resource_stamps,
-            &self.stamp_targets,
-            ir_clean,
+            &PresentSubmitOptions {
+                present_slots,
+                resource_stamps: &self.resource_stamps,
+                stamp_targets: &self.stamp_targets,
+                ir_clean,
+            },
         )
     }
 }

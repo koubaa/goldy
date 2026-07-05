@@ -440,7 +440,8 @@ pub(crate) struct DeviceInner {
     /// Device floor + sync primitive; per-context progress comes from [`Self::context_readers`].
     pub(crate) device_timeline_reader: Arc<dyn backend::DeviceTimelineReader>,
     /// Per-context timeline readers registered at [`crate::Context::new`], unregistered on drop.
-    pub(crate) context_readers: Arc<Mutex<HashMap<crate::backend::ContextHandle, Arc<dyn backend::ContextTimelineReader>>>>,
+    pub(crate) context_readers:
+        Arc<Mutex<HashMap<crate::backend::ContextHandle, Arc<dyn backend::ContextTimelineReader>>>>,
 }
 
 impl Clone for Device {
@@ -612,7 +613,7 @@ impl Device {
         self.inner.vram_allocator.set_allocation_policy(policy)
     }
 
-    /// Install an allocation policy if the device still has the default [`NoPolicy`].
+    /// Install an allocation policy if the device still has the default [`NoPolicy`](crate::NoPolicy).
     pub fn ensure_allocation_policy(
         &self,
         policy: Arc<dyn crate::allocation_policy::AllocationPolicy>,
@@ -787,7 +788,10 @@ impl Device {
     }
 
     /// Lock-free GPU progress for a live context on this device (for ledger / parcel queries).
-    pub(crate) fn context_gpu_progress(&self, ctx: crate::backend::ContextHandle) -> Option<crate::timeline::TimelineValue> {
+    pub(crate) fn context_gpu_progress(
+        &self,
+        ctx: crate::backend::ContextHandle,
+    ) -> Option<crate::timeline::TimelineValue> {
         let reader = {
             let readers = self.inner.context_readers.lock().unwrap();
             readers.get(&ctx).cloned()
