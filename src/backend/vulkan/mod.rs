@@ -984,7 +984,13 @@ impl GpuBackend for VulkanBackend {
         if !self.state.enable_validation {
             return;
         }
-        texture::set_debug_name(&self.state.instance, &self.state.devices, &self.state.textures, handle, name);
+        texture::set_debug_name(
+            &self.state.instance,
+            &self.state.devices,
+            &self.state.textures,
+            handle,
+            name,
+        );
     }
 
     fn read_texture_to_cpu(&mut self, texture_handle: TextureHandle, output: &mut [u8]) -> Result<()> {

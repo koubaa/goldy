@@ -61,7 +61,6 @@ impl ParcelStamp {
 enum ParcelBacking {
     WholeBuffer(Arc<Allocation>),
 
-
     /// BufferRange is a sub-region of a partitioned buffer.
     ///
     /// This is an internal Goldy type. The public API is [`RetainedPool::acquire_record`]

@@ -1506,26 +1506,15 @@ impl IntoDispatch for &Parcel {
 ///   that need barriers but carry no stamp, such as [`crate::Texture`] objects. `resource_identity`
 ///   is `None` for barrier-free resources such as samplers, which only need a bindless slot.
 /// - `bindless_slot_index` is the raw heap index to write into the push-constant layout.
+type SchemeBindIdentity = Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>;
+type SchemeBindResult = (SchemeBindIdentity, Option<u32>);
+
 pub(crate) trait SchemeBindable {
-    fn resolve(
-        &self,
-        scheme: &Scheme,
-        access: ResourceAccess,
-    ) -> (
-        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
-        Option<u32>,
-    );
+    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult;
 }
 
 impl SchemeBindable for Parcel {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (
-        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
-        Option<u32>,
-    ) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         (
             Some((self.resource_id(), Some(self.stamp_handle()))),
             self.resource_index(access),
@@ -1534,14 +1523,7 @@ impl SchemeBindable for Parcel {
 }
 
 impl SchemeBindable for crate::Buffer {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (
-        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
-        Option<u32>,
-    ) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = self.whole();
         (
             Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
@@ -1551,14 +1533,7 @@ impl SchemeBindable for crate::Buffer {
 }
 
 impl<T> SchemeBindable for Lease<T> {
-    fn resolve(
-        &self,
-        scheme: &Scheme,
-        access: ResourceAccess,
-    ) -> (
-        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
-        Option<u32>,
-    ) {
+    fn resolve(&self, scheme: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         let parcel = &scheme.leases[self.id.0 as usize];
         // TODO(inaugural-check): enforce that the first access to a buffer lease is Write
         // (or ReadWrite), never pure Read. The pool may recycle a buffer whose bytes come
@@ -1573,14 +1548,7 @@ impl<T> SchemeBindable for Lease<T> {
 }
 
 impl SchemeBindable for crate::Sampler {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (
-        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
-        Option<u32>,
-    ) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         // Samplers carry no GPU-written data: no RAW/WAW hazard, no barrier, no stamp.
         // Only the bindless heap index is needed.
         (None, self.resource_index(access))
@@ -1588,14 +1556,7 @@ impl SchemeBindable for crate::Sampler {
 }
 
 impl SchemeBindable for crate::Texture {
-    fn resolve(
-        &self,
-        _: &Scheme,
-        access: ResourceAccess,
-    ) -> (
-        Option<(ResourceId, Option<Arc<crate::parcel::ParcelStamp>>)>,
-        Option<u32>,
-    ) {
+    fn resolve(&self, _: &Scheme, access: ResourceAccess) -> SchemeBindResult {
         // Raw textures participate in barrier generation but carry no ParcelStamp because
         // they are not parcel-wrapped (e.g. TexturePool-managed). Cross-submit hazard
         // tracking is handled by frame pipeline depth, matching the classic TaskGraph path.

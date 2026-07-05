@@ -1368,9 +1368,13 @@ pub(super) fn set_debug_name(
 ) {
     let Some(ts) = textures.get(&handle) else { return };
     *ts.debug_name.lock().unwrap() = Some(name.to_owned());
-    let Some(ld) = devices.get(&ts.device_handle) else { return };
+    let Some(ld) = devices.get(&ts.device_handle) else {
+        return;
+    };
     let debug_utils = ash::ext::debug_utils::Device::new(instance, &ld.device);
-    let Ok(name_cstr) = std::ffi::CString::new(name) else { return };
+    let Ok(name_cstr) = std::ffi::CString::new(name) else {
+        return;
+    };
     // `object_handle` sets both the raw handle and `object_type` from the vk::Image type.
     let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
         .object_handle(ts.image)
