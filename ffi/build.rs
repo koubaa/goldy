@@ -46,6 +46,11 @@ fn generate_c_header(crate_dir: &Path) {
         .generate()
         .expect("Failed to generate C header")
         .write_to_file(&output_file);
+
+    // cbindgen may embed CRLF from the header block in cbindgen.toml; normalize so
+    // goldy.h matches the LF stored in git (*.h text eol=lf).
+    let content = fs::read_to_string(&output_file).expect("Failed to read generated goldy.h");
+    fs::write(&output_file, content.replace("\r\n", "\n")).expect("Failed to normalize goldy.h");
 }
 
 fn copy_slang_libraries(crate_dir: &Path, out_dir: &Path) {
