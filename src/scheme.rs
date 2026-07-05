@@ -3719,7 +3719,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     }
 
     #[test]
-    fn submit_gate_folds_resolved_present_promise_into_last_reads() {
+    fn submit_gate_folds_resolved_present_promise_into_foreign_reads() {
         use crate::task_graph::cross_submit::ResourceKey;
 
         let device = mock_device();
@@ -3738,10 +3738,12 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         let _sub2 = scheme.submit().expect("submit 2");
         let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
+        let sync = stamp.sync.lock().unwrap();
         assert!(
-            stamp.sync.lock().unwrap().last_reads.get(&ctx_handle).is_some(),
-            "submit gate must fold resolved present promise into last_reads"
+            sync.foreign_reads.get(&ctx_handle).is_some(),
+            "submit gate must fold resolved present promise into foreign_reads"
         );
+        drop(sync);
         assert_eq!(
             stamp.pending.lock().unwrap().len(),
             1,

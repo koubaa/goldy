@@ -127,6 +127,9 @@ fn find_ledger_entry(ledger: &LedgerSnapshot, key: ResourceKey) -> Option<Ledger
                 for (&ctx, &tv) in &entry.sync.last_reads {
                     m.sync.record_read(ctx, tv);
                 }
+                for (&ctx, &tv) in &entry.sync.foreign_reads {
+                    m.sync.record_foreign_read(ctx, tv);
+                }
             }
         }
     }
@@ -361,9 +364,14 @@ pub fn compute_cross_submit_sync_into(
                 }
             }
             for (&ctx, &tv) in &sync.last_reads {
-                // Same-context WAR is loop-carried (e.g. present easement read, then next
-                // frame compute write). Prologue barriers are baked into retained CBs and
-                // stripped on resubmit; a live queue wait survives `submit_sync_waits_only`.
+                // Same-context WAR against Goldy-scheduled reads: live wait today; may relax
+                // to a baked prologue barrier once structural baking exists (see exchange harvest).
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+            for (&ctx, &tv) in &sync.foreign_reads {
+                // Same-context WAR against exercised-claim reads (e.g. present easement).
+                // Prologue barriers are baked into retained CBs and stripped on resubmit;
+                // a live queue wait survives `submit_sync_waits_only`.
                 wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
             }
         }
@@ -787,6 +795,79 @@ mod tests {
             1,
             "loop-carried WAW against own last_write still needs a baked prologue barrier"
         );
+    }
+
+    #[test]
+    fn war_foreign_read_same_context_emits_wait() {
+        let ctx = 1;
+        let key = ResourceKey::Texture(4);
+        let mut sync = ResourceSync::default();
+        sync.record_write(ctx, 44, WRITE_KINDS_COMPUTE_TRANSFER);
+        sync.record_foreign_read(ctx, 45);
+        assert!(sync.last_reads.is_empty());
+        let mut ledger = LedgerSnapshot::new();
+        ledger.insert(key, LedgerEntry { sync });
+
+        let mut ir = GraphIR::default();
+        ir.nodes.push(TaskNode {
+            label: "write_tex",
+            bindings: vec![ResourceBinding {
+                resource: ResourceId::Texture(4),
+                access: NodeAccess::Write,
+            }],
+            kind: NodeKind::Dispatch {
+                pipeline: 1,
+                resource_slots: vec![],
+                user_slots: vec![],
+                dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
+            },
+        });
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+
+        assert_eq!(sync.waits.len(), 1, "foreign same-context WAR must emit a live wait");
+        assert_eq!(sync.waits[0].value, 45);
+    }
+
+    #[test]
+    fn aliased_ledger_merge_preserves_foreign_read_provenance() {
+        let ctx = 1;
+        let parent: BufferHandle = 10;
+        let mut sync_a = ResourceSync::default();
+        sync_a.record_foreign_read(ctx, 7);
+        let mut sync_b = ResourceSync::default();
+        sync_b.record_read(ctx, 9);
+        let mut ledger = LedgerSnapshot::new();
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 0,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_a },
+        );
+        ledger.insert(
+            ResourceKey::BufferRange {
+                parent,
+                offset: 32,
+                len: 32,
+            },
+            LedgerEntry { sync: sync_b },
+        );
+
+        let ir = single_binding_ir(
+            ResourceId::BufferRange {
+                parent,
+                offset: 0,
+                len: 64,
+            },
+            NodeAccess::Write,
+        );
+        let net = net_access_per_resource(&ir);
+        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+
+        assert_eq!(sync.waits.len(), 1);
+        assert_eq!(sync.waits[0].value, 9, "merged WAR must use max read epoch across provenances");
     }
 
     #[test]
