@@ -106,6 +106,7 @@ impl RenderPassRecord {
     }
 
     pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
@@ -307,11 +308,7 @@ impl ComputeNodeRecord {
     }
 
     pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
-        self.bindings.push(ResourceBinding {
-            resource: parcel.resource_id(),
-            access,
-        });
-        self
+        self.register_parcel_binding(parcel, access)
     }
 
     pub fn with_buffer_view(&mut self, view: &BufferView, access: NodeAccess) -> &mut Self {

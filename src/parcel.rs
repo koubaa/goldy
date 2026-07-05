@@ -532,18 +532,6 @@ impl Buffer {
         self.bookkeeping = None;
     }
 
-    /// Peel a single-unit buffer into a transient-pool parcel (no bookkeeping).
-    pub(crate) fn into_transient_parcel(mut self) -> anyhow::Result<Parcel> {
-        if self.is_partitioned() {
-            anyhow::bail!("into_transient_parcel requires a single-unit buffer");
-        }
-        self.release_bookkeeping();
-        match self.storage {
-            BufferStorage::Single(arc) => Ok(Parcel::from_whole_buffer(arc, self.home_device)),
-            BufferStorage::Partitioned { .. } => unreachable!(),
-        }
-    }
-
     /// Iterate all bindable parcels for dependency registration.
     pub fn parcels(&self) -> impl Iterator<Item = &Parcel> {
         self.units.iter()

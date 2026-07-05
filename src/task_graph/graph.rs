@@ -2544,6 +2544,7 @@ pub struct NodeBuilder<'a> {
 impl<'a> NodeBuilder<'a> {
     /// Declare that this node accesses a bindable buffer parcel with the given logical access.
     pub fn with_buffer(mut self, parcel: &crate::Parcel, access: NodeAccess) -> Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
@@ -2809,6 +2810,7 @@ impl<'a> RenderPassBuilder<'a> {
 
     /// Like [`Self::with_buffer`] but for use while recording on `&mut self`.
     pub fn with_buffer(&mut self, parcel: &crate::Parcel, access: NodeAccess) -> &mut Self {
+        self.graph.stamp_targets.push(parcel.stamp_handle());
         self.bindings.push(ResourceBinding {
             resource: parcel.resource_id(),
             access,
@@ -3178,6 +3180,24 @@ mod tests {
 
         let tv = graph.submit(&ctx).unwrap();
         assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
+    }
+
+    #[test]
+    fn render_pass_with_buffer_submit_stamps_last_referenced() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let buffer = retained_buffer(&mut pool);
+        let target = RenderTarget::new(&device, 8, 8, TextureFormat::Rgba8Unorm).unwrap();
+
+        let mut graph = TaskGraph::new();
+        let mut pass = graph.render_pass("draw", &target);
+        pass.with_buffer(buffer.whole(), NodeAccess::Read);
+        pass.clear(Color::BLUE);
+        pass.finish_recorded();
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(buffer.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]
@@ -4192,6 +4212,27 @@ mod tests {
 
         let tv = graph.submit(&ctx).unwrap();
         assert_eq!(parcel.last_referenced_on(ctx.backend_handle()), Some(tv));
+    }
+
+    #[test]
+    fn with_buffer_submit_stamps_last_referenced() {
+        let device = Arc::new(mock_device());
+        let ctx = device.create_context().unwrap();
+        let mut pool = crate::RetainedPool::new(device.clone());
+        let buffer = retained_buffer(&mut pool);
+        assert!(buffer.last_referenced().is_empty());
+
+        let shader = mock_shader(&device);
+        let pipeline = mock_pipeline(&device, &shader);
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("work", &pipeline)
+            .with_buffer(buffer.whole(), NodeAccess::ReadWrite)
+            .dispatch(1, 1, 1);
+
+        let tv = graph.submit(&ctx).unwrap();
+        assert_eq!(buffer.last_referenced_on(ctx.backend_handle()), Some(tv));
     }
 
     #[test]
