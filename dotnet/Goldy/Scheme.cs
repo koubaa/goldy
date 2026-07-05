@@ -176,6 +176,17 @@ public sealed class SchemeComputeNodeScope : IDisposable
         return this;
     }
 
+    public SchemeComputeNodeScope WithTexture(Texture texture, NodeAccess nodeAccess)
+    {
+        EnsureOpen();
+        ArgumentNullException.ThrowIfNull(texture);
+        var result = NativeMethods.SchemeComputeNodeWithTexture(
+            _scheme.Handle, texture.Handle, nodeAccess);
+        if (result != GoldyResult.Ok)
+            throw GoldyException.FromLastError("Scheme compute_node_with_texture");
+        return this;
+    }
+
     public SchemeComputeNodeScope WithField(
         Buffer buffer,
         uint unit,

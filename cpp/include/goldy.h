@@ -693,6 +693,14 @@ enum GoldyResult goldy_scheme_compute_node_with_parcel(struct GoldyScheme *schem
                                                        const struct GoldyParcel *parcel,
                                                        enum GoldyNodeAccess node_access);
 
+// Declare a retained texture for the active compute node (shader binding + dependency).
+//
+// # Safety
+// All pointers must be valid.
+enum GoldyResult goldy_scheme_compute_node_with_texture(struct GoldyScheme *scheme,
+                                                        const struct GoldyTexture *texture,
+                                                        enum GoldyNodeAccess node_access);
+
 // Copy a scheme-held render target into a present lease drawable.
 //
 // # Safety

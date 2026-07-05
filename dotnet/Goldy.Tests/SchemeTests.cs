@@ -73,7 +73,7 @@ public class SchemeTests
             using var device = instance.RequestAdapter().RequestDevice();
 
             using var retainedPool = new RetainedPool(device);
-            using var parcel = retainedPool.AcquireTexture(
+            using var texture = retainedPool.AcquireTexture(
                 16,
                 16,
                 TextureFormat.Rgba8Unorm,
@@ -87,11 +87,11 @@ public class SchemeTests
             using (var node = scheme.ComputeNode("write_tex", pipeline))
             {
                 node
-                    .WithParcel(parcel, NodeAccess.Write)
+                    .WithTexture(texture, NodeAccess.Write)
                     .Dispatch(2, 2, 1);
             }
 
-            using var grant = scheme.GrantReadTexture(parcel);
+            using var grant = scheme.GrantReadTexture(texture);
             using var frame = scheme.Submit();
             var bytes = grant.Consume(frame);
             Assert.True(bytes.Length > 0);

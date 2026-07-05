@@ -202,6 +202,10 @@ internal static partial class NativeMethods
     internal static partial GoldyResult SchemeComputeNodeWithParcel(
         nint scheme, nint parcel, NodeAccess nodeAccess);
 
+    [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_texture")]
+    internal static partial GoldyResult SchemeComputeNodeWithTexture(
+        nint scheme, nint texture, NodeAccess nodeAccess);
+
     [LibraryImport(LibName, EntryPoint = "goldy_scheme_compute_node_with_param")]
     internal static partial GoldyResult SchemeComputeNodeWithParam(nint scheme, uint value);
 
