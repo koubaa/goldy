@@ -1,7 +1,7 @@
 //! Buffer management logic.
 
 use super::sparse;
-use super::types::{self, BufferState};
+use super::types::{self, BufferState, SharedBufferTable};
 use super::utils::find_memory_type;
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::BufferKind;
@@ -73,8 +73,7 @@ fn submit_copy(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
-    next_buffer_handle: &mut BufferHandle,
+    buffers: &SharedBufferTable,
     instance: &ash::Instance,
     device_handle: DeviceHandle,
     logical_size: u64,
@@ -187,8 +186,7 @@ pub(super) fn create(
         None
     };
 
-    let handle = *next_buffer_handle;
-    *next_buffer_handle += 1;
+    let handle = buffers.write().unwrap().alloc_handle();
 
     // Register buffer in bindless descriptor set (UNIFORM or STORAGE)
     let bindless_index = {
@@ -243,7 +241,7 @@ pub(super) fn create(
         Some(index)
     };
 
-    buffers.insert(
+    buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -287,8 +285,7 @@ fn align_sparse_capacity(cap: u64, block: u64) -> u64 {
 pub(super) fn create_sparse_with_capacity(
     _instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
-    next_buffer_handle: &mut BufferHandle,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     logical_size: u64,
     capacity: u64,
@@ -347,8 +344,7 @@ pub(super) fn create_sparse_with_capacity(
     drop(pool_guard);
 
     let bindless_descriptor_set = ld.bindless_descriptor_set;
-    let handle = *next_buffer_handle;
-    *next_buffer_handle += 1;
+    let handle = buffers.write().unwrap().alloc_handle();
 
     let bindless_index = {
         let index = ld
@@ -376,7 +372,7 @@ pub(super) fn create_sparse_with_capacity(
         Some(index)
     };
 
-    buffers.insert(
+    buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -408,28 +404,32 @@ pub(super) fn create_sparse_with_capacity(
 /// Hint unused sparse pages at and above `offset` (bytes).
 pub(super) fn hint_unused_above(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
     offset: u64,
 ) {
-    let Some(buf) = buffers.get(&buffer_handle) else {
-        return;
+    let (device_handle, vkbuf, _alloc, block, first_page, total_pages) = {
+        let buffers_read = buffers.read().unwrap();
+        let Some(buf) = buffers_read.entries.get(&buffer_handle) else {
+            return;
+        };
+        if !buf.is_sparse {
+            return;
+        }
+        let block = buf.sparse_block_size;
+        if block == 0 {
+            return;
+        }
+        let device_handle = buf.device_handle;
+        let vkbuf = buf.buffer;
+        let alloc = buf.allocation_size;
+        let first_page = ((offset.saturating_add(block.saturating_sub(1))) / block) as usize;
+        let total_pages = sparse::num_sparse_pages(alloc, block) as usize;
+        if first_page >= total_pages {
+            return;
+        }
+        (device_handle, vkbuf, alloc, block, first_page, total_pages)
     };
-    if !buf.is_sparse {
-        return;
-    }
-    let block = buf.sparse_block_size;
-    if block == 0 {
-        return;
-    }
-    let device_handle = buf.device_handle;
-    let vkbuf = buf.buffer;
-    let alloc = buf.allocation_size;
-    let first_page = ((offset.saturating_add(block.saturating_sub(1))) / block) as usize;
-    let total_pages = sparse::num_sparse_pages(alloc, block) as usize;
-    if first_page >= total_pages {
-        return;
-    }
 
     {
         let Some(ld) = devices.get(&device_handle) else {
@@ -437,7 +437,12 @@ pub(super) fn hint_unused_above(
         };
         let bind_queue = ld.sparse_binding_queue;
         let dev: &ash::Device = &ld.device;
-        let sparse_pages = &mut buffers.get_mut(&buffer_handle).expect("buffer missing").sparse_pages;
+        let mut buffers_write = buffers.write().unwrap();
+        let sparse_pages = &mut buffers_write
+            .entries
+            .get_mut(&buffer_handle)
+            .expect("buffer missing")
+            .sparse_pages;
 
         let mut binds = Vec::new();
         let mut to_free: Vec<(vk::DeviceMemory, vk::DeviceSize)> = Vec::new();
@@ -472,24 +477,41 @@ pub(super) fn hint_unused_above(
 }
 
 /// Byte size of the underlying VkBuffer allocation.
-pub(super) fn capacity(buffers: &HashMap<BufferHandle, BufferState>, buffer_handle: BufferHandle) -> u64 {
-    buffers.get(&buffer_handle).map(|b| b.allocation_size).unwrap_or(0)
+pub(super) fn capacity(buffers: &SharedBufferTable, buffer_handle: BufferHandle) -> u64 {
+    buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .map(|b| b.allocation_size)
+        .unwrap_or(0)
 }
 
 pub(super) fn set_logical_size(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
-    let is_sparse = buffers.get(&buffer_handle).map(|b| b.is_sparse).unwrap_or(false);
+    let is_sparse = {
+        let buffers_guard = buffers.read().unwrap();
+        buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .map(|b| b.is_sparse)
+            .unwrap_or(false)
+    };
     if is_sparse {
         return set_logical_size_sparse(devices, buffers, device_handle, buffer_handle, new_logical_size);
     }
 
     let (bindless_index, is_storage, vkbuf, old_logical) = {
-        let buf = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffers_guard = buffers.read().unwrap();
+        let buf = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if buf.is_view {
             anyhow::bail!("cannot set logical size on buffer views");
         }
@@ -508,7 +530,7 @@ pub(super) fn set_logical_size(
         (buf.bindless_index, buf.is_storage, buf.buffer, buf.size)
     };
 
-    buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+    buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().size = new_logical_size;
 
     if old_logical == new_logical_size {
         return Ok(());
@@ -518,7 +540,8 @@ pub(super) fn set_logical_size(
     // size. Invalidate it so ensure_staging recreates it at the new size.
     if new_logical_size > old_logical {
         let (old_stg_buf, old_stg_mem) = {
-            let buf = buffers.get_mut(&buffer_handle).unwrap();
+            let mut buffers_write = buffers.write().unwrap();
+            let buf = buffers_write.entries.get_mut(&buffer_handle).unwrap();
             (buf.staging_buffer.take(), buf.staging_memory.take())
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
@@ -578,13 +601,17 @@ pub(super) fn set_logical_size(
 
 fn set_logical_size_sparse(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
     let (bindless_index, is_storage, vkbuf, old_logical, block) = {
-        let buf = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffers_guard = buffers.read().unwrap();
+        let buf = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if buf.is_view {
             anyhow::bail!("cannot set logical size on buffer views");
         }
@@ -621,7 +648,9 @@ fn set_logical_size_sparse(
         let bind_queue = ld.sparse_binding_queue;
         let dev: &ash::Device = &ld.device;
 
-        let sparse_pages = &mut buffers
+        let mut buffers_write = buffers.write().unwrap();
+        let sparse_pages = &mut buffers_write
+            .entries
             .get_mut(&buffer_handle)
             .context("buffer disappeared")?
             .sparse_pages;
@@ -674,13 +703,14 @@ fn set_logical_size_sparse(
         }
     }
 
-    buffers.get_mut(&buffer_handle).unwrap().size = new_logical_size;
+    buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap().size = new_logical_size;
 
     // When growing, the existing staging buffer was sized for the old (smaller) logical
     // size. Invalidate it so ensure_staging recreates it at the new size.
     if new_logical_size > old_logical {
         let (old_stg_buf, old_stg_mem) = {
-            let buf = buffers.get_mut(&buffer_handle).unwrap();
+            let mut buffers_write = buffers.write().unwrap();
+            let buf = buffers_write.entries.get_mut(&buffer_handle).unwrap();
             (buf.staging_buffer.take(), buf.staging_memory.take())
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
@@ -949,13 +979,20 @@ fn submit_resize_transfer(
 pub(super) fn resize(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     new_size: u64,
     preserve_contents: bool,
 ) -> Result<()> {
-    let old_state = buffers.get(&buffer_handle).context("Invalid buffer handle")?.clone();
+    let old_state = {
+        let buffers_guard = buffers.read().unwrap();
+        buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?
+            .clone()
+    };
 
     if old_state.is_view {
         anyhow::bail!("cannot resize buffer views");
@@ -1083,7 +1120,7 @@ pub(super) fn resize(
 
     let old_parent_vk = old_state.buffer;
 
-    *buffers.get_mut(&buffer_handle).unwrap() = BufferState {
+    *buffers.write().unwrap().entries.get_mut(&buffer_handle).unwrap() = BufferState {
         device_handle,
         buffer: new_buffer,
         memory: new_memory,
@@ -1107,6 +1144,9 @@ pub(super) fn resize(
     };
 
     let view_handles: Vec<BufferHandle> = buffers
+        .read()
+        .unwrap()
+        .entries
         .iter()
         .filter(|(h, st)| **h != buffer_handle && st.is_view && st.buffer == old_parent_vk)
         .map(|(h, _)| *h)
@@ -1115,7 +1155,8 @@ pub(super) fn resize(
     if let Some(descriptor_set) = bindless_descriptor_set {
         for vh in view_handles {
             let (off, view_size, idx) = {
-                let st = buffers.get(&vh).context("view missing")?;
+                let buffers_guard = buffers.read().unwrap();
+                let st = buffers_guard.entries.get(&vh).context("view missing")?;
                 (
                     st.view_byte_offset.context("internal: view byte offset")?,
                     st.size,
@@ -1139,11 +1180,11 @@ pub(super) fn resize(
                     .device
                     .update_descriptor_sets(std::slice::from_ref(&write), &[]);
             }
-            buffers.get_mut(&vh).unwrap().buffer = new_buffer;
+            buffers.write().unwrap().entries.get_mut(&vh).unwrap().buffer = new_buffer;
         }
     } else {
         for vh in view_handles {
-            buffers.get_mut(&vh).unwrap().buffer = new_buffer;
+            buffers.write().unwrap().entries.get_mut(&vh).unwrap().buffer = new_buffer;
         }
     }
 
@@ -1156,10 +1197,10 @@ pub(super) fn resize(
 /// belongs to the parent and is not freed.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
 ) {
-    if let Some(buffer) = buffers.remove(&buffer_handle) {
+    if let Some(buffer) = buffers.write().unwrap().entries.remove(&buffer_handle) {
         if let Some(device) = devices.get(&buffer.device_handle) {
             let barrier = device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
 
@@ -1218,36 +1259,46 @@ pub(super) fn destroy(
 /// It shares the parent's VkBuffer and staging resources.
 pub(super) fn create_view(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
-    next_buffer_handle: &mut BufferHandle,
+    buffers: &SharedBufferTable,
     parent_handle: BufferHandle,
     offset: u64,
     size: u64,
     element_stride: Option<u32>,
 ) -> Result<BufferHandle> {
-    let parent = buffers.get(&parent_handle).context("Invalid parent buffer handle")?;
+    let (device_handle, vk_buffer, is_storage, parent_flags, parent_allocation_size) = {
+        let buffers_guard = buffers.read().unwrap();
+        let parent = buffers_guard
+            .entries
+            .get(&parent_handle)
+            .context("Invalid parent buffer handle")?;
 
-    if offset + size > parent.size {
-        anyhow::bail!(
-            "View [{}, {}) exceeds parent buffer size {}",
-            offset,
-            offset + size,
-            parent.size
-        );
-    }
+        if offset + size > parent.size {
+            anyhow::bail!(
+                "View [{}, {}) exceeds parent buffer size {}",
+                offset,
+                offset + size,
+                parent.size
+            );
+        }
 
-    if !parent.is_storage {
-        anyhow::bail!("Buffer views are only supported for storage (Scattered) buffers");
-    }
+        if !parent.is_storage {
+            anyhow::bail!("Buffer views are only supported for storage (Scattered) buffers");
+        }
 
-    let device_handle = parent.device_handle;
-    let vk_buffer = parent.buffer;
-    let is_storage = parent.is_storage;
-    let parent_flags = parent.flags;
+        (
+            parent.device_handle,
+            parent.buffer,
+            parent.is_storage,
+            parent.flags,
+            parent.allocation_size,
+        )
+    };
 
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
+
+    let handle = buffers.write().unwrap().alloc_handle();
 
     let bindless_index = if size == 0 {
         // A zero-byte view has no addressable data; VkDescriptorBufferInfo.range must be > 0
@@ -1256,7 +1307,7 @@ pub(super) fn create_view(
         // be bound to shaders.
         None
     } else {
-        let handle_for_registry = *next_buffer_handle;
+        let handle_for_registry = handle;
         let index = logical_device
             .descriptors
             .lock()
@@ -1296,17 +1347,14 @@ pub(super) fn create_view(
         Some(index)
     };
 
-    let handle = *next_buffer_handle;
-    *next_buffer_handle += 1;
-
-    buffers.insert(
+    buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
             buffer: vk_buffer,
             memory: vk::DeviceMemory::null(),
             size,
-            allocation_size: parent.allocation_size,
+            allocation_size: parent_allocation_size,
             bindless_index,
             is_storage,
             element_stride,
@@ -1332,17 +1380,24 @@ pub(super) fn create_view(
 pub(super) fn ensure_staging(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
 ) -> Result<()> {
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
-    if !buffer.is_storage || buffer.staging_buffer.is_some() || buffer.flags.contains(BufferFlags::CPU_READABLE) {
+    let (size, device_handle, needs_staging) = {
+        let buffers_guard = buffers.read().unwrap();
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
+        let needs =
+            buffer.is_storage && buffer.staging_buffer.is_none() && !buffer.flags.contains(BufferFlags::CPU_READABLE);
+        (buffer.size, buffer.device_handle, needs)
+    };
+    if !needs_staging {
         return Ok(());
     }
-    let size = buffer.size;
-    let device = devices
-        .get(&buffer.device_handle)
-        .context("Buffer's device is invalid")?;
+
+    let device = devices.get(&device_handle).context("Buffer's device is invalid")?;
 
     let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
     let staging_info = vk::BufferCreateInfo::default()
@@ -1372,7 +1427,8 @@ pub(super) fn ensure_staging(
 
     unsafe { device.device.bind_buffer_memory(stg_buf, stg_mem, 0) }.context("Failed to bind staging buffer memory")?;
 
-    let buf = buffers.get_mut(&buffer_handle).unwrap();
+    let mut buffers_write = buffers.write().unwrap();
+    let buf = buffers_write.entries.get_mut(&buffer_handle).unwrap();
     buf.staging_buffer = Some(stg_buf);
     buf.staging_memory = Some(stg_mem);
     Ok(())
@@ -1380,24 +1436,33 @@ pub(super) fn ensure_staging(
 
 /// View tightly packed bytes in a CPU-writable storage buffer's host mapping.
 pub(super) fn cpu_writable_flat_slice(
-    buffers: &HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
     offset: u64,
     len: usize,
 ) -> Result<&[u8]> {
-    let buffer = buffers
-        .get(&buffer_handle)
-        .context("cpu_writable_flat_slice: invalid buffer handle")?;
-    if !buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
-        anyhow::bail!("cpu_writable_flat_slice: buffer is not CPU_WRITABLE");
-    }
-    if offset + len as u64 > buffer.size {
-        anyhow::bail!("cpu_writable_flat_slice: slice exceeds buffer bounds");
-    }
-    let base = buffer
-        .host_mapped
-        .context("cpu_writable_flat_slice: missing host mapping")?;
-    Ok(unsafe { std::slice::from_raw_parts((base as *const u8).add(offset as usize), len) })
+    let (host_mapped, size, flags) = {
+        let buffers_guard = buffers.read().unwrap();
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("cpu_writable_flat_slice: invalid buffer handle")?;
+        if !buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+            anyhow::bail!("cpu_writable_flat_slice: buffer is not CPU_WRITABLE");
+        }
+        if offset + len as u64 > buffer.size {
+            anyhow::bail!("cpu_writable_flat_slice: slice exceeds buffer bounds");
+        }
+        (
+            buffer
+                .host_mapped
+                .context("cpu_writable_flat_slice: missing host mapping")?,
+            buffer.size,
+            buffer.flags,
+        )
+    };
+    let _ = (size, flags);
+    Ok(unsafe { std::slice::from_raw_parts((host_mapped as *const u8).add(offset as usize), len) })
 }
 
 /// Write data to a buffer at the specified offset.
@@ -1407,7 +1472,7 @@ pub(super) fn cpu_writable_flat_slice(
 pub(super) fn write(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
     offset: u64,
     data: &[u8],
@@ -1418,14 +1483,22 @@ pub(super) fn write(
     }
 
     {
-        let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffers_guard = buffers.read().unwrap();
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if offset + data.len() as u64 > buffer.size {
             anyhow::bail!("Write would exceed buffer bounds");
         }
     }
 
     {
-        let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffers_guard = buffers.read().unwrap();
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if let Some(base) = buffer.host_mapped {
             let p = base as *mut u8;
             unsafe {
@@ -1436,7 +1509,11 @@ pub(super) fn write(
     }
     ensure_staging(instance, devices, buffers, buffer_handle)?;
 
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffers_guard = buffers.read().unwrap();
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     let device = devices
         .get(&buffer.device_handle)
@@ -1472,13 +1549,24 @@ pub(super) fn write(
 }
 
 /// Get the size of a buffer in bytes.
-pub(super) fn size(buffers: &HashMap<BufferHandle, BufferState>, buffer_handle: BufferHandle) -> u64 {
-    buffers.get(&buffer_handle).map(|b| b.size).unwrap_or(0)
+pub(super) fn size(buffers: &SharedBufferTable, buffer_handle: BufferHandle) -> u64 {
+    buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .map(|b| b.size)
+        .unwrap_or(0)
 }
 
 /// Get the bindless descriptor index for a buffer, if any.
-pub(super) fn bindless_index(buffers: &HashMap<BufferHandle, BufferState>, buffer_handle: BufferHandle) -> Option<u32> {
-    buffers.get(&buffer_handle).and_then(|b| b.bindless_index)
+pub(super) fn bindless_index(buffers: &SharedBufferTable, buffer_handle: BufferHandle) -> Option<u32> {
+    buffers
+        .read()
+        .unwrap()
+        .entries
+        .get(&buffer_handle)
+        .and_then(|b| b.bindless_index)
 }
 
 /// Read buffer contents to CPU. Copies from offset 0 for length output.len().
@@ -1488,7 +1576,7 @@ pub(super) fn bindless_index(buffers: &HashMap<BufferHandle, BufferState>, buffe
 pub(super) fn read_to_cpu(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     output: &mut [u8],
@@ -1496,7 +1584,11 @@ pub(super) fn read_to_cpu(
     let _tz = crate::tracy_zone!("vk.buffer.read_to_cpu");
     {
         let _validate = crate::tracy_zone!("vk.buffer.read_to_cpu.validate");
-        let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+        let buffers_guard = buffers.read().unwrap();
+        let buffer = buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?;
         if buffer.device_handle != device_handle {
             anyhow::bail!("Buffer belongs to different device");
         }
@@ -1522,7 +1614,12 @@ pub(super) fn read_to_cpu(
 
     let buffer = {
         let _lookup = crate::tracy_zone!("vk.buffer.read_to_cpu.lookup_after_staging");
-        buffers.get(&buffer_handle).context("Invalid buffer handle")?
+        let buffers_guard = buffers.read().unwrap();
+        buffers_guard
+            .entries
+            .get(&buffer_handle)
+            .context("Invalid buffer handle")?
+            .clone()
     };
 
     let device = devices.get(&device_handle).context("Invalid device handle")?;
@@ -1573,13 +1670,17 @@ pub(super) fn read_to_cpu(
 /// Fill buffer region with zeros. If size is 0, clears from offset to end of buffer.
 pub(super) fn clear(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     buffer_handle: BufferHandle,
     offset: u64,
     size: u64,
 ) -> Result<()> {
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffers_guard = buffers.read().unwrap();
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
 
     let device = devices.get(&device_handle).context("Invalid device handle")?;
 
@@ -1642,8 +1743,7 @@ pub(super) fn clear(
 pub(super) fn alloc_readback_buffer(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
-    next_buffer_handle: &mut BufferHandle,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     size: u64,
 ) -> Result<BufferHandle> {
@@ -1673,9 +1773,8 @@ pub(super) fn alloc_readback_buffer(
     let ptr = unsafe { logical_device.map_memory2(memory, 0, size) }.context("Failed to map grant readback buffer")?;
     let host_mapped = Some(ptr as usize);
 
-    let handle = *next_buffer_handle;
-    *next_buffer_handle += 1;
-    buffers.insert(
+    let handle = buffers.write().unwrap().alloc_handle();
+    buffers.write().unwrap().entries.insert(
         handle,
         BufferState {
             device_handle,
@@ -1724,27 +1823,19 @@ pub(super) fn query_texture_copy_footprint(
 pub(super) fn alloc_texture_readback_staging(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    buffers: &mut HashMap<BufferHandle, BufferState>,
-    next_buffer_handle: &mut BufferHandle,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     layout: crate::backend::TextureCopyFootprint,
 ) -> Result<BufferHandle> {
-    let handle = alloc_readback_buffer(
-        instance,
-        devices,
-        buffers,
-        next_buffer_handle,
-        device_handle,
-        layout.staging_bytes,
-    )?;
-    if let Some(buf) = buffers.get_mut(&handle) {
+    let handle = alloc_readback_buffer(instance, devices, buffers, device_handle, layout.staging_bytes)?;
+    if let Some(buf) = buffers.write().unwrap().entries.get_mut(&handle) {
         buf.texture_copy_footprint = Some(layout);
     }
     Ok(handle)
 }
 
 pub(super) fn read_texture_readback_staging(
-    buffers: &HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
     layout: crate::backend::TextureCopyFootprint,
     output: &mut [u8],
@@ -1752,7 +1843,11 @@ pub(super) fn read_texture_readback_staging(
     if output.len() as u64 != layout.logical_bytes {
         anyhow::bail!("read_texture_readback_staging size mismatch");
     }
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffers_guard = buffers.read().unwrap();
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
     if !buffer.is_grant_readback {
         anyhow::bail!("read_texture_readback_staging requires a grant readback buffer");
     }
@@ -1772,11 +1867,15 @@ pub(super) fn read_texture_readback_staging(
 
 /// Read bytes from a grant readback staging buffer.
 pub(super) fn read_readback_buffer(
-    buffers: &HashMap<BufferHandle, BufferState>,
+    buffers: &SharedBufferTable,
     buffer_handle: BufferHandle,
     output: &mut [u8],
 ) -> Result<()> {
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let buffers_guard = buffers.read().unwrap();
+    let buffer = buffers_guard
+        .entries
+        .get(&buffer_handle)
+        .context("Invalid buffer handle")?;
     if !buffer.is_grant_readback {
         anyhow::bail!("read_readback_buffer requires a grant readback buffer");
     }

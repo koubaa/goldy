@@ -3302,7 +3302,7 @@ fn scheme_copy_buffer_to_texture_parcel_full_texture() {
 
     let mut scheme = Scheme::new(&ctx);
     scheme
-        .copy_buffer_to_texture_parcel(&staging, 0, &texture, 0, 0, W, H)
+        .copy_buffer_to_texture_parcel(&staging, 0, 0, &texture, 0, 0, W, H)
         .expect("copy_buffer_to_texture_parcel");
     let frame = scheme.submit().expect("submit");
     frame.wait(&ctx).expect("wait");
@@ -3337,10 +3337,10 @@ fn scheme_copy_buffer_to_texture_parcel_oob_returns_error() {
 
     let mut scheme = Scheme::new(&ctx);
     // x + width exceeds texture width.
-    let result = scheme.copy_buffer_to_texture_parcel(&staging, 0, &texture, 6, 0, 4, 4);
+    let result = scheme.copy_buffer_to_texture_parcel(&staging, 0, 0, &texture, 6, 0, 4, 4);
     assert!(result.is_err(), "x+width exceeds texture width → error");
     // y + height exceeds texture height.
-    let result2 = scheme.copy_buffer_to_texture_parcel(&staging, 0, &texture, 0, 6, 4, 4);
+    let result2 = scheme.copy_buffer_to_texture_parcel(&staging, 0, 0, &texture, 0, 6, 4, 4);
     assert!(result2.is_err(), "y+height exceeds texture height → error");
 }
 
@@ -3372,7 +3372,7 @@ fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src() {
     );
 
     let mut scheme = Scheme::new(&ctx);
-    let result = scheme.copy_buffer_to_texture_parcel(&tex_parcel, 0, &dst_texture, 0, 0, 4, 4);
+    let result = scheme.copy_buffer_to_texture_parcel(&tex_parcel, 0, 0, &dst_texture, 0, 0, 4, 4);
     assert!(
         result.is_err(),
         "copy_buffer_to_texture_parcel should reject a texture parcel as src"
@@ -3406,7 +3406,7 @@ fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
 
     let mut scheme = Scheme::new(&ctx);
     scheme
-        .copy_buffer_to_texture_parcel(&staging, 0, &texture, 0, 0, W, H)
+        .copy_buffer_to_texture_parcel(&staging, 0, 0, &texture, 0, 0, W, H)
         .expect("copy_buffer_to_texture_parcel");
 
     scheme.submit().expect("first submit");
@@ -3423,6 +3423,98 @@ fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
         1,
         "second submit must be a retention hit"
     );
+}
+
+#[test]
+fn scheme_copy_buffer_to_texture_pitched_retained_after_layout_settles() {
+    let device = make_device();
+    let ctx = submission_context(&device);
+
+    const W: u32 = 4;
+    const H: u32 = 4;
+    let format = TextureFormat::Rgba8Unorm;
+    let footprint = device
+        .texture_copy_footprint(W, H, format)
+        .expect("texture_copy_footprint");
+    assert!(
+        footprint.row_pitch > 0,
+        "pitched upload test requires a non-zero row pitch"
+    );
+
+    let byte_size = footprint.staging_bytes;
+    let tight_len = (W * H * 4) as usize;
+    let pixels = vec![128u8; tight_len];
+
+    let mut pool = RetainedPool::new(Arc::new(device.clone()));
+    let staging = pool
+        .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
+        .expect("staging");
+
+    let write_pitched = |buf: &goldy::Buffer| {
+        if footprint.row_pitch == footprint.tight_row_bytes() {
+            buf.write(footprint.footprint_offset, &pixels).expect("write tight");
+        } else {
+            let row_bytes = footprint.tight_row_bytes() as usize;
+            for row in 0..H {
+                let src = &pixels[row as usize * row_bytes..(row as usize + 1) * row_bytes];
+                let dst_off = footprint.footprint_offset + row as u64 * footprint.row_pitch as u64;
+                buf.write(dst_off, src).expect("write pitched row");
+            }
+        }
+    };
+
+    write_pitched(&staging);
+
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; tight_len],
+        W,
+        H,
+        format,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+    );
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .copy_buffer_to_texture_parcel(
+            &staging.whole(),
+            footprint.footprint_offset,
+            footprint.row_pitch,
+            &texture,
+            0,
+            0,
+            W,
+            H,
+        )
+        .expect("copy_buffer_to_texture_parcel pitched");
+
+    let refresh_and_submit = |scheme: &mut Scheme, staging: &goldy::Buffer| {
+        write_pitched(staging);
+        scheme.submit().expect("submit");
+    };
+
+    refresh_and_submit(&mut scheme, &staging);
+    refresh_and_submit(&mut scheme, &staging);
+    refresh_and_submit(&mut scheme, &staging);
+
+    #[cfg(not(feature = "metal"))]
+    {
+        assert_eq!(
+            scheme.replay_stats().records,
+            2,
+            "initial record + one re-record when destination texture layout settles"
+        );
+        assert_eq!(
+            scheme.replay_stats().resubmit_hits,
+            1,
+            "third submit must resubmit the retained pitched texture-upload partition"
+        );
+    }
+
+    let mut output = vec![0u8; texture.byte_size() as usize];
+    texture.read_to_cpu(&mut output).expect("read_to_cpu");
+    assert_eq!(output, pixels, "pitched retained upload must produce correct pixels");
 }
 
 // ─── Cross-scheme retention (shared-parcel topology) ─────────────────────────

@@ -533,6 +533,26 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 4u8.hash(&mut h);
                 grant_id.hash(&mut h);
             }
+            NodeKind::CopyBufferToTexture {
+                src,
+                src_offset,
+                src_row_pitch,
+                dst,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                5u8.hash(&mut h);
+                src.hash(&mut h);
+                src_offset.hash(&mut h);
+                src_row_pitch.hash(&mut h);
+                dst.hash(&mut h);
+                x.hash(&mut h);
+                y.hash(&mut h);
+                width.hash(&mut h);
+                height.hash(&mut h);
+            }
             _ => {
                 2u8.hash(&mut h);
             }
@@ -544,11 +564,14 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
 /// Compute per-partition fingerprints for all partitions in `wave_ranges`.
 ///
 /// Each fingerprint folds `partition_fingerprint` with the partition index so that
-/// identical adjacent partitions get distinct keys.
+/// identical adjacent partitions get distinct keys. When `layout_tag` is provided,
+/// pitched [`NodeKind::CopyBufferToTexture`] nodes also fold in the destination
+/// texture's barrier-layout tag so retained CBs are re-recorded after layout settles.
 fn compute_partition_fps(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
     wave_ranges: &[std::ops::Range<usize>],
+    layout_tag: Option<&dyn Fn(crate::backend::TextureHandle) -> u64>,
 ) -> Vec<u64> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -558,12 +581,28 @@ fn compute_partition_fps(
         .map(|(part_idx, range)| {
             let waves = &schedule.waves[range.clone()];
             let raw_fp = partition_fingerprint(ir, schedule, waves);
+            let layout_fp = layout_tag
+                .map(|tag| analysis::partition_copy_texture_layout_fingerprint(ir, waves, tag))
+                .unwrap_or(0);
             let mut h = DefaultHasher::new();
             raw_fp.hash(&mut h);
+            layout_fp.hash(&mut h);
             part_idx.hash(&mut h);
             h.finish()
         })
         .collect()
+}
+
+fn texture_copy_layout_tag(context: &crate::Context) -> impl Fn(crate::backend::TextureHandle) -> u64 + '_ {
+    move |texture| {
+        context
+            .device()
+            .inner
+            .backend
+            .lock()
+            .unwrap()
+            .texture_copy_retention_tag(texture)
+    }
 }
 
 /// True when all nodes in the given waves are retainable (no uploads).
@@ -572,31 +611,7 @@ fn compute_partition_fps(
 /// submit, so a partition containing them is submitted standalone rather than
 /// retained.
 fn partition_waves_can_retain(ir: &GraphIR, waves: &[Wave]) -> bool {
-    use super::ResourceId;
-    for wave in waves {
-        for &ni in &wave.node_indices {
-            match &ir.nodes[ni].kind {
-                NodeKind::WriteBuffer { .. }
-                | NodeKind::WriteTexture { .. }
-                | NodeKind::WriteTextureRegion { .. }
-                | NodeKind::CopyBufferToTexture { .. }
-                | NodeKind::CopyTexture { .. } => return false,
-                // CopyRenderTarget → PresentLease is retainable via the slot-key
-                // mechanism (§5.3 of render-scheme.md); it must NOT be standalone.
-                // CopyRenderTarget → Texture is also retainable: the texture handle
-                // is stable across submissions, so the blit CB can be reused as-is.
-                // All other destinations (SwapchainOutput, etc.) are not stable and
-                // must be submitted standalone.
-                NodeKind::CopyRenderTarget { dst, .. }
-                    if !matches!(dst, ResourceId::PresentLease(_) | ResourceId::Texture(_)) =>
-                {
-                    return false;
-                }
-                _ => {}
-            }
-        }
-    }
-    true
+    analysis::waves_can_retain(ir, waves)
 }
 
 /// True when the partition's waves contain at least one [`NodeKind::RenderPass`] node.
@@ -790,6 +805,7 @@ fn cross_sync_for_ir<'a>(
     submitting_ctx: crate::backend::ContextHandle,
     waves: &[Wave],
 ) -> Option<&'a SubmitSync> {
+    let _tz = crate::tracy_zone!("goldy.cross_sync_for_ir");
     let state = submit_state?;
     cross_sync_for_stamps(scratch, &state.resource_stamps, ir, submitting_ctx, waves)
 }
@@ -817,11 +833,13 @@ impl PartitionSubmitResult {
 /// two wave groups depending on barrier cost or swapchain presence.  Each
 /// partition is treated independently:
 ///
-/// - **Upload partition** (contains `WriteBuffer`/`WriteTexture`/`CopyTexture`
-///   nodes, or `CopyRenderTarget` to a present-lease): submitted via
-///   `submit_standalone` on every call — data is staged fresh each frame and
-///   cannot be retained. `CopyRenderTarget` to a stable texture parcel
-///   (`ResourceId::Texture`) is retainable and does **not** force standalone.
+/// - **Tight upload partition** (contains `WriteBuffer`/`WriteTexture`/`CopyTexture`, or
+///   `CopyBufferToTexture` with `src_row_pitch == 0`): submitted via `submit_standalone`
+///   on every call — payload is staged via the belt or texture pool each frame.
+/// - **Pitched texture upload partition** (`CopyBufferToTexture` with `src_row_pitch > 0`):
+///   retainable after layout settles; partition fingerprint includes destination layout tag.
+///   `CopyRenderTarget` to a stable texture parcel (`ResourceId::Texture`) is retainable
+///   and does **not** force standalone.
 /// - **Render partition** (contains `RenderPass` nodes):
 ///   submitted via `submit_graph_and_retain`; the backend retains the closed
 ///   list and can resubmit it on cache hit.
@@ -851,9 +869,10 @@ pub(crate) fn submit_resolved_ir_and_retain(
 
     // Compute per-partition fingerprints up front so we can check them against the
     // cached keys without borrowing `cache` mutably yet.
+    let layout_tag = texture_copy_layout_tag(context);
     let partition_fps: Vec<u64> = {
         let schedule = &cache.as_ref().unwrap().schedule;
-        compute_partition_fps(ir, schedule, &wave_ranges)
+        compute_partition_fps(ir, schedule, &wave_ranges, Some(&layout_tag))
     };
 
     // Ensure the partition retention key vecs are sized correctly.
@@ -942,7 +961,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         };
 
         if !can_retain {
-            // Upload/copy partition: always submit standalone, never retain.
+            // Non-retainable upload/copy partition: submit standalone every frame.
             let cache_entry = cache.as_ref().unwrap();
             let cmds = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
@@ -1055,6 +1074,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     // cached keys directly; only compute individual fps for partitions that have
     // no cached key yet (standalone upload partitions — whose fp is never actually
     // read in the loop — and present partitions before their first N slot records).
+    let layout_tag = texture_copy_layout_tag(context);
     let partition_fps: Vec<u64> = {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.partition_fps");
         if ir_clean {
@@ -1069,8 +1089,10 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         use std::hash::{Hash, Hasher};
                         let waves = &schedule.waves[wave_ranges[i].clone()];
                         let raw_fp = partition_fingerprint(ir, schedule, waves);
+                        let layout_fp = analysis::partition_copy_texture_layout_fingerprint(ir, waves, &layout_tag);
                         let mut h = DefaultHasher::new();
                         raw_fp.hash(&mut h);
+                        layout_fp.hash(&mut h);
                         i.hash(&mut h);
                         h.finish()
                     })
@@ -1078,7 +1100,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 .collect()
         } else {
             let schedule = &cache.as_ref().unwrap().schedule;
-            compute_partition_fps(ir, schedule, &wave_ranges)
+            compute_partition_fps(ir, schedule, &wave_ranges, Some(&layout_tag))
         }
     };
 

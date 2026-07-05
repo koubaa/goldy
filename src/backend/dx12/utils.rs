@@ -2,10 +2,13 @@
 //!
 //! Format conversions and helpers.
 
+use super::types::LogicalDevice;
 use anyhow::{Context, Result};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use windows::Win32::{
     Foundation::{CloseHandle, WAIT_OBJECT_0},
-    Graphics::Direct3D12::ID3D12Fence,
+    Graphics::Direct3D12::{ID3D12CommandList, ID3D12Fence},
     System::Threading::{CreateEventA, WaitForSingleObject, INFINITE},
 };
 
@@ -170,6 +173,41 @@ pub fn address_mode_to_d3d12(mode: AddressMode) -> Direct3D12::D3D12_TEXTURE_ADD
         AddressMode::Repeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_WRAP,
         AddressMode::MirrorRepeat => Direct3D12::D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
     }
+}
+
+/// Execute command lists and signal the device fence under [`LogicalDevice::queue_lock`].
+///
+/// Reserves the timeline value with `fetch_add` inside the lock so `(value, execute, signal)`
+/// is atomic relative to other queue submits.
+pub(super) fn execute_command_lists_and_signal_device(
+    logical_device: &LogicalDevice,
+    command_lists: &[Option<ID3D12CommandList>],
+) -> Result<u64> {
+    let queue_lock = Arc::clone(&logical_device.queue_lock);
+    let _guard = queue_lock.lock().unwrap();
+    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+    unsafe {
+        logical_device.command_queue.ExecuteCommandLists(command_lists);
+    }
+    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
+        .context("Failed to signal device fence")?;
+    Ok(fence_value)
+}
+
+/// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
+pub(super) fn execute_command_lists_and_signal_context(
+    logical_device: &LogicalDevice,
+    ctx_fence: &ID3D12Fence,
+    command_lists: &[Option<ID3D12CommandList>],
+) -> Result<u64> {
+    let queue_lock = Arc::clone(&logical_device.queue_lock);
+    let _guard = queue_lock.lock().unwrap();
+    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+    unsafe {
+        logical_device.command_queue.ExecuteCommandLists(command_lists);
+    }
+    unsafe { logical_device.command_queue.Signal(ctx_fence, fence_value) }.context("Failed to signal context fence")?;
+    Ok(fence_value)
 }
 
 /// Wait for a fence to reach the specified value.

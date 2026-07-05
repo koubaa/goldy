@@ -3,8 +3,12 @@
 use super::super::shared;
 use super::super::shared::DISPATCH_BATCH_STRIDE;
 use super::staging;
-use super::types::{ComputePipelineState, LogicalDevice, PipelineState, PushLayout, SlotKey};
-use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle, RenderTargetHandle};
+use super::submit_session::{VulkanSubmitScope, VulkanSubmitView};
+use super::types::{
+    ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable, SharedComputePipelineTable,
+    SharedPipelineTable, SlotKey,
+};
+use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
@@ -17,7 +21,7 @@ use std::sync::atomic::Ordering;
 
 /// Build GPU-side timeline-semaphore waits for cross-context [`SubmitSync::waits`].
 fn build_cross_submit_wait_infos(
-    state: &super::types::VulkanState,
+    view: &VulkanSubmitView<'_>,
     sync: Option<&SubmitSync>,
 ) -> Result<Vec<vk::SemaphoreSubmitInfo<'static>>> {
     let Some(s) = sync else {
@@ -25,8 +29,10 @@ fn build_cross_submit_wait_infos(
     };
     let mut wait_infos = Vec::with_capacity(s.waits.len());
     for epoch in &s.waits {
-        let sem = state
+        let sem = view
             .contexts
+            .read()
+            .unwrap()
             .get(&epoch.context)
             .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
             .lock()
@@ -54,13 +60,13 @@ fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Op
 }
 
 fn buffer_stride_for_bindless_index(
-    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
     index: u32,
     cat: crate::types::ResourceCategory,
 ) -> Option<u32> {
     // Uniform and storage buffers use separate bindless array indices; both may be 0.
-    for b in buffers.values() {
+    for b in buffers.read().unwrap().entries.values() {
         if b.device_handle != device_handle {
             continue;
         }
@@ -91,17 +97,20 @@ fn collect_slots_from_raw_bind(indices: &[u32], categories: &[Option<crate::type
 
 fn collect_slot_keys_from_gpu_commands(
     commands: &[GpuCommand],
-    compute_pipelines: &HashMap<ComputePipelineHandle, ComputePipelineState>,
-    _buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    compute_pipelines: &SharedComputePipelineTable,
+    _buffers: &SharedBufferTable,
 ) -> Vec<SlotKey> {
     let mut current_pipeline = None;
     let mut slots = Vec::new();
+    let compute_read = compute_pipelines.read().unwrap();
     for cmd in commands {
         match cmd {
             GpuCommand::SetPipeline(p) => current_pipeline = Some(*p),
             GpuCommand::BindResourcesRaw { indices, .. } => {
-                if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
-                    slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                if let Some(h) = current_pipeline {
+                    if let Some(p) = compute_read.entries.get(&h) {
+                        slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                    }
                 }
             }
             GpuCommand::BindResourcesTyped { handles } => {
@@ -112,16 +121,18 @@ fn collect_slot_keys_from_gpu_commands(
                 }
             }
             GpuCommand::DispatchBatch { arg_data, count, .. } => {
-                if let Some(p) = current_pipeline.and_then(|h| compute_pipelines.get(&h)) {
-                    let layout_size = std::mem::size_of::<PushLayout>();
-                    for i in 0..*count as usize {
-                        let base = i * DISPATCH_BATCH_STRIDE;
-                        if base + layout_size <= arg_data.len() {
-                            let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                            for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
-                                    if let Some(key) = slot_key_from_category(cat, idx as u32) {
-                                        slots.push(key);
+                if let Some(h) = current_pipeline {
+                    if let Some(p) = compute_read.entries.get(&h) {
+                        let layout_size = std::mem::size_of::<PushLayout>();
+                        for i in 0..*count as usize {
+                            let base = i * DISPATCH_BATCH_STRIDE;
+                            if base + layout_size <= arg_data.len() {
+                                let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                                for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                    if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
+                                        if let Some(key) = slot_key_from_category(cat, idx as u32) {
+                                            slots.push(key);
+                                        }
                                     }
                                 }
                             }
@@ -137,20 +148,25 @@ fn collect_slot_keys_from_gpu_commands(
 
 fn collect_slot_keys_from_graph_commands(
     commands: &[GraphCommand],
-    compute_pipelines: &HashMap<ComputePipelineHandle, ComputePipelineState>,
-    pipelines: &HashMap<PipelineHandle, PipelineState>,
-    buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    compute_pipelines: &SharedComputePipelineTable,
+    pipelines: &SharedPipelineTable,
+    buffers: &SharedBufferTable,
 ) -> Vec<SlotKey> {
     let mut slots = Vec::new();
     let mut current_compute_pipeline = None;
     let mut current_render_pipeline = None;
+    let compute_read = compute_pipelines.read().unwrap();
+    let pipelines_read = pipelines.read().unwrap();
+    let buffers_read = buffers.read().unwrap();
     for gc in commands {
         match gc {
             GraphCommand::Compute(cmd) => match cmd {
                 GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
                 GpuCommand::BindResourcesRaw { indices, .. } => {
-                    if let Some(p) = current_compute_pipeline.and_then(|h| compute_pipelines.get(&h)) {
-                        slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                    if let Some(h) = current_compute_pipeline {
+                        if let Some(p) = compute_read.entries.get(&h) {
+                            slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                        }
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles } => {
@@ -161,16 +177,18 @@ fn collect_slot_keys_from_graph_commands(
                     }
                 }
                 GpuCommand::DispatchBatch { arg_data, count, .. } => {
-                    if let Some(p) = current_compute_pipeline.and_then(|h| compute_pipelines.get(&h)) {
-                        let layout_size = std::mem::size_of::<PushLayout>();
-                        for i in 0..*count as usize {
-                            let base = i * DISPATCH_BATCH_STRIDE;
-                            if base + layout_size <= arg_data.len() {
-                                let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                                for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                    if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
-                                        if let Some(key) = slot_key_from_category(cat, idx as u32) {
-                                            slots.push(key);
+                    if let Some(h) = current_compute_pipeline {
+                        if let Some(p) = compute_read.entries.get(&h) {
+                            let layout_size = std::mem::size_of::<PushLayout>();
+                            for i in 0..*count as usize {
+                                let base = i * DISPATCH_BATCH_STRIDE;
+                                if base + layout_size <= arg_data.len() {
+                                    let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                                    for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                        if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
+                                            if let Some(key) = slot_key_from_category(cat, idx as u32) {
+                                                slots.push(key);
+                                            }
                                         }
                                     }
                                 }
@@ -188,14 +206,16 @@ fn collect_slot_keys_from_graph_commands(
                         RenderCommand::SetPipeline(p) => current_render_pipeline = Some(*p),
                         RenderCommand::BindResources { buffers: buf_handles } => {
                             for h in buf_handles {
-                                if let Some(idx) = buffers.get(h).and_then(|b| b.bindless_index) {
+                                if let Some(idx) = buffers_read.entries.get(h).and_then(|b| b.bindless_index) {
                                     slots.push(SlotKey::StorageBuffer(idx));
                                 }
                             }
                         }
                         RenderCommand::BindResourcesRaw { indices, .. } => {
-                            if let Some(p) = current_render_pipeline.and_then(|h| pipelines.get(&h)) {
-                                slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                            if let Some(h) = current_render_pipeline {
+                                if let Some(p) = pipelines_read.entries.get(&h) {
+                                    slots.extend(collect_slots_from_raw_bind(indices, &p.push_constant_categories));
+                                }
                             }
                         }
                         RenderCommand::BindResourcesTyped { handles } => {
@@ -371,7 +391,7 @@ fn vulkan_decode_duration_ns(start: u64, end: u64, valid_bits: u32, period_ns: f
 }
 
 unsafe fn vulkan_finish_gpu_profile(
-    state: &super::types::VulkanState,
+    view: &VulkanSubmitView<'_>,
     ctx: super::ContextHandle,
     device: &ash::Device,
     timeline_sem: vk::Semaphore,
@@ -387,7 +407,7 @@ unsafe fn vulkan_finish_gpu_profile(
             device.destroy_query_pool(profile.pool, None);
         }
         if e == vk::Result::ERROR_DEVICE_LOST {
-            state.device_lost.store(true, Ordering::Relaxed);
+            view.device_lost.store(true, Ordering::Relaxed);
         }
         return Err(anyhow::anyhow!("wait_semaphores (gpu profiling): {:?}", e));
     }
@@ -421,7 +441,7 @@ unsafe fn vulkan_finish_gpu_profile(
     }
 
     device.destroy_query_pool(profile.pool, None);
-    reap_timeline_cmd_buffers_up_to(state, ctx, signal_value);
+    reap_timeline_cmd_buffers_up_to_with_view(view, ctx, signal_value);
     let _ = cmd;
     Ok(())
 }
@@ -436,12 +456,17 @@ unsafe fn vulkan_finish_gpu_profile(
 /// that queue. Draining with V is therefore safe and never creates a
 /// cross-context dependency.
 pub(super) fn ctx_completed_value(
-    state: &super::types::VulkanState,
+    view: &VulkanSubmitView<'_>,
     ctx: super::ContextHandle,
     device_handle: super::DeviceHandle,
 ) -> u64 {
-    let sem = state.contexts.get(&ctx).map(|sc| sc.lock().unwrap().timeline_semaphore);
-    let dev = state.devices.get(&device_handle).map(|ld| &ld.device);
+    let sem = view
+        .contexts
+        .read()
+        .unwrap()
+        .get(&ctx)
+        .map(|sc| sc.lock().unwrap().timeline_semaphore);
+    let dev = view.devices.get(&device_handle).map(|ld| &ld.device);
     match (dev, sem) {
         (Some(dev), Some(sem)) => unsafe { dev.get_semaphore_counter_value(sem).unwrap_or(0) },
         _ => 0,
@@ -458,12 +483,12 @@ pub(super) fn ctx_completed_value(
 /// fall over, the device is lost (`ERROR_DEVICE_LOST` on the next
 /// `queue_submit`), and the unbounded HashMap teardown corrupts the heap on
 /// shutdown.
-fn reap_signaled_fences(state: &super::types::VulkanState) {
+fn reap_signaled_fences(view: &VulkanSubmitView<'_>) {
     let signaled: Vec<u64> = {
-        let pool = state.compute_fence_pool.lock().unwrap();
+        let pool = view.compute_fence_pool.lock().unwrap();
         pool.iter()
             .filter_map(|(token, (device_handle, fence, _))| {
-                let logical_device = state.devices.get(device_handle)?;
+                let logical_device = view.devices.get(device_handle)?;
                 let signaled = unsafe { logical_device.device.get_fence_status(*fence) }.unwrap_or(false);
                 if signaled {
                     Some(*token)
@@ -474,10 +499,10 @@ fn reap_signaled_fences(state: &super::types::VulkanState) {
             .collect()
     };
 
-    let mut pool = state.compute_fence_pool.lock().unwrap();
+    let mut pool = view.compute_fence_pool.lock().unwrap();
     for token in signaled {
         if let Some((device_handle, fence, cmd_buf)) = pool.remove(&token) {
-            if let Some(logical_device) = state.devices.get(&device_handle) {
+            if let Some(logical_device) = view.devices.get(&device_handle) {
                 unsafe {
                     if let Some(cb) = cmd_buf {
                         logical_device
@@ -497,8 +522,7 @@ fn reap_signaled_fences(state: &super::types::VulkanState) {
 /// Create a compute pipeline.
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
-    next_compute_pipeline_handle: &mut ComputePipelineHandle,
+    compute_pipelines: &SharedComputePipelineTable,
     device_handle: DeviceHandle,
     cs_module: vk::ShaderModule,
     shader_debug_name: String,
@@ -535,10 +559,9 @@ pub(super) fn create(
     }
     .map_err(|(_, e)| anyhow::anyhow!("Failed to create compute pipeline: {:?}", e))?;
 
-    let handle = *next_compute_pipeline_handle;
-    *next_compute_pipeline_handle += 1;
+    let handle = compute_pipelines.write().unwrap().alloc_handle();
 
-    compute_pipelines.insert(
+    compute_pipelines.write().unwrap().entries.insert(
         handle,
         ComputePipelineState {
             device_handle,
@@ -559,10 +582,10 @@ pub(super) fn create(
 /// Destroy a compute pipeline.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    compute_pipelines: &mut HashMap<ComputePipelineHandle, ComputePipelineState>,
+    compute_pipelines: &SharedComputePipelineTable,
     pipeline_handle: ComputePipelineHandle,
 ) {
-    if let Some(pipeline) = compute_pipelines.remove(&pipeline_handle) {
+    if let Some(pipeline) = compute_pipelines.write().unwrap().entries.remove(&pipeline_handle) {
         if let Some(logical_device) = devices.get(&pipeline.device_handle) {
             unsafe {
                 logical_device.device.device_wait_idle().ok();
@@ -578,21 +601,17 @@ pub(super) fn destroy(
 
 /// Submit compute commands without blocking. Returns a fence token for polling/waiting.
 /// Submit a batch of GPU commands as a single compute submission.
-pub(super) fn submit(
-    state: &super::types::VulkanState,
+pub(super) fn submit_with_scope(
+    scope: &VulkanSubmitScope<'_>,
     ctx: super::ContextHandle,
     commands: &[GpuCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
+    scope.assert_ctx(ctx);
+    let view = &scope.view;
+    let device_handle = scope.device_handle;
     let mut commands = commands.to_vec();
     crate::frame_table::lower_gpu_commands(&mut commands);
-    let device_handle = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .device;
     let _tz = tracy_zone!("vk.submit");
     // Detect WriteBuffer up-front so we can skip all the staging-belt /
     // fence-pool maintenance when this submit has no host→GPU uploads.
@@ -617,22 +636,27 @@ pub(super) fn submit(
 
     if has_write_buffer || has_write_texture {
         let _rz = tracy_zone!("vk.submit.belt_reclaim");
-        let completed_timeline = ctx_completed_value(state, ctx, device_handle);
+        let completed_timeline = scope.completed_timeline_value();
 
         if has_write_buffer {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                sc_arc.lock().unwrap().staging_belt.reclaim(
-                    &state.compute_fence_pool,
-                    &state.devices,
+            {
+                scope.sc.lock().unwrap().staging_belt.reclaim(
+                    view.compute_fence_pool,
+                    view.devices,
                     completed_timeline,
                 )?;
             }
-            reap_signaled_fences(state);
+            reap_signaled_fences(view);
         }
 
         if has_write_texture {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                sc_arc.lock().unwrap().texture_staging_pool.reclaim(completed_timeline);
+            {
+                scope
+                    .sc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -651,10 +675,11 @@ pub(super) fn submit(
             } = command
             {
                 // Extract Copy fields from the buffer state so the borrow ends
-                // before we take a mutable borrow of state.contexts for the belt.
+                // before we take a mutable borrow of view.contexts for the belt.
                 let (host_mapped, is_storage, buf_device, buf_memory) = {
-                    let buf = state
-                        .buffers
+                    let buffers_read = view.buffers.read().unwrap();
+                    let buf = buffers_read
+                        .entries
                         .get(buf_handle)
                         .context("WriteBuffer: invalid buffer handle")?;
                     (buf.host_mapped, buf.is_storage, buf.device_handle, buf.memory)
@@ -665,7 +690,7 @@ pub(super) fn submit(
                         std::ptr::copy_nonoverlapping(data.as_ptr(), p.add(*offset as usize), data.len());
                     }
                 } else if !is_storage {
-                    let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
+                    let dev = view.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                     unsafe {
                         let ptr = dev
                             .map_memory2(buf_memory, *offset, data.len() as u64)
@@ -674,10 +699,9 @@ pub(super) fn submit(
                         dev.unmap_memory2(buf_memory).context("WriteBuffer: unmap failed")?;
                     }
                 } else {
-                    let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
-                    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                    let mut sc = sc_arc.lock().unwrap();
-                    let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
+                    let dev = view.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
+                    let mut sc = scope.sc.lock().unwrap();
+                    let (stg_buf, stg_off) = sc.staging_belt.write(view.instance, dev, data)?;
                     belt_slices.push((stg_buf, stg_off));
                 }
             }
@@ -685,27 +709,21 @@ pub(super) fn submit(
     }
 
     if commands.is_empty() {
-        let signal_value = state
+        let signal_value = view
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?
             .timeline_next
             .fetch_add(1, Ordering::Relaxed);
-        let timeline_sem = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .lock()
-            .unwrap()
-            .timeline_semaphore;
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let timeline_sem = scope.sc.lock().unwrap().timeline_semaphore;
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         let queue = ld.queue;
         let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
         let signal_info = vk::SemaphoreSubmitInfo::default()
             .semaphore(timeline_sem)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+        let wait_infos = build_cross_submit_wait_infos(view, sync)?;
         let submit_info2 = if wait_infos.is_empty() {
             vk::SubmitInfo2::default().signal_semaphore_infos(std::slice::from_ref(&signal_info))
         } else {
@@ -722,13 +740,9 @@ pub(super) fn submit(
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
         {
-            let completed = ctx_completed_value(state, ctx, device_handle);
-            let ctx_batch: Vec<_> = state
-                .contexts
-                .get(&ctx)
-                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
-                .unwrap_or_default();
-            if let Some(ld) = state.devices.get(&device_handle) {
+            let completed = scope.completed_timeline_value();
+            let ctx_batch: Vec<_> = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
+            if let Some(ld) = view.devices.get(&device_handle) {
                 let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                 let mut registry = descriptors_arc.lock().unwrap();
                 for r in ctx_batch {
@@ -736,14 +750,14 @@ pub(super) fn submit(
                 }
             }
         }
-        if let Some(sc_arc) = state.contexts.get(&ctx) {
-            sc_arc.lock().unwrap().last_submitted_seq = signal_value;
+        {
+            scope.sc.lock().unwrap().last_submitted_seq = signal_value;
         }
         return Ok(signal_value);
     }
 
-    let compute_pipelines = &state.compute_pipelines;
-    let buffers = &state.buffers;
+    let compute_pipelines = &view.compute_pipelines;
+    let buffers = &view.buffers;
 
     let mut texture_upload_scratch: Vec<super::texture::ComputeTextureScratch> = Vec::new();
     for command in &commands {
@@ -754,13 +768,12 @@ pub(super) fn submit(
                 width,
                 height,
             } => {
-                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                let mut sc_guard = sc_arc.lock().unwrap();
+                let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                    &state.instance,
-                    &state.devices,
-                    &state.textures,
+                    view.instance,
+                    view.devices,
+                    view.textures,
                     pool,
                     *texture,
                     data,
@@ -778,13 +791,12 @@ pub(super) fn submit(
                 height,
                 data,
             } => {
-                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                let mut sc_guard = sc_arc.lock().unwrap();
+                let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                    &state.instance,
-                    &state.devices,
-                    &state.textures,
+                    view.instance,
+                    view.devices,
+                    view.textures,
                     pool,
                     *texture,
                     data,
@@ -802,15 +814,15 @@ pub(super) fn submit(
                 y,
                 width,
                 height,
+                ..
             } => {
-                let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                let mut sc_guard = sc_arc.lock().unwrap();
+                let mut sc_guard = scope.sc.lock().unwrap();
                 let pool = &mut sc_guard.texture_staging_pool;
                 texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
-                    &state.instance,
-                    &state.devices,
-                    &state.textures,
-                    &state.buffers,
+                    view.instance,
+                    view.devices,
+                    view.textures,
+                    view.buffers,
                     pool,
                     *src,
                     *src_offset,
@@ -827,16 +839,15 @@ pub(super) fn submit(
 
     let (dispatch_count, dispatch_labels) = collect_dispatch_labels_compute(&commands);
     let vk_gpu_profile = unsafe {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         create_vulkan_gpu_profile_pool(ld, false, dispatch_count, dispatch_labels)?
     };
 
     let mut vk_gpu_profile = vk_gpu_profile;
 
     let cmd = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        let mut sc = sc_arc.lock().unwrap();
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
+        let mut sc = scope.sc.lock().unwrap();
         let cb = acquire_cmd_buffer(ld, &mut sc)?;
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         if let Err(e) = unsafe { ld.device.begin_command_buffer(cb, &begin_info) } {
@@ -847,7 +858,7 @@ pub(super) fn submit(
     };
 
     let (cmd, belt_idx, _texture_upload_idx) = {
-        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let logical_device = view.devices.get(&device_handle).context("Invalid device handle")?;
 
         // Cross-submission acquire: make prior submit's writes visible to this
         // CB's reads. Same-queue execution ordering is guaranteed by Vulkan but
@@ -908,15 +919,17 @@ pub(super) fn submit(
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut belt_idx = 0usize;
         let mut texture_upload_idx = 0usize;
+        let compute_pipelines_read = compute_pipelines.read().unwrap();
+        let buffers_read = buffers.read().unwrap();
 
         // Process commands (same logic as dispatch)
         for command in &commands {
             match command {
                 GpuCommand::FrameTableStaging { data } => {
                     super::frame_table::record_prologue(
-                        &state.contexts,
-                        &state.frame_tables,
-                        &state.buffers,
+                        view.contexts,
+                        view.frame_tables,
+                        view.buffers,
                         device_handle,
                         logical_device,
                         cmd,
@@ -925,7 +938,7 @@ pub(super) fn submit(
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
-                    if let Some(pipeline_state) = compute_pipelines.get(handle) {
+                    if let Some(pipeline_state) = compute_pipelines.read().unwrap().entries.get(handle) {
                         unsafe {
                             logical_device.device.cmd_bind_pipeline(
                                 cmd,
@@ -941,7 +954,7 @@ pub(super) fn submit(
                     user: raw_user,
                     frame_table_base,
                 } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                    if let Some(pipeline) = current_pipeline.and_then(|h| compute_pipelines_read.entries.get(&h)) {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
@@ -965,7 +978,7 @@ pub(super) fn submit(
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                    if let Some(pipeline) = current_pipeline.and_then(|h| compute_pipelines_read.entries.get(&h)) {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,
@@ -1018,7 +1031,7 @@ pub(super) fn submit(
                     let push_size = std::mem::size_of::<crate::backend::shared::PushLayout>();
                     let stride = crate::backend::shared::DISPATCH_BATCH_STRIDE;
                     let pipeline_layout = current_pipeline
-                        .and_then(|h| compute_pipelines.get(&h))
+                        .and_then(|h| compute_pipelines_read.entries.get(&h))
                         .map(|p| p.layout);
                     for i in 0..*count as usize {
                         let base = i * stride;
@@ -1048,7 +1061,11 @@ pub(super) fn submit(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let buf_state = buffers.get(buffer).context("DispatchIndirect: invalid buffer handle")?;
+                    let vk_buf = buffers_read
+                        .entries
+                        .get(buffer)
+                        .context("DispatchIndirect: invalid buffer handle")?
+                        .buffer;
                     unsafe {
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -1059,9 +1076,7 @@ pub(super) fn submit(
                                 base,
                             );
                         }
-                        logical_device
-                            .device
-                            .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
+                        logical_device.device.cmd_dispatch_indirect(cmd, vk_buf, *offset);
 
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -1097,7 +1112,7 @@ pub(super) fn submit(
                         let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_entries
                             .iter()
                             .filter_map(|(h, usage)| {
-                                buffers.get(h).map(|bs| {
+                                buffers.read().unwrap().entries.get(h).map(|bs| {
                                     vk::BufferMemoryBarrier2::default()
                                         .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
                                         .src_access_mask(slot_usage_to_vk_access(&usage.src, true))
@@ -1118,7 +1133,7 @@ pub(super) fn submit(
                         let tex_img: Vec<vk::ImageMemoryBarrier2> = tex_entries
                             .iter()
                             .filter_map(|(h, usage)| {
-                                state.textures.get(h).map(|ts| {
+                                view.textures.read().unwrap().entries.get(h).map(|ts| {
                                     let old_layout = ts.image_layout();
                                     ts.set_image_layout(vk::ImageLayout::GENERAL);
                                     vk::ImageMemoryBarrier2::default()
@@ -1153,9 +1168,15 @@ pub(super) fn submit(
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
-                    let buf_state = buffers.get(buffer).context("ClearBuffer: invalid buffer handle")?;
+                    let (vk_buf, buf_size) = {
+                        let bs = buffers_read
+                            .entries
+                            .get(buffer)
+                            .context("ClearBuffer: invalid buffer handle")?;
+                        (bs.buffer, bs.size)
+                    };
                     let clear_size = if *size == 0 {
-                        buf_state.size.saturating_sub(*offset)
+                        buf_size.saturating_sub(*offset)
                     } else {
                         *size
                     };
@@ -1163,7 +1184,7 @@ pub(super) fn submit(
                         unsafe {
                             logical_device
                                 .device
-                                .cmd_fill_buffer(cmd, buf_state.buffer, *offset, clear_size, 0);
+                                .cmd_fill_buffer(cmd, vk_buf, *offset, clear_size, 0);
 
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
@@ -1182,10 +1203,16 @@ pub(super) fn submit(
                     data,
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
-                    let buf_state = buffers.get(buf_handle).context("WriteBuffer: invalid buffer handle")?;
+                    let (is_storage, host_mapped, vk_buf) = {
+                        let bs = buffers_read
+                            .entries
+                            .get(buf_handle)
+                            .context("WriteBuffer: invalid buffer handle")?;
+                        (bs.is_storage, bs.host_mapped, bs.buffer)
+                    };
                     // HOST_VISIBLE / CPU_READABLE paths were handled in the pre-pass;
                     // DEVICE_LOCAL storage uses the staging belt (see pre-pass).
-                    if buf_state.is_storage && buf_state.host_mapped.is_none() {
+                    if is_storage && host_mapped.is_none() {
                         let (stg, stg_off) = belt_slices
                             .get(belt_idx)
                             .context("WriteBuffer: belt slice missing (internal error)")?;
@@ -1196,12 +1223,9 @@ pub(super) fn submit(
                             size: data.len() as u64,
                         };
                         unsafe {
-                            logical_device.device.cmd_copy_buffer(
-                                cmd,
-                                *stg,
-                                buf_state.buffer,
-                                std::slice::from_ref(&region),
-                            );
+                            logical_device
+                                .device
+                                .cmd_copy_buffer(cmd, *stg, vk_buf, std::slice::from_ref(&region));
 
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
@@ -1222,19 +1246,23 @@ pub(super) fn submit(
                         .get(texture_upload_idx)
                         .context("WriteTexture: scratch missing (internal)")?;
                     texture_upload_idx += 1;
-                    super::texture::record_compute_texture_upload(&state.devices, &state.textures, cmd, scratch)?;
+                    super::texture::record_compute_texture_upload(view.devices, view.textures, cmd, scratch)?;
                 }
                 GpuCommand::CopyTexture { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_texture");
-                    let (src_image, width, height) = {
-                        let ts = state.textures.get(src).context("CopyTexture: src texture not found")?;
-                        (ts.image, ts.width, ts.height)
+                    let (src_image, width, height, dst_image) = {
+                        let textures_read = view.textures.read().unwrap();
+                        let ts = textures_read
+                            .entries
+                            .get(src)
+                            .context("CopyTexture: src texture not found")?;
+                        let dst_image = textures_read
+                            .entries
+                            .get(dst)
+                            .context("CopyTexture: dst texture not found")?
+                            .image;
+                        (ts.image, ts.width, ts.height, dst_image)
                     };
-                    let dst_image = state
-                        .textures
-                        .get(dst)
-                        .context("CopyTexture: dst texture not found")?
-                        .image;
 
                     unsafe {
                         // Barrier: ensure compute writes to src are visible; dst may be
@@ -1301,8 +1329,9 @@ pub(super) fn submit(
                 } => {
                     let _tz = tracy_zone!("vk.copy_buffer");
                     let (src_buf, dst_buf) = {
-                        let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
-                        let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                        let buffers_read = view.buffers.read().unwrap();
+                        let src_state = buffers_read.entries.get(src).context("CopyBuffer: invalid src")?;
+                        let dst_state = buffers_read.entries.get(dst).context("CopyBuffer: invalid dst")?;
                         if src_offset.saturating_add(*size) > src_state.size
                             || dst_offset.saturating_add(*size) > dst_state.size
                         {
@@ -1331,15 +1360,18 @@ pub(super) fn submit(
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");
-                    let staging_buffer = state
-                        .buffers
-                        .get(dst)
-                        .context("CopyTextureToReadback: invalid dst")?
-                        .buffer;
+                    let staging_buffer = {
+                        let buffers_read = view.buffers.read().unwrap();
+                        buffers_read
+                            .entries
+                            .get(dst)
+                            .context("CopyTextureToReadback: invalid dst")?
+                            .buffer
+                    };
                     super::texture::record_copy_texture_to_readback(
                         cmd,
                         logical_device,
-                        &state.textures,
+                        view.textures,
                         staging_buffer,
                         *src,
                         *layout,
@@ -1347,18 +1379,20 @@ pub(super) fn submit(
                 }
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_render_target");
-                    let (src_image, width, height) = {
-                        let rt = state
-                            .render_targets
+                    let (src_image, width, height, dst_image) = {
+                        let render_targets_read = view.render_targets.read().unwrap();
+                        let rt = render_targets_read
+                            .entries
                             .get(src)
                             .context("CopyRenderTarget: src render target not found")?;
-                        (rt.image, rt.width, rt.height)
+                        let textures_read = view.textures.read().unwrap();
+                        let dst_image = textures_read
+                            .entries
+                            .get(dst)
+                            .context("CopyRenderTarget: dst texture not found")?
+                            .image;
+                        (rt.image, rt.width, rt.height, dst_image)
                     };
-                    let dst_image = state
-                        .textures
-                        .get(dst)
-                        .context("CopyRenderTarget: dst texture not found")?
-                        .image;
 
                     unsafe {
                         let mem_barrier = vk::MemoryBarrier2::default()
@@ -1465,32 +1499,26 @@ pub(super) fn submit(
 
     // Standalone submit: signal device timeline semaphore (Vulkan 1.2+).
     let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
-    let used_slots = collect_slot_keys_from_gpu_commands(&commands, &state.compute_pipelines, &state.buffers);
-    if let Some(ld) = state.devices.get(&device_handle) {
+    let used_slots = collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.buffers);
+    if let Some(ld) = view.devices.get(&device_handle) {
         ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, signal_value, used_slots);
     }
 
-    let timeline_sem = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_semaphore;
-    let submit_device_core = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let timeline_sem = scope.sc.lock().unwrap().timeline_semaphore;
+    let submit_device_core = view.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device_core.queue_lock);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let wait_infos = build_cross_submit_wait_infos(view, sync)?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let submit_info2 = if wait_infos.is_empty() {
         vk::SubmitInfo2::default()
@@ -1515,13 +1543,7 @@ pub(super) fn submit(
         }
     };
     if let Err(e) = queue_submit_result {
-        let ctx_pool = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .lock()
-            .unwrap()
-            .command_pool;
+        let ctx_pool = scope.sc.lock().unwrap().command_pool;
         unsafe {
             submit_device_core.device.free_command_buffers(ctx_pool, &[cmd]);
             if let Some(prof) = vk_gpu_profile.take() {
@@ -1531,16 +1553,17 @@ pub(super) fn submit(
         return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
 
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
+    {
+        let mut sc = scope.sc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
     }
 
     if !texture_upload_scratch.is_empty() {
         let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch.into_iter().map(|s| s.entry).collect();
-        if let Some(sc_arc) = state.contexts.get(&ctx) {
-            sc_arc
+        {
+            scope
+                .sc
                 .lock()
                 .unwrap()
                 .texture_staging_pool
@@ -1548,8 +1571,8 @@ pub(super) fn submit(
         }
     }
 
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        sc_arc.lock().unwrap().staging_belt.finish(signal_value);
+    {
+        scope.sc.lock().unwrap().staging_belt.finish(signal_value);
     }
 
     debug_assert_eq!(
@@ -1560,29 +1583,19 @@ pub(super) fn submit(
 
     if let Some(prof) = vk_gpu_profile {
         let (device_clone, timeline_sem) = {
-            let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-            let sem = state
-                .contexts
-                .get(&ctx)
-                .context("Invalid context handle")?
-                .lock()
-                .unwrap()
-                .timeline_semaphore;
+            let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
+            let sem = scope.sc.lock().unwrap().timeline_semaphore;
             (ld.device.clone(), sem)
         };
         unsafe {
-            vulkan_finish_gpu_profile(state, ctx, &device_clone, timeline_sem, signal_value, cmd, prof)?;
+            vulkan_finish_gpu_profile(view, ctx, &device_clone, timeline_sem, signal_value, cmd, prof)?;
         }
     }
 
     {
-        let completed = ctx_completed_value(state, ctx, device_handle);
-        let ctx_batch: Vec<_> = state
-            .contexts
-            .get(&ctx)
-            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
-            .unwrap_or_default();
-        if let Some(ld) = state.devices.get(&device_handle) {
+        let completed = scope.completed_timeline_value();
+        let ctx_batch = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
+        if let Some(ld) = view.devices.get(&device_handle) {
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
                 let mut registry = descriptors_arc.lock().unwrap();
@@ -1590,13 +1603,27 @@ pub(super) fn submit(
                     super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
+                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
     }
 
     Ok(signal_value)
+}
+
+pub(super) fn submit(
+    state: &super::types::VulkanState,
+    ctx: super::ContextHandle,
+    commands: &[GpuCommand],
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    submit_with_scope(
+        &super::submit_session::scope_from_state(state, ctx)?,
+        ctx,
+        commands,
+        sync,
+    )
 }
 
 /// Submit mixed compute + render graph commands in a single command buffer.
@@ -1610,7 +1637,13 @@ pub(super) fn submit_graph(
     commands: &[GraphCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    submit_graph_impl(state, ctx, commands, None, sync)
+    submit_graph_with_scope(
+        &super::submit_session::scope_from_state(state, ctx)?,
+        ctx,
+        commands,
+        None,
+        sync,
+    )
 }
 
 /// Inner implementation shared by `submit_graph` and `submit_graph_and_retain`.
@@ -1624,20 +1657,16 @@ pub(super) fn submit_graph(
 /// When `retain_key` is `None` (normal path):
 /// - the CB is recorded with `ONE_TIME_SUBMIT`
 /// - after submit it is stored in `timeline_cmd_buffers` and freed once the GPU retires it
-fn submit_graph_impl(
-    state: &super::types::VulkanState,
+pub(super) fn submit_graph_with_scope(
+    scope: &VulkanSubmitScope<'_>,
     ctx: super::ContextHandle,
     commands: &[GraphCommand],
     retain_key: Option<u64>,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    let device_handle = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .device;
+    scope.assert_ctx(ctx);
+    let view = &scope.view;
+    let device_handle = scope.device_handle;
     let _tz = tracy_zone!("vk.submit_graph");
     // --- Same housekeeping as `submit` ---
     // Skip belt reclaim + fence reap when there's no host upload in this submit;
@@ -1666,22 +1695,27 @@ fn submit_graph_impl(
 
     if has_upload {
         let _rz = tracy_zone!("vk.submit_graph.belt_reclaim");
-        let completed_timeline = ctx_completed_value(state, ctx, device_handle);
+        let completed_timeline = scope.completed_timeline_value();
 
         {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                sc_arc.lock().unwrap().staging_belt.reclaim(
-                    &state.compute_fence_pool,
-                    &state.devices,
+            {
+                scope.sc.lock().unwrap().staging_belt.reclaim(
+                    view.compute_fence_pool,
+                    view.devices,
                     completed_timeline,
                 )?;
             }
         }
-        reap_signaled_fences(state);
+        reap_signaled_fences(view);
 
         if has_write_texture_graph {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                sc_arc.lock().unwrap().texture_staging_pool.reclaim(completed_timeline);
+            {
+                scope
+                    .sc
+                    .lock()
+                    .unwrap()
+                    .texture_staging_pool
+                    .reclaim(completed_timeline);
             }
         }
     }
@@ -1699,11 +1733,12 @@ fn submit_graph_impl(
                         offset,
                         data,
                     } => {
-                        // Extract Copy fields so the state.buffers borrow ends
-                        // before we take &mut state.contexts for the belt.
+                        // Extract Copy fields so the view.buffers borrow ends
+                        // before we take &mut view.contexts for the belt.
                         let (host_mapped, is_storage, buf_device, buf_memory) = {
-                            let buf = state
-                                .buffers
+                            let buffers_read = view.buffers.read().unwrap();
+                            let buf = buffers_read
+                                .entries
                                 .get(buf_handle)
                                 .context("WriteBuffer: invalid buffer handle")?;
                             (buf.host_mapped, buf.is_storage, buf.device_handle, buf.memory)
@@ -1714,7 +1749,7 @@ fn submit_graph_impl(
                                 std::ptr::copy_nonoverlapping(data.as_ptr(), p.add(*offset as usize), data.len());
                             }
                         } else if !is_storage {
-                            let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
+                            let dev = view.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
                             unsafe {
                                 let ptr = dev
                                     .map_memory2(buf_memory, *offset, data.len() as u64)
@@ -1723,10 +1758,9 @@ fn submit_graph_impl(
                                 dev.unmap_memory2(buf_memory).context("WriteBuffer: unmap failed")?;
                             }
                         } else {
-                            let dev = state.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
-                            let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                            let mut sc = sc_arc.lock().unwrap();
-                            let (stg_buf, stg_off) = sc.staging_belt.write(&state.instance, dev, data)?;
+                            let dev = view.devices.get(&buf_device).context("WriteBuffer: device invalid")?;
+                            let mut sc = scope.sc.lock().unwrap();
+                            let (stg_buf, stg_off) = sc.staging_belt.write(view.instance, dev, data)?;
                             belt_slices.push((stg_buf, stg_off));
                         }
                     }
@@ -1736,13 +1770,12 @@ fn submit_graph_impl(
                         width,
                         height,
                     } => {
-                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                            &state.instance,
-                            &state.devices,
-                            &state.textures,
+                            view.instance,
+                            view.devices,
+                            view.textures,
                             pool,
                             *texture,
                             data,
@@ -1760,13 +1793,12 @@ fn submit_graph_impl(
                         height,
                         data,
                     } => {
-                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
-                            &state.instance,
-                            &state.devices,
-                            &state.textures,
+                            view.instance,
+                            view.devices,
+                            view.textures,
                             pool,
                             *texture,
                             data,
@@ -1784,15 +1816,15 @@ fn submit_graph_impl(
                         y,
                         width,
                         height,
+                        ..
                     } => {
-                        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-                        let mut sc_guard = sc_arc.lock().unwrap();
+                        let mut sc_guard = scope.sc.lock().unwrap();
                         let pool = &mut sc_guard.texture_staging_pool;
                         texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
-                            &state.instance,
-                            &state.devices,
-                            &state.textures,
-                            &state.buffers,
+                            view.instance,
+                            view.devices,
+                            view.textures,
+                            view.buffers,
                             pool,
                             *src,
                             *src_offset,
@@ -1811,9 +1843,8 @@ fn submit_graph_impl(
 
     // --- Acquire and begin command buffer ---
     let cmd = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        let mut sc = sc_arc.lock().unwrap();
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
+        let mut sc = scope.sc.lock().unwrap();
         let cb = acquire_cmd_buffer(ld, &mut sc)?;
         // Use ONE_TIME_SUBMIT for normal submits (driver hint for optimization).
         // Retained CBs use SIMULTANEOUS_USE so a still-pending CB may be resubmitted
@@ -1831,7 +1862,7 @@ fn submit_graph_impl(
         cb
     };
 
-    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let logical_device = view.devices.get(&device_handle).context("Invalid device handle")?;
 
     let (dispatch_count_graph, dispatch_labels_graph) = collect_dispatch_labels_graph(commands);
     let mut vk_gpu_profile =
@@ -1897,8 +1928,10 @@ fn submit_graph_impl(
     }
 
     // --- Walk GraphCommands (inline to satisfy the borrow checker) ---
-    let compute_pipelines = &state.compute_pipelines;
-    let buffers = &state.buffers;
+    let compute_pipelines = &view.compute_pipelines;
+    let buffers = &view.buffers;
+    let compute_pipelines_read = compute_pipelines.read().unwrap();
+    let buffers_read = buffers.read().unwrap();
     let mut current_compute_pipeline: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
@@ -1911,9 +1944,9 @@ fn submit_graph_impl(
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table_prologue_in_cb = true;
                     super::frame_table::record_prologue(
-                        &state.contexts,
-                        &state.frame_tables,
-                        &state.buffers,
+                        view.contexts,
+                        view.frame_tables,
+                        view.buffers,
                         device_handle,
                         logical_device,
                         cmd,
@@ -1922,7 +1955,7 @@ fn submit_graph_impl(
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
-                    if let Some(pipeline_state) = compute_pipelines.get(handle) {
+                    if let Some(pipeline_state) = compute_pipelines.read().unwrap().entries.get(handle) {
                         unsafe {
                             logical_device.device.cmd_bind_pipeline(
                                 cmd,
@@ -1938,7 +1971,9 @@ fn submit_graph_impl(
                     user: raw_user,
                     frame_table_base,
                 } => {
-                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                    if let Some(pipeline) =
+                        current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p))
+                    {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
@@ -1962,7 +1997,9 @@ fn submit_graph_impl(
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| compute_pipelines.get(&p)) {
+                    if let Some(pipeline) =
+                        current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p))
+                    {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,
@@ -2015,7 +2052,7 @@ fn submit_graph_impl(
                     let push_size = std::mem::size_of::<crate::backend::shared::PushLayout>();
                     let stride = crate::backend::shared::DISPATCH_BATCH_STRIDE;
                     let pipeline_layout = current_compute_pipeline
-                        .and_then(|h| compute_pipelines.get(&h))
+                        .and_then(|h| compute_pipelines_read.entries.get(&h))
                         .map(|p| p.layout);
                     for i in 0..*count as usize {
                         let base = i * stride;
@@ -2045,7 +2082,11 @@ fn submit_graph_impl(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let buf_state = buffers.get(buffer).context("DispatchIndirect: invalid buffer handle")?;
+                    let vk_buf = buffers_read
+                        .entries
+                        .get(buffer)
+                        .context("DispatchIndirect: invalid buffer handle")?
+                        .buffer;
                     unsafe {
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -2056,9 +2097,7 @@ fn submit_graph_impl(
                                 base,
                             );
                         }
-                        logical_device
-                            .device
-                            .cmd_dispatch_indirect(cmd, buf_state.buffer, *offset);
+                        logical_device.device.cmd_dispatch_indirect(cmd, vk_buf, *offset);
 
                         if let Some(ref prof) = vk_gpu_profile {
                             let base = 2u32 + (vk_dispatch_idx as u32) * 2;
@@ -2094,7 +2133,7 @@ fn submit_graph_impl(
                         let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_entries
                             .iter()
                             .filter_map(|(h, usage)| {
-                                buffers.get(h).map(|bs| {
+                                buffers.read().unwrap().entries.get(h).map(|bs| {
                                     vk::BufferMemoryBarrier2::default()
                                         .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
                                         .src_access_mask(slot_usage_to_vk_access(&usage.src, true))
@@ -2115,7 +2154,7 @@ fn submit_graph_impl(
                         let tex_img: Vec<vk::ImageMemoryBarrier2> = tex_entries
                             .iter()
                             .filter_map(|(h, usage)| {
-                                state.textures.get(h).map(|ts| {
+                                view.textures.read().unwrap().entries.get(h).map(|ts| {
                                     let old_layout = ts.image_layout();
                                     ts.set_image_layout(vk::ImageLayout::GENERAL);
                                     vk::ImageMemoryBarrier2::default()
@@ -2150,9 +2189,15 @@ fn submit_graph_impl(
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
-                    let buf_state = buffers.get(buffer).context("ClearBuffer: invalid buffer handle")?;
+                    let (vk_buf, buf_size) = {
+                        let bs = buffers_read
+                            .entries
+                            .get(buffer)
+                            .context("ClearBuffer: invalid buffer handle")?;
+                        (bs.buffer, bs.size)
+                    };
                     let clear_size = if *size == 0 {
-                        buf_state.size.saturating_sub(*offset)
+                        buf_size.saturating_sub(*offset)
                     } else {
                         *size
                     };
@@ -2160,7 +2205,7 @@ fn submit_graph_impl(
                         unsafe {
                             logical_device
                                 .device
-                                .cmd_fill_buffer(cmd, buf_state.buffer, *offset, clear_size, 0);
+                                .cmd_fill_buffer(cmd, vk_buf, *offset, clear_size, 0);
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -2178,8 +2223,14 @@ fn submit_graph_impl(
                     data,
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
-                    let buf_state = buffers.get(buf_handle).context("WriteBuffer: invalid buffer handle")?;
-                    if buf_state.is_storage && buf_state.host_mapped.is_none() {
+                    let (is_storage, host_mapped, vk_buf) = {
+                        let bs = buffers_read
+                            .entries
+                            .get(buf_handle)
+                            .context("WriteBuffer: invalid buffer handle")?;
+                        (bs.is_storage, bs.host_mapped, bs.buffer)
+                    };
+                    if is_storage && host_mapped.is_none() {
                         let (stg, stg_off) = belt_slices
                             .get(belt_idx)
                             .context("WriteBuffer: belt slice missing (internal error)")?;
@@ -2190,12 +2241,9 @@ fn submit_graph_impl(
                             size: data.len() as u64,
                         };
                         unsafe {
-                            logical_device.device.cmd_copy_buffer(
-                                cmd,
-                                *stg,
-                                buf_state.buffer,
-                                std::slice::from_ref(&region),
-                            );
+                            logical_device
+                                .device
+                                .cmd_copy_buffer(cmd, *stg, vk_buf, std::slice::from_ref(&region));
                             let mem_barrier = vk::MemoryBarrier2::default()
                                 .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
                                 .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -2215,19 +2263,23 @@ fn submit_graph_impl(
                         .get(texture_upload_idx)
                         .context("WriteTexture: scratch missing (internal)")?;
                     texture_upload_idx += 1;
-                    super::texture::record_compute_texture_upload(&state.devices, &state.textures, cmd, scratch)?;
+                    super::texture::record_compute_texture_upload(view.devices, view.textures, cmd, scratch)?;
                 }
                 GpuCommand::CopyTexture { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_texture");
-                    let (src_image, width, height) = {
-                        let ts = state.textures.get(src).context("CopyTexture: src texture not found")?;
-                        (ts.image, ts.width, ts.height)
+                    let (src_image, width, height, dst_image) = {
+                        let textures_read = view.textures.read().unwrap();
+                        let ts = textures_read
+                            .entries
+                            .get(src)
+                            .context("CopyTexture: src texture not found")?;
+                        let dst_image = textures_read
+                            .entries
+                            .get(dst)
+                            .context("CopyTexture: dst texture not found")?
+                            .image;
+                        (ts.image, ts.width, ts.height, dst_image)
                     };
-                    let dst_image = state
-                        .textures
-                        .get(dst)
-                        .context("CopyTexture: dst texture not found")?
-                        .image;
                     unsafe {
                         let mem_barrier = vk::MemoryBarrier2::default()
                             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::TRANSFER)
@@ -2287,8 +2339,9 @@ fn submit_graph_impl(
                 } => {
                     let _tz = tracy_zone!("vk.copy_buffer");
                     let (src_buf, dst_buf) = {
-                        let src_state = state.buffers.get(src).context("CopyBuffer: invalid src")?;
-                        let dst_state = state.buffers.get(dst).context("CopyBuffer: invalid dst")?;
+                        let buffers_read = view.buffers.read().unwrap();
+                        let src_state = buffers_read.entries.get(src).context("CopyBuffer: invalid src")?;
+                        let dst_state = buffers_read.entries.get(dst).context("CopyBuffer: invalid dst")?;
                         if src_offset.saturating_add(*size) > src_state.size
                             || dst_offset.saturating_add(*size) > dst_state.size
                         {
@@ -2317,15 +2370,18 @@ fn submit_graph_impl(
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");
-                    let staging_buffer = state
-                        .buffers
-                        .get(dst)
-                        .context("CopyTextureToReadback: invalid dst")?
-                        .buffer;
+                    let staging_buffer = {
+                        let buffers_read = view.buffers.read().unwrap();
+                        buffers_read
+                            .entries
+                            .get(dst)
+                            .context("CopyTextureToReadback: invalid dst")?
+                            .buffer
+                    };
                     super::texture::record_copy_texture_to_readback(
                         cmd,
                         logical_device,
-                        &state.textures,
+                        view.textures,
                         staging_buffer,
                         *src,
                         *layout,
@@ -2333,18 +2389,20 @@ fn submit_graph_impl(
                 }
                 GpuCommand::CopyRenderTarget { src, dst } => {
                     let _tz = tracy_zone!("vk.copy_render_target");
-                    let (src_image, width, height) = {
-                        let rt = state
-                            .render_targets
+                    let (src_image, width, height, dst_image) = {
+                        let render_targets_read = view.render_targets.read().unwrap();
+                        let rt = render_targets_read
+                            .entries
                             .get(src)
                             .context("CopyRenderTarget: src render target not found")?;
-                        (rt.image, rt.width, rt.height)
+                        let textures_read = view.textures.read().unwrap();
+                        let dst_image = textures_read
+                            .entries
+                            .get(dst)
+                            .context("CopyRenderTarget: dst texture not found")?
+                            .image;
+                        (rt.image, rt.width, rt.height, dst_image)
                     };
-                    let dst_image = state
-                        .textures
-                        .get(dst)
-                        .context("CopyRenderTarget: dst texture not found")?
-                        .image;
 
                     unsafe {
                         let mem_barrier = vk::MemoryBarrier2::default()
@@ -2425,7 +2483,7 @@ fn submit_graph_impl(
                 }
 
                 let (staging_data, lowered, has_render_bindings) =
-                    super::frame_table::prepare_render_commands(buffers, &state.pipelines, render_cmds)?;
+                    super::frame_table::prepare_render_commands(buffers, view.pipelines, render_cmds)?;
                 if has_render_bindings {
                     if frame_table_prologue_in_cb {
                         let graph_staging = super::frame_table::extract_staging_from_graph(commands)
@@ -2434,17 +2492,17 @@ fn submit_graph_impl(
                         let sync_data =
                             super::frame_table::merge_staging_for_render_sync(&graph_staging, &staging_data);
                         super::frame_table::sync_table_row_to_device(
-                            state,
-                            device_handle,
+                            &scope.frame_table,
+                            view.buffers,
                             logical_device,
                             cmd,
                             &sync_data,
                         )?;
                     } else {
                         super::frame_table::record_prologue(
-                            &state.contexts,
-                            &state.frame_tables,
-                            &state.buffers,
+                            view.contexts,
+                            view.frame_tables,
+                            view.buffers,
                             device_handle,
                             logical_device,
                             cmd,
@@ -2453,15 +2511,25 @@ fn submit_graph_impl(
                     }
                 }
 
-                let pipelines = &state.pipelines;
                 super::render_target::record_render_pass_to_buffer(
-                    &state.devices,
-                    &state.render_targets,
+                    view.devices,
+                    view.render_targets,
                     device_handle,
                     *target,
                     &lowered,
                     cmd,
-                    |cb, cmds, ld, cur_pipe| super::render_commands::record(cb, cmds, ld, pipelines, buffers, cur_pipe),
+                    |cb, cmds, ld, cur_pipe| {
+                        let pipelines_read = view.pipelines.read().unwrap();
+                        let buffers_read = view.buffers.read().unwrap();
+                        super::render_commands::record(
+                            cb,
+                            cmds,
+                            ld,
+                            &pipelines_read.entries,
+                            &buffers_read.entries,
+                            cur_pipe,
+                        )
+                    },
                 )?;
 
                 rendered_targets.push(*target);
@@ -2531,33 +2599,27 @@ fn submit_graph_impl(
     }
 
     let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
 
     let used_slots =
-        collect_slot_keys_from_graph_commands(commands, &state.compute_pipelines, &state.pipelines, &state.buffers);
-    if let Some(ld) = state.devices.get(&device_handle) {
+        collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.pipelines, view.buffers);
+    if let Some(ld) = view.devices.get(&device_handle) {
         ld.descriptors
             .lock()
             .unwrap()
             .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
     }
 
-    let timeline_sem = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_semaphore;
-    let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let timeline_sem = scope.sc.lock().unwrap().timeline_semaphore;
+    let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let wait_infos = build_cross_submit_wait_infos(view, sync)?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let submit_info2 = if wait_infos.is_empty() {
         vk::SubmitInfo2::default()
@@ -2571,13 +2633,10 @@ fn submit_graph_impl(
     };
 
     let retain_plan = if let Some(key) = retain_key {
-        let frame_table_row = super::frame_table::extract_staging_from_graph(commands).and_then(|_| {
-            state
-                .frame_tables
-                .get(&device_handle)
-                .and_then(super::frame_table::last_prologue_row)
-        });
-        if let (Some(ft), Some(row)) = (state.frame_tables.get(&device_handle), frame_table_row) {
+        let ft = &scope.frame_table;
+        let frame_table_row = super::frame_table::extract_staging_from_graph(commands)
+            .and_then(|_| super::frame_table::last_prologue_row(ft));
+        if let Some(row) = frame_table_row {
             super::frame_table::pin_row(ft, row)?;
         }
         Some((key, frame_table_row))
@@ -2597,13 +2656,7 @@ fn submit_graph_impl(
         }
     };
     if let Err(e) = queue_submit_result {
-        let ctx_pool = state
-            .contexts
-            .get(&ctx)
-            .context("Invalid context handle")?
-            .lock()
-            .unwrap()
-            .command_pool;
+        let ctx_pool = scope.sc.lock().unwrap().command_pool;
         unsafe {
             submit_device.device.free_command_buffers(ctx_pool, &[cmd]);
             if let Some(prof) = vk_gpu_profile.take() {
@@ -2611,16 +2664,14 @@ fn submit_graph_impl(
             }
         }
         if let Some((_, Some(row))) = retain_plan {
-            if let Some(ft) = state.frame_tables.get(&device_handle) {
-                super::frame_table::unpin_row(ft, row);
-            }
+            super::frame_table::unpin_row(&scope.frame_table, row);
         }
         return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
 
     // Post-submit: store the CB for lifecycle management.
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
+    {
+        let mut sc = scope.sc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         if let Some((key, frame_table_row)) = retain_plan {
             sc.retained_compute_cbs.insert(
@@ -2639,8 +2690,9 @@ fn submit_graph_impl(
 
     if !texture_upload_scratch.is_empty() {
         let entries: Vec<staging::TextureStagingEntry> = texture_upload_scratch.into_iter().map(|s| s.entry).collect();
-        if let Some(sc_arc) = state.contexts.get(&ctx) {
-            sc_arc
+        {
+            scope
+                .sc
                 .lock()
                 .unwrap()
                 .texture_staging_pool
@@ -2648,42 +2700,32 @@ fn submit_graph_impl(
         }
     }
 
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        sc_arc.lock().unwrap().staging_belt.finish(signal_value);
+    {
+        scope.sc.lock().unwrap().staging_belt.finish(signal_value);
     }
 
     if let Some(prof) = vk_gpu_profile {
         let (device_clone, timeline_sem) = {
-            let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-            let sem = state
-                .contexts
-                .get(&ctx)
-                .context("Invalid context handle")?
-                .lock()
-                .unwrap()
-                .timeline_semaphore;
+            let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
+            let sem = scope.sc.lock().unwrap().timeline_semaphore;
             (ld.device.clone(), sem)
         };
         unsafe {
-            vulkan_finish_gpu_profile(state, ctx, &device_clone, timeline_sem, signal_value, cmd, prof)?;
+            vulkan_finish_gpu_profile(view, ctx, &device_clone, timeline_sem, signal_value, cmd, prof)?;
         }
     }
 
     // Mark rendered targets
     for t in rendered_targets {
-        if let Some(rt) = state.render_targets.get(&t) {
+        if let Some(rt) = view.render_targets.read().unwrap().entries.get(&t) {
             rt.has_rendered.store(true, Ordering::Relaxed);
         }
     }
 
     {
-        let completed = ctx_completed_value(state, ctx, device_handle);
-        let ctx_batch: Vec<_> = state
-            .contexts
-            .get(&ctx)
-            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
-            .unwrap_or_default();
-        if let Some(ld) = state.devices.get(&device_handle) {
+        let completed = scope.completed_timeline_value();
+        let ctx_batch = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
+        if let Some(ld) = view.devices.get(&device_handle) {
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
                 let mut registry = descriptors_arc.lock().unwrap();
@@ -2691,7 +2733,7 @@ fn submit_graph_impl(
                     super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
+                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
@@ -2715,10 +2757,9 @@ pub(super) fn submit_graph_and_retain(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    // Evict any previously retained CB so we start fresh.
-    evict_retained(state, ctx, key);
-    // Delegate to the shared inner path with retention enabled.
-    submit_graph_impl(state, ctx, commands, Some(key), sync)
+    let scope = super::submit_session::scope_from_state(state, ctx)?;
+    evict_retained_with_scope(&scope, ctx, key);
+    submit_graph_with_scope(&scope, ctx, commands, Some(key), sync)
 }
 
 /// Re-execute the retained dispatch CB without re-recording.
@@ -2728,17 +2769,27 @@ pub(super) fn try_resubmit_retained(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
-    let (device_handle, timeline_sem) = {
-        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        let sc = sc_arc.lock().unwrap();
-        (sc.device, sc.timeline_semaphore)
-    };
-    let retained = {
-        let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        let sc = sc_arc.lock().unwrap();
-        sc.retained_compute_cbs
+    try_resubmit_retained_with_scope(&super::submit_session::scope_from_state(state, ctx)?, ctx, key, sync)
+}
+
+/// Re-execute the retained dispatch CB without re-recording.
+pub(super) fn try_resubmit_retained_with_scope(
+    scope: &VulkanSubmitScope<'_>,
+    ctx: super::ContextHandle,
+    key: u64,
+    sync: Option<&SubmitSync>,
+) -> Result<Option<TimelineValue>> {
+    scope.assert_ctx(ctx);
+    let view = &scope.view;
+    let device_handle = scope.device_handle;
+    let (timeline_sem, retained) = {
+        let sc = scope.sc.lock().unwrap();
+        let timeline_sem = sc.timeline_semaphore;
+        let retained = sc
+            .retained_compute_cbs
             .get(&key)
-            .map(|r| (r.command_buffer, r.used_slots.clone()))
+            .map(|r| (r.command_buffer, r.used_slots.clone()));
+        (timeline_sem, retained)
     };
 
     let Some((cmd, used_slots)) = retained else {
@@ -2746,16 +2797,16 @@ pub(super) fn try_resubmit_retained(
     };
 
     let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
-    let submit_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let queue_lock = std::sync::Arc::clone(&submit_device.queue_lock);
     let signal_info = vk::SemaphoreSubmitInfo::default()
         .semaphore(timeline_sem)
         .value(signal_value)
         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-    let wait_infos = build_cross_submit_wait_infos(state, sync)?;
+    let wait_infos = build_cross_submit_wait_infos(view, sync)?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
     let submit_info2 = if wait_infos.is_empty() {
         vk::SubmitInfo2::default()
@@ -2781,7 +2832,7 @@ pub(super) fn try_resubmit_retained(
         .context("Failed to queue_submit2 retained dispatch CB")?;
     }
 
-    if let Some(ld) = state.devices.get(&device_handle) {
+    if let Some(ld) = view.devices.get(&device_handle) {
         ld.descriptors
             .lock()
             .unwrap()
@@ -2789,21 +2840,17 @@ pub(super) fn try_resubmit_retained(
     }
 
     // Update the last signal value so eviction can defer-free the CB safely.
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
+    {
+        let mut sc = scope.sc.lock().unwrap();
         if let Some(retained) = sc.retained_compute_cbs.values_mut().find(|r| r.command_buffer == cmd) {
             retained.last_signal_value = signal_value;
         }
     }
 
     {
-        let completed = ctx_completed_value(state, ctx, device_handle);
-        let ctx_batch: Vec<_> = state
-            .contexts
-            .get(&ctx)
-            .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
-            .unwrap_or_default();
-        if let Some(ld) = state.devices.get(&device_handle) {
+        let completed = scope.completed_timeline_value();
+        let ctx_batch = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
+        if let Some(ld) = view.devices.get(&device_handle) {
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             {
                 let mut registry = descriptors_arc.lock().unwrap();
@@ -2811,13 +2858,13 @@ pub(super) fn try_resubmit_retained(
                     super::types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, &state.contexts, device_handle);
+                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
     }
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        sc_arc.lock().unwrap().last_submitted_seq = signal_value;
+    {
+        scope.sc.lock().unwrap().last_submitted_seq = signal_value;
     }
 
     Ok(Some(signal_value))
@@ -2825,7 +2872,7 @@ pub(super) fn try_resubmit_retained(
 
 fn evict_retained_on_context(
     contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::frame_table::FrameTableDevice>,
+    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::types::SharedFrameTableDevice>,
     ctx: super::ContextHandle,
     key: u64,
 ) {
@@ -2852,11 +2899,13 @@ fn evict_retained_on_context(
 
 /// Evict every retained dispatch CB on contexts for `device_handle` that pins `row`.
 pub(super) fn evict_retained_pinning_row(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::frame_table::FrameTableDevice>,
+    contexts: &super::types::SharedContextMap,
+    frame_tables: &super::types::SharedFrameTableMap,
     device_handle: super::DeviceHandle,
     row: u32,
 ) {
+    let contexts = contexts.read().unwrap();
+    let frame_tables = frame_tables.read().unwrap();
     let ctxs: Vec<super::ContextHandle> = contexts
         .iter()
         .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
@@ -2875,23 +2924,33 @@ pub(super) fn evict_retained_pinning_row(
                 .collect()
         };
         for key in keys {
-            evict_retained_on_context(contexts, frame_tables, ctx, key);
+            evict_retained_on_context(&contexts, &frame_tables, ctx, key);
         }
     }
 }
 
 /// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
-pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {
-    evict_retained_on_context(&state.contexts, &state.frame_tables, ctx, key);
+pub(super) fn evict_retained_with_scope(scope: &VulkanSubmitScope<'_>, ctx: super::ContextHandle, key: u64) {
+    scope.assert_ctx(ctx);
+    let contexts = scope.view.contexts.read().unwrap();
+    let frame_tables = scope.view.frame_tables.read().unwrap();
+    evict_retained_on_context(&contexts, &frame_tables, ctx, key);
 }
 
-pub(super) fn reap_timeline_cmd_buffers_up_to(
-    state: &super::types::VulkanState,
+pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {
+    if let Ok(scope) = super::submit_session::scope_from_state(state, ctx) {
+        evict_retained_with_scope(&scope, ctx, key);
+    }
+}
+
+fn reap_timeline_cmd_buffers_up_to_with_view(
+    view: &VulkanSubmitView<'_>,
     ctx: super::ContextHandle,
     max_completed_value: u64,
 ) {
     let (device, pool, keys): (DeviceHandle, vk::CommandPool, Vec<u64>) = {
-        let sc_arc = match state.contexts.get(&ctx) {
+        let contexts = view.contexts.read().unwrap();
+        let sc_arc = match contexts.get(&ctx) {
             Some(s) => s,
             None => return,
         };
@@ -2911,18 +2970,27 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
         return;
     }
     let cbs_to_free: Vec<vk::CommandBuffer> = {
-        let sc_arc = state.contexts.get(&ctx).expect("context");
+        let contexts = view.contexts.read().unwrap();
+        let sc_arc = contexts.get(&ctx).expect("context");
         let mut sc = sc_arc.lock().unwrap();
         keys.iter()
             .filter_map(|k| sc.timeline_cmd_buffers.remove(k))
             .flatten()
             .collect()
     };
-    if let Some(ld) = state.devices.get(&device) {
+    if let Some(ld) = view.devices.get(&device) {
         for cb in cbs_to_free {
             unsafe {
                 ld.device.free_command_buffers(pool, &[cb]);
             }
         }
     }
+}
+
+pub(super) fn reap_timeline_cmd_buffers_up_to(
+    state: &super::types::VulkanState,
+    ctx: super::ContextHandle,
+    max_completed_value: u64,
+) {
+    reap_timeline_cmd_buffers_up_to_with_view(&state.submit_view(), ctx, max_completed_value);
 }

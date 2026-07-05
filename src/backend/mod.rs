@@ -633,10 +633,17 @@ pub enum GpuCommand {
         dst_offset: u64,
         size: u64,
     },
-    /// Copy tightly packed pixels from a CPU-writable buffer into a texture subregion.
+    /// Copy pixels from a CPU-writable buffer into a texture subregion.
+    ///
+    /// When `src_row_pitch == 0` the source is tightly packed and the backend will repack
+    /// into a footprint-aligned intermediate buffer.  When `src_row_pitch > 0` the source
+    /// is already footprint-aligned (allocated with `staging_bytes` capacity and rows
+    /// written at `src_row_pitch` stride), and the backend copies directly.
     CopyBufferToTexture {
         src: BufferHandle,
         src_offset: u64,
+        /// 0 = tight source (backend repacks); >0 = footprint pitch, copy directly.
+        src_row_pitch: u32,
         dst: TextureHandle,
         x: u32,
         y: u32,
@@ -820,20 +827,30 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 }
 
-/// Per-context submit session that acquires the global backend mutex only around
-/// individual backend submit calls (Phase 5a). Backends can later replace this
-/// with a lock-free session cloned from `Arc<RwLock<State>>` sub-handles.
+/// Clone a per-context submit session at [`crate::Context::new`].
+///
+/// Real GPU backends return lock-free sessions; Metal and mock use [`LockedSubmitSession`].
+pub(crate) trait GpuBackendSubmitSession {
+    fn clone_context_submit_session(
+        &self,
+        ctx: ContextHandle,
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
+    ) -> std::sync::Arc<dyn ContextSubmitSession>;
+}
+
+/// Per-context submit session that acquires the global backend mutex around every
+/// submit call. Used by Metal (until lock-free recording lands) and [`mock::MockBackend`].
 pub(crate) struct LockedSubmitSession {
     backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
     backend_type: BackendType,
 }
 
 impl LockedSubmitSession {
-    pub fn from_backend(
+    /// Build a session while the global backend lock is already held (must not re-lock).
+    pub fn with_backend_type(
         backend: std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>,
-        _ctx: ContextHandle,
+        backend_type: BackendType,
     ) -> std::sync::Arc<dyn ContextSubmitSession> {
-        let backend_type = backend.lock().unwrap().backend_type();
         std::sync::Arc::new(Self { backend, backend_type })
     }
 }
@@ -919,7 +936,7 @@ pub(crate) trait GpuBackendTimelineWait {
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
-pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit {
+pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSplit + GpuBackendSubmitSession {
     /// Downcast to `&mut dyn std::any::Any` for test introspection.
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
@@ -1043,6 +1060,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         layout: TextureCopyFootprint,
         output: &mut [u8],
     ) -> Result<()>;
+
+    /// Barrier-layout tag for retained [`GpuCommand::CopyBufferToTexture`] fingerprinting.
+    ///
+    /// Must change when the texture's copy-source barrier state changes such that a
+    /// retained command buffer's baked barriers would be invalid (typically once,
+    /// COMMON → shader-read after the first upload).
+    fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64;
 
     /// Mock-backend grant readback allocation counter (tests only).
     #[doc(hidden)]
@@ -1698,12 +1722,8 @@ pub fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 
 /// Create the default backend wrapped in an `Arc<Mutex<...>>`.
 ///
-/// For DX12, returns a process-wide singleton so that all `Instance` objects
-/// share one backend — the existing per-instance `Mutex` then naturally
-/// serializes all D3D12 calls, preventing debug-layer access violations
-/// when parallel test threads create independent instances.
-///
-/// For other backends, creates a fresh instance each time.
+/// For DX12, each [`crate::Instance`] gets its own backend with independent mutable state;
+/// DXGI factory/adapters are shared process-wide. Other backends create a fresh instance.
 pub fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
     use std::sync::{Arc, Mutex};
 

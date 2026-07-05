@@ -17,8 +17,8 @@ pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
     let Some(ld) = state.devices.get(&device) else {
         return floor;
     };
-    let max_ctx = state
-        .contexts
+    let contexts = state.contexts.read().unwrap();
+    let max_ctx = contexts
         .values()
         .filter_map(|sc_arc| {
             let sc = sc_arc.lock().unwrap();
@@ -73,7 +73,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
 
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);
-    state.contexts.insert(
+    state.contexts.write().unwrap().insert(
         id,
         Arc::new(Mutex::new(SubmissionContext {
             device,
@@ -95,7 +95,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
 }
 
 pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
-    let Some(sc_arc) = state.contexts.remove(&ctx) else {
+    let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
         return;
     };
     let mut sc = sc_arc.lock().unwrap();
@@ -155,7 +155,7 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         }
         for (_, retained) in sc.retained_compute_cbs.drain() {
             if let Some(row) = retained.frame_table_row {
-                if let Some(ft) = state.frame_tables.get(&device) {
+                if let Some(ft) = state.frame_tables.read().unwrap().get(&device) {
                     super::frame_table::unpin_row(ft, row);
                 }
             }
@@ -182,14 +182,17 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
 
     // Find a context on this device whose last_submitted_seq covers `seq`.
     // In the unified-context model there is typically exactly one such context.
-    let sem = state.contexts.values().find_map(|sc_arc| {
-        let sc = sc_arc.lock().unwrap();
-        if sc.device == device && sc.last_submitted_seq >= seq {
-            Some(sc.timeline_semaphore)
-        } else {
-            None
-        }
-    });
+    let sem = {
+        let contexts = state.contexts.read().unwrap();
+        contexts.values().find_map(|sc_arc| {
+            let sc = sc_arc.lock().unwrap();
+            if sc.device == device && sc.last_submitted_seq >= seq {
+                Some(sc.timeline_semaphore)
+            } else {
+                None
+            }
+        })
+    };
 
     if let Some(sem) = sem {
         let wait = vk::SemaphoreWaitInfo::default()
@@ -208,7 +211,7 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
                 tracing::warn!("wait_until_device_seq_at_least timed out waiting for seq {seq} on device {device}");
                 return;
             }
-            if let Some(sem) = state.contexts.values().find_map(|sc_arc| {
+            if let Some(sem) = state.contexts.read().unwrap().values().find_map(|sc_arc| {
                 let sc = sc_arc.lock().unwrap();
                 if sc.device == device && sc.last_submitted_seq >= seq {
                     Some(sc.timeline_semaphore)
@@ -235,6 +238,8 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
 pub(super) fn context_device(state: &VulkanState, ctx: ContextHandle) -> DeviceHandle {
     state
         .contexts
+        .read()
+        .unwrap()
         .get(&ctx)
         .expect("invalid context handle")
         .lock()

@@ -4,6 +4,7 @@
 //! `render_to_target` and `surface_render` to avoid code duplication.
 
 use super::super::shared;
+use super::submit_session::Dx12RecordState;
 use super::types::{self, Dx12State};
 use super::utils::{index_format_to_dxgi, topology_to_d3d12};
 use super::{DeviceHandle, RenderCommand};
@@ -15,7 +16,26 @@ pub(super) fn record(
     cmd: &ID3D12GraphicsCommandList7,
     commands: &[RenderCommand],
     device_handle: DeviceHandle,
+    record: &Dx12RecordState<'_>,
+) -> anyhow::Result<()> {
+    record_with_tables(cmd, commands, device_handle, record)
+}
+
+pub(super) fn record_state(
+    cmd: &ID3D12GraphicsCommandList7,
+    commands: &[RenderCommand],
+    device_handle: DeviceHandle,
     state: &Dx12State,
+) -> anyhow::Result<()> {
+    let record = super::submit_session::record_state_from_backend(state, device_handle)?;
+    record_with_tables(cmd, commands, device_handle, &record)
+}
+
+fn record_with_tables(
+    cmd: &ID3D12GraphicsCommandList7,
+    commands: &[RenderCommand],
+    device_handle: DeviceHandle,
+    record: &Dx12RecordState<'_>,
 ) -> anyhow::Result<()> {
     // COM: same pointer as ID3D12GraphicsCommandList for method calls.
     let cmd: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
@@ -30,7 +50,7 @@ pub(super) fn record(
                 // TODO: Implement depth clear
             }
             RenderCommand::SetPipeline(pipeline_handle) => {
-                let pipelines_read = state.pipelines.read().unwrap();
+                let pipelines_read = record.pipelines.read().unwrap();
                 if let Some(pipeline) = pipelines_read.entries.get(pipeline_handle) {
                     current_vertex_stride = pipeline.vertex_stride;
                     current_pipeline_handle = Some(*pipeline_handle);
@@ -42,7 +62,7 @@ pub(super) fn record(
                 }
             }
             RenderCommand::SetVertexBuffer { slot, buffer, offset } => {
-                let buffers_read = state.buffers.read().unwrap();
+                let buffers_read = record.buffers.read().unwrap();
                 if let Some(buf_state) = buffers_read.entries.get(buffer) {
                     let view = D3D12_VERTEX_BUFFER_VIEW {
                         BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
@@ -53,7 +73,7 @@ pub(super) fn record(
                 }
             }
             RenderCommand::SetIndexBuffer { buffer, offset, format } => {
-                let buffers_read = state.buffers.read().unwrap();
+                let buffers_read = record.buffers.read().unwrap();
                 if let Some(buf_state) = buffers_read.entries.get(buffer) {
                     let view = D3D12_INDEX_BUFFER_VIEW {
                         BufferLocation: unsafe { buf_state.resource.GetGPUVirtualAddress() } + offset,
@@ -74,14 +94,20 @@ pub(super) fn record(
                 user: raw_user,
                 frame_table_base,
             } => {
-                let pipelines_read = state.pipelines.read().unwrap();
+                let pipelines_read = record.pipelines.read().unwrap();
                 if let Some(h) = current_pipeline_handle {
                     if let Some(pipeline) = pipelines_read.entries.get(&h) {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_bindless_slot_kinds(
                                 raw_indices,
                                 &pipeline.push_constant_slot_kinds,
-                                |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                                |idx| {
+                                    super::buffer::bindless_slot_kind_for_index(
+                                        &record.buffers.read().unwrap().entries,
+                                        device_handle,
+                                        idx,
+                                    )
+                                },
                                 &pipeline.shader_debug_name,
                             )
                         })?;
@@ -99,7 +125,7 @@ pub(super) fn record(
                 }
             }
             RenderCommand::BindResourcesTyped { handles: typed_handles } => {
-                let pipelines_read = state.pipelines.read().unwrap();
+                let pipelines_read = record.pipelines.read().unwrap();
                 if let Some(h) = current_pipeline_handle {
                     if let Some(pipeline) = pipelines_read.entries.get(&h) {
                         crate::backend::validate_typed_push_constants(
@@ -112,7 +138,13 @@ pub(super) fn record(
                             crate::backend::validate_bindless_slot_kinds(
                                 &indices,
                                 &pipeline.push_constant_slot_kinds,
-                                |idx| super::buffer::bindless_slot_kind_for_index(state, device_handle, idx),
+                                |idx| {
+                                    super::buffer::bindless_slot_kind_for_index(
+                                        &record.buffers.read().unwrap().entries,
+                                        device_handle,
+                                        idx,
+                                    )
+                                },
                                 &pipeline.shader_debug_name,
                             )
                         })?;

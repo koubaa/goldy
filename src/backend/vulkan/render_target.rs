@@ -2,9 +2,9 @@
 //!
 //! Handles creation, destruction, rendering, and readback of off-screen render targets.
 
-use super::types::{LogicalDevice, RenderTargetState};
+use super::types::{LogicalDevice, RenderTargetState, SharedRenderTargetTable};
 use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk};
-use super::{BufferHandle, DeviceHandle, PipelineHandle, RenderTargetHandle};
+use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, TextureFormat};
 use anyhow::{Context, Result};
@@ -33,8 +33,7 @@ fn find_memory_type(
 pub(super) fn create(
     instance: &Instance,
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
-    next_render_target_handle: &mut RenderTargetHandle,
+    render_targets: &SharedRenderTargetTable,
     device_handle: DeviceHandle,
     width: u32,
     height: u32,
@@ -113,10 +112,9 @@ pub(super) fn create(
     let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
         .context("Failed to allocate command buffer")?;
 
-    let handle = *next_render_target_handle;
-    *next_render_target_handle += 1;
+    let handle = render_targets.write().unwrap().alloc_handle();
 
-    render_targets.insert(
+    render_targets.write().unwrap().entries.insert(
         handle,
         RenderTargetState {
             device_handle,
@@ -146,8 +144,7 @@ pub(super) fn create(
 pub(super) fn create_with_depth(
     instance: &Instance,
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
-    next_render_target_handle: &mut RenderTargetHandle,
+    render_targets: &SharedRenderTargetTable,
     device_handle: DeviceHandle,
     width: u32,
     height: u32,
@@ -288,10 +285,9 @@ pub(super) fn create_with_depth(
     let command_buffers = unsafe { logical_device.device.allocate_command_buffers(&alloc_info) }
         .context("Failed to allocate command buffer")?;
 
-    let handle = *next_render_target_handle;
-    *next_render_target_handle += 1;
+    let handle = render_targets.write().unwrap().alloc_handle();
 
-    render_targets.insert(
+    render_targets.write().unwrap().entries.insert(
         handle,
         RenderTargetState {
             device_handle,
@@ -325,10 +321,10 @@ pub(super) fn create_with_depth(
 /// Destroy a render target and free GPU resources.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
+    render_targets: &SharedRenderTargetTable,
     target: RenderTargetHandle,
 ) {
-    if let Some(state) = render_targets.remove(&target) {
+    if let Some(state) = render_targets.write().unwrap().entries.remove(&target) {
         if let Some(logical_device) = devices.get(&state.device_handle) {
             unsafe {
                 let _ = logical_device.device.device_wait_idle();
@@ -365,7 +361,7 @@ pub(super) fn destroy(
 /// Does NOT begin/end the command buffer and does NOT submit.
 pub(super) fn record_render_pass_to_buffer<F>(
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    render_targets: &HashMap<RenderTargetHandle, RenderTargetState>,
+    render_targets: &SharedRenderTargetTable,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
@@ -377,7 +373,11 @@ where
 {
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
-    let render_target = render_targets.get(&target).context("Invalid render target handle")?;
+    let render_targets_guard = render_targets.read().unwrap();
+    let render_target = render_targets_guard
+        .entries
+        .get(&target)
+        .context("Invalid render target handle")?;
 
     if render_target.device_handle != device_handle {
         anyhow::bail!("Render target belongs to a different device");
@@ -544,16 +544,16 @@ where
 }
 
 pub(super) struct RenderToResources<'a> {
-    pub(super) contexts: &'a HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
+    pub(super) contexts: &'a super::types::SharedContextMap,
     pub(super) devices: &'a HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    pub(super) frame_tables: &'a HashMap<DeviceHandle, super::frame_table::FrameTableDevice>,
-    pub(super) buffers: &'a HashMap<BufferHandle, super::types::BufferState>,
-    pub(super) pipelines: &'a HashMap<super::PipelineHandle, super::types::PipelineState>,
+    pub(super) frame_tables: &'a super::types::SharedFrameTableMap,
+    pub(super) buffers: &'a super::types::SharedBufferTable,
+    pub(super) pipelines: &'a super::types::SharedPipelineTable,
 }
 
 pub(super) fn render_to<F>(
     resources: RenderToResources<'_>,
-    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
+    render_targets: &SharedRenderTargetTable,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
@@ -568,6 +568,9 @@ where
         super::frame_table::prepare_render_commands(resources.buffers, resources.pipelines, commands)?;
 
     let cmd = render_targets
+        .read()
+        .unwrap()
+        .entries
         .get(&target)
         .context("Invalid render target handle")?
         .command_buffer;
@@ -614,7 +617,7 @@ where
 
     unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
-    if let Some(rt) = render_targets.get(&target) {
+    if let Some(rt) = render_targets.read().unwrap().entries.get(&target) {
         rt.has_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -626,13 +629,17 @@ where
 pub(super) fn read_to_cpu(
     instance: &Instance,
     devices: &HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    render_targets: &mut HashMap<RenderTargetHandle, RenderTargetState>,
+    render_targets: &SharedRenderTargetTable,
     target: RenderTargetHandle,
     output: &mut [u8],
 ) -> Result<()> {
     // Get render target info and device
     let (device_handle, width, height, format, image, physical_device) = {
-        let render_target = render_targets.get(&target).context("Invalid render target handle")?;
+        let render_targets_guard = render_targets.read().unwrap();
+        let render_target = render_targets_guard
+            .entries
+            .get(&target)
+            .context("Invalid render target handle")?;
 
         if !render_target.has_rendered.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("Cannot read from render target that hasn't been rendered to");
@@ -659,7 +666,8 @@ pub(super) fn read_to_cpu(
 
     // Ensure staging buffer exists (lazy creation)
     let needs_staging = {
-        let render_target = render_targets.get(&target).unwrap();
+        let render_targets_guard = render_targets.read().unwrap();
+        let render_target = render_targets_guard.entries.get(&target).unwrap();
         render_target.staging_buffer.is_none()
     };
 
@@ -700,7 +708,8 @@ pub(super) fn read_to_cpu(
         }
         .context("Failed to bind staging buffer memory")?;
 
-        let render_target = render_targets.get_mut(&target).unwrap();
+        let mut render_targets_write = render_targets.write().unwrap();
+        let render_target = render_targets_write.entries.get_mut(&target).unwrap();
         render_target.staging_buffer = Some(staging_buffer);
         render_target.staging_memory = Some(staging_memory);
 
@@ -708,7 +717,8 @@ pub(super) fn read_to_cpu(
     }
 
     // Now copy and read
-    let render_target = render_targets.get(&target).unwrap();
+    let render_targets_guard = render_targets.read().unwrap();
+    let render_target = render_targets_guard.entries.get(&target).unwrap();
     let staging_buffer = render_target.staging_buffer.unwrap();
     let staging_memory = render_target.staging_memory.unwrap();
     let cmd = render_target.command_buffer;

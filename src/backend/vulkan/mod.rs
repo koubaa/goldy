@@ -25,6 +25,7 @@ mod sampler;
 mod shader;
 mod sparse;
 mod staging;
+mod submit_session;
 mod surface;
 mod texture;
 mod types;
@@ -37,7 +38,7 @@ use anyhow::{Context, Result};
 use ash::{khr, vk};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Process-global lock serialising `vkCreateInstance` and `vkDestroyInstance`.
 ///
@@ -55,7 +56,7 @@ static VK_INSTANCE_LOCK: Mutex<()> = Mutex::new(());
 /// Extract push-constant slot categories for a render pipeline from shader
 /// reflection. Fragment shader data takes precedence; vertex is a fallback.
 fn render_reflection_data(
-    shaders: &HashMap<ShaderHandle, ShaderState>,
+    shaders: &HashMap<ShaderHandle, ShaderState>, // caller passes entries snapshot
     vertex_shader: ShaderHandle,
     fragment_shader: ShaderHandle,
 ) -> (Vec<Option<crate::types::ResourceCategory>>, Vec<Option<u32>>) {
@@ -251,29 +252,22 @@ impl VulkanBackend {
             physical_devices,
             devices: HashMap::new(),
             next_device_handle: 1,
-            contexts: HashMap::new(),
+            contexts: Arc::new(RwLock::new(HashMap::new())),
             next_context_id: 1,
-            buffers: HashMap::new(),
-            next_buffer_handle: 1,
-            shaders: HashMap::new(),
-            next_shader_handle: 1,
-            pipelines: HashMap::new(),
-            next_pipeline_handle: 1,
-            compute_pipelines: HashMap::new(),
-            next_compute_pipeline_handle: 1,
-            render_targets: HashMap::new(),
-            next_render_target_handle: 1,
+            buffers: Arc::new(RwLock::new(BufferTable::new())),
+            shaders: Arc::new(RwLock::new(ShaderTable::new())),
+            pipelines: Arc::new(RwLock::new(PipelineTable::new())),
+            compute_pipelines: Arc::new(RwLock::new(ComputePipelineTable::new())),
+            render_targets: Arc::new(RwLock::new(RenderTargetTable::new())),
             surfaces: HashMap::new(),
             next_surface_handle: 1,
-            textures: HashMap::new(),
-            next_texture_handle: 1,
-            samplers: HashMap::new(),
-            next_sampler_handle: 1,
+            textures: Arc::new(RwLock::new(TextureTable::new())),
+            samplers: Arc::new(RwLock::new(SamplerTable::new())),
             slang_compiler,
-            compute_fence_pool: Mutex::new(HashMap::new()),
+            compute_fence_pool: Arc::new(Mutex::new(HashMap::new())),
             device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             enable_validation,
-            frame_tables: HashMap::new(),
+            frame_tables: Arc::new(RwLock::new(HashMap::new())),
         };
 
         Ok(Self { state })
@@ -288,7 +282,7 @@ impl VulkanBackend {
         shader::ensure_stage_compiled(
             &self.state.slang_compiler,
             &self.state.devices,
-            &mut self.state.shaders,
+            &self.state.shaders,
             shader_handle,
             stage,
         )
@@ -310,6 +304,8 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
         let sem = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .lock()
@@ -397,6 +393,8 @@ impl GpuBackend for VulkanBackend {
         let ctxs: Vec<ContextHandle> = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .iter()
             .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
             .map(|(k, _)| *k)
@@ -429,7 +427,7 @@ impl GpuBackend for VulkanBackend {
         &self,
         ctx: ContextHandle,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
-        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        let sc = std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?);
         let device = {
             let sc_guard = sc.lock().unwrap();
             self.state.devices.get(&sc_guard.device)?.device.clone()
@@ -455,7 +453,7 @@ impl GpuBackend for VulkanBackend {
             >,
         >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
-        let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
+        let sc = std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?);
         let device_handle = {
             let sc_guard = sc.lock().unwrap();
             sc_guard.device
@@ -491,8 +489,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<BufferHandle> {
         buffer::create(
             &self.state.devices,
-            &mut self.state.buffers,
-            &mut self.state.next_buffer_handle,
+            &self.state.buffers,
             &self.state.instance,
             device_handle,
             size,
@@ -504,14 +501,14 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
-        buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer_handle);
+        buffer::destroy(&self.state.devices, &self.state.buffers, buffer_handle);
     }
 
     fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         buffer::write(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.buffers,
+            &self.state.buffers,
             buffer_handle,
             offset,
             data,
@@ -546,8 +543,7 @@ impl GpuBackend for VulkanBackend {
             let handle = buffer::create_sparse_with_capacity(
                 &self.state.instance,
                 &self.state.devices,
-                &mut self.state.buffers,
-                &mut self.state.next_buffer_handle,
+                &self.state.buffers,
                 device_handle,
                 initial_size,
                 cap,
@@ -559,8 +555,7 @@ impl GpuBackend for VulkanBackend {
         }
         let handle = buffer::create(
             &self.state.devices,
-            &mut self.state.buffers,
-            &mut self.state.next_buffer_handle,
+            &self.state.buffers,
             &self.state.instance,
             device_handle,
             initial_size,
@@ -580,7 +575,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<()> {
         buffer::set_logical_size(
             &self.state.devices,
-            &mut self.state.buffers,
+            &self.state.buffers,
             device_handle,
             buffer_handle,
             new_logical_size,
@@ -588,7 +583,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn hint_buffer_unused_above(&mut self, buffer_handle: BufferHandle, offset: u64) {
-        buffer::hint_unused_above(&self.state.devices, &mut self.state.buffers, buffer_handle, offset);
+        buffer::hint_unused_above(&self.state.devices, &self.state.buffers, buffer_handle, offset);
     }
 
     fn device_capabilities(&self, device_handle: DeviceHandle) -> crate::device::DeviceCapabilities {
@@ -619,8 +614,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<BufferHandle> {
         buffer::create_view(
             &self.state.devices,
-            &mut self.state.buffers,
-            &mut self.state.next_buffer_handle,
+            &self.state.buffers,
             parent,
             offset,
             size,
@@ -638,7 +632,7 @@ impl GpuBackend for VulkanBackend {
         buffer::resize(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.buffers,
+            &self.state.buffers,
             device_handle,
             buffer_handle,
             new_size,
@@ -655,7 +649,7 @@ impl GpuBackend for VulkanBackend {
         buffer::read_to_cpu(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.buffers,
+            &self.state.buffers,
             device_handle,
             buffer_handle,
             output,
@@ -666,8 +660,7 @@ impl GpuBackend for VulkanBackend {
         buffer::alloc_readback_buffer(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.buffers,
-            &mut self.state.next_buffer_handle,
+            &self.state.buffers,
             device,
             size,
         )
@@ -678,7 +671,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
-        buffer::destroy(&self.state.devices, &mut self.state.buffers, buffer);
+        buffer::destroy(&self.state.devices, &self.state.buffers, buffer);
     }
 
     fn query_texture_copy_footprint(
@@ -691,6 +684,17 @@ impl GpuBackend for VulkanBackend {
         Ok(buffer::query_texture_copy_footprint(width, height, format))
     }
 
+    fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64 {
+        self.state
+            .textures
+            .read()
+            .unwrap()
+            .entries
+            .get(&texture)
+            .map(|t| t.image_layout().as_raw() as u64)
+            .unwrap_or(0)
+    }
+
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
@@ -699,8 +703,7 @@ impl GpuBackend for VulkanBackend {
         buffer::alloc_texture_readback_staging(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.buffers,
-            &mut self.state.next_buffer_handle,
+            &self.state.buffers,
             device,
             layout,
         )
@@ -761,8 +764,7 @@ impl GpuBackend for VulkanBackend {
     ) -> Result<ShaderHandle> {
         shader::create(
             &self.state.devices,
-            &mut self.state.shaders,
-            &mut self.state.next_shader_handle,
+            &self.state.shaders,
             crate::backend::shared::ShaderDesc::new(
                 device_handle,
                 slang_source,
@@ -775,7 +777,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_shader(&mut self, shader_handle: ShaderHandle) {
-        shader::destroy(&self.state.devices, &mut self.state.shaders, shader_handle);
+        shader::destroy(&self.state.devices, &self.state.shaders, shader_handle);
     }
 
     fn create_pipeline(
@@ -791,14 +793,17 @@ impl GpuBackend for VulkanBackend {
         let vs_module = self.ensure_shader_stage_compiled(vertex_shader, crate::slang::SlangStage::Vertex)?;
         let fs_module = self.ensure_shader_stage_compiled(fragment_shader, crate::slang::SlangStage::Fragment)?;
 
-        let (cats, strides) = render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
+        let (cats, strides) = render_reflection_data(
+            &self.state.shaders.read().unwrap().entries,
+            vertex_shader,
+            fragment_shader,
+        );
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
         let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format);
         let handle = pipeline::create(pipeline::VulkanGraphicsPipelineCreateBundle {
             devices: &self.state.devices,
-            pipelines: &mut self.state.pipelines,
-            next_pipeline_handle: &mut self.state.next_pipeline_handle,
+            pipelines: &self.state.pipelines,
             device_handle,
             vs_module,
             fs_module,
@@ -806,7 +811,7 @@ impl GpuBackend for VulkanBackend {
             shader_debug_name,
         })?;
 
-        if let Some(ps) = self.state.pipelines.get_mut(&handle) {
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&handle) {
             ps.push_constant_categories = cats;
             ps.binding_element_strides = strides;
         }
@@ -814,7 +819,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_pipeline(&mut self, pipeline_handle: PipelineHandle) {
-        pipeline::destroy(&self.state.devices, &mut self.state.pipelines, pipeline_handle);
+        pipeline::destroy(&self.state.devices, &self.state.pipelines, pipeline_handle);
     }
 
     fn create_render_target(
@@ -827,8 +832,7 @@ impl GpuBackend for VulkanBackend {
         render_target::create(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.render_targets,
-            &mut self.state.next_render_target_handle,
+            &self.state.render_targets,
             device_handle,
             width,
             height,
@@ -837,7 +841,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_render_target(&mut self, target: RenderTargetHandle) {
-        render_target::destroy(&self.state.devices, &mut self.state.render_targets, target);
+        render_target::destroy(&self.state.devices, &self.state.render_targets, target);
     }
 
     fn render_to_target(
@@ -860,12 +864,21 @@ impl GpuBackend for VulkanBackend {
         };
         render_target::render_to(
             render_resources,
-            &mut self.state.render_targets,
+            &self.state.render_targets,
             device_handle,
             target,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
-                render_commands::record(cmd, cmds, logical_device, pipelines, buffers, current_pipeline)
+                let pipelines_read = pipelines.read().unwrap();
+                let buffers_read = buffers.read().unwrap();
+                render_commands::record(
+                    cmd,
+                    cmds,
+                    logical_device,
+                    &pipelines_read.entries,
+                    &buffers_read.entries,
+                    current_pipeline,
+                )
             },
         )
     }
@@ -874,7 +887,7 @@ impl GpuBackend for VulkanBackend {
         render_target::read_to_cpu(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.render_targets,
+            &self.state.render_targets,
             target,
             output,
         )
@@ -892,9 +905,8 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             &self.state.devices,
             &mut self.state.surfaces,
-            &mut self.state.textures,
+            &self.state.textures,
             &mut self.state.next_surface_handle,
-            &mut self.state.next_texture_handle,
             device_handle,
             window,
             display,
@@ -930,6 +942,8 @@ impl GpuBackend for VulkanBackend {
         let timeline_sem = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .get(&frame.context)
             .context("Invalid context handle")?
             .lock()
@@ -950,7 +964,7 @@ impl GpuBackend for VulkanBackend {
             .and_then(|s| s.frame_sync.get(frame.present_slot as usize))
             .and_then(|fs| fs.frame_timeline_value)
         {
-            if let Some(sc_arc) = self.state.contexts.get(&frame.context) {
+            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&frame.context) {
                 sc_arc.lock().unwrap().last_submitted_seq = tv;
             }
         }
@@ -963,8 +977,7 @@ impl GpuBackend for VulkanBackend {
             &self.state.instance,
             &self.state.devices,
             &mut self.state.surfaces,
-            &mut self.state.textures,
-            &mut self.state.next_texture_handle,
+            &self.state.textures,
             surface_handle,
             width,
             height,
@@ -1007,14 +1020,17 @@ impl GpuBackend for VulkanBackend {
 
         let shader_debug_name = format!("shader(vs=#{vertex_shader}, fs=#{fragment_shader})");
 
-        let (cats, strides) = render_reflection_data(&self.state.shaders, vertex_shader, fragment_shader);
+        let (cats, strides) = render_reflection_data(
+            &self.state.shaders.read().unwrap().entries,
+            vertex_shader,
+            fragment_shader,
+        );
 
         let raster = crate::backend::shared::PipelineDesc::new(vertex_layout, topology, target_format)
             .with_depth_stencil(depth_stencil);
         let handle = pipeline::create_with_depth(pipeline::VulkanGraphicsPipelineCreateBundle {
             devices: &self.state.devices,
-            pipelines: &mut self.state.pipelines,
-            next_pipeline_handle: &mut self.state.next_pipeline_handle,
+            pipelines: &self.state.pipelines,
             device_handle,
             vs_module,
             fs_module,
@@ -1022,7 +1038,7 @@ impl GpuBackend for VulkanBackend {
             shader_debug_name,
         })?;
 
-        if let Some(ps) = self.state.pipelines.get_mut(&handle) {
+        if let Some(ps) = self.state.pipelines.write().unwrap().entries.get_mut(&handle) {
             ps.push_constant_categories = cats;
             ps.binding_element_strides = strides;
         }
@@ -1040,8 +1056,7 @@ impl GpuBackend for VulkanBackend {
         render_target::create_with_depth(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.render_targets,
-            &mut self.state.next_render_target_handle,
+            &self.state.render_targets,
             device_handle,
             width,
             height,
@@ -1062,8 +1077,7 @@ impl GpuBackend for VulkanBackend {
         texture::create(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.textures,
-            &mut self.state.next_texture_handle,
+            &self.state.textures,
             device_handle,
             width,
             height,
@@ -1077,7 +1091,7 @@ impl GpuBackend for VulkanBackend {
         texture::write(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.textures,
+            &self.state.textures,
             texture_handle,
             data,
             width,
@@ -1097,7 +1111,7 @@ impl GpuBackend for VulkanBackend {
         texture::write_region(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.textures,
+            &self.state.textures,
             texture_handle,
             x,
             y,
@@ -1108,7 +1122,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_texture(&mut self, texture_handle: TextureHandle) {
-        texture::destroy(&self.state.devices, &mut self.state.textures, texture_handle);
+        texture::destroy(&self.state.devices, &self.state.textures, texture_handle);
     }
 
     fn set_texture_debug_name(&mut self, handle: TextureHandle, name: &str) {
@@ -1128,7 +1142,7 @@ impl GpuBackend for VulkanBackend {
         texture::read_to_cpu(
             &self.state.instance,
             &self.state.devices,
-            &mut self.state.textures,
+            &self.state.textures,
             texture_handle,
             output,
         )
@@ -1147,17 +1161,11 @@ impl GpuBackend for VulkanBackend {
         device_handle: DeviceHandle,
         desc: &crate::types::SamplerDesc,
     ) -> Result<SamplerHandle> {
-        sampler::create(
-            &self.state.devices,
-            &mut self.state.samplers,
-            &mut self.state.next_sampler_handle,
-            device_handle,
-            desc,
-        )
+        sampler::create(&self.state.devices, &self.state.samplers, device_handle, desc)
     }
 
     fn destroy_sampler(&mut self, sampler_handle: SamplerHandle) {
-        sampler::destroy(&self.state.devices, &mut self.state.samplers, sampler_handle);
+        sampler::destroy(&self.state.devices, &self.state.samplers, sampler_handle);
     }
 
     fn sampler_bindless_index(&self, sampler_handle: SamplerHandle) -> Option<u32> {
@@ -1172,26 +1180,27 @@ impl GpuBackend for VulkanBackend {
         // Compile shader on-demand
         let cs_module = self.ensure_shader_stage_compiled(compute_shader, crate::slang::SlangStage::Compute)?;
 
-        let (cats, strides) = self
-            .state
-            .shaders
-            .get(&compute_shader)
-            .and_then(|s| s.reflection.as_ref())
-            .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
-            .unwrap_or_default();
+        let (cats, strides) = {
+            let shaders = self.state.shaders.read().unwrap();
+            shaders
+                .entries
+                .get(&compute_shader)
+                .and_then(|s| s.reflection.as_ref())
+                .map(|r| (r.push_constant_categories.clone(), r.binding_element_strides.clone()))
+                .unwrap_or_default()
+        };
 
         let shader_debug_name = format!("compute_shader#{compute_shader}");
 
         let handle = compute::create(
             &self.state.devices,
-            &mut self.state.compute_pipelines,
-            &mut self.state.next_compute_pipeline_handle,
+            &self.state.compute_pipelines,
             device_handle,
             cs_module,
             shader_debug_name,
         )?;
 
-        if let Some(ps) = self.state.compute_pipelines.get_mut(&handle) {
+        if let Some(ps) = self.state.compute_pipelines.write().unwrap().entries.get_mut(&handle) {
             ps.push_constant_categories = cats;
             ps.binding_element_strides = strides;
         }
@@ -1199,12 +1208,13 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline_handle: ComputePipelineHandle) {
-        compute::destroy(&self.state.devices, &mut self.state.compute_pipelines, pipeline_handle);
+        compute::destroy(&self.state.devices, &self.state.compute_pipelines, pipeline_handle);
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
         let _tz = crate::tracy_zone!("vk.gpu_progress");
-        let Some(sc_arc) = self.state.contexts.get(&ctx) else {
+        let contexts = self.state.contexts.read().unwrap();
+        let Some(sc_arc) = contexts.get(&ctx).cloned() else {
             return 0;
         };
         let sc = sc_arc.lock().unwrap();
@@ -1232,6 +1242,8 @@ impl GpuBackend for VulkanBackend {
         let signal_queue = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .get(&ctx)
             .map(|sc| std::sync::Arc::clone(&sc.lock().unwrap().signal_queue));
         let Some(signal_queue) = signal_queue else {
@@ -1255,7 +1267,10 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let sc_arc = self.state.contexts.get(&ctx)?;
+        let sc_arc = {
+            let contexts = self.state.contexts.read().unwrap();
+            contexts.get(&ctx)?.clone()
+        };
         let last_submitted_seq = sc_arc.lock().unwrap().last_submitted_seq;
         let progress = self.gpu_progress(ctx);
         if progress < last_submitted_seq {
@@ -1283,6 +1298,8 @@ impl GpuBackend for VulkanBackend {
         let sem = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .get(&ctx)
             .context("Invalid context handle")?
             .lock()
@@ -1389,7 +1406,7 @@ impl GpuBackend for VulkanBackend {
         let Some(logical_device) = self.state.devices.get(&device_handle) else {
             return;
         };
-        for sc_arc in self.state.contexts.values() {
+        for sc_arc in self.state.contexts.read().unwrap().values() {
             let mut sc = sc_arc.lock().unwrap();
             if sc.device == device_handle {
                 unsafe { sc.staging_belt.trim(logical_device) };
@@ -1421,11 +1438,13 @@ impl GpuBackend for VulkanBackend {
 
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
-        let completed = compute::ctx_completed_value(&self.state, ctx, device_handle);
+        let completed = compute::ctx_completed_value(&self.state.submit_view(), ctx, device_handle);
         // Per-context queue: resources whose lifetime is bounded by this context.
         let ctx_batch: Vec<_> = self
             .state
             .contexts
+            .read()
+            .unwrap()
             .get(&ctx)
             .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(completed))
             .unwrap_or_default();
@@ -1562,5 +1581,16 @@ impl crate::backend::ContextDeferredDeletionFlush for VulkanContextDeferredDelet
             registry.drain_ready_slot_reclamations(&completed_values);
         }
         self.ld.process_deletion_queue_up_to(device_retired);
+    }
+}
+
+impl crate::backend::GpuBackendSubmitSession for VulkanBackend {
+    fn clone_context_submit_session(
+        &self,
+        ctx: ContextHandle,
+        _backend: std::sync::Arc<std::sync::Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    ) -> std::sync::Arc<dyn crate::backend::ContextSubmitSession> {
+        submit_session::VulkanSubmitSession::clone_from_state(&self.state, ctx)
+            .unwrap_or_else(|e| panic!("clone_context_submit_session({ctx}): {e:#}"))
     }
 }

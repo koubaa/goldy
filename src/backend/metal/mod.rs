@@ -504,6 +504,11 @@ impl GpuBackend for MetalBackend {
         Ok(buffer::query_texture_copy_footprint(width, height, format))
     }
 
+    fn texture_copy_retention_tag(&self, texture: TextureHandle) -> u64 {
+        let _ = texture;
+        0
+    }
+
     fn alloc_texture_readback_staging(
         &mut self,
         device: DeviceHandle,
@@ -1064,6 +1069,16 @@ impl GpuBackend for MetalBackend {
             .get(&ctx)
             .map(|sc_arc| sc_arc.lock().unwrap().in_flight_command_buffers.len())
             .unwrap_or(0)
+    }
+}
+
+impl crate::backend::GpuBackendSubmitSession for MetalBackend {
+    fn clone_context_submit_session(
+        &self,
+        _ctx: ContextHandle,
+        backend: std::sync::Arc<std::sync::Mutex<Box<dyn crate::backend::GpuBackend>>>,
+    ) -> std::sync::Arc<dyn crate::backend::ContextSubmitSession> {
+        crate::backend::LockedSubmitSession::with_backend_type(backend, BackendType::Metal)
     }
 }
 

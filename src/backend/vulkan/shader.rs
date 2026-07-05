@@ -1,6 +1,6 @@
 //! Shader management logic.
 
-use super::types::{self, ShaderState};
+use super::types::{self, ShaderState, SharedShaderTable};
 use super::{DeviceHandle, ShaderHandle};
 use anyhow::{Context, Result};
 use ash::vk;
@@ -9,17 +9,15 @@ use std::collections::HashMap;
 /// Create a shader from Slang source code.
 pub(super) fn create(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    shaders: &mut HashMap<ShaderHandle, ShaderState>,
-    next_shader_handle: &mut ShaderHandle,
+    shaders: &SharedShaderTable,
     desc: crate::backend::shared::ShaderDesc<'_>,
 ) -> Result<ShaderHandle> {
     // Just validate the device exists - actual compilation happens at pipeline creation
     let _ = devices.get(&desc.device).context("Invalid device handle")?;
 
-    let handle = *next_shader_handle;
-    *next_shader_handle += 1;
+    let handle = shaders.write().unwrap().alloc_handle();
 
-    shaders.insert(
+    shaders.write().unwrap().entries.insert(
         handle,
         ShaderState {
             device_handle: desc.device,
@@ -46,10 +44,10 @@ pub(super) fn create(
 /// Destroy a shader and clean up compiled shader modules.
 pub(super) fn destroy(
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    shaders: &mut HashMap<ShaderHandle, ShaderState>,
+    shaders: &SharedShaderTable,
     shader_handle: ShaderHandle,
 ) {
-    if let Some(shader) = shaders.remove(&shader_handle) {
+    if let Some(shader) = shaders.write().unwrap().entries.remove(&shader_handle) {
         if let Some(device) = devices.get(&shader.device_handle) {
             unsafe {
                 if let Some(module) = shader.vertex_module {
@@ -70,22 +68,25 @@ pub(super) fn destroy(
 pub(super) fn ensure_stage_compiled(
     slang_compiler: &crate::slang::SlangCompiler,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
-    shaders: &mut HashMap<ShaderHandle, ShaderState>,
+    shaders: &SharedShaderTable,
     shader_handle: ShaderHandle,
     stage: crate::slang::SlangStage,
 ) -> Result<vk::ShaderModule> {
-    let shader = shaders.get_mut(&shader_handle).context("Invalid shader handle")?;
-
-    // Check if already compiled for this stage
-    let cached_module = match stage {
-        crate::slang::SlangStage::Vertex => shader.vertex_module,
-        crate::slang::SlangStage::Fragment => shader.fragment_module,
-        crate::slang::SlangStage::Compute => shader.compute_module,
-        _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
-    };
-
-    if let Some(module) = cached_module {
-        return Ok(module);
+    {
+        let shaders_read = shaders.read().unwrap();
+        let shader = shaders_read
+            .entries
+            .get(&shader_handle)
+            .context("Invalid shader handle")?;
+        let cached_module = match stage {
+            crate::slang::SlangStage::Vertex => shader.vertex_module,
+            crate::slang::SlangStage::Fragment => shader.fragment_module,
+            crate::slang::SlangStage::Compute => shader.compute_module,
+            _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
+        };
+        if let Some(module) = cached_module {
+            return Ok(module);
+        }
     }
 
     // Get the entry point name based on stage
@@ -96,13 +97,24 @@ pub(super) fn ensure_stage_compiled(
         _ => anyhow::bail!("Unsupported shader stage: {:?}", stage),
     };
 
-    // Clone source, search paths, and defines to avoid borrow issues
-    let slang_source = shader.slang_source.clone();
-    let search_paths: Vec<&str> = shader.search_paths.iter().map(|s| s.as_str()).collect();
-    let extra_defines: Vec<(&str, &str)> = shader.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let device_handle = shader.device_handle;
-    let optimization_level = shader.optimization_level;
-    let layout_checks_snapshot = shader.layout_checks.clone();
+    let (slang_source, search_paths, extra_defines, device_handle, optimization_level, layout_checks_snapshot) = {
+        let shaders_read = shaders.read().unwrap();
+        let shader = shaders_read
+            .entries
+            .get(&shader_handle)
+            .context("Invalid shader handle")?;
+        (
+            shader.slang_source.clone(),
+            shader.search_paths.clone(),
+            shader.defines.clone(),
+            shader.device_handle,
+            shader.optimization_level,
+            shader.layout_checks.clone(),
+        )
+    };
+
+    let search_path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
+    let extra_define_refs: Vec<(&str, &str)> = extra_defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     // Compile shader with reflection data for resource binding
     let result = slang_compiler
@@ -110,8 +122,8 @@ pub(super) fn ensure_stage_compiled(
             &slang_source,
             crate::slang::ShaderTarget::Spirv,
             &[(entry_point_name, stage)],
-            &search_paths,
-            &extra_defines,
+            &search_path_refs,
+            &extra_define_refs,
             &layout_checks_snapshot,
             optimization_level,
         )
@@ -150,36 +162,39 @@ pub(super) fn ensure_stage_compiled(
             tracing::info!("Dumped SPIR-V bytecode to {}", path.display());
         }
     }
-    // Cache the module and reflection data
-    let shader = shaders.get_mut(&shader_handle).unwrap();
-    match stage {
-        crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
-        crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
-        crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
-        _ => {} // Already validated above, shouldn't reach here
-    }
 
-    if !layout_checks_snapshot.is_empty() {
-        shader.layout_checks.clear();
-    }
+    {
+        let mut shaders_write = shaders.write().unwrap();
+        let shader = shaders_write.entries.get_mut(&shader_handle).unwrap();
+        match stage {
+            crate::slang::SlangStage::Vertex => shader.vertex_module = Some(module),
+            crate::slang::SlangStage::Fragment => shader.fragment_module = Some(module),
+            crate::slang::SlangStage::Compute => shader.compute_module = Some(module),
+            _ => {} // Already validated above, shouldn't reach here
+        }
 
-    // Store reflection data (merge with existing if any)
-    if let Some(ref new_reflection) = reflection {
-        if let Some(ref mut existing) = shader.reflection {
-            // Merge parameter blocks
-            for pb in &new_reflection.parameter_blocks {
-                if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
-                    existing.parameter_blocks.push(pb.clone());
+        if !layout_checks_snapshot.is_empty() {
+            shader.layout_checks.clear();
+        }
+
+        // Store reflection data (merge with existing if any)
+        if let Some(ref new_reflection) = reflection {
+            if let Some(ref mut existing) = shader.reflection {
+                // Merge parameter blocks
+                for pb in &new_reflection.parameter_blocks {
+                    if !existing.parameter_blocks.iter().any(|p| p.name == pb.name) {
+                        existing.parameter_blocks.push(pb.clone());
+                    }
                 }
+                if existing.push_constant_categories.is_empty() {
+                    existing.push_constant_categories = new_reflection.push_constant_categories.clone();
+                }
+                if existing.binding_element_strides.is_empty() {
+                    existing.binding_element_strides = new_reflection.binding_element_strides.clone();
+                }
+            } else {
+                shader.reflection = reflection;
             }
-            if existing.push_constant_categories.is_empty() {
-                existing.push_constant_categories = new_reflection.push_constant_categories.clone();
-            }
-            if existing.binding_element_strides.is_empty() {
-                existing.binding_element_strides = new_reflection.binding_element_strides.clone();
-            }
-        } else {
-            shader.reflection = reflection;
         }
     }
 

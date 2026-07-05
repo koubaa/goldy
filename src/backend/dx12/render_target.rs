@@ -4,7 +4,7 @@
 
 use super::barriers;
 use super::types::RenderTargetState;
-use super::utils::{depth_format_to_dxgi, format_to_dxgi};
+use super::utils::{depth_format_to_dxgi, execute_command_lists_and_signal_device, format_to_dxgi, wait_for_fence};
 use super::{render_commands, DeviceHandle, Dx12State, RenderTargetHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, DepthFormat, TextureFormat};
@@ -218,17 +218,17 @@ pub(super) fn destroy(state: &mut Dx12State, target: RenderTargetHandle) {
 /// binding, draw commands, and RENDER_TARGET -> COPY_SOURCE barrier into `cmd_list`.
 /// Does NOT close/execute/signal.
 #[allow(clippy::too_many_lines)]
-pub(super) fn record_render_pass_to_list(
-    state: &Dx12State,
+pub(super) fn record_render_pass_to_list_with_record(
+    record: &super::submit_session::Dx12RecordState<'_>,
     device_handle: DeviceHandle,
     target: RenderTargetHandle,
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
 ) -> Result<bool> {
-    let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+    let logical_device = record.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let render_targets_read = state.render_targets.read().unwrap();
+    let render_targets_read = record.render_targets.read().unwrap();
     let render_target = render_targets_read
         .entries
         .get(&target)
@@ -339,19 +339,15 @@ pub(super) fn record_render_pass_to_list(
         ]);
     }
 
-    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(state, commands)?;
+    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(record, commands)?;
     if has_bindings {
         if frame_table_prologue_already_recorded {
-            // Graph submit already ran FrameTableStaging prologue in this command list;
-            // refresh the active row without advancing the selector.
-            super::frame_table::sync_table_row_to_device(state, device_handle, cmd_list, &staging_data)?;
+            super::frame_table::sync_table_row_to_device(record, device_handle, cmd_list, &staging_data)?;
         } else {
-            // Legacy BindResources is lowered here (not at emit time), or this is a
-            // standalone render pass — record the full prologue (bump + copy + selector).
             super::frame_table::record_prologue(
-                &state.contexts,
-                &state.frame_tables,
-                &state.buffers.read().unwrap().entries,
+                record.contexts,
+                &record.frame_table,
+                &record.buffers.read().unwrap().entries,
                 device_handle,
                 cmd_list,
                 &staging_data,
@@ -359,7 +355,7 @@ pub(super) fn record_render_pass_to_list(
         }
     }
 
-    render_commands::record(cmd_list, &lowered, device_handle, state)?;
+    render_commands::record(cmd_list, &lowered, device_handle, record)?;
 
     // RENDER_TARGET -> COPY_SOURCE for potential readback
     let to_copy = barriers::texture_barrier_full(
@@ -374,6 +370,27 @@ pub(super) fn record_render_pass_to_list(
     unsafe { barriers::barrier_textures(cmd_list, &[to_copy]) };
 
     Ok(has_bindings)
+}
+
+/// Record an offscreen render pass into an existing command list without closing/executing.
+#[allow(clippy::too_many_lines)]
+pub(super) fn record_render_pass_to_list(
+    state: &Dx12State,
+    device_handle: DeviceHandle,
+    target: RenderTargetHandle,
+    commands: &[RenderCommand],
+    cmd_list: &ID3D12GraphicsCommandList7,
+    frame_table_prologue_already_recorded: bool,
+) -> Result<bool> {
+    let record = super::submit_session::record_state_from_backend(state, device_handle)?;
+    record_render_pass_to_list_with_record(
+        &record,
+        device_handle,
+        target,
+        commands,
+        cmd_list,
+        frame_table_prologue_already_recorded,
+    )
 }
 
 /// Render commands to a render target.
@@ -417,15 +434,7 @@ pub(super) fn render(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal fence")?;
+    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     // Blocking wait — required so the shared command_allocator can be safely
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;
@@ -564,16 +573,8 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, out
     unsafe { cmd.Close() }.context("Failed to close command list")?;
 
     let cmd_list: ID3D12CommandList = cmd.cast().context("Failed to cast command list")?;
-    unsafe {
-        logical_device.command_queue.ExecuteCommandLists(&[Some(cmd_list)]);
-    }
-
+    let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     // Wait for copy to complete
-    let fence_value = logical_device
-        .timeline_next
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
-        .context("Failed to signal fence")?;
     wait_for_fence(&logical_device.fence, fence_value)?;
 
     // Map and copy data
@@ -605,17 +606,5 @@ pub(super) fn read_to_cpu(state: &mut Dx12State, target: RenderTargetHandle, out
 
     unsafe { staging_buffer.Unmap(0, None) };
 
-    Ok(())
-}
-
-/// Helper to wait for a fence value.
-fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{CreateEventA, WaitForSingleObject, INFINITE};
-
-    let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
-    unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
-    unsafe { WaitForSingleObject(event, INFINITE) };
-    unsafe { CloseHandle(event) }.ok();
     Ok(())
 }
