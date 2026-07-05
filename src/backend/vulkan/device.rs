@@ -457,13 +457,14 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
+            legacy_frame_table: Mutex::new(None),
         }),
     );
 
     tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
-    let ld = state.devices.get(&handle).unwrap().clone();
-    let instance = state.instance.clone();
-    super::frame_table::init_device(state, &instance, handle, &ld)?;
+    if let Some(ld) = state.devices.get(&handle) {
+        super::frame_table::reserve_device_bindless_slots(ld);
+    }
     Ok(handle)
 }
 
@@ -483,6 +484,14 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         "destroying Vulkan device"
     );
     if let Some(logical_device) = state.devices.remove(&device_handle) {
+        let wait_result = unsafe { logical_device.device.device_wait_idle() };
+
+        if !matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
+            if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
+                super::frame_table::destroy_context(state, &logical_device, &ft);
+            }
+        }
+
         unsafe {
             let wait_result = logical_device.device.device_wait_idle();
 
@@ -578,8 +587,6 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
                     sc.texture_staging_pool.destroy_all(&logical_device);
                 }
             }
-
-            super::frame_table::destroy_device(state, device_handle, &logical_device);
 
             // Destroy buffers owned by this device
             let buffer_handles: Vec<_> = state

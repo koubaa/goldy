@@ -679,7 +679,7 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
             .with_context(|| format!("Invalid context handle {ctx}"))?,
     );
     let device_handle = sc.lock().unwrap().device;
-    let record = record_state_from_backend(state, device_handle)?;
+    let record = record_state_from_backend(state, ctx, device_handle)?;
     let use_global_buffer_barriers = record.ld.adapter_id == super::WARP_ADAPTER_ID;
     Ok(Dx12SubmitScope {
         ctx,
@@ -766,6 +766,8 @@ struct CmdCtx<'a> {
     dispatch_idx: u32,
     current_compute_pipeline: Option<ComputePipelineHandle>,
     pending_deletions: Vec<super::types::PendingDeletion>,
+    /// Frame table row chosen at prologue record time (stable under concurrent submits).
+    frame_table_row: Option<u32>,
 }
 
 /// Emit one `GpuCommand` onto the open command list in `ctx`.
@@ -786,14 +788,15 @@ fn record_gpu_command(
     let cl7 = ctx.command_list7;
     match cmd {
         GpuCommand::FrameTableStaging { data } => {
-            super::frame_table::record_prologue(
+            let row = super::frame_table::record_prologue(
                 scope.contexts(),
+                _ctx_handle,
                 scope.frame_table(),
                 &scope.buffers().read().unwrap().entries,
-                device_handle,
                 cl7,
                 data,
             )?;
+            ctx.frame_table_row = Some(row);
         }
         GpuCommand::SetPipeline(handle) => {
             let _tz = tracy_zone!("dx12.set_pipeline");
@@ -867,6 +870,10 @@ fn record_gpu_command(
             }
             let mut layout = types::PushLayout::default();
             shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+            {
+                let ft = scope.frame_table();
+                shared::set_frame_table_slots(&mut layout, ft.selector_slot, ft.table_slot);
+            }
             unsafe {
                 cl.SetComputeRoot32BitConstants(
                     0,
@@ -1008,6 +1015,21 @@ fn record_gpu_command(
                 .devices()
                 .get(&device_handle)
                 .context("DispatchBatch: invalid device")?;
+
+            // Arg data is built during context-agnostic lowering; patch in this
+            // context's frame-table slots (`_rs1`/`_rs2`) at record time.
+            let arg_data = {
+                let ft = scope.frame_table();
+                let mut patched = arg_data.to_vec();
+                crate::backend::shared::patch_dispatch_batch_frame_table_slots(
+                    &mut patched,
+                    *count as usize,
+                    ft.selector_slot,
+                    ft.table_slot,
+                );
+                patched
+            };
+            let arg_data = &arg_data;
 
             if let Some(batch_sig) = logical_device.compute_batch_dispatch_signature.clone() {
                 let buf_size = arg_data.len() as u64;
@@ -1607,6 +1629,7 @@ struct SubmitFinish {
     retain_key: Option<u64>,
     used_slots: Vec<DeferredSlot>,
     frame_table_staging: Option<std::sync::Arc<[u32]>>,
+    frame_table_row: Option<u32>,
     pending_deletions: Vec<super::types::PendingDeletion>,
 }
 
@@ -1655,6 +1678,7 @@ fn execute_signal_and_finish(
         retain_key,
         used_slots,
         frame_table_staging,
+        frame_table_row,
         pending_deletions,
     } = submit;
     let StagingFinish {
@@ -1730,10 +1754,8 @@ fn execute_signal_and_finish(
                     old_slot.retained = false;
                 }
             }
-            let frame_table_row = frame_table_staging
-                .as_ref()
-                .and_then(|_| super::frame_table::last_prologue_row(scope.frame_table()));
-            if let Some(row) = frame_table_row {
+            let pin_row_index = frame_table_staging.is_some().then_some(frame_table_row).flatten();
+            if let Some(row) = pin_row_index {
                 super::frame_table::pin_row(scope.frame_table(), row)?;
             }
             if let Some(cl) = sc
@@ -1749,7 +1771,7 @@ fn execute_signal_and_finish(
                         slot_idx,
                         used_slots,
                         frame_table_staging,
-                        frame_table_row,
+                        frame_table_row: pin_row_index,
                     },
                 );
             }
@@ -1977,7 +1999,7 @@ pub(super) fn submit_with_scope(
         prof
     };
 
-    let (belt_idx_final, pending_deletions) = {
+    let (belt_idx_final, pending_deletions, frame_table_row) = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
         let mut cmd_ctx = CmdCtx {
             command_list: &command_list,
@@ -1991,6 +2013,7 @@ pub(super) fn submit_with_scope(
             dispatch_idx: 0,
             current_compute_pipeline: None,
             pending_deletions: Vec::new(),
+            frame_table_row: None,
         };
         for cmd in &commands {
             record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, cmd)?;
@@ -2000,7 +2023,7 @@ pub(super) fn submit_with_scope(
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions)
+        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, cmd_ctx.frame_table_row)
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
@@ -2038,6 +2061,7 @@ pub(super) fn submit_with_scope(
             retain_key: None,
             used_slots,
             frame_table_staging,
+            frame_table_row,
             pending_deletions,
         },
         StagingFinish {
@@ -2239,7 +2263,7 @@ pub(super) fn submit_graph_with_scope(
     };
 
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
-    let (belt_idx_final, pending_deletions);
+    let (belt_idx_final, pending_deletions, frame_table_row);
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
         let mut cmd_ctx = CmdCtx {
@@ -2254,6 +2278,7 @@ pub(super) fn submit_graph_with_scope(
             dispatch_idx: 0,
             current_compute_pipeline: None,
             pending_deletions: Vec::new(),
+            frame_table_row: None,
         };
 
         let mut frame_table_prologue_in_cb = false;
@@ -2296,14 +2321,18 @@ pub(super) fn submit_graph_with_scope(
                     };
                     unsafe { barriers::barrier_globals(cmd_ctx.command_list7, &[pre_render_barrier]) };
 
-                    let touched = super::render_target::record_render_pass_to_list_with_record(
+                    let (touched, prologue_row) = super::render_target::record_render_pass_to_list_with_record(
                         &scope.record,
                         device_handle,
+                        Some(ctx),
                         *target,
                         render_cmds,
                         &command_list7,
                         frame_table_prologue_in_cb,
                     )?;
+                    if let Some(row) = prologue_row {
+                        cmd_ctx.frame_table_row = Some(row);
+                    }
                     frame_table_prologue_in_cb |= touched;
                     {
                         let render_targets_read = scope.render_targets().read().unwrap();
@@ -2336,6 +2365,7 @@ pub(super) fn submit_graph_with_scope(
         );
         belt_idx_final = cmd_ctx.belt_idx;
         pending_deletions = cmd_ctx.pending_deletions;
+        frame_table_row = cmd_ctx.frame_table_row;
     }
 
     let tail = D3D12_GLOBAL_BARRIER {
@@ -2372,6 +2402,7 @@ pub(super) fn submit_graph_with_scope(
             retain_key,
             used_slots,
             frame_table_staging,
+            frame_table_row,
             pending_deletions,
         },
         StagingFinish {
@@ -2529,51 +2560,26 @@ fn evict_retained_on_context(
     }
 }
 
-/// Evict every retained graph on contexts for `device_handle` that pins `row`.
-///
-/// Called when the frame-table ring wraps and a new prologue needs to overwrite staging
-/// bytes for a row still held by a retained command list from partitioned retention.
-pub(super) fn evict_retained_pinning_row(
+pub(super) fn evict_retained_pinning_row_for_context(
     contexts: &types::SharedContextMap,
     frame_table: &super::frame_table::FrameTableDevice,
-    device_handle: DeviceHandle,
+    ctx: ContextHandle,
     row: u32,
 ) {
-    // Collect all (ctx, key) pairs that pin `row` under a single short-lived read guard,
-    // then drop the guard before calling evict_retained_on_context.
-    //
-    // evict_retained_on_context takes its own contexts.read() internally.  Windows
-    // SRWLOCK has write-priority: if any thread queues a write (e.g. context::destroy)
-    // between the outer read acquisition and the inner one, the inner read blocks while
-    // the outer read prevents the writer from completing — deadlock.  Releasing the
-    // guard before calling evict avoids the re-entrant read.
-    let evict_list: Vec<(ContextHandle, Vec<u64>)> = {
+    let keys: Vec<u64> = {
         let contexts_read = contexts.read().unwrap();
-        contexts_read
+        let Some(sc_arc) = contexts_read.get(&ctx) else {
+            return;
+        };
+        let sc = sc_arc.lock().unwrap();
+        sc.retained_graphs
             .iter()
-            .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
-            .filter_map(|(ctx_h, sc_arc)| {
-                let keys: Vec<u64> = sc_arc
-                    .lock()
-                    .unwrap()
-                    .retained_graphs
-                    .iter()
-                    .filter(|(_, g)| g.frame_table_row == Some(row))
-                    .map(|(k, _)| *k)
-                    .collect();
-                if keys.is_empty() {
-                    None
-                } else {
-                    Some((*ctx_h, keys))
-                }
-            })
+            .filter(|(_, g)| g.frame_table_row == Some(row))
+            .map(|(k, _)| *k)
             .collect()
-    }; // contexts_read dropped here — no read guard held during eviction
-
-    for (ctx, keys) in evict_list {
-        for key in keys {
-            evict_retained_on_context(contexts, frame_table, ctx, key);
-        }
+    };
+    for key in keys {
+        evict_retained_on_context(contexts, frame_table, ctx, key);
     }
 }
 

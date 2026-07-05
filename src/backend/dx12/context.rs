@@ -26,11 +26,23 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
         .get(&device)
         .map(|d| unsafe { d.fence.GetCompletedValue() })
         .unwrap_or(0);
-    floor.max(max_ctx).max(device_sync)
+    let retired = floor.max(max_ctx).max(device_sync);
+    if retired == u64::MAX {
+        if let Some(ld) = state.devices.get(&device) {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &state.device_removed,
+                "dx12::context::device_retired",
+                0,
+                retired,
+            );
+        }
+    }
+    retired
 }
 
 pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<ContextHandle> {
-    let ld = state.devices.get(&device).context("Invalid device handle")?;
+    let ld = state.devices.get(&device).context("Invalid device handle")?.clone();
 
     let fence: ID3D12Fence = unsafe { ld.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create per-context DX12 fence")?;
@@ -62,6 +74,8 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);
 
+    let frame_table = super::frame_table::init_context(state, device, &ld)?;
+
     // Register the fence in the lock-free index before inserting the context so that
     // any concurrent drain_ready_slot_reclamations sees a consistent view.
     state
@@ -83,9 +97,89 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
+            frame_table,
+            reclamation_context: None,
         })),
     );
     Ok(id)
+}
+
+/// Context handles live on `device`, filtered via the lock-free `context_fences` map
+/// (keyed by `DeviceHandle` without requiring any `sc_arc` mutex acquisition).
+///
+/// Critical for avoiding cross-test/cross-device lock contention: `state.contexts` is a
+/// single global map shared by every `Device` in the process, so scanning it and locking
+/// every `sc_arc` just to filter by device would serialize buffer destroys against
+/// unrelated, concurrently-running tests' in-flight GPU waits (see issue: `cargo test`
+/// runs tests in parallel by default, each with its own `Device`/contexts).
+fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHandle> {
+    let result: Vec<ContextHandle> = state
+        .context_fences
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|(_, (dev, _))| *dev == device)
+        .map(|(h, _)| *h)
+        .collect();
+    result
+}
+
+/// Returns the `ContextHandle` whose reclamation context is installed on the current thread.
+pub(super) fn context_handle_for_thread(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
+    let thread = std::thread::current().id();
+    let contexts = state.contexts.read().unwrap();
+    contexts_on_device(state, device).into_iter().find_map(|h| {
+        let sc_arc = contexts.get(&h)?;
+        let sc = sc_arc.lock().expect("context Mutex poisoned");
+        if let Some((t, _)) = sc.reclamation_context {
+            if t == thread {
+                return Some(h);
+            }
+        }
+        None
+    })
+}
+
+/// When exactly one live context exists on `device`, return it for destroy attribution.
+pub(super) fn sole_context_on_device(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
+    let mut on_device = contexts_on_device(state, device);
+    if on_device.len() == 1 {
+        on_device.pop()
+    } else {
+        None
+    }
+}
+
+/// Context to receive a user-initiated buffer destroy (thread reclamation scope, else sole context).
+pub(super) fn destroy_attribution_context(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
+    context_handle_for_thread(state, device).or_else(|| sole_context_on_device(state, device))
+}
+
+/// Fence barrier for deferred buffer destruction on `device`.
+pub(super) fn reclamation_barrier(state: &Dx12State, device: DeviceHandle) -> u64 {
+    let thread = std::thread::current().id();
+    let candidates = contexts_on_device(state, device);
+    if !candidates.is_empty() {
+        let contexts = state.contexts.read().unwrap();
+        for h in candidates {
+            if let Some(sc_arc) = contexts.get(&h) {
+                let sc = sc_arc.lock().expect("context Mutex poisoned");
+                if let Some((t, epoch)) = sc.reclamation_context {
+                    if t == thread {
+                        return epoch;
+                    }
+                }
+            }
+        }
+    }
+    state
+        .devices
+        .get(&device)
+        .map(|d| {
+            let timeline_next = d.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
+            timeline_next.saturating_sub(1)
+        })
+        .unwrap_or(0)
 }
 
 pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
@@ -118,9 +212,7 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 
     for old in sc.retained_graphs.drain().map(|(_, g)| g) {
         if let Some(row) = old.frame_table_row {
-            if let Some(ft) = state.frame_tables.read().unwrap().get(&device) {
-                super::frame_table::unpin_row(ft, row);
-            }
+            super::frame_table::unpin_row(&sc.frame_table, row);
         }
         if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
             slot.retained = false;
@@ -141,6 +233,24 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
                 super::types::destroy_pending_deletion(ld, &mut registry, resource);
             }
         }
+    }
+
+    super::frame_table::destroy_context(state, device, &sc.frame_table);
+}
+
+/// Drain per-context deferred deletions retired up to `completed` on the render/wait thread.
+pub(super) fn drain_context_deletion_queue_up_to(
+    ld: &super::types::LogicalDevice,
+    sc: &mut super::types::Dx12SubmissionContext,
+    completed: u64,
+) {
+    let batch = sc.deletion_queue.drain_up_to_completed(completed);
+    if batch.is_empty() {
+        return;
+    }
+    let mut registry = ld.descriptors.lock().unwrap();
+    for resource in batch {
+        super::types::destroy_pending_deletion(ld, &mut registry, resource);
     }
 }
 

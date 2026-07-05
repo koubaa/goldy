@@ -740,17 +740,6 @@ pub(super) fn submit_with_scope(
         };
         r.context("Failed queue_submit2 for empty compute submit")?;
         {
-            let completed = scope.completed_timeline_value();
-            let ctx_batch: Vec<_> = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
-            if let Some(ld) = view.devices.get(&device_handle) {
-                let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-                let mut registry = descriptors_arc.lock().unwrap();
-                for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut registry, r);
-                }
-            }
-        }
-        {
             scope.sc.lock().unwrap().last_submitted_seq = signal_value;
         }
         return Ok(signal_value);
@@ -928,9 +917,9 @@ pub(super) fn submit_with_scope(
                 GpuCommand::FrameTableStaging { data } => {
                     super::frame_table::record_prologue(
                         view.contexts,
-                        view.frame_tables,
+                        ctx,
+                        &scope.frame_table,
                         view.buffers,
-                        device_handle,
                         logical_device,
                         cmd,
                         data,
@@ -966,6 +955,11 @@ pub(super) fn submit_with_scope(
                         })?;
                         let mut layout = PushLayout::default();
                         shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                        shared::set_frame_table_slots(
+                            &mut layout,
+                            scope.frame_table.selector_slot,
+                            scope.frame_table.table_slot,
+                        );
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,
@@ -1033,9 +1027,18 @@ pub(super) fn submit_with_scope(
                     let pipeline_layout = current_pipeline
                         .and_then(|h| compute_pipelines_read.entries.get(&h))
                         .map(|p| p.layout);
+                    // Arg data is built during context-agnostic lowering; patch in
+                    // this context's frame-table slots (`_rs1`/`_rs2`) at record time.
+                    let mut patched_args = arg_data.to_vec();
+                    crate::backend::shared::patch_dispatch_batch_frame_table_slots(
+                        &mut patched_args,
+                        *count as usize,
+                        scope.frame_table.selector_slot,
+                        scope.frame_table.table_slot,
+                    );
                     for i in 0..*count as usize {
                         let base = i * stride;
-                        let layout_bytes = &arg_data[base..base + push_size];
+                        let layout_bytes = &patched_args[base..base + push_size];
                         let wg_off = base + push_size;
                         let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
                         let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
@@ -1593,19 +1596,12 @@ pub(super) fn submit_with_scope(
     }
 
     {
-        let completed = scope.completed_timeline_value();
-        let ctx_batch = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
         if let Some(ld) = view.devices.get(&device_handle) {
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            {
-                let mut registry = descriptors_arc.lock().unwrap();
-                for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut registry, r);
-                }
-                let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
-                registry.drain_ready_slot_reclamations(&completed_values);
-            }
+            let mut registry = descriptors_arc.lock().unwrap();
+            let completed_values =
+                super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
+            registry.drain_ready_slot_reclamations(&completed_values);
         }
     }
 
@@ -1937,21 +1933,23 @@ pub(super) fn submit_graph_with_scope(
     let mut texture_upload_idx = 0usize;
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
     let mut frame_table_prologue_in_cb = false;
+    let mut frame_table_row: Option<u32> = None;
 
     for graph_cmd in commands {
         match graph_cmd {
             GraphCommand::Compute(gpu_cmd) => match gpu_cmd {
                 GpuCommand::FrameTableStaging { data } => {
                     frame_table_prologue_in_cb = true;
-                    super::frame_table::record_prologue(
+                    let row = super::frame_table::record_prologue(
                         view.contexts,
-                        view.frame_tables,
+                        ctx,
+                        &scope.frame_table,
                         view.buffers,
-                        device_handle,
                         logical_device,
                         cmd,
                         data,
                     )?;
+                    frame_table_row = Some(row);
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -1985,6 +1983,11 @@ pub(super) fn submit_graph_with_scope(
                         })?;
                         let mut layout = PushLayout::default();
                         shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                        shared::set_frame_table_slots(
+                            &mut layout,
+                            scope.frame_table.selector_slot,
+                            scope.frame_table.table_slot,
+                        );
                         unsafe {
                             logical_device.device.cmd_push_constants(
                                 cmd,
@@ -2054,9 +2057,18 @@ pub(super) fn submit_graph_with_scope(
                     let pipeline_layout = current_compute_pipeline
                         .and_then(|h| compute_pipelines_read.entries.get(&h))
                         .map(|p| p.layout);
+                    // Arg data is built during context-agnostic lowering; patch in
+                    // this context's frame-table slots (`_rs1`/`_rs2`) at record time.
+                    let mut patched_args = arg_data.to_vec();
+                    crate::backend::shared::patch_dispatch_batch_frame_table_slots(
+                        &mut patched_args,
+                        *count as usize,
+                        scope.frame_table.selector_slot,
+                        scope.frame_table.table_slot,
+                    );
                     for i in 0..*count as usize {
                         let base = i * stride;
-                        let layout_bytes = &arg_data[base..base + push_size];
+                        let layout_bytes = &patched_args[base..base + push_size];
                         let wg_off = base + push_size;
                         let wg_x = u32::from_ne_bytes(arg_data[wg_off..wg_off + 4].try_into().unwrap());
                         let wg_y = u32::from_ne_bytes(arg_data[wg_off + 4..wg_off + 8].try_into().unwrap());
@@ -2499,15 +2511,16 @@ pub(super) fn submit_graph_with_scope(
                             &sync_data,
                         )?;
                     } else {
-                        super::frame_table::record_prologue(
+                        let row = super::frame_table::record_prologue(
                             view.contexts,
-                            view.frame_tables,
+                            ctx,
+                            &scope.frame_table,
                             view.buffers,
-                            device_handle,
                             logical_device,
                             cmd,
                             &staging_data,
                         )?;
+                        frame_table_row = Some(row);
                     }
                 }
 
@@ -2528,6 +2541,7 @@ pub(super) fn submit_graph_with_scope(
                             &pipelines_read.entries,
                             &buffers_read.entries,
                             cur_pipe,
+                            (scope.frame_table.selector_slot, scope.frame_table.table_slot),
                         )
                     },
                 )?;
@@ -2634,12 +2648,14 @@ pub(super) fn submit_graph_with_scope(
 
     let retain_plan = if let Some(key) = retain_key {
         let ft = &scope.frame_table;
-        let frame_table_row = super::frame_table::extract_staging_from_graph(commands)
-            .and_then(|_| super::frame_table::last_prologue_row(ft));
-        if let Some(row) = frame_table_row {
+        let pin_row_index = super::frame_table::extract_staging_from_graph(commands)
+            .is_some()
+            .then_some(frame_table_row)
+            .flatten();
+        if let Some(row) = pin_row_index {
             super::frame_table::pin_row(ft, row)?;
         }
-        Some((key, frame_table_row))
+        Some((key, pin_row_index))
     } else {
         None
     };
@@ -2723,19 +2739,12 @@ pub(super) fn submit_graph_with_scope(
     }
 
     {
-        let completed = scope.completed_timeline_value();
-        let ctx_batch = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
         if let Some(ld) = view.devices.get(&device_handle) {
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            {
-                let mut registry = descriptors_arc.lock().unwrap();
-                for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut registry, r);
-                }
-                let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
-                registry.drain_ready_slot_reclamations(&completed_values);
-            }
+            let mut registry = descriptors_arc.lock().unwrap();
+            let completed_values =
+                super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
+            registry.drain_ready_slot_reclamations(&completed_values);
         }
     }
 
@@ -2848,19 +2857,12 @@ pub(super) fn try_resubmit_retained_with_scope(
     }
 
     {
-        let completed = scope.completed_timeline_value();
-        let ctx_batch = scope.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
         if let Some(ld) = view.devices.get(&device_handle) {
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            {
-                let mut registry = descriptors_arc.lock().unwrap();
-                for r in ctx_batch {
-                    super::types::destroy_pending_deletion(ld, &mut registry, r);
-                }
-                let completed_values =
-                    super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
-                registry.drain_ready_slot_reclamations(&completed_values);
-            }
+            let mut registry = descriptors_arc.lock().unwrap();
+            let completed_values =
+                super::types::snapshot_context_completed_values(&ld.device, view.contexts, device_handle);
+            registry.drain_ready_slot_reclamations(&completed_values);
         }
     }
     {
@@ -2871,24 +2873,17 @@ pub(super) fn try_resubmit_retained_with_scope(
 }
 
 fn evict_retained_on_context(
-    contexts: &std::collections::HashMap<super::ContextHandle, super::types::SharedSubmissionContext>,
-    frame_tables: &std::collections::HashMap<super::DeviceHandle, super::types::SharedFrameTableDevice>,
+    frame_table: &super::frame_table::FrameTableDevice,
     ctx: super::ContextHandle,
     key: u64,
+    contexts: &super::types::SharedContextMap,
 ) {
-    if let Some(sc_arc) = contexts.get(&ctx) {
+    if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
         if let Some(old) = sc.retained_compute_cbs.remove(&key) {
             if let Some(row) = old.frame_table_row {
-                let device = sc.device;
-                if let Some(ft) = frame_tables.get(&device) {
-                    super::frame_table::unpin_row(ft, row);
-                }
+                super::frame_table::unpin_row(frame_table, row);
             }
-            // Defer the CB free until the GPU has retired its last submission.
-            // Pushing directly to free_cmd_buffers is unsafe because the CB may
-            // still be in-flight; using timeline_cmd_buffers ensures vkFreeCommandBuffers
-            // is only called once the GPU timeline passes last_signal_value.
             sc.timeline_cmd_buffers
                 .entry(old.last_signal_value)
                 .or_default()
@@ -2897,44 +2892,33 @@ fn evict_retained_on_context(
     }
 }
 
-/// Evict every retained dispatch CB on contexts for `device_handle` that pins `row`.
-pub(super) fn evict_retained_pinning_row(
+pub(super) fn evict_retained_pinning_row_for_context(
     contexts: &super::types::SharedContextMap,
-    frame_tables: &super::types::SharedFrameTableMap,
-    device_handle: super::DeviceHandle,
+    frame_table: &super::frame_table::FrameTableDevice,
+    ctx: super::ContextHandle,
     row: u32,
 ) {
-    let contexts = contexts.read().unwrap();
-    let frame_tables = frame_tables.read().unwrap();
-    let ctxs: Vec<super::ContextHandle> = contexts
-        .iter()
-        .filter(|(_, sc_arc)| sc_arc.lock().unwrap().device == device_handle)
-        .map(|(h, _)| *h)
-        .collect();
-    for ctx in ctxs {
-        let keys: Vec<u64> = {
-            let sc_arc = contexts.get(&ctx).expect("context handle in device scan");
-            sc_arc
-                .lock()
-                .unwrap()
-                .retained_compute_cbs
-                .iter()
-                .filter(|(_, g)| g.frame_table_row == Some(row))
-                .map(|(k, _)| *k)
-                .collect()
+    let keys: Vec<u64> = {
+        let contexts_read = contexts.read().unwrap();
+        let Some(sc_arc) = contexts_read.get(&ctx) else {
+            return;
         };
-        for key in keys {
-            evict_retained_on_context(&contexts, &frame_tables, ctx, key);
-        }
+        let sc = sc_arc.lock().unwrap();
+        sc.retained_compute_cbs
+            .iter()
+            .filter(|(_, g)| g.frame_table_row == Some(row))
+            .map(|(k, _)| *k)
+            .collect()
+    };
+    for key in keys {
+        evict_retained_on_context(frame_table, ctx, key, contexts);
     }
 }
 
 /// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
 pub(super) fn evict_retained_with_scope(scope: &VulkanSubmitScope<'_>, ctx: super::ContextHandle, key: u64) {
     scope.assert_ctx(ctx);
-    let contexts = scope.view.contexts.read().unwrap();
-    let frame_tables = scope.view.frame_tables.read().unwrap();
-    evict_retained_on_context(&contexts, &frame_tables, ctx, key);
+    evict_retained_on_context(&scope.frame_table, ctx, key, scope.view.contexts);
 }
 
 pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {

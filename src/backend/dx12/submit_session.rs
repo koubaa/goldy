@@ -94,16 +94,43 @@ impl<'a> Dx12SubmitScope<'a> {
 
 pub(crate) fn record_state_from_backend<'a>(
     state: &'a Dx12State,
+    ctx: ContextHandle,
     device_handle: DeviceHandle,
 ) -> Result<Dx12RecordState<'a>> {
     let frame_table = Arc::clone(
-        state
-            .frame_tables
+        &state
+            .contexts
             .read()
             .unwrap()
-            .get(&device_handle)
-            .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
+            .get(&ctx)
+            .with_context(|| format!("Invalid context handle {ctx}"))?
+            .lock()
+            .unwrap()
+            .frame_table,
     );
+    Ok(Dx12RecordState {
+        ld: state
+            .devices
+            .get(&device_handle)
+            .with_context(|| format!("Invalid device {device_handle}"))?,
+        devices: &state.devices,
+        contexts: &state.contexts,
+        frame_table,
+        buffers: &state.buffers,
+        shaders: &state.shaders,
+        pipelines: &state.pipelines,
+        compute_pipelines: &state.compute_pipelines,
+        render_targets: &state.render_targets,
+        textures: &state.textures,
+        samplers: &state.samplers,
+    })
+}
+
+pub(crate) fn record_state_for_legacy_render<'a>(
+    state: &'a mut Dx12State,
+    device_handle: DeviceHandle,
+) -> Result<Dx12RecordState<'a>> {
+    let frame_table = super::frame_table::ensure_legacy_frame_table(state, device_handle)?;
     Ok(Dx12RecordState {
         ld: state
             .devices
@@ -152,20 +179,15 @@ impl Dx12SubmitSession {
                 .get(&ctx)
                 .with_context(|| format!("Invalid context handle {ctx}"))?,
         );
-        let device_handle = sc.lock().unwrap().device;
+        let (device_handle, frame_table) = {
+            let sc_guard = sc.lock().unwrap();
+            (sc_guard.device, Arc::clone(&sc_guard.frame_table))
+        };
         let ld = Arc::clone(
             state
                 .devices
                 .get(&device_handle)
                 .with_context(|| format!("Invalid device handle {device_handle}"))?,
-        );
-        let frame_table = Arc::clone(
-            state
-                .frame_tables
-                .read()
-                .unwrap()
-                .get(&device_handle)
-                .with_context(|| format!("frame table not initialized for device {device_handle}"))?,
         );
         let devices: HashMap<DeviceHandle, SharedLogicalDevice> = state
             .devices

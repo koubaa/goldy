@@ -1338,50 +1338,73 @@ pub(super) fn set_logical_size(
 /// descriptor slots for deferred deletion after in-flight GPU work completes.
 /// For views, only the descriptor slots are deferred.
 pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
-    if let Some(buffer) = state.buffers.write().unwrap().entries.remove(&buffer_handle) {
-        if let Some(device) = state.devices.get(&buffer.device_handle) {
-            let last_fence = device
-                .timeline_next
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_sub(1);
+    // Drop the buffers write lock before context attribution: the submission worker
+    // holds sc Mutex then buffers.read() (bind_to_bindless_heap); holding buffers.write()
+    // here while waiting on sc would invert that order and deadlock.
+    let Some(buffer) = ({
+        let mut buffers = state.buffers.write().unwrap();
+        buffers.entries.remove(&buffer_handle)
+    }) else {
+        return;
+    };
+    let Some(device) = state.devices.get(&buffer.device_handle) else {
+        return;
+    };
+    let barrier = super::context::reclamation_barrier(state, buffer.device_handle);
+    let last_fence = {
+        let registry = device.descriptors.lock().unwrap();
+        registry.bindless_retirement_fence_for_buffer(buffer_handle, barrier)
+    };
+    let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
 
-            if buffer.is_view {
-                device
-                    .deletion_queue
-                    .lock()
-                    .unwrap()
-                    .queue(last_fence, super::types::PendingDeletion::BufferView { buffer_handle });
-                return;
-            }
+    if buffer.is_view {
+        let deletion = super::types::PendingDeletion::BufferView { buffer_handle };
+        queue_pending_deletion(state, device, ctx_h, last_fence, deletion);
+        return;
+    }
 
-            if buffer.transient_placed {
-                device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
-                return;
-            }
-            if buffer.coherent_readback_mapped.is_some() {
-                let no_write = D3D12_RANGE { Begin: 0, End: 0 };
-                if buffer.is_grant_readback {
-                    // Grant readback maps the primary READBACK resource directly.
-                    unsafe { buffer.resource.Unmap(0, Some(&no_write)) };
-                } else if let Some(ref rb) = buffer.coherent_readback {
-                    unsafe { rb.Unmap(0, Some(&no_write)) };
-                }
-            }
-            device.deletion_queue.lock().unwrap().queue(
-                last_fence,
-                super::types::PendingDeletion::Buffer {
-                    buffer_handle,
-                    resource: buffer.resource,
-                    upload_buffer: buffer.upload_buffer,
-                    coherent_readback: buffer.coherent_readback,
-                    reserved_tiles: if buffer.is_reserved {
-                        Some(buffer.reserved_tiles)
-                    } else {
-                        None
-                    },
-                },
-            );
+    if buffer.transient_placed {
+        device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
+        return;
+    }
+    if buffer.coherent_readback_mapped.is_some() {
+        let no_write = D3D12_RANGE { Begin: 0, End: 0 };
+        if buffer.is_grant_readback {
+            // Grant readback maps the primary READBACK resource directly.
+            unsafe { buffer.resource.Unmap(0, Some(&no_write)) };
+        } else if let Some(ref rb) = buffer.coherent_readback {
+            unsafe { rb.Unmap(0, Some(&no_write)) };
         }
+    }
+    let deletion = super::types::PendingDeletion::Buffer {
+        buffer_handle,
+        resource: buffer.resource,
+        upload_buffer: buffer.upload_buffer,
+        coherent_readback: buffer.coherent_readback,
+        reserved_tiles: if buffer.is_reserved {
+            Some(buffer.reserved_tiles)
+        } else {
+            None
+        },
+    };
+    queue_pending_deletion(state, device, ctx_h, last_fence, deletion);
+}
+
+fn queue_pending_deletion(
+    state: &Dx12State,
+    device: &super::types::LogicalDevice,
+    ctx_h: Option<super::ContextHandle>,
+    last_fence: u64,
+    deletion: super::types::PendingDeletion,
+) {
+    if let Some(ctx_h) = ctx_h {
+        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx_h) {
+            sc_arc.lock().unwrap().deletion_queue.queue(last_fence, deletion);
+        } else {
+            device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
+        }
+    } else {
+        device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
     }
 }
 

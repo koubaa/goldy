@@ -267,7 +267,6 @@ impl VulkanBackend {
             compute_fence_pool: Arc::new(Mutex::new(HashMap::new())),
             device_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             enable_validation,
-            frame_tables: Arc::new(RwLock::new(HashMap::new())),
         };
 
         Ok(Self { state })
@@ -329,6 +328,14 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
         }
         if let Some(ld) = self.state.devices.get(&device_handle) {
             let drain_to = value.min(retired);
+            let ctx_batch: Vec<_> = self
+                .state
+                .contexts
+                .read()
+                .unwrap()
+                .get(&ctx)
+                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(drain_to))
+                .unwrap_or_default();
             let drained = {
                 let _drain = crate::tracy_zone!("vk.wait_until.deletion_queue.drain");
                 ld.deletion_queue.lock().unwrap().drain_up_to(drain_to)
@@ -337,7 +344,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
                 let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                 let mut registry = descriptors_arc.lock().unwrap();
-                for r in drained {
+                for r in ctx_batch.into_iter().chain(drained) {
                     types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 let completed_values =
@@ -501,7 +508,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn destroy_buffer(&mut self, buffer_handle: BufferHandle) {
-        buffer::destroy(&self.state.devices, &self.state.buffers, buffer_handle);
+        buffer::destroy(&self.state, buffer_handle);
     }
 
     fn write_buffer(&mut self, buffer_handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
@@ -671,7 +678,7 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn free_readback_buffer(&mut self, buffer: BufferHandle) {
-        buffer::destroy(&self.state.devices, &self.state.buffers, buffer);
+        buffer::destroy(&self.state, buffer);
     }
 
     fn query_texture_copy_footprint(
@@ -850,17 +857,13 @@ impl GpuBackend for VulkanBackend {
         target: RenderTargetHandle,
         commands: &[RenderCommand],
     ) -> Result<()> {
-        let contexts = &self.state.contexts;
-        let pipelines = &self.state.pipelines;
-        let buffers = &self.state.buffers;
-        let devices = &self.state.devices;
-        let frame_tables = &self.state.frame_tables;
+        let instance = self.state.instance.clone();
+        let frame_table = frame_table::ensure_legacy_frame_table(&mut self.state, &instance, device_handle)?;
         let render_resources = render_target::RenderToResources {
-            contexts,
-            devices,
-            frame_tables,
-            buffers,
-            pipelines,
+            devices: &self.state.devices,
+            frame_table: &frame_table,
+            buffers: &self.state.buffers,
+            pipelines: &self.state.pipelines,
         };
         render_target::render_to(
             render_resources,
@@ -869,8 +872,8 @@ impl GpuBackend for VulkanBackend {
             target,
             commands,
             |cmd, cmds, logical_device, current_pipeline| {
-                let pipelines_read = pipelines.read().unwrap();
-                let buffers_read = buffers.read().unwrap();
+                let pipelines_read = self.state.pipelines.read().unwrap();
+                let buffers_read = self.state.buffers.read().unwrap();
                 render_commands::record(
                     cmd,
                     cmds,
@@ -878,6 +881,7 @@ impl GpuBackend for VulkanBackend {
                     &pipelines_read.entries,
                     &buffers_read.entries,
                     current_pipeline,
+                    (frame_table.selector_slot, frame_table.table_slot),
                 )
             },
         )
@@ -954,6 +958,7 @@ impl GpuBackend for VulkanBackend {
             frame.surface,
             frame.image,
             frame.present_slot,
+            frame.context,
             timeline_sem,
             commands,
         )?;
@@ -1465,11 +1470,12 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
-        let device_handle = self.context_device(ctx);
         self.state
-            .devices
-            .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().len())
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.len())
             .unwrap_or(0)
     }
 }

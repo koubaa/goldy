@@ -37,7 +37,7 @@ pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
 }
 
 pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<ContextHandle> {
-    let ld = state.devices.get(&device).context("Invalid device handle")?;
+    let ld = state.devices.get(&device).context("Invalid device handle")?.clone();
 
     let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
         .semaphore_type(vk::SemaphoreType::TIMELINE)
@@ -73,6 +73,10 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
 
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);
+
+    let instance = state.instance.clone();
+    let frame_table = super::frame_table::init_context(state, &instance, device, &ld)?;
+
     state.contexts.write().unwrap().insert(
         id,
         Arc::new(Mutex::new(SubmissionContext {
@@ -89,6 +93,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
+            frame_table,
         })),
     );
     Ok(id)
@@ -153,16 +158,17 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         for cb in sc.free_cmd_buffers.drain(..) {
             ld.device.free_command_buffers(command_pool, &[cb]);
         }
+        let mut rows_to_unpin = Vec::new();
         for (_, retained) in sc.retained_compute_cbs.drain() {
-            if let Some(row) = retained.frame_table_row {
-                if let Some(ft) = state.frame_tables.read().unwrap().get(&device) {
-                    super::frame_table::unpin_row(ft, row);
-                }
-            }
+            rows_to_unpin.push(retained.frame_table_row);
             ld.device.free_command_buffers(command_pool, &[retained.command_buffer]);
+        }
+        for row in rows_to_unpin.into_iter().flatten() {
+            super::frame_table::unpin_row(&sc.frame_table, row);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);
+        super::frame_table::destroy_context(state, ld, &sc.frame_table);
     }
 }
 
@@ -245,4 +251,46 @@ pub(super) fn context_device(state: &VulkanState, ctx: ContextHandle) -> DeviceH
         .lock()
         .unwrap()
         .device
+}
+
+fn contexts_on_device(state: &VulkanState, device: DeviceHandle) -> Vec<ContextHandle> {
+    state
+        .contexts
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|(&h, sc_arc)| {
+            let sc = sc_arc.lock().unwrap();
+            (sc.device == device).then_some(h)
+        })
+        .collect()
+}
+
+/// When exactly one live context exists on `device`, return it for destroy attribution.
+pub(super) fn sole_context_on_device(state: &VulkanState, device: DeviceHandle) -> Option<ContextHandle> {
+    let mut on_device = contexts_on_device(state, device);
+    if on_device.len() == 1 {
+        on_device.pop()
+    } else {
+        None
+    }
+}
+
+/// Context to receive a user-initiated buffer destroy when attribution is unambiguous.
+pub(super) fn destroy_attribution_context(state: &VulkanState, device: DeviceHandle) -> Option<ContextHandle> {
+    sole_context_on_device(state, device)
+}
+
+/// Timeline barrier for deferred buffer destruction on `device`.
+pub(super) fn reclamation_barrier(state: &VulkanState, device: DeviceHandle, ctx: Option<ContextHandle>) -> u64 {
+    if let Some(ctx) = ctx {
+        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
+            return sc_arc.lock().unwrap().last_submitted_seq;
+        }
+    }
+    state
+        .devices
+        .get(&device)
+        .map(|d| d.timeline_next.load(Ordering::Relaxed).saturating_sub(1))
+        .unwrap_or(0)
 }

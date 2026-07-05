@@ -617,6 +617,8 @@ pub(crate) struct SubmissionContext {
     /// surface acquire).  As a result the submit hot path no longer touches the
     /// device-level queue at all, which is required for Phase 5 (lock-free submit).
     pub deletion_queue: DeletionQueue,
+    /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
+    pub frame_table: SharedFrameTableDevice,
 }
 
 /// A logical Vulkan device with associated resources.
@@ -698,6 +700,9 @@ pub(crate) struct LogicalDevice {
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
     pub vk_timestamp_period_ns: f32,
+
+    /// Frame table for legacy `render_to_target` (no submission context).
+    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
 }
 
 /// A Vulkan command buffer retained for resubmission.
@@ -1341,11 +1346,8 @@ pub(super) type SharedComputeFencePool = Arc<ComputeFencePool>;
 /// Per-context map — read/write independently of the global backend mutex (Phase 5b-iii).
 pub(crate) type SharedContextMap = Arc<RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
 
-/// Per-device frame-table GPU resources — cloned into submit sessions.
+/// Per-context frame-table GPU resources — cloned into submit sessions at context creation.
 pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
-
-/// Frame tables keyed by device — cloned into [`super::submit_session::VulkanSubmitSession`].
-pub(crate) type SharedFrameTableMap = Arc<RwLock<HashMap<DeviceHandle, SharedFrameTableDevice>>>;
 
 /// Map plus monotonic handle allocator for a single resource kind.
 ///
@@ -1426,6 +1428,4 @@ pub(super) struct VulkanState {
     /// `true` when `VK_EXT_debug_utils` was loaded (i.e. validation layers are
     /// active).  Guards `set_texture_debug_name` so we never call a null fp.
     pub enable_validation: bool,
-    /// Per-device frame-table GPU resources (selector, device table, upload staging).
-    pub frame_tables: SharedFrameTableMap,
 }

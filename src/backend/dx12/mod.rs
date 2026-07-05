@@ -134,6 +134,13 @@ pub fn is_debug_mode() -> bool {
     !no_debug && (cfg!(debug_assertions) || std::env::var("GOLDY_DX12_DEBUG").is_ok_and(|v| v == "1" || v == "true"))
 }
 
+pub(crate) fn env_enable_dred() -> bool {
+    if std::env::var("GOLDY_DX12_NO_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        return false;
+    }
+    is_debug_mode() || std::env::var("GOLDY_DX12_DRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Get or create a DX12 backend for one [`crate::Instance`].
 ///
 /// Each instance owns independent `Dx12State` (resource tables, contexts, devices) so
@@ -183,8 +190,7 @@ impl Dx12Backend {
             next_dsv_offset: 0,
             free_dsv_offsets: Vec::new(),
             slang_compiler,
-            device_removed: std::sync::atomic::AtomicBool::new(false),
-            frame_tables: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            device_removed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         Ok(Self { state })
@@ -194,7 +200,7 @@ impl Dx12Backend {
     fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
         let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
-        utils::wait_for_fence(&device.fence, fence_value)
+        utils::wait_for_fence_on_device(&device.fence, fence_value, Some(device))
     }
 }
 
@@ -210,7 +216,12 @@ impl Dx12Backend {
             logical_device
                 .timeline_next
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            logical_device.flush_deletion_queue();
+            let fences = self.state.context_fences.read().unwrap();
+            logical_device.flush_deletion_queue(&fences);
+
+            if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
+                frame_table::destroy_context(&self.state, device_handle, &ft);
+            }
 
             let pso_cache = logical_device.pso_cache.read().unwrap();
             if pso_cache.dirty {
@@ -389,20 +400,29 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         // Detect TDR: device removal signals all fences with u64::MAX.
         let completed = unsafe { fence.GetCompletedValue() };
         if completed == u64::MAX {
-            self.state
-                .device_removed
-                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(ld) = self.state.devices.get(&device_handle) {
+                diagnostic::first_touch_device_removed(
+                    &ld.device,
+                    &self.state.device_removed,
+                    "dx12::finish_timeline_wait",
+                    value,
+                    completed,
+                );
                 let reason = unsafe { ld.device.GetDeviceRemovedReason() };
                 anyhow::bail!("GPU device removed (TDR): {:?}", reason);
             }
             anyhow::bail!("GPU device removed (TDR)");
         }
         let retired = context::device_retired(&self.state, device_handle);
+        let drain_to = value.min(retired);
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            ld.process_deletion_queue_up_to(value.min(retired));
-            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
+                let mut sc = sc_arc.lock().unwrap();
+                context::drain_context_deletion_queue_up_to(ld, &mut sc, drain_to);
+            }
             let fences = self.state.context_fences.read().unwrap();
+            ld.process_deletion_queue_up_to(drain_to, &fences);
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
         Ok(())
@@ -515,6 +535,18 @@ impl GpuBackend for Dx12Backend {
             ld: std::sync::Arc::clone(self.state.devices.get(&device_handle)?),
             context_fences: std::sync::Arc::clone(&self.state.context_fences),
         }))
+    }
+
+    fn clone_context_reclamation_scope(
+        &self,
+        ctx: ContextHandle,
+    ) -> std::sync::Arc<dyn crate::backend::ContextReclamationScope> {
+        if let Some(sc) = self.state.contexts.read().unwrap().get(&ctx) {
+            return std::sync::Arc::new(Dx12ContextReclamationScope {
+                sc: std::sync::Arc::clone(sc),
+            });
+        }
+        std::sync::Arc::new(crate::backend::NoOpReclamationScope)
     }
 
     fn context_device(&self, ctx: ContextHandle) -> DeviceHandle {
@@ -817,6 +849,7 @@ impl GpuBackend for Dx12Backend {
             frame.surface,
             frame.image,
             frame.present_slot,
+            frame.context,
             commands,
         )
     }
@@ -960,20 +993,29 @@ impl GpuBackend for Dx12Backend {
             // Detect TDR: device removal signals all fences with u64::MAX.
             let completed = unsafe { fence.GetCompletedValue() };
             if completed == u64::MAX {
-                self.state
-                    .device_removed
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
+                    diagnostic::first_touch_device_removed(
+                        &ld.device,
+                        &self.state.device_removed,
+                        "dx12::wait_for_context_timeout",
+                        value,
+                        completed,
+                    );
                     let reason = unsafe { ld.device.GetDeviceRemovedReason() };
                     anyhow::bail!("GPU device removed (TDR): {:?}", reason);
                 }
                 anyhow::bail!("GPU device removed (TDR)");
             }
             let retired = context::device_retired(&self.state, device_handle);
+            let drain_to = value.min(retired);
             if let Some(dev) = self.state.devices.get(&device_handle) {
-                dev.process_deletion_queue_up_to(value.min(retired));
-                let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
+                if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
+                    let mut sc = sc_arc.lock().unwrap();
+                    context::drain_context_deletion_queue_up_to(dev, &mut sc, drain_to);
+                }
                 let fences = self.state.context_fences.read().unwrap();
+                dev.process_deletion_queue_up_to(drain_to, &fences);
+                let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
                 descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
             }
         }
@@ -1231,20 +1273,39 @@ impl GpuBackend for Dx12Backend {
         let device_handle = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device_handle);
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            ld.process_deletion_queue_up_to(retired);
-            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
+            let ctx_batch: Vec<_> = self
+                .state
+                .contexts
+                .read()
+                .unwrap()
+                .get(&ctx)
+                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to_completed(retired))
+                .unwrap_or_default();
+            if !ctx_batch.is_empty() {
+                let mut registry = ld.descriptors.lock().unwrap();
+                for resource in ctx_batch {
+                    types::destroy_pending_deletion(ld, &mut registry, resource);
+                }
+            }
             let fences = self.state.context_fences.read().unwrap();
+            ld.process_deletion_queue_up_to(retired, &fences);
+            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
     }
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
-        let device_handle = self.context_device(ctx);
-        self.state
-            .devices
-            .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
-            .unwrap_or(0)
+        let ctx_pending = self
+            .state
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .map(|sc| sc.lock().unwrap().deletion_queue.pending_len())
+            .unwrap_or(0);
+        // Per-context count only: device-global queue holds foreign/legacy destroys
+        // and must not pollute this context's reclaim horizon (see scheme_two_contexts_reclaim_independently).
+        ctx_pending
     }
 }
 
@@ -1308,6 +1369,18 @@ impl crate::backend::DeviceTimelineReader for Dx12DeviceTimelineReader {
     }
 }
 
+struct Dx12ContextReclamationScope {
+    sc: types::SharedSubmissionContext,
+}
+
+impl crate::backend::ContextReclamationScope for Dx12ContextReclamationScope {
+    fn set_epoch(&self, epoch: Option<crate::timeline::TimelineValue>) {
+        if let Ok(mut sc) = self.sc.lock() {
+            sc.reclamation_context = epoch.map(|epoch| (std::thread::current().id(), epoch));
+        }
+    }
+}
+
 struct Dx12ContextDeferredDeletionFlush {
     ctx: ContextHandle,
     sc: types::SharedSubmissionContext,
@@ -1338,6 +1411,6 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             }
             registry.drain_ready_slot_reclamations(&fences);
         }
-        self.ld.process_deletion_queue_up_to(device_retired);
+        self.ld.process_deletion_queue_up_to(device_retired, &fences);
     }
 }

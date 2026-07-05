@@ -700,6 +700,14 @@ pub(super) fn record_commands_to_buffer(
                     prologue_row.unwrap_or(0) * crate::frame_table::FRAME_TABLE_ROW_STRIDE + frame_table_base;
                 let mut layout = PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, absolute_base, raw_user);
+                // Metal's frame table is device-level at fixed arg slots (selector
+                // unused; table at slot 1); the slots still travel via push words
+                // so the shared shader preamble reads them uniformly.
+                shared::set_frame_table_slots(
+                    &mut layout,
+                    crate::frame_table::FRAME_TABLE_SELECTOR_SLOT,
+                    crate::frame_table::FRAME_TABLE_DEVICE_SLOT,
+                );
                 let layout_bytes = layout.as_bytes();
                 guard
                     .compute
@@ -774,6 +782,11 @@ pub(super) fn record_commands_to_buffer(
                             let mut patched = PushLayout::default();
                             bytemuck::bytes_of_mut(&mut patched).copy_from_slice(layout_slice);
                             patched._reserved[0] = patched._reserved[0].wrapping_add(row_offset);
+                            shared::set_frame_table_slots(
+                                &mut patched,
+                                crate::frame_table::FRAME_TABLE_SELECTOR_SLOT,
+                                crate::frame_table::FRAME_TABLE_DEVICE_SLOT,
+                            );
                             enc.set_bytes(
                                 RESOURCE_SLOT_BUFFER,
                                 std::mem::size_of::<PushLayout>() as u64,

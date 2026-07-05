@@ -893,11 +893,11 @@ pub(super) fn render(
     surface_handle: SurfaceHandle,
     image: SwapchainImageHandle,
     present_slot: u32,
+    ctx: super::ContextHandle,
     timeline_sem: vk::Semaphore,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let devices = &state.devices;
-    let frame_tables = &state.frame_tables;
     let buffers = &state.buffers;
     let pipelines = &state.pipelines;
     let surfaces = &mut state.surfaces;
@@ -993,12 +993,23 @@ pub(super) fn render(
             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
+        let frame_table = {
+            let contexts_read = state.contexts.read().unwrap();
+            let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
+            drop(contexts_read);
+            let sc_guard = sc_arc.lock().unwrap();
+            let ft = std::sync::Arc::clone(&sc_guard.frame_table);
+            drop(sc_guard);
+            ft
+        };
         if has_bindings {
-            super::frame_table::record_prologue_for_tables(
+            // Per-context frame-table slots are bound once at context init; no
+            // per-submit rebinding needed.
+            super::frame_table::record_prologue(
                 &state.contexts,
-                frame_tables,
+                ctx,
+                &frame_table,
                 buffers,
-                device_handle,
                 logical_device,
                 cmd,
                 &staging_data,
@@ -1138,6 +1149,7 @@ pub(super) fn render(
                 &pipelines_read.entries,
                 &buffers_read.entries,
                 &mut current_pipeline,
+                (frame_table.selector_slot, frame_table.table_slot),
             )?;
         }
 

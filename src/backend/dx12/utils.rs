@@ -194,6 +194,13 @@ pub(super) fn execute_command_lists_and_signal_device(
     Ok(fence_value)
 }
 
+/// Run `f` while holding [`LogicalDevice::queue_lock`] (the queue is externally synchronized).
+pub(super) fn with_queue_lock<R>(logical_device: &LogicalDevice, f: impl FnOnce() -> R) -> R {
+    let queue_lock = Arc::clone(&logical_device.queue_lock);
+    let _guard = queue_lock.lock().unwrap();
+    f()
+}
+
 /// Execute command lists and signal a context fence under [`LogicalDevice::queue_lock`].
 pub(super) fn execute_command_lists_and_signal_context(
     logical_device: &LogicalDevice,
@@ -213,13 +220,48 @@ pub(super) fn execute_command_lists_and_signal_context(
 /// Wait for a fence to reach the specified value.
 /// This is a low-level helper for GPU synchronization.
 pub(super) fn wait_for_fence(fence: &ID3D12Fence, value: u64) -> Result<()> {
-    if unsafe { fence.GetCompletedValue() } < value {
+    wait_for_fence_on_device(fence, value, None)
+}
+
+/// Like [`wait_for_fence`] but logs DRED on first `u64::MAX` when `ld` is provided.
+pub(super) fn wait_for_fence_on_device(
+    fence: &ID3D12Fence,
+    value: u64,
+    ld: Option<&super::types::LogicalDevice>,
+) -> Result<()> {
+    let completed = unsafe { fence.GetCompletedValue() };
+    if completed == u64::MAX {
+        if let Some(ld) = ld {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &ld.device_removed,
+                "dx12::utils::wait_for_fence_on_device",
+                value,
+                completed,
+            );
+        }
+        anyhow::bail!("GPU device removed while waiting for fence value {value}");
+    }
+    if completed < value {
         let event = unsafe { CreateEventA(None, false, false, None) }.context("Failed to create event")?;
 
         unsafe { fence.SetEventOnCompletion(value, event) }.context("Failed to set event on completion")?;
 
         unsafe { WaitForSingleObject(event, INFINITE) };
         unsafe { CloseHandle(event) }.ok();
+    }
+    let completed_after = unsafe { fence.GetCompletedValue() };
+    if completed_after == u64::MAX {
+        if let Some(ld) = ld {
+            super::diagnostic::first_touch_device_removed(
+                &ld.device,
+                &ld.device_removed,
+                "dx12::utils::wait_for_fence_on_device",
+                value,
+                completed_after,
+            );
+        }
+        anyhow::bail!("GPU device removed after waiting for fence value {value}");
     }
     Ok(())
 }

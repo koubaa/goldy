@@ -544,9 +544,8 @@ where
 }
 
 pub(super) struct RenderToResources<'a> {
-    pub(super) contexts: &'a super::types::SharedContextMap,
     pub(super) devices: &'a HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    pub(super) frame_tables: &'a super::types::SharedFrameTableMap,
+    pub(super) frame_table: &'a super::types::SharedFrameTableDevice,
     pub(super) buffers: &'a super::types::SharedBufferTable,
     pub(super) pipelines: &'a super::types::SharedPipelineTable,
 }
@@ -580,11 +579,9 @@ where
         .context("Failed to begin command buffer")?;
 
     if has_bindings {
-        super::frame_table::record_prologue_for_tables(
-            resources.contexts,
-            resources.frame_tables,
+        super::frame_table::record_prologue_legacy(
+            resources.frame_table,
             resources.buffers,
-            device_handle,
             logical_device,
             cmd,
             &staging_data,

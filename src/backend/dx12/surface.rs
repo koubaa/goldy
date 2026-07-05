@@ -381,7 +381,8 @@ pub(super) fn acquire(
     let retired = super::context::device_retired(state, device_handle);
     if let Some(device) = state.devices.get(&device_handle) {
         let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
-        device.process_deletion_queue_up_to(retired);
+        let fences = state.context_fences.read().unwrap();
+        device.process_deletion_queue_up_to(retired, &fences);
     }
 
     let surface = state
@@ -481,6 +482,7 @@ pub(super) fn render(
     surface_handle: SurfaceHandle,
     image: SwapchainImageHandle,
     present_slot: u32,
+    ctx: super::ContextHandle,
     commands: &[RenderCommand],
 ) -> Result<()> {
     let surface = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
@@ -611,25 +613,31 @@ pub(super) fn render(
     }
 
     let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands_state(state, device_handle, commands)?;
+        super::frame_table::prepare_render_commands_state(state, ctx, device_handle, commands)?;
     if has_bindings {
-        super::frame_table::record_prologue(
+        let ft = {
+            let contexts_read = state.contexts.read().unwrap();
+            let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
+            drop(contexts_read);
+            let sc_guard = sc_arc.lock().unwrap();
+            let ft = std::sync::Arc::clone(&sc_guard.frame_table);
+            drop(sc_guard);
+            ft
+        };
+        // Per-context frame-table slots are bound once at context init; no
+        // per-submit rebinding needed.
+        let _row = super::frame_table::record_prologue(
             &state.contexts,
-            state
-                .frame_tables
-                .read()
-                .unwrap()
-                .get(&device_handle)
-                .context("frame table not initialized")?,
+            ctx,
+            &ft,
             &state.buffers.read().unwrap().entries,
-            device_handle,
             cmd,
             &staging_data,
         )?;
     }
 
     // Execute render commands
-    render_commands::record_state(cmd, &lowered, device_handle, state)?;
+    render_commands::record_state(cmd, &lowered, device_handle, ctx, state)?;
 
     // RENDER_TARGET -> PRESENT (enhanced barrier, per MS DirectX-Graphics-Samples).
     // SYNC_NONE + NO_ACCESS: no subsequent work on this resource in this command list.

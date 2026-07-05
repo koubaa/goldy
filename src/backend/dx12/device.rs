@@ -416,17 +416,22 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             compute_batch_dispatch_signature,
             zero_buffer,
             deletion_queue: std::sync::Mutex::new(super::types::DeletionQueue::new()),
+            pending_buffer_gpu_releases: std::sync::Mutex::new(Vec::new()),
+            device_removed: std::sync::Arc::clone(&state.device_removed),
             descriptors: std::sync::Arc::new(std::sync::Mutex::new(super::types::DescriptorRegistry::new())),
             pso_cache: std::sync::Arc::new(std::sync::RwLock::new(super::types::PsoCache::new(
                 graphics_pso_blobs,
                 compute_pso_blobs,
             ))),
             queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            legacy_frame_table: std::sync::Mutex::new(None),
         }),
     );
 
-    let ld = state.devices.get(&handle).unwrap().clone();
-    super::frame_table::init_device(state, handle, &ld)?;
+    {
+        let ld = state.devices.get(&handle).unwrap();
+        super::frame_table::reserve_device_bindless_slots(ld);
+    }
 
     tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
     Ok(handle)

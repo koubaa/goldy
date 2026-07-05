@@ -25,9 +25,10 @@ pub(super) fn record_state(
     cmd: &ID3D12GraphicsCommandList7,
     commands: &[RenderCommand],
     device_handle: DeviceHandle,
+    ctx: super::ContextHandle,
     state: &Dx12State,
 ) -> anyhow::Result<()> {
-    let record = super::submit_session::record_state_from_backend(state, device_handle)?;
+    let record = super::submit_session::record_state_from_backend(state, ctx, device_handle)?;
     record_with_tables(cmd, commands, device_handle, &record)
 }
 
@@ -115,6 +116,11 @@ fn record_with_tables(
                 }
                 let mut layout = types::PushLayout::default();
                 shared::fill_frame_table_dispatch(&mut layout, *frame_table_base, raw_user);
+                shared::set_frame_table_slots(
+                    &mut layout,
+                    record.frame_table.selector_slot,
+                    record.frame_table.table_slot,
+                );
                 unsafe {
                     cmd.SetGraphicsRoot32BitConstants(
                         0,

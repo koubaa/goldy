@@ -4,11 +4,16 @@
 //! before each submission; shader preambles resolve `index = table[selector][base + k]`
 //! instead of reading baked push-constant words.
 
-/// Bindless heap slot for the per-submission selector cell (`u32`).
+/// Metal argument-buffer slot for the (unused) selector cell.
+///
+/// On DX12/Vulkan the selector/table slots are **per-context** (allocated from
+/// the device descriptor registry) and reach shaders via push constants
+/// `_rs1`/`_rs2`; these constants only describe Metal's fixed device-level
+/// argument-buffer layout.
 pub const FRAME_TABLE_SELECTOR_SLOT: u32 = 0;
-/// Bindless heap slot for the device-local index table (`Scattered<u32>`).
+/// Metal argument-buffer slot for the device-local index table (`Scattered<u32>`).
 pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
-/// First bindless slot available to program resources (selector + table are reserved).
+/// First bindless slot available to program resources (low protocol slots reserved).
 pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
 /// Maximum bindless indices routed through the table per submission row.
