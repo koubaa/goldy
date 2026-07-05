@@ -6,12 +6,12 @@
 use crate::backend::{FrameToken, GpuBackend, SurfaceHandle};
 use crate::context::Context as GpuContext;
 use crate::task_graph::TaskGraph;
-use crate::Texture;
 use crate::timeline::TimelineValue;
 use crate::tracy_frame_mark;
 use crate::tracy_zone;
 use crate::types::{PresentMode, ResourceAccess, SurfaceConfig, TextureFormat};
 use crate::vram_allocator::DeferredPayload;
+use crate::Texture;
 use anyhow::{Context, Result};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::{Arc, Mutex};

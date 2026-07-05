@@ -12,8 +12,8 @@
 //! with the timeline from [`TaskGraph::submit`](crate::task_graph::TaskGraph::submit)).
 
 use crate::device::Device;
-use crate::Texture;
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
+use crate::Texture;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -81,9 +81,7 @@ impl TexturePool {
         }
         device
             .alloc_texture(width, height, format, access, flags)
-            .map(|backing| {
-                crate::Texture::from_borrowed_backing(backing, std::sync::Arc::downgrade(&device.inner))
-            })
+            .map(|backing| crate::Texture::from_borrowed_backing(backing, std::sync::Arc::downgrade(&device.inner)))
     }
 
     /// Return an owned texture to the pool after the GPU has finished using it.

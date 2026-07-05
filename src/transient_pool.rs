@@ -128,11 +128,7 @@ impl TransientPool {
                 let entry = bin.swap_remove(pos);
                 let bytes = entry.parcel.byte_size();
                 self.pending.subtract(ParcelType::Texture, bytes);
-                let guard = BookkeepingGuard::new(
-                    Arc::downgrade(&self.outstanding),
-                    ParcelType::Texture,
-                    bytes,
-                );
+                let guard = BookkeepingGuard::new(Arc::downgrade(&self.outstanding), ParcelType::Texture, bytes);
                 self.outstanding.add(ParcelType::Texture, bytes);
                 return Ok(Texture::from_parcel(entry.parcel, guard, home_device));
             }

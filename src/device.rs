@@ -606,7 +606,10 @@ impl Device {
         Ok(buf)
     }
 
-    fn finish_texture_alloc(&self, mut tex: crate::texture::TextureBacking) -> anyhow::Result<crate::texture::TextureBacking> {
+    fn finish_texture_alloc(
+        &self,
+        mut tex: crate::texture::TextureBacking,
+    ) -> anyhow::Result<crate::texture::TextureBacking> {
         tex.set_deed(self.parcel_deed());
         Ok(tex)
     }

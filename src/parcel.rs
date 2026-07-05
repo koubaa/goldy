@@ -10,8 +10,7 @@ use crate::device::DeviceInner;
 use crate::task_graph::ResourceId;
 use crate::texture::TextureBacking;
 use crate::timeline::{
-    PromiseState, ReferenceTable, ResourceSync, Settle, TimelinePromise, TimelineValue,
-    WRITE_KINDS_TRANSFER,
+    PromiseState, ReferenceTable, ResourceSync, Settle, TimelinePromise, TimelineValue, WRITE_KINDS_TRANSFER,
 };
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle, TextureFlags};
 use crate::vram_allocator::ParcelType;
@@ -45,7 +44,6 @@ pub(crate) struct ParcelStamp {
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
-
 
     /// Set when this stamp is registered for scheme/task-graph hazard tracking.
     /// TODO: delete this when task graph is eliminated
@@ -770,11 +768,7 @@ impl Texture {
         }
     }
 
-    pub(crate) fn from_parcel(
-        parcel: Parcel,
-        bookkeeping: BookkeepingGuard,
-        home_device: Weak<DeviceInner>,
-    ) -> Self {
+    pub(crate) fn from_parcel(parcel: Parcel, bookkeeping: BookkeepingGuard, home_device: Weak<DeviceInner>) -> Self {
         Self {
             parcel,
             bookkeeping: Some(bookkeeping),
@@ -889,11 +883,7 @@ impl Texture {
 
     /// Non-owning view sharing this texture's parcel stamp.
     pub fn borrow(&self) -> Self {
-        let backing = self
-            .parcel
-            .grant_texture_keepalive()
-            .expect("texture parcel")
-            .borrow();
+        let backing = self.parcel.grant_texture_keepalive().expect("texture parcel").borrow();
         Self {
             parcel: self.parcel.clone_stamp_with_texture(backing),
             bookkeeping: None,

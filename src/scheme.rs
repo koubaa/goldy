@@ -9,9 +9,8 @@
 //! **Submission**: `scheme.submit()` — submits, and submits again, using the retained path
 //! when clean.
 
-use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureHandle, TextureCopyFootprint};
+use crate::backend::{BufferHandle, GpuCommand, RenderCommand, TextureCopyFootprint, TextureHandle};
 use crate::buffer::{Allocation, BufferSource};
-use crate::Buffer;
 use crate::context::Context;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
@@ -32,6 +31,7 @@ use crate::types::{
     TextureFormat, TextureKind,
 };
 use crate::validation_env;
+use crate::Buffer;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -1193,11 +1193,8 @@ impl Scheme {
             );
         }
 
-        let present_resolvers = claim_present_easement_promises(
-            &self.ir,
-            &self.present_grants,
-            self.submit_state.resource_stamps(),
-        );
+        let present_resolvers =
+            claim_present_easement_promises(&self.ir, &self.present_grants, self.submit_state.resource_stamps());
         let submission = self.finish_submit_frame(tv, surface_frames, present_resolvers)?;
         Ok(submission)
     }
@@ -1649,11 +1646,7 @@ impl Scheme {
     ///
     /// Required when `src` may have been written by a prior scheme submission on the same
     /// [`Context`]: cross-submission barriers and parcel stamps are applied before the transfer read.
-    pub fn copy_texture(
-        &mut self,
-        src: &crate::Texture,
-        dst: &Buffer,
-    ) -> Result<TextureCopyFootprint, GoldyError> {
+    pub fn copy_texture(&mut self, src: &crate::Texture, dst: &Buffer) -> Result<TextureCopyFootprint, GoldyError> {
         if !dst.flags().contains(BufferFlags::CPU_READABLE) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "copy_texture to buffer requires BufferFlags::CPU_READABLE destination"
@@ -1877,10 +1870,7 @@ impl SchemeBindable for crate::Texture {
             }
         });
         let parcel = self.whole();
-        (
-            Some((parcel.resource_id(), Some(parcel.stamp_handle()))),
-            slot,
-        )
+        (Some((parcel.resource_id(), Some(parcel.stamp_handle()))), slot)
     }
 }
 

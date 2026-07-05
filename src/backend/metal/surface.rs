@@ -35,9 +35,7 @@
 //! and rotate through them. Frame N writes to slot `N % 3` while the GPU reads
 //! slot `(N-1) % 3` — the slots never alias across concurrent frames.
 
-use super::super::{
-    DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle,
-};
+use super::super::{DeviceHandle, FrameToken, RenderCommand, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use super::compute;
 use super::render_commands::{create_render_pass, record};
 use super::types::{
@@ -165,7 +163,13 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
                 s.drawable_slots,
                 s.current_texture_handle,
             ),
-            None => (None, None, [None; MAX_FRAMES_IN_FLIGHT], [None; MAX_FRAMES_IN_FLIGHT], None),
+            None => (
+                None,
+                None,
+                [None; MAX_FRAMES_IN_FLIGHT],
+                [None; MAX_FRAMES_IN_FLIGHT],
+                None,
+            ),
         };
 
     for slot in 0..MAX_FRAMES_IN_FLIGHT {
@@ -330,9 +334,8 @@ pub(super) fn render(
     let surface_state = state.surfaces.get(&surface).context("Invalid surface handle")?;
     let present_slot = present_slot as usize;
 
-    let drawable_ptr = surface_state
-        .drawable_slots[present_slot]
-        .context("No drawable acquired — call surface_acquire first")?;
+    let drawable_ptr =
+        surface_state.drawable_slots[present_slot].context("No drawable acquired — call surface_acquire first")?;
     let drawable = drawable_ptr as id;
 
     let device_handle = surface_state.device_handle;

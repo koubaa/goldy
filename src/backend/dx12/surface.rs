@@ -515,8 +515,8 @@ pub(super) fn render(
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(cmd) };
     let width = surface.width;
     let height = surface.height;
-    let render_target = &surface.render_targets[image_index as usize];
-    let rtv_offset = surface.rtv_offsets[image_index as usize];
+    let render_target = &surface.render_targets[image_index];
+    let rtv_offset = surface.rtv_offsets[image_index];
     let depth_resource = surface.depth_texture.clone();
 
     // Reset command allocator and list

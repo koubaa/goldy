@@ -208,11 +208,7 @@ pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> 
 }
 
 /// Union each resource's access across the nodes in `waves` (one submit partition).
-pub fn net_access_for_waves_into(
-    out: &mut HashMap<ResourceKey, NetAccess>,
-    ir: &GraphIR,
-    waves: &[super::ir::Wave],
-) {
+pub fn net_access_for_waves_into(out: &mut HashMap<ResourceKey, NetAccess>, ir: &GraphIR, waves: &[super::ir::Wave]) {
     out.clear();
     for wave in waves {
         for &node_idx in &wave.node_indices {
@@ -378,16 +374,15 @@ pub fn compute_cross_submit_sync_into(
     }
 
     waits.clear();
-    waits.extend(
-        wait_map
-            .drain()
-            .map(|(context, value)| Epoch { context, value }),
-    );
+    waits.extend(wait_map.drain().map(|(context, value)| Epoch { context, value }));
     waits.sort_by_key(|e| (e.context, e.value));
 }
 
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
-#[allow(dead_code, reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch")]
+#[allow(
+    dead_code,
+    reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
+)]
 pub fn compute_cross_submit_sync(
     net: &HashMap<ResourceKey, NetAccess>,
     ledger: &LedgerSnapshot,
@@ -417,7 +412,10 @@ pub fn build_ledger_snapshot_into(out: &mut LedgerSnapshot, stamps: &[(ResourceK
 }
 
 /// Build a ledger snapshot from registered stamp bindings.
-#[allow(dead_code, reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch")]
+#[allow(
+    dead_code,
+    reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
+)]
 pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> LedgerSnapshot {
     let mut ledger = LedgerSnapshot::new();
     build_ledger_snapshot_into(&mut ledger, stamps);
@@ -449,7 +447,10 @@ pub fn resource_stamps_from_ir_into(
 }
 
 /// Collect unique resource keys from IR that have registered stamps.
-#[allow(dead_code, reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch")]
+#[allow(
+    dead_code,
+    reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
+)]
 pub fn resource_stamps_from_ir(
     ir: &GraphIR,
     resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
@@ -867,7 +868,10 @@ mod tests {
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
 
         assert_eq!(sync.waits.len(), 1);
-        assert_eq!(sync.waits[0].value, 9, "merged WAR must use max read epoch across provenances");
+        assert_eq!(
+            sync.waits[0].value, 9,
+            "merged WAR must use max read epoch across provenances"
+        );
     }
 
     #[test]
@@ -999,13 +1003,7 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
         assert!(sync.prologue.is_empty());
-        assert_eq!(
-            sync.waits,
-            vec![Epoch {
-                context: ctx,
-                value: 3
-            }]
-        );
+        assert_eq!(sync.waits, vec![Epoch { context: ctx, value: 3 }]);
     }
 
     #[test]

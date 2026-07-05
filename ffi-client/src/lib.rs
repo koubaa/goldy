@@ -19,9 +19,9 @@ mod retained_pool;
 mod scheme;
 mod shader_module;
 mod surface;
-mod texture;
 mod swapchain_pool;
 mod sys;
+mod texture;
 mod types;
 
 pub use adapter::Adapter;
@@ -40,9 +40,9 @@ pub use scheme::{
     SchemeRenderPassBuilder, SchemeRenderTargetLease, SchemeSubmission,
 };
 pub use shader_module::ShaderModule;
-pub use texture::Texture;
 pub use surface::{Frame, Surface};
 pub use swapchain_pool::SwapchainPool;
+pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceDescriptor, DeviceType, IndexFormat,
     NodeAccess, PowerPreference, PrimitiveTopology, RenderPipelineDesc, RequestAdapterOptions, ResourceAccess,

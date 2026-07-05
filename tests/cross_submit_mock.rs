@@ -320,10 +320,7 @@ fn war_retained_resubmit_emits_live_wait() {
     let waits = recorded_waits(&device).last().cloned().unwrap_or_default();
     assert_eq!(waits.len(), 1, "retained WAR resubmit must restate a live queue wait");
     assert_eq!(waits[0].context, ctx.test_backend_handle());
-    assert_eq!(
-        waits[0].value, 2,
-        "retained WAR resubmit must wait on the reader epoch"
-    );
+    assert_eq!(waits[0].value, 2, "retained WAR resubmit must wait on the reader epoch");
 }
 
 fn recorded_graph_syncs(device: &Device) -> Vec<bool> {

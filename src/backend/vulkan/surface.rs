@@ -1269,10 +1269,7 @@ pub(super) fn present(
     // The swapchain image view + bindless descriptor are permanent (registered
     // at swapchain creation), so no deferred unregister is needed.
     let (render_pass_submitted, device_handle, render_finished_sem_present, swapchain) = {
-        let s = state
-            .surfaces
-            .get(&surface_handle)
-            .context("Invalid surface handle")?;
+        let s = state.surfaces.get(&surface_handle).context("Invalid surface handle")?;
         let rp = s.frame_sync[present_slot].render_pass_submitted;
         let dh = s.device_handle;
         let fr = &s.frame_sync[present_slot];
@@ -1306,7 +1303,11 @@ pub(super) fn present(
             let scratch = s.scratch_texture_slots[present_slot]
                 .as_ref()
                 .expect("scratch texture slot not initialized before present");
-            (scratch.image, scratch.texture_handle, s.frame_sync[present_slot].copy_command_buffer)
+            (
+                scratch.image,
+                scratch.texture_handle,
+                s.frame_sync[present_slot].copy_command_buffer,
+            )
         };
         let swapchain_image = {
             let s = state.surfaces.get(&surface_handle).unwrap();

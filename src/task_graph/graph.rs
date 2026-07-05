@@ -20,9 +20,9 @@ use crate::error::GoldyError;
 use crate::pipeline::RenderPipeline;
 use crate::render_target::RenderTarget;
 use crate::sampler::Sampler;
-use crate::Texture;
 use crate::timeline::TimelineValue;
 use crate::types::{Color, IndexFormat, ResourceAccess, ResourceHandle, TextureFormat};
+use crate::Texture;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -553,7 +553,11 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
 ///
 /// Each fingerprint folds `partition_fingerprint` with the partition index so that
 /// identical adjacent partitions get distinct keys.
-fn compute_partition_fps(ir: &GraphIR, schedule: &CompiledSchedule, wave_ranges: &[std::ops::Range<usize>]) -> Vec<u64> {
+fn compute_partition_fps(
+    ir: &GraphIR,
+    schedule: &CompiledSchedule,
+    wave_ranges: &[std::ops::Range<usize>],
+) -> Vec<u64> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     wave_ranges
@@ -988,11 +992,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
             partition_graph_commands_for_retain(ir, cache_entry, &waves, part_idx, has_render, None)
         };
         let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-        ensure_partition_retired_before_rerecord(
-            backend,
-            ctx,
-            cache.as_ref().unwrap().partition_last_tv[part_idx],
-        )?;
+        ensure_partition_retired_before_rerecord(backend, ctx, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
         last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync)?;
         {
             let entry = cache.as_mut().unwrap();
@@ -1020,6 +1020,7 @@ pub(crate) struct ResolvedPresentSlot {
 /// Like [`submit_resolved_ir_and_retain`], but resolves [`ResourceId::PresentLease`]
 /// bindings through `present_slots` and retains present-touching partitions per
 /// backing slot (immutable CB per swapchain image index).
+#[allow(clippy::too_many_arguments)] // base submit path + present_slots + stamp maps
 pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     cache: &mut Option<CompiledCacheEntry>,
     context: &crate::Context,
@@ -1038,10 +1039,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     // (no structural or topology dirtiness), reuse the cached binding fingerprint
     // directly — avoids an O(IR-nodes) hash walk every frame at steady state.
     let fp = if ir_clean {
-        cache
-            .as_ref()
-            .map(|e| e.fp)
-            .unwrap_or_else(|| binding_fingerprint(ir))
+        cache.as_ref().map(|e| e.fp).unwrap_or_else(|| binding_fingerprint(ir))
     } else {
         binding_fingerprint(ir)
     };
@@ -1085,7 +1083,6 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
         }
     };
 
-
     {
         let entry = cache.as_mut().unwrap();
         ensure_partition_cache_vecs(entry, wave_ranges.len());
@@ -1100,14 +1097,14 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.present_resolver");
         for slot in present_slots {
-        resolver.present_leases.insert(
-            slot.lease_id,
-            ResolvedSwapchain {
-                handle: slot.handle,
-                uav_index: slot.uav_index,
-            },
-        );
-    }
+            resolver.present_leases.insert(
+                slot.lease_id,
+                ResolvedSwapchain {
+                    handle: slot.handle,
+                    uav_index: slot.uav_index,
+                },
+            );
+        }
     }
 
     let ctx = context.backend_handle();
@@ -1119,98 +1116,69 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
         let mut cross_scratch = CrossSubmitScratch::new();
         let mut part_idx = 0usize;
         while part_idx < wave_ranges.len() {
-        let merged_range = {
-            let schedule = &cache.as_ref().unwrap().schedule;
-            try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx)
-        };
-        if let Some(merged_range) = merged_range {
-            let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
-            let merged_waves = {
+            let merged_range = {
                 let schedule = &cache.as_ref().unwrap().schedule;
-                schedule.waves[merged_range.clone()].to_vec()
+                try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx)
             };
+            if let Some(merged_range) = merged_range {
+                let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
+                let merged_waves = {
+                    let schedule = &cache.as_ref().unwrap().schedule;
+                    schedule.waves[merged_range.clone()].to_vec()
+                };
+                let sync = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
+                    cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &merged_waves)
+                };
+                let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+
+                if cached_key == Some(merged_fp) {
+                    let _tz = crate::tracy_zone!("goldy.resubmit.merged");
+                    if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync)? {
+                        last_tv = tv;
+                        result.resubmit_hits += 1;
+                        record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
+                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                        part_idx += 2;
+                        continue;
+                    }
+                }
+
+                let graph_cmds = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.merged_emit");
+                    analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
+                };
+                let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
+                ensure_partition_retired_before_rerecord(
+                    backend,
+                    ctx,
+                    cache.as_ref().unwrap().partition_last_tv[part_idx],
+                )?;
+                last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, merged_fp, sync)?;
+                {
+                    let entry = cache.as_mut().unwrap();
+                    entry.partition_retention_keys[part_idx] = Some(merged_fp);
+                    entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
+                    record_merged_partition_last_tvs(entry, part_idx, last_tv);
+                }
+                result.records += 1;
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
+                part_idx += 2;
+                continue;
+            }
+
+            let part_fp = partition_fps[part_idx];
+            let range = wave_ranges[part_idx].clone();
+            let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
+            let can_retain = partition_waves_can_retain(ir, &waves);
+            let has_render = partition_waves_have_render(ir, &waves);
+            let has_present = analysis::partition_waves_have_present(ir, &waves);
             let sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &merged_waves)
+                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &waves)
             };
-            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
-            if cached_key == Some(merged_fp) {
-                let _tz = crate::tracy_zone!("goldy.resubmit.merged");
-                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, merged_fp, sync)? {
-                    last_tv = tv;
-                    result.resubmit_hits += 1;
-                    record_merged_partition_last_tvs(cache.as_mut().unwrap(), part_idx, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
-                    part_idx += 2;
-                    continue;
-                }
-            }
-
-            let graph_cmds = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.merged_emit");
-                analysis::emit_graph_commands_for_waves(ir, &merged_waves, None)
-            };
-            let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
-            ensure_partition_retired_before_rerecord(
-                backend,
-                ctx,
-                cache.as_ref().unwrap().partition_last_tv[part_idx],
-            )?;
-            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, merged_fp, sync)?;
-            {
-                let entry = cache.as_mut().unwrap();
-                entry.partition_retention_keys[part_idx] = Some(merged_fp);
-                entry.partition_retention_keys[part_idx + 1] = Some(merged_fp);
-                record_merged_partition_last_tvs(entry, part_idx, last_tv);
-            }
-            result.records += 1;
-            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
-            part_idx += 2;
-            continue;
-        }
-
-        let part_fp = partition_fps[part_idx];
-        let range = wave_ranges[part_idx].clone();
-        let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
-        let can_retain = partition_waves_can_retain(ir, &waves);
-        let has_render = partition_waves_have_render(ir, &waves);
-        let has_present = analysis::partition_waves_have_present(ir, &waves);
-        let sync = {
-            let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-            cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &waves)
-        };
-
-        if !can_retain {
-            let cache_entry = cache.as_ref().unwrap();
-            let cmds = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
-                partition_standalone_commands(
-                    ir,
-                    cache_entry,
-                    &waves,
-                    part_idx,
-                    has_render,
-                    has_present,
-                    if has_present { Some(&resolver) } else { None },
-                )?
-            };
-            let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
-            last_tv = backend_submit_standalone(backend, ctx, &cmds, sync)?;
-            record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-            apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
-            part_idx += 1;
-            continue;
-        }
-
-        if has_present {
-            if present_slots.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "present partition requires at least one resolved present slot"
-                ));
-            }
-
-            if !backend.retains_present_partitions() {
+            if !can_retain {
                 let cache_entry = cache.as_ref().unwrap();
                 let cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
@@ -1220,8 +1188,8 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         &waves,
                         part_idx,
                         has_render,
-                        true,
-                        Some(&resolver),
+                        has_present,
+                        if has_present { Some(&resolver) } else { None },
                     )?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
@@ -1232,27 +1200,102 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 continue;
             }
 
-            let slot_key = {
-                let _tz = crate::tracy_zone!("goldy.partition_loop.present_slot_key");
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut h = DefaultHasher::new();
-                part_fp.hash(&mut h);
-                for slot in present_slots {
-                    slot.lease_id.hash(&mut h);
-                    slot.slot_id.hash(&mut h);
+            if has_present {
+                if present_slots.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "present partition requires at least one resolved present slot"
+                    ));
                 }
-                h.finish()
-            };
 
-            let already_retained = cache.as_ref().unwrap().partition_slot_keys[part_idx]
-                .as_ref()
-                .map(|s| s.contains(&slot_key))
-                .unwrap_or(false);
+                if !backend.retains_present_partitions() {
+                    let cache_entry = cache.as_ref().unwrap();
+                    let cmds = {
+                        let _tz = crate::tracy_zone!("goldy.partition_loop.standalone_cmds");
+                        partition_standalone_commands(
+                            ir,
+                            cache_entry,
+                            &waves,
+                            part_idx,
+                            has_render,
+                            true,
+                            Some(&resolver),
+                        )?
+                    };
+                    let _tz = crate::tracy_zone!("goldy.submit_partition.standalone");
+                    last_tv = backend_submit_standalone(backend, ctx, &cmds, sync)?;
+                    record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                    part_idx += 1;
+                    continue;
+                }
 
-            if already_retained {
-                let _tz = crate::tracy_zone!("goldy.resubmit.present_slot");
-                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, slot_key, sync)? {
+                let slot_key = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.present_slot_key");
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    part_fp.hash(&mut h);
+                    for slot in present_slots {
+                        slot.lease_id.hash(&mut h);
+                        slot.slot_id.hash(&mut h);
+                    }
+                    h.finish()
+                };
+
+                let already_retained = cache.as_ref().unwrap().partition_slot_keys[part_idx]
+                    .as_ref()
+                    .map(|s| s.contains(&slot_key))
+                    .unwrap_or(false);
+
+                if already_retained {
+                    let _tz = crate::tracy_zone!("goldy.resubmit.present_slot");
+                    if let Some(tv) = backend_try_resubmit_retained(backend, ctx, slot_key, sync)? {
+                        last_tv = tv;
+                        result.resubmit_hits += 1;
+                        record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
+                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                        part_idx += 1;
+                        continue;
+                    }
+                }
+
+                let graph_cmds = {
+                    let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
+                    partition_graph_commands_for_retain(
+                        ir,
+                        cache.as_ref().unwrap(),
+                        &waves,
+                        part_idx,
+                        has_render,
+                        Some(&resolver),
+                    )
+                };
+                let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
+                ensure_partition_retired_before_rerecord(
+                    backend,
+                    ctx,
+                    cache.as_ref().unwrap().partition_last_tv[part_idx],
+                )?;
+                last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, slot_key, sync)?;
+                {
+                    let entry = cache.as_mut().unwrap();
+                    entry.partition_slot_keys[part_idx]
+                        .get_or_insert_with(std::collections::HashSet::new)
+                        .insert(slot_key);
+                    // Store part_fp so clean frames can reuse it without recomputing.
+                    entry.partition_retention_keys[part_idx] = Some(part_fp);
+                    record_partition_last_tv(entry, part_idx, last_tv);
+                }
+                result.records += 1;
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
+                part_idx += 1;
+                continue;
+            }
+
+            let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
+            if cached_key == Some(part_fp) {
+                let _tz = crate::tracy_zone!("goldy.resubmit.partition");
+                if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync)? {
                     last_tv = tv;
                     result.resubmit_hits += 1;
                     record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
@@ -1264,70 +1307,24 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 
             let graph_cmds = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
-                partition_graph_commands_for_retain(
-                    ir,
-                    cache.as_ref().unwrap(),
-                    &waves,
-                    part_idx,
-                    has_render,
-                    Some(&resolver),
-                )
+                partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
             };
-            let _tz = crate::tracy_zone!("goldy.submit_partition.present_record");
+            let _tz = crate::tracy_zone!("goldy.submit_partition.record");
             ensure_partition_retired_before_rerecord(
                 backend,
                 ctx,
                 cache.as_ref().unwrap().partition_last_tv[part_idx],
             )?;
-            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, slot_key, sync)?;
+            last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync)?;
             {
                 let entry = cache.as_mut().unwrap();
-                entry.partition_slot_keys[part_idx]
-                    .get_or_insert_with(std::collections::HashSet::new)
-                    .insert(slot_key);
-                // Store part_fp so clean frames can reuse it without recomputing.
                 entry.partition_retention_keys[part_idx] = Some(part_fp);
                 record_partition_last_tv(entry, part_idx, last_tv);
             }
             result.records += 1;
             apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
             part_idx += 1;
-            continue;
         }
-
-        let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
-        if cached_key == Some(part_fp) {
-            let _tz = crate::tracy_zone!("goldy.resubmit.partition");
-            if let Some(tv) = backend_try_resubmit_retained(backend, ctx, part_fp, sync)? {
-                last_tv = tv;
-                result.resubmit_hits += 1;
-                record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
-                part_idx += 1;
-                continue;
-            }
-        }
-
-        let graph_cmds = {
-            let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
-            partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
-        };
-        let _tz = crate::tracy_zone!("goldy.submit_partition.record");
-        ensure_partition_retired_before_rerecord(
-            backend,
-            ctx,
-            cache.as_ref().unwrap().partition_last_tv[part_idx],
-        )?;
-        last_tv = backend_submit_graph_and_retain(backend, ctx, &graph_cmds, part_fp, sync)?;
-        {
-            let entry = cache.as_mut().unwrap();
-            entry.partition_retention_keys[part_idx] = Some(part_fp);
-            record_partition_last_tv(entry, part_idx, last_tv);
-        }
-        result.records += 1;
-        apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &waves, last_tv);
-        part_idx += 1;
-    }
     }
 
     Ok((last_tv, result))

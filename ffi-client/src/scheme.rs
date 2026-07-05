@@ -3,12 +3,12 @@ use crate::compute::ComputePipeline;
 use crate::context::Context;
 use crate::error::{check, expect_ok, non_null_expect, Result};
 use crate::parcel::Parcel;
-use crate::texture::Texture;
 use crate::pipeline::RenderPipeline;
 use crate::sys::{
     self, GoldyPresentGrant, GoldyPresentLease, GoldyReadGrant, GoldyReplayStats, GoldyScheme,
     GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
+use crate::texture::Texture;
 use crate::types::{Color, DepthFormat, IndexFormat, NodeAccess, TextureFormat};
 use std::ffi::CString;
 use std::ops::Range;

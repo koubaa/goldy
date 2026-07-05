@@ -4,14 +4,14 @@ mod common;
 
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
-    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_destroy, goldy_texture_destroy,
+    goldy_context_create, goldy_context_destroy, goldy_device_destroy, goldy_instance_destroy,
     goldy_read_grant_byte_size, goldy_read_grant_consume, goldy_read_grant_destroy,
     goldy_retained_pool_acquire_texture, goldy_retained_pool_create, goldy_retained_pool_destroy,
     goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read_texture,
     goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin, goldy_scheme_render_pass_clear,
     goldy_scheme_render_pass_finish, goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy,
-    goldy_scheme_submit, GoldyColor, GoldyDepthFormat, GoldyResult, GoldyTextureFlags, GoldyTextureFormat,
-    GoldyTextureKind,
+    goldy_scheme_submit, goldy_texture_destroy, GoldyColor, GoldyDepthFormat, GoldyResult, GoldyTextureFlags,
+    GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
 

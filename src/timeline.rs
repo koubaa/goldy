@@ -258,9 +258,7 @@ impl TimelinePromise {
 
 impl std::fmt::Debug for TimelinePromise {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TimelinePromise")
-            .field("state", &self.poll())
-            .finish()
+        f.debug_struct("TimelinePromise").field("state", &self.poll()).finish()
     }
 }
 

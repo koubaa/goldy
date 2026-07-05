@@ -1,8 +1,8 @@
 use crate::buffer::Buffer;
 use crate::device::Device;
 use crate::error::{non_null, Result};
-use crate::texture::Texture;
 use crate::sys::{self, GoldyRecordBuilder, GoldyRetainedPool};
+use crate::texture::Texture;
 use crate::types::BufferKind;
 use bytemuck::Pod;
 use std::ffi::CString;

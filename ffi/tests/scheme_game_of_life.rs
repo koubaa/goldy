@@ -6,18 +6,17 @@ use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_unit_byte_size, goldy_buffer_unit_read_to_cpu, goldy_compute_pipeline_create,
     goldy_compute_pipeline_destroy, goldy_context_create, goldy_context_destroy, goldy_device_destroy,
-    goldy_instance_destroy, goldy_read_grant_consume, goldy_read_grant_destroy,
-    goldy_texture_destroy,
-    goldy_record_builder_build, goldy_record_builder_create, goldy_record_builder_emplace,
-    goldy_render_pipeline_create, goldy_render_pipeline_destroy, goldy_retained_pool_acquire_texture,
-    goldy_retained_pool_create, goldy_retained_pool_destroy, goldy_scheme_compute_node_begin,
-    goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_field, goldy_scheme_copy_to_texture,
-    goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_grant_read_texture, goldy_scheme_lease_render_target,
-    goldy_scheme_render_pass_begin, goldy_scheme_render_pass_clear, goldy_scheme_render_pass_draw_fullscreen,
-    goldy_scheme_render_pass_finish, goldy_scheme_render_pass_set_pipeline, goldy_scheme_render_pass_with_field,
+    goldy_instance_destroy, goldy_read_grant_consume, goldy_read_grant_destroy, goldy_record_builder_build,
+    goldy_record_builder_create, goldy_record_builder_emplace, goldy_render_pipeline_create,
+    goldy_render_pipeline_destroy, goldy_retained_pool_acquire_texture, goldy_retained_pool_create,
+    goldy_retained_pool_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch,
+    goldy_scheme_compute_node_with_field, goldy_scheme_copy_to_texture, goldy_scheme_create, goldy_scheme_destroy,
+    goldy_scheme_grant_read_texture, goldy_scheme_lease_render_target, goldy_scheme_render_pass_begin,
+    goldy_scheme_render_pass_clear, goldy_scheme_render_pass_draw_fullscreen, goldy_scheme_render_pass_finish,
+    goldy_scheme_render_pass_set_pipeline, goldy_scheme_render_pass_with_field,
     goldy_scheme_render_target_lease_destroy, goldy_scheme_submission_destroy, goldy_scheme_submit,
-    goldy_shader_create, goldy_shader_destroy, GoldyColor, GoldyDepthFormat, GoldyNodeAccess, GoldyRenderPipelineDesc,
-    GoldyResult, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
+    goldy_shader_create, goldy_shader_destroy, goldy_texture_destroy, GoldyColor, GoldyDepthFormat, GoldyNodeAccess,
+    GoldyRenderPipelineDesc, GoldyResult, GoldyTextureFlags, GoldyTextureFormat, GoldyTextureKind,
 };
 use std::ffi::CString;
 

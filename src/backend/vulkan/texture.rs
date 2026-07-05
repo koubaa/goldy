@@ -982,13 +982,11 @@ pub(super) fn read_to_cpu(
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
     unsafe {
-        logical_device
-            .device
-            .queue_submit(
-                logical_device.queue,
-                std::slice::from_ref(&submit_info),
-                vk::Fence::null(),
-            )
+        logical_device.device.queue_submit(
+            logical_device.queue,
+            std::slice::from_ref(&submit_info),
+            vk::Fence::null(),
+        )
     }
     .context("Failed to submit command buffer")?;
 

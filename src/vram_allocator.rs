@@ -56,7 +56,7 @@
 //!
 //! [`TransientAllocator`]: crate::transient_allocator::TransientAllocator
 //! [`BufferPool`]: crate::buffer::BufferPool
-//! [`Texture`]: crate::texture::Texture
+//! [`Texture`]: crate::Texture
 //! [`TexturePool`]: crate::texture_pool::TexturePool
 //! [`Device`]: crate::device::Device
 //! [`VramAllocator`]: crate::vram_allocator::VramAllocator
@@ -183,7 +183,7 @@ pub trait VramAllocator: Send + Sync {
     /// Borrowing sub-range views (e.g. [`crate::BufferView`]) never call this.
     ///
     /// `reserved` is the parcel's reserved backing size; `committed` is the runtime's
-    /// handed-out estimate (logical size for buffers, [`Texture::byte_size`] for textures).
+    /// handed-out estimate (logical size for buffers, [`crate::Texture::byte_size`] for textures).
     fn notify_freed(&self, _reserved: u64, _committed: u64, _kind: ParcelType) {}
 
     /// Net bytes allocated by this allocator (allocations minus frees).

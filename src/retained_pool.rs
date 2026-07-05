@@ -2,7 +2,7 @@
 //!
 //! [`RetainedPool::acquire_texture`], [`RetainedPool::acquire_buffer`], and
 //! [`RetainedPool::acquire_record`] are the supported ways to create retained resources.
-//! Buffers are acquired aggregates; bind their [`Parcel`] units. Relinquish via
+//! Buffers are acquired aggregates; bind their [`crate::Parcel`] units. Relinquish via
 //! [`RetainedPool::release_buffer`] / [`RetainedPool::release_texture`] or by dropping.
 
 use crate::buffer::{BufferPool, StructuredBufferElement};

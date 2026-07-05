@@ -72,9 +72,7 @@ fn read_texture_via_scheme_copy(ctx: &goldy::Context, texture: &goldy::Texture) 
         )
         .expect("host buffer");
     let mut scheme = Scheme::new(ctx);
-    scheme
-        .copy_texture(texture, &host_buf)
-        .expect("copy_texture");
+    scheme.copy_texture(texture, &host_buf).expect("copy_texture");
     let frame = scheme.submit().expect("submit");
     frame.wait(ctx).expect("wait");
     let mut padded = vec![0u8; layout.staging_bytes as usize];
@@ -1715,7 +1713,6 @@ fn scheme_with_parcel_raw_texture() {
         TextureFlags::COPY_SRC,
     );
 
-
     let mut scheme = Scheme::new(&ctx);
     scheme
         .node("write_tex_raw", &pipeline)
@@ -3051,8 +3048,15 @@ fn scheme_commit_write_texture_round_trip() {
             [r, g, 128u8, 255u8]
         })
         .collect();
-    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC);
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    );
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -3074,8 +3078,15 @@ fn scheme_commit_write_texture_round_trip() {
 fn scheme_commit_write_texture_wrong_size_returns_error() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let texture = test_alloc_texture(&device, &vec![0u8; 8 * 8 * 4], 8, 8, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; 8 * 8 * 4],
+        8,
+        8,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    );
 
     let mut scheme = Scheme::new(&ctx);
     // Too few bytes — must error.
@@ -3090,8 +3101,15 @@ fn scheme_commit_write_texture_wrong_size_returns_error() {
 fn scheme_commit_write_texture_marks_scheme_dirty() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let texture = test_alloc_texture(&device, &vec![0u8; 4 * 4 * 4], 4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; 4 * 4 * 4],
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    );
 
     let mut scheme = Scheme::new(&ctx);
     assert!(scheme.is_dirty(), "new scheme starts dirty");
@@ -3118,8 +3136,15 @@ fn scheme_commit_write_texture_region_round_trip() {
     const W: u32 = 8;
     const H: u32 = 8;
     // Initialize with zeros.
-    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC);
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    );
 
     // Write a 4×4 region at (2, 2) with a solid color.
     const RX: u32 = 2;
@@ -3162,8 +3187,15 @@ fn scheme_commit_write_texture_region_round_trip() {
 fn scheme_commit_write_texture_region_oob_returns_error() {
     let device = make_device();
     let ctx = submission_context(&device);
-    let texture = test_alloc_texture(&device, &vec![0u8; 8 * 8 * 4], 8, 8, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; 8 * 8 * 4],
+        8,
+        8,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    );
 
     let mut scheme = Scheme::new(&ctx);
     // Region extends beyond texture width.
@@ -3181,8 +3213,15 @@ fn scheme_commit_write_texture_region_multiple_non_overlapping() {
 
     const W: u32 = 8;
     const H: u32 = 8;
-    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC);
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC,
+    );
 
     // Top-left 4×4 → red (255,0,0,255). Bottom-right 4×4 → blue (0,0,255,255).
     let red: Vec<u8> = vec![255u8, 0, 0, 255].repeat(16);
@@ -3250,8 +3289,15 @@ fn scheme_copy_buffer_to_texture_parcel_full_texture() {
     staging.write(0, &pixels).expect("staging.write");
 
     // Destination texture (COPY_DST for buffer→texture copy; COPY_SRC for read_to_cpu readback).
-    let texture = test_alloc_texture(&device, &vec![0u8; (W * H * 4) as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC | TextureFlags::COPY_DST);
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; (W * H * 4) as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+    );
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -3278,8 +3324,15 @@ fn scheme_copy_buffer_to_texture_parcel_oob_returns_error() {
     let staging = pool
         .acquire_buffer(64, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
         .expect("staging");
-    let texture = test_alloc_texture(&device, &vec![0u8; 8 * 8 * 4], 8, 8, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; 8 * 8 * 4],
+        8,
+        8,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    );
 
     let mut scheme = Scheme::new(&ctx);
     // x + width exceeds texture width.
@@ -3307,8 +3360,15 @@ fn scheme_copy_buffer_to_texture_parcel_rejects_texture_src() {
             None,
         )
         .expect("tex_parcel");
-    let dst_texture = test_alloc_texture(&device, &vec![0u8; 4 * 4 * 4], 4, 4, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::empty());
-
+    let dst_texture = test_alloc_texture(
+        &device,
+        &vec![0u8; 4 * 4 * 4],
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::empty(),
+    );
 
     let mut scheme = Scheme::new(&ctx);
     let result = scheme.copy_buffer_to_texture_parcel(&tex_parcel, 0, &dst_texture, 0, 0, 4, 4);
@@ -3333,8 +3393,15 @@ fn scheme_copy_buffer_to_texture_parcel_resubmit_is_retained() {
         .acquire_buffer(byte_size, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE, None)
         .expect("staging");
     staging.write(0, &pixels).expect("staging.write");
-    let texture = test_alloc_texture(&device, &vec![0u8; byte_size as usize], W, H, TextureFormat::Rgba8Unorm, TextureKind::Direct, TextureFlags::COPY_SRC | TextureFlags::COPY_DST);
-
+    let texture = test_alloc_texture(
+        &device,
+        &vec![0u8; byte_size as usize],
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        TextureKind::Direct,
+        TextureFlags::COPY_SRC | TextureFlags::COPY_DST,
+    );
 
     let mut scheme = Scheme::new(&ctx);
     scheme
@@ -3369,7 +3436,10 @@ struct CrossRetentionBuffers {
 fn cross_retention_buffers(device: &Device) -> CrossRetentionBuffers {
     let mut pool = RetainedPool::new(Arc::new(device.clone()));
     let input = pool
-        .acquire_buffer_with_data(&(0..CROSS_RETENTION_ELEMS as u32).collect::<Vec<_>>(), BufferKind::Scattered)
+        .acquire_buffer_with_data(
+            &(0..CROSS_RETENTION_ELEMS as u32).collect::<Vec<_>>(),
+            BufferKind::Scattered,
+        )
         .expect("input");
     let shared = pool
         .acquire_buffer_with_data(&vec![0u32; CROSS_RETENTION_ELEMS], BufferKind::Scattered)
@@ -3723,7 +3793,11 @@ fn cross_scheme_copy_reader_disappearing_does_not_re_dirty() {
     for _ in 0..3 {
         cross_retention_run_worker_then_copy_reader(&mut worker, &mut reader);
     }
-    assert_eq!(worker.replay_stats().records, 2, "reader appearance: bootstrap + one refresh");
+    assert_eq!(
+        worker.replay_stats().records,
+        2,
+        "reader appearance: bootstrap + one refresh"
+    );
 
     drop(reader);
 
@@ -3839,7 +3913,10 @@ fn cross_scheme_grant_read_observes_worker_writes_without_re_record() {
         let frame = reader.submit().expect("reader submit");
         let values = read_grant_u32(&grant, &frame, CROSS_RETENTION_ELEMS);
         for (i, &v) in values.iter().enumerate() {
-            assert_eq!(v, i as u32, "grant lease must observe the worker's copy output at shared[{i}]");
+            assert_eq!(
+                v, i as u32,
+                "grant lease must observe the worker's copy output at shared[{i}]"
+            );
         }
     }
 
@@ -3953,7 +4030,9 @@ fn cross_scheme_texture_readback_retained_loop_records_twice() {
 
     // Sanity: the readback buffer observed the worker's texture writes (non-zero).
     let mut padded = vec![0u8; texture.copy_layout().staging_bytes as usize];
-    host_buf.read_to_cpu(ctx.device(), &mut padded).expect("read host buffer");
+    host_buf
+        .read_to_cpu(ctx.device(), &mut padded)
+        .expect("read host buffer");
     assert!(padded.iter().any(|&b| b != 0), "texture readback must observe writes");
 
     // The copy_texture readback reads the texture, a WAR against the worker's write, so
