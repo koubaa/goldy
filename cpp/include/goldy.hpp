@@ -186,12 +186,6 @@ enum class NodeAccess {
     ReadWrite = GOLDY_NODE_ACCESS_READ_WRITE,
 };
 
-enum class ResourceAccess {
-    Read = GOLDY_RESOURCE_ACCESS_READ,
-    Write = GOLDY_RESOURCE_ACCESS_WRITE,
-    ReadWrite = GOLDY_RESOURCE_ACCESS_READ_WRITE,
-};
-
 /**
  * @brief Texture flags for copy and render operations.
  */
