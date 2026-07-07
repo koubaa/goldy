@@ -30,6 +30,8 @@ pub(crate) struct FrameTableDevice {
     pub submission_counter: AtomicU32,
     /// Bitmask of rows pinned by retained command buffers (must not be overwritten).
     pub pinned_rows: AtomicU32,
+    /// Last `submission_counter` value that wrote each row (ring reuse guard).
+    pub last_sub_for_row: [AtomicU32; FRAME_TABLE_MAX_ROWS as usize],
 }
 
 /// Reserve user bindless slots once per device (low protocol slots stay unused).
@@ -86,6 +88,7 @@ pub(crate) fn init_context(
         staging_mapped,
         submission_counter: AtomicU32::new(0),
         pinned_rows: AtomicU32::new(0),
+        last_sub_for_row: std::array::from_fn(|_| AtomicU32::new(0)),
     });
 
     let buffers = state.buffers.read().unwrap();
@@ -384,12 +387,22 @@ pub(crate) fn unpin_row(ft: &FrameTableDevice, row: u32) {
     ft.pinned_rows.fetch_and(!bit, Ordering::AcqRel);
 }
 
-fn assert_row_available(ft: &FrameTableDevice, row: u32) -> Result<()> {
+fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()> {
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         anyhow::bail!(
             "frame table row {row} is still pinned after evicting retained graphs; \
              retained command buffer lifecycle bug"
         );
+    }
+    if sub >= FRAME_TABLE_MAX_ROWS {
+        let prev = ft.last_sub_for_row[row as usize].load(Ordering::Acquire);
+        let gap = sub - prev;
+        if gap < FRAME_TABLE_MAX_ROWS {
+            anyhow::bail!(
+                "frame table row capacity exceeded: row {row} may still be in flight \
+                 (sub={sub}, last_sub_for_row={prev}, need gap >= {FRAME_TABLE_MAX_ROWS})"
+            );
+        }
     }
     Ok(())
 }
@@ -406,7 +419,8 @@ fn write_staging_for_submission(
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         super::compute::evict_retained_pinning_row_for_context(contexts, ft, ctx, row);
     }
-    assert_row_available(ft, row)?;
+    assert_row_available(ft, sub, row)?;
+    ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
@@ -423,7 +437,8 @@ fn write_staging_for_submission(
 fn write_staging_standalone(ft: &FrameTableDevice, data: &[u32]) -> Result<u32> {
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
-    assert_row_available(ft, row)?;
+    assert_row_available(ft, sub, row)?;
+    ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = ft.staging_mapped as *mut u32;
