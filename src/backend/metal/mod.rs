@@ -322,32 +322,9 @@ impl GpuBackend for MetalBackend {
         context::destroy(&mut self.state, ctx);
     }
 
-    fn clone_context_timeline_reader(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
-        Some(std::sync::Arc::new(MetalContextTimelineReader {
-            sc: std::sync::Arc::clone(self.state.contexts.get(&ctx)?),
-        }))
-    }
-
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
-        Some(std::sync::Arc::new(MetalDeviceTimelineReader {
-            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
-        }))
-    }
-
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-            >,
-        >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let sc = std::sync::Arc::clone(self.state.contexts.get(&ctx)?);
         let device_handle = {
@@ -357,7 +334,6 @@ impl GpuBackend for MetalBackend {
         Some(std::sync::Arc::new(MetalContextDeferredDeletionFlush {
             sc,
             ld: std::sync::Arc::clone(self.state.devices.get(&device_handle)?),
-            timeline: std::sync::Arc::clone(context_readers.lock().unwrap().get(&ctx)?),
         }))
     }
 
@@ -1106,27 +1082,6 @@ impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
     }
 }
 
-struct MetalContextTimelineReader {
-    sc: types::SharedMetalSubmissionContext,
-}
-
-impl crate::backend::ContextTimelineReader for MetalContextTimelineReader {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        let sc = self.sc.lock().unwrap();
-        context::context_gpu_progress(&sc)
-    }
-
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.sc.lock().unwrap();
-        let progress = context::context_gpu_progress(&sc);
-        if progress < sc.last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
-    }
-}
-
 struct MetalWaiterBlockingWait {
     waiter: types::TimelineWaiter,
     value: crate::timeline::TimelineValue,
@@ -1167,26 +1122,21 @@ impl crate::backend::TimelineBlockingWait for MetalWaiterBlockingWait {
     }
 }
 
-struct MetalDeviceTimelineReader {
-    ld: types::SharedLogicalDevice,
-}
-
-impl crate::backend::DeviceTimelineReader for MetalDeviceTimelineReader {
-    fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        use std::sync::atomic::Ordering;
-        self.ld.retired_floor.load(Ordering::Relaxed)
-    }
-}
-
 struct MetalContextDeferredDeletionFlush {
     sc: types::SharedMetalSubmissionContext,
     ld: types::SharedLogicalDevice,
-    timeline: std::sync::Arc<dyn crate::backend::ContextTimelineReader>,
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for MetalContextDeferredDeletionFlush {
-    fn flush(&self, device_retired: crate::timeline::TimelineValue) {
-        let ctx_signaled = self.timeline.gpu_progress();
+    fn flush(&self) {
+        let ctx_signaled = if let Ok(sc) = self.sc.lock() {
+            context::context_gpu_progress(&sc)
+        } else {
+            return;
+        };
+        // Metal uses a single shared queue, so this context's progress is the device
+        // retired value for items enqueued up to this context's last submission.
+        let device_retired = self.ld.retired_floor.load(std::sync::atomic::Ordering::Relaxed).max(ctx_signaled);
         if let Ok(mut sc) = self.sc.lock() {
             sc.deletion_queue.process_up_to(ctx_signaled);
         }

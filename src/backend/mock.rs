@@ -96,34 +96,6 @@ struct MockContextState {
     signal_queue: crate::signal::SignalQueue,
 }
 
-struct MockContextTimelineReader {
-    state: Arc<Mutex<MockContextState>>,
-}
-
-impl crate::backend::ContextTimelineReader for MockContextTimelineReader {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        self.state.lock().unwrap().completed
-    }
-
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
-        let state = self.state.lock().unwrap();
-        if state.completed < state.last_submitted_seq {
-            Some(state.completed.saturating_add(1))
-        } else {
-            None
-        }
-    }
-}
-
-struct MockDeviceTimelineReader {
-    floor: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl crate::backend::DeviceTimelineReader for MockDeviceTimelineReader {
-    fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        self.floor.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
 
 #[allow(dead_code)]
 struct MockBuffer {
@@ -600,32 +572,9 @@ impl GpuBackend for MockBackend {
         }
     }
 
-    fn clone_context_timeline_reader(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<Arc<dyn crate::backend::ContextTimelineReader>> {
-        Some(Arc::new(MockContextTimelineReader {
-            state: Arc::clone(self.contexts.get(&ctx)?),
-        }))
-    }
-
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<Arc<dyn crate::backend::DeviceTimelineReader>> {
-        Some(Arc::new(MockDeviceTimelineReader {
-            floor: Arc::clone(self.device_retired_floor.get(&device)?),
-        }))
-    }
-
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        _context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-            >,
-        >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let _ = ctx;
         Some(std::sync::Arc::new(crate::backend::NoOpDeferredDeletionFlush))

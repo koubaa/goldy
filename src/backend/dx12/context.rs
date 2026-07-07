@@ -188,7 +188,7 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
         return;
     };
 
-    // Cloned per-context handles (`ContextTimelineReader`, `ContextDeferredDeletionFlush`, …)
+    // Cloned per-context handles (`ContextDeferredDeletionFlush`, `ContextReclamationScope`, …)
     // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
     let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
         .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));

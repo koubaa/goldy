@@ -720,31 +720,17 @@ pub(crate) trait TimelineBlockingWait: Send {
     }
 }
 
-/// Per-context GPU timeline queries cloned out of the backend so
-/// [`Context::gpu_progress`](crate::Context::gpu_progress) and
-/// [`Context::peek_oldest_in_flight`](crate::Context::peek_oldest_in_flight) do not
-/// need the global backend lock.
-#[doc(hidden)]
-pub trait ContextTimelineReader: Send + Sync {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue;
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue>;
-}
-
-/// Device-scoped timeline horizon (retired floor + device sync primitive) cloned out of
-/// the backend so [`Device::timeline_retired`](crate::Device::timeline_retired) can combine
-/// it with per-context readers without the global backend mutex.
-#[doc(hidden)]
-pub trait DeviceTimelineReader: Send + Sync {
-    /// Floor and device-level sync completion; excludes per-context fence/semaphore progress.
-    fn device_horizon(&self) -> crate::timeline::TimelineValue;
-}
 
 /// Per-context deferred GPU deletion flush cloned out of the backend so
 /// [`Context::boundary_crossed`](crate::Context::boundary_crossed) does not need the global
 /// backend mutex for `flush_deferred_deletions`.
+///
+/// Each implementation is responsible for computing whatever device-scope timeline value it
+/// needs internally; the trait no longer takes `device_retired` as a parameter so callers
+/// do not need to produce it.
 #[doc(hidden)]
 pub trait ContextDeferredDeletionFlush: Send + Sync {
-    fn flush(&self, device_retired: crate::timeline::TimelineValue);
+    fn flush(&self);
 }
 
 /// Per-context reclamation epoch scope (Metal heap routing during `boundary_crossed`).
@@ -762,7 +748,7 @@ impl ContextReclamationScope for NoOpReclamationScope {
 pub(crate) struct NoOpDeferredDeletionFlush;
 
 impl ContextDeferredDeletionFlush for NoOpDeferredDeletionFlush {
-    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {}
+    fn flush(&self) {}
 }
 
 /// Bookkeeping applied after [`PresentGpuWork::run`] completes without the global lock.
@@ -978,21 +964,11 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle>;
     fn destroy_context(&mut self, ctx: ContextHandle);
 
-    /// Clone the per-context timeline reader out of backend state.
-    ///
-    /// Called once from [`Context::new`](crate::Context::new) so hot-path progress
-    /// queries avoid the global backend mutex.
-    #[doc(hidden)]
-    fn clone_context_timeline_reader(&self, ctx: ContextHandle) -> Option<std::sync::Arc<dyn ContextTimelineReader>>;
-
     /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
     #[doc(hidden)]
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        context_readers: std::sync::Arc<
-            std::sync::Mutex<std::collections::HashMap<ContextHandle, std::sync::Arc<dyn ContextTimelineReader>>>,
-        >,
     ) -> Option<std::sync::Arc<dyn ContextDeferredDeletionFlush>>;
 
     /// Clone the per-context reclamation scope for [`Context::boundary_crossed`].
@@ -1001,10 +977,6 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         let _ = ctx;
         std::sync::Arc::new(NoOpReclamationScope)
     }
-
-    /// Clone the device-scoped timeline horizon reader for lock-free retirement queries.
-    #[doc(hidden)]
-    fn clone_device_timeline_reader(&self, device: DeviceHandle) -> Option<std::sync::Arc<dyn DeviceTimelineReader>>;
 
     /// Returns `true` if the device has been permanently lost (TDR, hardware hang, etc.).
     ///

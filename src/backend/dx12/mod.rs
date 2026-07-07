@@ -525,32 +525,9 @@ impl GpuBackend for Dx12Backend {
         context::destroy(&mut self.state, ctx);
     }
 
-    fn clone_context_timeline_reader(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
-        Some(std::sync::Arc::new(Dx12ContextTimelineReader {
-            sc: std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?),
-        }))
-    }
-
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
-        Some(std::sync::Arc::new(Dx12DeviceTimelineReader {
-            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
-        }))
-    }
-
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        _context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-            >,
-        >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let device_handle = self.context_device(ctx);
         Some(std::sync::Arc::new(Dx12ContextDeferredDeletionFlush {
@@ -1366,26 +1343,6 @@ struct Dx12TimelineBlockingWait {
     value: crate::timeline::TimelineValue,
 }
 
-struct Dx12ContextTimelineReader {
-    sc: types::SharedSubmissionContext,
-}
-
-impl crate::backend::ContextTimelineReader for Dx12ContextTimelineReader {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        unsafe { self.sc.lock().unwrap().fence.GetCompletedValue() }
-    }
-
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.sc.lock().unwrap();
-        let progress = unsafe { sc.fence.GetCompletedValue() };
-        if progress < sc.last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
-    }
-}
-
 impl crate::backend::TimelineBlockingWait for Dx12TimelineBlockingWait {
     fn block(self: Box<Self>) -> Result<()> {
         utils::wait_for_fence(&self.fence, self.value)
@@ -1393,20 +1350,6 @@ impl crate::backend::TimelineBlockingWait for Dx12TimelineBlockingWait {
 
     fn block_timeout(self: Box<Self>, timeout_ms: u32) -> Result<bool> {
         utils::wait_for_fence_timeout(&self.fence, self.value, timeout_ms)
-    }
-}
-
-struct Dx12DeviceTimelineReader {
-    ld: types::SharedLogicalDevice,
-}
-
-impl crate::backend::DeviceTimelineReader for Dx12DeviceTimelineReader {
-    fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        use std::sync::atomic::Ordering;
-        let floor = self.ld.retired_floor.load(Ordering::Relaxed);
-        // Device sync fence shares the per-context timeline value space (`timeline_next`).
-        let device_sync = unsafe { self.ld.fence.GetCompletedValue() };
-        floor.max(device_sync)
     }
 }
 
@@ -1434,7 +1377,7 @@ struct Dx12ContextDeferredDeletionFlush {
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletionFlush {
-    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {
+    fn flush(&self) {
         let completed = self
             .context_fences
             .read()

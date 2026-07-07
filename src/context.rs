@@ -27,7 +27,6 @@ pub struct Context {
 pub(crate) struct ContextInner {
     device: Device,
     handle: ContextHandle,
-    timeline_reader: Option<Arc<dyn crate::backend::ContextTimelineReader>>,
     deletion_flush: Option<Arc<dyn crate::backend::ContextDeferredDeletionFlush>>,
     reclamation_scope: Option<Arc<dyn crate::backend::ContextReclamationScope>>,
     submit_session: Option<Arc<dyn crate::backend::ContextSubmitSession>>,
@@ -71,11 +70,9 @@ impl Drop for ContextInner {
         }
         // Release cloned per-context backend handles before destroy_context.
         // Backends expect sole ownership of the per-context Arc at teardown.
-        self.timeline_reader.take();
         self.deletion_flush.take();
         self.reclamation_scope.take();
         self.submit_session.take();
-        self.device.unregister_context_timeline_reader(self.handle);
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
         //
@@ -105,17 +102,10 @@ impl Context {
                 .create_context(device.inner.handle)
                 .map_err(GoldyError::Backend)?
         };
-        let timeline_reader = {
-            let backend = device.inner.backend.lock().unwrap();
-            backend
-                .clone_context_timeline_reader(handle)
-                .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context timeline reader")))?
-        };
-        device.register_context_timeline_reader(handle, Arc::clone(&timeline_reader));
         let (deletion_flush, reclamation_scope) = {
             let backend = device.inner.backend.lock().unwrap();
             let deletion_flush = backend
-                .clone_context_deletion_flush(handle, Arc::clone(&device.inner.context_readers))
+                .clone_context_deletion_flush(handle)
                 .ok_or_else(|| GoldyError::Backend(anyhow::anyhow!("missing context deletion flush")))?;
             let reclamation_scope = backend.clone_context_reclamation_scope(handle);
             (deletion_flush, reclamation_scope)
@@ -128,7 +118,6 @@ impl Context {
             inner: Arc::new(ContextInner {
                 device,
                 handle,
-                timeline_reader: Some(timeline_reader),
                 deletion_flush: Some(deletion_flush),
                 reclamation_scope: Some(reclamation_scope),
                 submit_session: Some(submit_session),
@@ -196,11 +185,7 @@ impl Context {
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("context.gpu_progress");
         let _query = crate::tracy_zone!("context.gpu_progress.query");
-        self.inner
-            .timeline_reader
-            .as_ref()
-            .expect("timeline reader")
-            .gpu_progress()
+        self.inner.device.inner.backend.lock().unwrap().gpu_progress(self.inner.handle)
     }
 
     /// Block until the timeline reaches at least `value`.
@@ -274,11 +259,7 @@ impl Context {
 
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
     pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
-        self.inner
-            .timeline_reader
-            .as_ref()
-            .expect("timeline reader")
-            .peek_oldest_in_flight()
+        self.inner.device.inner.backend.lock().unwrap().peek_oldest_in_flight(self.inner.handle)
     }
 
     /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this context.
@@ -336,7 +317,7 @@ impl Context {
                 .deletion_flush
                 .as_ref()
                 .expect("deletion flush")
-                .flush(retired);
+                .flush();
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.reclaim");
@@ -371,7 +352,7 @@ impl Context {
                 .deletion_flush
                 .as_ref()
                 .expect("deletion flush")
-                .flush(retired);
+                .flush();
         }
     }
 

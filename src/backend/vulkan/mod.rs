@@ -459,35 +459,9 @@ impl GpuBackend for VulkanBackend {
         context::destroy(&mut self.state, ctx);
     }
 
-    fn clone_context_timeline_reader(
-        &self,
-        ctx: ContextHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::ContextTimelineReader>> {
-        let sc = std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?);
-        let device = {
-            let sc_guard = sc.lock().unwrap();
-            self.state.devices.get(&sc_guard.device)?.device.clone()
-        };
-        Some(std::sync::Arc::new(VulkanContextTimelineReader { device, sc }))
-    }
-
-    fn clone_device_timeline_reader(
-        &self,
-        device: DeviceHandle,
-    ) -> Option<std::sync::Arc<dyn crate::backend::DeviceTimelineReader>> {
-        Some(std::sync::Arc::new(VulkanDeviceTimelineReader {
-            ld: std::sync::Arc::clone(self.state.devices.get(&device)?),
-        }))
-    }
-
     fn clone_context_deletion_flush(
         &self,
         ctx: ContextHandle,
-        context_readers: std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-            >,
-        >,
     ) -> Option<std::sync::Arc<dyn crate::backend::ContextDeferredDeletionFlush>> {
         let sc = std::sync::Arc::clone(self.state.contexts.read().unwrap().get(&ctx)?);
         let device_handle = {
@@ -499,7 +473,8 @@ impl GpuBackend for VulkanBackend {
             ctx,
             sc,
             ld,
-            context_readers,
+            contexts: std::sync::Arc::clone(&self.state.contexts),
+            device_handle,
         }))
     }
 
@@ -1527,29 +1502,6 @@ impl GpuBackend for VulkanBackend {
     }
 }
 
-struct VulkanContextTimelineReader {
-    device: ash::Device,
-    sc: SharedSubmissionContext,
-}
-
-impl crate::backend::ContextTimelineReader for VulkanContextTimelineReader {
-    fn gpu_progress(&self) -> crate::timeline::TimelineValue {
-        let _tz = crate::tracy_zone!("vk.gpu_progress");
-        let sc = self.sc.lock().unwrap();
-        unsafe { self.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0)
-    }
-
-    fn peek_oldest_in_flight(&self) -> Option<crate::timeline::TimelineValue> {
-        let sc = self.sc.lock().unwrap();
-        let progress = unsafe { self.device.get_semaphore_counter_value(sc.timeline_semaphore) }.unwrap_or(0);
-        if progress < sc.last_submitted_seq {
-            Some(progress.saturating_add(1))
-        } else {
-            None
-        }
-    }
-}
-
 struct VulkanTimelineBlockingWait {
     device: ash::Device,
     semaphore: vk::Semaphore,
@@ -1591,39 +1543,19 @@ impl crate::backend::TimelineBlockingWait for VulkanTimelineBlockingWait {
     }
 }
 
-struct VulkanDeviceTimelineReader {
-    ld: types::SharedLogicalDevice,
-}
-
-impl crate::backend::DeviceTimelineReader for VulkanDeviceTimelineReader {
-    fn device_horizon(&self) -> crate::timeline::TimelineValue {
-        use std::sync::atomic::Ordering;
-        self.ld.retired_floor.load(Ordering::Relaxed)
-    }
-}
-
 struct VulkanContextDeferredDeletionFlush {
     ctx: ContextHandle,
     sc: types::SharedSubmissionContext,
     ld: types::SharedLogicalDevice,
-    context_readers: std::sync::Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<ContextHandle, std::sync::Arc<dyn crate::backend::ContextTimelineReader>>,
-        >,
-    >,
+    contexts: types::SharedContextMap,
+    device_handle: DeviceHandle,
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for VulkanContextDeferredDeletionFlush {
-    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {
-        let (completed, completed_values) = {
-            let readers = self.context_readers.lock().unwrap();
-            let completed = readers.get(&self.ctx).map(|r| r.gpu_progress()).unwrap_or(0);
-            let completed_values = readers
-                .iter()
-                .map(|(&ctx, reader)| (ctx, reader.gpu_progress()))
-                .collect();
-            (completed, completed_values)
-        };
+    fn flush(&self) {
+        let completed_values =
+            types::snapshot_context_completed_values(&self.ld.device, &self.contexts, self.device_handle);
+        let completed = completed_values.get(&self.ctx).copied().unwrap_or(0);
         let ctx_batch: Vec<_> = self.sc.lock().unwrap().deletion_queue.drain_up_to(completed);
         let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
         {
