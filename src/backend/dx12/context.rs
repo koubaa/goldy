@@ -43,9 +43,22 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
 
 pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<ContextHandle> {
     let ld = state.devices.get(&device).context("Invalid device handle")?.clone();
+    let is_warp = ld.adapter_id == super::WARP_ADAPTER_ID;
 
     let fence: ID3D12Fence = unsafe { ld.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
         .context("Failed to create per-context DX12 fence")?;
+
+    // Own queue per context (see `Dx12SubmissionContext::command_queue`): a GPU-side
+    // cross-context `Wait` enqueued here only ever stalls this context. This is a
+    // backend-agnostic invariant that holds for WARP too.
+    let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+        Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+        Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+        Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+        NodeMask: 0,
+    };
+    let command_queue: ID3D12CommandQueue =
+        unsafe { ld.device.CreateCommandQueue(&queue_desc) }.context("Failed to create per-context DX12 command queue")?;
 
     let compute_initial_allocator: ID3D12CommandAllocator =
         unsafe { ld.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
@@ -85,9 +98,11 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         .insert(id, (device, fence.clone()));
     state.contexts.write().unwrap().insert(
         id,
-        std::sync::Arc::new(std::sync::Mutex::new(Dx12SubmissionContext {
+        std::sync::Arc::new(std::sync::Mutex::new(        Dx12SubmissionContext {
             device,
             fence,
+            command_queue,
+            queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             last_submitted_seq: 0,
             signal_queue,
             fence_shutdown,
@@ -158,39 +173,86 @@ pub(super) fn destroy_attribution_context(state: &Dx12State, device: DeviceHandl
     context_handle_for_thread(state, device).or_else(|| sole_context_on_device(state, device))
 }
 
-/// Fence barrier for deferred buffer destruction on `device`.
-pub(super) fn reclamation_barrier(state: &Dx12State, device: DeviceHandle) -> u64 {
-    let thread = std::thread::current().id();
-    let candidates = contexts_on_device(state, device);
-    if !candidates.is_empty() {
-        let contexts = state.contexts.read().unwrap();
-        for h in candidates {
-            if let Some(sc_arc) = contexts.get(&h) {
-                let sc = sc_arc.lock().expect("context Mutex poisoned");
-                if let Some((t, epoch)) = sc.reclamation_context {
-                    if t == thread {
-                        return epoch;
-                    }
-                }
-            }
+/// Block until every live context on `device` has drained its own per-context command
+/// queue up to its last submitted value.
+///
+/// Each context now owns its own `ID3D12CommandQueue` (see `Dx12SubmissionContext`), so
+/// a device-level wait that only touches `LogicalDevice::command_queue`/`fence` no longer
+/// observes in-flight per-context GPU work. Callers that need a true "everything on this
+/// device has retired" barrier (device-wide idle wait, device teardown) must drain every
+/// context's own fence explicitly first.
+pub(super) fn wait_for_all_contexts_on_device(state: &Dx12State, device: DeviceHandle) {
+    for ctx in contexts_on_device(state, device) {
+        let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx).cloned() else {
+            continue;
+        };
+        let (fence, seq) = {
+            let sc = sc_arc.lock().expect("context Mutex poisoned");
+            (sc.fence.clone(), sc.last_submitted_seq)
+        };
+        if seq > 0 {
+            let _ = super::utils::wait_for_fence(&fence, seq);
         }
     }
-    state
-        .devices
-        .get(&device)
-        .map(|d| {
-            let timeline_next = d.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
-            timeline_next.saturating_sub(1)
+}
+
+/// Deferred-deletion requirement for a buffer/texture destroy attributed to a single
+/// context (`ctx`). Returns `ctx`'s thread-pinned reclamation epoch if set, else `ctx`'s own
+/// last-submitted value — safe as a floor either way since both are values `ctx`'s own fence
+/// is guaranteed to eventually reach, and this is only ever compared against that same fence.
+pub(super) fn reclamation_barrier_for_context(state: &Dx12State, ctx: ContextHandle) -> u64 {
+    let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx).cloned() else {
+        return 0;
+    };
+    let sc = sc_arc.lock().expect("context Mutex poisoned");
+    let thread = std::thread::current().id();
+    if let Some((t, epoch)) = sc.reclamation_context {
+        if t == thread {
+            return epoch;
+        }
+    }
+    sc.last_submitted_seq
+}
+
+/// Per-context requirement snapshot for a destroy that could not be attributed to a single
+/// context: every live context on `device` must retire past its own current last-submitted
+/// value before the resource can be freed. Using each context's own bounded value (rather
+/// than e.g. the device-wide `timeline_next`) avoids waiting forever on a context that has
+/// gone idle below that shared-space floor and may never submit again.
+pub(super) fn reclamation_requirements_all_contexts(
+    state: &Dx12State,
+    device: DeviceHandle,
+) -> Vec<(ContextHandle, u64)> {
+    let handles = contexts_on_device(state, device);
+    let contexts = state.contexts.read().unwrap();
+    handles
+        .into_iter()
+        .filter_map(|h| {
+            let sc_arc = contexts.get(&h)?;
+            let sc = sc_arc.lock().expect("context Mutex poisoned");
+            Some((h, sc.last_submitted_seq))
         })
-        .unwrap_or(0)
+        .collect()
+}
+
+/// Full requirement snapshot for a buffer/texture destroy: the attributed context's own
+/// barrier (if attribution succeeded) or a snapshot across every live context on `device`.
+pub(super) fn reclamation_requirements(
+    state: &Dx12State,
+    device: DeviceHandle,
+    ctx_h: Option<ContextHandle>,
+) -> Vec<(ContextHandle, u64)> {
+    match ctx_h {
+        Some(ctx) => vec![(ctx, reclamation_barrier_for_context(state, ctx))],
+        None => reclamation_requirements_all_contexts(state, device),
+    }
 }
 
 pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
-    // Remove from both maps first; the fence index must not outlive the context.
+    // Remove from the context map first so lookups by handle stop finding this context.
     let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
         return;
     };
-    state.context_fences.write().unwrap().remove(&ctx);
 
     // Cloned per-context handles (`ContextTimelineReader`, `ContextDeferredDeletionFlush`, …)
     // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
@@ -207,6 +269,26 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
         }
         let _ = super::utils::wait_for_fence(&sc.fence, sc.last_submitted_seq);
     }
+
+    let completed_after_wait = unsafe { sc.fence.GetCompletedValue() };
+    if completed_after_wait == u64::MAX {
+        if let Some(ld) = state.devices.get(&device) {
+            if super::api_log::enabled() {
+                let hresult: i32 = match unsafe { ld.device.GetDeviceRemovedReason() } {
+                    Ok(()) => 0,
+                    Err(e) => e.code().0,
+                };
+                super::api_log::log_device_removed(device, hresult);
+            }
+        }
+    }
+
+    // Only now is it safe to drop the fence out of the shared lookup table: any deferred
+    // deletion elsewhere with a requirement on `ctx` uses `is_none_or` to treat a *missing*
+    // context as "already retired" (see `slot_requirements_met`). Removing this earlier (before
+    // the GPU-drain wait above) let concurrent drains on other threads see `ctx` as gone and
+    // release resources this context's still in-flight work could still be touching.
+    state.context_fences.write().unwrap().remove(&ctx);
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
     if let Some(ld) = state.devices.get(&device) {

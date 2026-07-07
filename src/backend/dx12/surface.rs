@@ -378,11 +378,10 @@ pub(super) fn acquire(
     }
 
     // Process deferred deletions now that the fence wait has completed.
-    let retired = super::context::device_retired(state, device_handle);
     if let Some(device) = state.devices.get(&device_handle) {
         let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
         let fences = state.context_fences.read().unwrap();
-        device.process_deletion_queue_up_to(retired, &fences);
+        device.process_deletion_queue_up_to(&fences);
     }
 
     let surface = state

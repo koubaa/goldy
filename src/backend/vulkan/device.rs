@@ -450,7 +450,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_descriptor_set,
             bindless_pipeline_layout,
             descriptors: Arc::new(Mutex::new(types::DescriptorRegistry::new())),
-            deletion_queue: Mutex::new(types::DeletionQueue::new()),
+            deletion_queue: Mutex::new(types::DeviceDeletionQueue::new()),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),
             queue_lock: Arc::new(Mutex::new(())),
@@ -500,7 +500,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // always valid and implicitly reclaims all child objects, so skip
             // individual cleanup and jump straight to it.
             if matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
-                let pending = logical_device.deletion_queue.lock().unwrap().len();
+                let pending = logical_device.deletion_queue.lock().unwrap().pending_len();
                 tracing::warn!(
                     %device_handle,
                     pending_deferred = pending,

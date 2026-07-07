@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::atomic::Ordering;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
@@ -488,6 +487,7 @@ pub(super) fn capacity(buffers: &SharedBufferTable, buffer_handle: BufferHandle)
 }
 
 pub(super) fn set_logical_size(
+    state: &super::types::VulkanState,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
@@ -503,7 +503,7 @@ pub(super) fn set_logical_size(
             .unwrap_or(false)
     };
     if is_sparse {
-        return set_logical_size_sparse(devices, buffers, device_handle, buffer_handle, new_logical_size);
+        return set_logical_size_sparse(state, devices, buffers, device_handle, buffer_handle, new_logical_size);
     }
 
     let (bindless_index, is_storage, vkbuf, old_logical) = {
@@ -546,9 +546,13 @@ pub(super) fn set_logical_size(
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
             let ld = devices.get(&device_handle).unwrap();
-            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            let requirements = super::context::reclamation_requirements(
+                state,
+                device_handle,
+                super::context::destroy_attribution_context(state, device_handle),
+            );
             ld.deletion_queue.lock().unwrap().queue(
-                barrier,
+                requirements,
                 types::PendingDeletion::ReplacedBufferGpu {
                     buffer: stg_buf,
                     memory: stg_mem,
@@ -600,6 +604,7 @@ pub(super) fn set_logical_size(
 }
 
 fn set_logical_size_sparse(
+    state: &super::types::VulkanState,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &SharedBufferTable,
     device_handle: DeviceHandle,
@@ -715,9 +720,13 @@ fn set_logical_size_sparse(
         };
         if let (Some(stg_buf), Some(stg_mem)) = (old_stg_buf, old_stg_mem) {
             let ld = devices.get(&device_handle).unwrap();
-            let barrier = ld.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            let requirements = super::context::reclamation_requirements(
+                state,
+                device_handle,
+                super::context::destroy_attribution_context(state, device_handle),
+            );
             ld.deletion_queue.lock().unwrap().queue(
-                barrier,
+                requirements,
                 types::PendingDeletion::ReplacedBufferGpu {
                     buffer: stg_buf,
                     memory: stg_mem,
@@ -977,6 +986,7 @@ fn submit_resize_transfer(
 
 /// Resize a root buffer in place. [`BufferHandle`] and bindless slot stay stable.
 pub(super) fn resize(
+    state: &super::types::VulkanState,
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     buffers: &SharedBufferTable,
@@ -1086,12 +1096,13 @@ pub(super) fn resize(
         }
     }
 
-    let barrier = devices
-        .get(&device_handle)
-        .unwrap()
-        .timeline_next
-        .load(Ordering::Relaxed)
-        .saturating_sub(1);
+    let ctx_h = super::context::destroy_attribution_context(state, device_handle);
+    let base = super::context::reclamation_requirements(state, device_handle, ctx_h);
+    let requirements = {
+        let ld = devices.get(&device_handle).context("resize: queue deletion")?;
+        let registry = ld.descriptors.lock().unwrap();
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+    };
     let pending = if old_state.is_sparse {
         let binds = sparse::collect_sparse_binds_for_teardown(old_state.sparse_block_size, &old_state.sparse_pages);
         types::PendingDeletion::ReplacedSparseBufferGpu {
@@ -1116,7 +1127,7 @@ pub(super) fn resize(
         .deletion_queue
         .lock()
         .unwrap()
-        .queue(barrier, pending);
+        .queue(requirements, pending);
 
     let old_parent_vk = old_state.buffer;
 
@@ -1199,11 +1210,15 @@ pub(super) fn destroy(state: &super::types::VulkanState, buffer_handle: BufferHa
     if let Some(buffer) = state.buffers.write().unwrap().entries.remove(&buffer_handle) {
         if let Some(device) = state.devices.get(&buffer.device_handle) {
             let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
-            let barrier = super::context::reclamation_barrier(state, buffer.device_handle, ctx_h);
+            let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
+            let requirements = {
+                let registry = device.descriptors.lock().unwrap();
+                registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+            };
 
             if buffer.is_view {
                 let deletion = types::PendingDeletion::BufferView { buffer_handle };
-                queue_pending_deletion(state, device, ctx_h, barrier, deletion);
+                queue_pending_deletion(device, requirements, deletion);
                 return;
             }
 
@@ -1240,31 +1255,18 @@ pub(super) fn destroy(state: &super::types::VulkanState, buffer_handle: BufferHa
                 staging_memory: buffer.staging_memory,
                 sparse_teardown,
             };
-            queue_pending_deletion(state, device, ctx_h, barrier, deletion);
+            queue_pending_deletion(device, requirements, deletion);
         }
     }
 }
 
-/// Queue buffer teardown on the context deletion queue when attribution is known.
-///
-/// Per-context buffer destroys are drained only on explicit-wait paths
-/// (`wait_until`, `flush_deferred_deletions`, context destroy) — not on the
-/// submit hot path — so retained command buffers can keep resubmitting against
-/// recorded bindings after the Rust `Buffer` has been dropped.
+/// Queue bindless-tracked buffer/view teardown on the device-level requirement-gated queue.
 fn queue_pending_deletion(
-    state: &super::types::VulkanState,
     device: &types::SharedLogicalDevice,
-    ctx_h: Option<super::ContextHandle>,
-    barrier: u64,
+    requirements: Vec<(super::ContextHandle, u64)>,
     deletion: types::PendingDeletion,
 ) {
-    if let Some(ctx_h) = ctx_h {
-        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx_h) {
-            sc_arc.lock().unwrap().deletion_queue.queue(barrier, deletion);
-            return;
-        }
-    }
-    device.deletion_queue.lock().unwrap().queue(barrier, deletion);
+    device.deletion_queue.lock().unwrap().queue(requirements, deletion);
 }
 
 /// Create a view into a sub-region of an existing buffer.

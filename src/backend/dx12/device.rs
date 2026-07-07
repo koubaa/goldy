@@ -415,7 +415,7 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             compute_dispatch_indirect_signature,
             compute_batch_dispatch_signature,
             zero_buffer,
-            deletion_queue: std::sync::Mutex::new(super::types::DeletionQueue::new()),
+            deletion_queue: std::sync::Mutex::new(super::types::DeviceDeletionQueue::new()),
             pending_buffer_gpu_releases: std::sync::Mutex::new(Vec::new()),
             device_removed: std::sync::Arc::clone(&state.device_removed),
             descriptors: std::sync::Arc::new(std::sync::Mutex::new(super::types::DescriptorRegistry::new())),

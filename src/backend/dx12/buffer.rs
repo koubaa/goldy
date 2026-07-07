@@ -418,8 +418,6 @@ pub(super) fn resize(
         .get(&device_handle)
         .context("resize_buffer: invalid device")?;
 
-    let mut deletion_fence_marker = unsafe { logical_device_ro.fence.GetCompletedValue() };
-
     if old.coherent_readback_mapped.is_some() {
         if let Some(ref rb) = old.coherent_readback {
             let no_write = D3D12_RANGE { Begin: 0, End: 0 };
@@ -568,8 +566,9 @@ pub(super) fn resize(
         unsafe { cmd.Close() }.context("resize_buffer: Close")?;
         let lists: [Option<ID3D12CommandList>; 1] = [Some(cmd.cast()?)];
         let fence_value = super::utils::execute_command_lists_and_signal_device(device, &lists)?;
+        // Synchronous wait: by the time we reach the deletion-queue push below, this
+        // copy has already fully retired, so it does not need to feed the deletion marker.
         super::utils::wait_for_fence(&device.fence, fence_value)?;
-        deletion_fence_marker = fence_value;
     } else if !old.is_storage && preserve_contents && copy_len > 0 {
         let mut src: *mut std::ffi::c_void = std::ptr::null_mut();
         let read_all = D3D12_RANGE {
@@ -650,13 +649,30 @@ pub(super) fn resize(
 
     patch_buffer_views_after_parent_resize(state, buffer_handle)?;
 
+    // `old_resource` keeps the same bindless slot(s) as the new resource until the
+    // descriptor rewrite above lands, so any context still reading through that slot's
+    // last-recorded fence value must retire before `old_resource` is freed. Using the
+    // device sync fence here (as this used to) is wrong: that fence is only signalled on
+    // explicit wait_for_gpu/resize paths, not per submit, so it under-reports how long
+    // in-flight per-context GPU work referencing the slot may still need `old_resource`.
+    let ctx_h = super::context::destroy_attribution_context(state, device_handle);
+    let base = super::context::reclamation_requirements(state, device_handle, ctx_h);
+    let requirements = {
+        let dev = state
+            .devices
+            .get(&device_handle)
+            .context("resize_buffer: queue deletion")?;
+        let registry = dev.descriptors.lock().unwrap();
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+    };
+
     let dev = state
         .devices
         .get(&device_handle)
         .context("resize_buffer: queue deletion")?;
     if old.is_reserved {
         dev.deletion_queue.lock().unwrap().queue(
-            deletion_fence_marker,
+            requirements,
             super::types::PendingDeletion::ReplacedReservedBufferGpu {
                 resource: old_resource,
                 tiles: old.reserved_tiles,
@@ -666,7 +682,7 @@ pub(super) fn resize(
         );
     } else {
         dev.deletion_queue.lock().unwrap().queue(
-            deletion_fence_marker,
+            requirements,
             super::types::PendingDeletion::ReplacedBufferGpu {
                 resource: old_resource,
                 upload_buffer: old.upload_buffer,
@@ -1350,16 +1366,16 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     let Some(device) = state.devices.get(&buffer.device_handle) else {
         return;
     };
-    let barrier = super::context::reclamation_barrier(state, buffer.device_handle);
-    let last_fence = {
-        let registry = device.descriptors.lock().unwrap();
-        registry.bindless_retirement_fence_for_buffer(buffer_handle, barrier)
-    };
     let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
+    let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
+    let requirements = {
+        let registry = device.descriptors.lock().unwrap();
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+    };
 
     if buffer.is_view {
         let deletion = super::types::PendingDeletion::BufferView { buffer_handle };
-        queue_pending_deletion(state, device, ctx_h, last_fence, deletion);
+        queue_pending_deletion(device, ctx_h, requirements, deletion);
         return;
     }
 
@@ -1387,25 +1403,20 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             None
         },
     };
-    queue_pending_deletion(state, device, ctx_h, last_fence, deletion);
+    queue_pending_deletion(device, ctx_h, requirements, deletion);
 }
 
+/// Queue a bindless-tracked (buffer/view) deletion on the device-level requirement-gated
+/// queue. Always device-level, never a per-context queue: `requirements` may legitimately
+/// list more than one context (any live context that has referenced the bindless slot), and
+/// a per-context queue can only ever be drained against its own single fence.
 fn queue_pending_deletion(
-    state: &Dx12State,
     device: &super::types::LogicalDevice,
-    ctx_h: Option<super::ContextHandle>,
-    last_fence: u64,
+    _ctx_h: Option<super::ContextHandle>,
+    requirements: Vec<(super::ContextHandle, u64)>,
     deletion: super::types::PendingDeletion,
 ) {
-    if let Some(ctx_h) = ctx_h {
-        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx_h) {
-            sc_arc.lock().unwrap().deletion_queue.queue(last_fence, deletion);
-        } else {
-            device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
-        }
-    } else {
-        device.deletion_queue.lock().unwrap().queue(last_fence, deletion);
-    }
+    device.deletion_queue.lock().unwrap().queue(requirements, deletion);
 }
 
 /// Hint unused reserved tiles at/above `offset` (bytes).
@@ -2550,7 +2561,9 @@ pub(super) fn read_readback_buffer(
     buffer_handle: BufferHandle,
     output: &mut [u8],
 ) -> Result<()> {
-    let buffer = buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    let Some(buffer) = buffers.get(&buffer_handle) else {
+        anyhow::bail!("Invalid buffer handle");
+    };
     if !buffer.is_grant_readback {
         anyhow::bail!("read_readback_buffer requires a grant readback buffer");
     }

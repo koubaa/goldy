@@ -630,27 +630,31 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 // Shared submit helpers
 // ---------------------------------------------------------------------------
 
-/// GPU-side queue waits on producer-context fences before executing consumer work.
-fn queue_wait_for_epochs(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<()> {
+/// Resolve producer-context fences for a submission's cross-submit waits.
+///
+/// Returns `(producer_fence, value)` pairs so the caller can enqueue the GPU `Wait`s inside
+/// the same `queue_lock` hold as `ExecuteCommandLists`/`Signal` (see
+/// [`super::utils::execute_with_waits_and_signal_context`]). Enqueuing waits outside that lock
+/// races the externally-synchronized command queue and can reorder sibling submits.
+fn resolve_epoch_waits(
+    scope: &Dx12SubmitScope<'_>,
+    sync: Option<&SubmitSync>,
+) -> Result<Vec<(ID3D12Fence, u64)>> {
     let Some(s) = sync else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     if s.waits.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let ld = scope.ld();
+    let fences = scope.context_fences.read().unwrap();
+    let mut resolved = Vec::with_capacity(s.waits.len());
     for epoch in &s.waits {
-        let fences = scope.context_fences.read().unwrap();
         let (_, producer_fence) = fences
             .get(&epoch.context)
             .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
-        unsafe {
-            ld.command_queue
-                .Wait(producer_fence, epoch.value)
-                .context("cross-submit GPU queue Wait")?;
-        }
+        resolved.push((producer_fence.clone(), epoch.value));
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// Latest device-global seq retired on the scope's device.
@@ -1714,10 +1718,21 @@ fn execute_signal_and_finish(
         .context("Invalid context handle")?
         .1
         .clone();
+    let (queue, queue_lock) = {
+        let sc = scope.sc.lock().unwrap();
+        (sc.command_queue.clone(), std::sync::Arc::clone(&sc.queue_lock))
+    };
     let fence_value = {
         let _tz = tracy_zone!("dx12.execute_and_signal");
-        queue_wait_for_epochs(scope, sync)?;
-        super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
+        let waits = resolve_epoch_waits(scope, sync)?;
+        super::utils::execute_with_waits_and_signal_context(
+            logical_device,
+            &queue,
+            &queue_lock,
+            &waits,
+            &ctx_fence,
+            &[Some(cmd_list)],
+        )?
     };
 
     scope
@@ -1735,7 +1750,7 @@ fn execute_signal_and_finish(
     }
 
     if let Some(prof) = gpu_profile {
-        if let Err(e) = dx12_finish_gpu_profile(&ctx_fence, &logical_device.command_queue, fence_value, prof) {
+        if let Err(e) = dx12_finish_gpu_profile(&ctx_fence, &queue, fence_value, prof) {
             tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
         }
     }
@@ -1779,20 +1794,10 @@ fn execute_signal_and_finish(
         sc.last_submitted_seq = fence_value;
     }
 
-    let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-    let ctx_del_batch = scope
-        .sc
-        .lock()
-        .unwrap()
-        .deletion_queue
-        .drain_up_to_completed(ctx_completed);
     {
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();
-        for resource in ctx_del_batch {
-            types::destroy_pending_deletion(dev, &mut registry, resource);
-        }
         let fences = scope.context_fences.read().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }
@@ -2480,13 +2485,24 @@ pub(super) fn try_resubmit_retained_with_scope(
             .clone()
     };
     let logical_device = scope.ld();
+    let (queue, queue_lock) = {
+        let sc = scope.sc.lock().unwrap();
+        (sc.command_queue.clone(), std::sync::Arc::clone(&sc.queue_lock))
+    };
     let fence_value = {
-        {
+        let waits = {
             let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
-            queue_wait_for_epochs(scope, sync)?;
-        }
+            resolve_epoch_waits(scope, sync)?
+        };
         let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
-        super::utils::execute_command_lists_and_signal_context(logical_device, &ctx_fence, &[Some(cmd_list)])?
+        super::utils::execute_with_waits_and_signal_context(
+            logical_device,
+            &queue,
+            &queue_lock,
+            &waits,
+            &ctx_fence,
+            &[Some(cmd_list)],
+        )?
     };
 
     {
@@ -2508,23 +2524,9 @@ pub(super) fn try_resubmit_retained_with_scope(
     }
 
     {
-        let _tz_del = tracy_zone!("dx12.resubmit_retained.deletion_drain");
-        // TODO - This hides latency and can be done asynchronously, but the effect
-        //        of deleting late might affect memory pool usage that could be
-        //        depended on in some workloads.
-        let retired_ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
-        let retained_del_batch = scope
-            .sc
-            .lock()
-            .unwrap()
-            .deletion_queue
-            .drain_up_to_completed(retired_ctx_completed);
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();
-        for resource in retained_del_batch {
-            types::destroy_pending_deletion(dev, &mut registry, resource);
-        }
         let fences = scope.context_fences.read().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }

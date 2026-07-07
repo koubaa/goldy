@@ -281,7 +281,46 @@ pub(super) fn destroy_attribution_context(state: &VulkanState, device: DeviceHan
     sole_context_on_device(state, device)
 }
 
-/// Timeline barrier for deferred buffer destruction on `device`.
+/// Deferred-deletion requirement for a destroy attributed to a single context.
+pub(super) fn reclamation_barrier_for_context(state: &VulkanState, ctx: ContextHandle) -> u64 {
+    let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx).cloned() else {
+        return 0;
+    };
+    let sc = sc_arc.lock().expect("context Mutex poisoned");
+    sc.last_submitted_seq
+}
+
+/// Per-context requirement snapshot when destroy could not be attributed to one context.
+pub(super) fn reclamation_requirements_all_contexts(
+    state: &VulkanState,
+    device: DeviceHandle,
+) -> Vec<(ContextHandle, u64)> {
+    let handles = contexts_on_device(state, device);
+    let contexts = state.contexts.read().unwrap();
+    handles
+        .into_iter()
+        .filter_map(|h| {
+            let sc_arc = contexts.get(&h)?;
+            let sc = sc_arc.lock().expect("context Mutex poisoned");
+            Some((h, sc.last_submitted_seq))
+        })
+        .collect()
+}
+
+/// Full requirement snapshot for a buffer/texture destroy.
+pub(super) fn reclamation_requirements(
+    state: &VulkanState,
+    device: DeviceHandle,
+    ctx_h: Option<ContextHandle>,
+) -> Vec<(ContextHandle, u64)> {
+    match ctx_h {
+        Some(ctx) => vec![(ctx, reclamation_barrier_for_context(state, ctx))],
+        None => reclamation_requirements_all_contexts(state, device),
+    }
+}
+
+/// Timeline barrier for deferred buffer destruction on `device` (legacy scalar helper).
+#[allow(dead_code)]
 pub(super) fn reclamation_barrier(state: &VulkanState, device: DeviceHandle, ctx: Option<ContextHandle>) -> u64 {
     if let Some(ctx) = ctx {
         if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {

@@ -41,6 +41,17 @@ pub(crate) struct PendingSlotReclamation {
     pub requirements: Vec<(super::ContextHandle, u64)>,
 }
 
+fn slot_requirements_met(
+    requirements: &[(super::ContextHandle, u64)],
+    completed_values: &HashMap<super::ContextHandle, u64>,
+) -> bool {
+    requirements.iter().all(|(ctx_id, required_seq)| {
+        completed_values
+            .get(ctx_id)
+            .is_none_or(|&v| v >= *required_seq)
+    })
+}
+
 /// Device-shared descriptor registry.
 ///
 /// Contains the irreducible shared state for bindless slot allocation: the
@@ -145,6 +156,44 @@ impl DescriptorRegistry {
                 i += 1;
             }
         }
+    }
+
+    /// Per-context requirements that must retire before a buffer's GPU resource can be
+    /// released: `base` merged with every live `slot_last_seen` entry for this buffer's
+    /// bindless slots.
+    pub(crate) fn bindless_retirement_requirements_for_buffer(
+        &self,
+        handle: BufferHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.buffer_slot_keys(handle);
+        self.merge_slot_requirements(&slots, base)
+    }
+
+    /// Same as [`Self::bindless_retirement_requirements_for_buffer`] but for a texture handle.
+    pub(crate) fn bindless_retirement_requirements_for_texture(
+        &self,
+        handle: TextureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.texture_slot_keys(handle);
+        self.merge_slot_requirements(&slots, base)
+    }
+
+    fn merge_slot_requirements(
+        &self,
+        slots: &[SlotKey],
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let mut merged: HashMap<super::ContextHandle, u64> = base.into_iter().collect();
+        for &slot in slots {
+            if let Some(map) = self.slot_last_seen.get(&slot) {
+                for (ctx, seq) in map.iter() {
+                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
+                }
+            }
+        }
+        merged.into_iter().collect()
     }
 }
 
@@ -276,6 +325,34 @@ impl ResourceRegistry {
         let index = self.sampler.alloc();
         self.sampler_indices.insert(handle, index);
         index
+    }
+
+    /// Bindless slot keys for `handle` without removing the registry entry.
+    pub fn buffer_slot_keys(&self, handle: BufferHandle) -> Vec<SlotKey> {
+        self.buffer_indices
+            .get(&handle)
+            .map(|&(index, is_storage)| {
+                vec![if is_storage {
+                    SlotKey::StorageBuffer(index)
+                } else {
+                    SlotKey::UniformBuffer(index)
+                }]
+            })
+            .unwrap_or_default()
+    }
+
+    /// Bindless slot keys for `handle` without removing the registry entry.
+    pub fn texture_slot_keys(&self, handle: TextureHandle) -> Vec<SlotKey> {
+        self.texture_indices
+            .get(&handle)
+            .map(|&(index, is_storage_image)| {
+                vec![if is_storage_image {
+                    SlotKey::StorageImage(index)
+                } else {
+                    SlotKey::SampledTexture(index)
+                }]
+            })
+            .unwrap_or_default()
     }
 
     /// Remove a buffer's handle mapping and return its slot key without recycling.
@@ -611,11 +688,8 @@ pub(crate) struct SubmissionContext {
     /// on each submit using `ctx_completed_value` — never via `device_retired` —
     /// so no other context's progress can block reclaim here.
     ///
-    /// User-destroyed resources (buffers, textures, …) whose context is unknown
-    /// at destroy time still go to `LogicalDevice::deletion_queue` and are drained
-    /// in the explicit-wait paths (`wait_until`, `flush_deferred_deletions`,
-    /// surface acquire).  As a result the submit hot path no longer touches the
-    /// device-level queue at all, which is required for Phase 5 (lock-free submit).
+    /// Dispatch-batch arg buffers and other resources whose lifetime is bounded by
+    /// this context's timeline only.
     pub deletion_queue: DeletionQueue,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
     pub frame_table: SharedFrameTableDevice,
@@ -660,10 +734,9 @@ pub(crate) struct LogicalDevice {
     /// `Arc` so Phase 5 can clone it out of `LogicalDevice` before dropping the
     /// global backend lock.
     pub descriptors: Arc<Mutex<DescriptorRegistry>>,
-    /// Deferred deletion queue for resources that are still in-flight.
-    /// `Mutex` so `LogicalDevice` can be `Arc`-wrapped (Phase 5a): callers that
-    /// previously took `&mut LogicalDevice` now lock this field individually.
-    pub deletion_queue: Mutex<DeletionQueue>,
+    /// Deferred deletion queue for bindless-tracked buffer/texture destroys that may
+    /// span more than one context. Keyed by per-context requirement snapshots.
+    pub deletion_queue: Mutex<DeviceDeletionQueue>,
     /// Device-global submission sequence (shared value space; contexts signal their own semaphores).
     /// `Arc` allows submit paths to clone the counter out before dropping device/state borrows
     /// (required for Phase 5 lock-free submit).
@@ -1145,6 +1218,40 @@ impl DeletionQueue {
     }
 }
 
+/// Device-level deferred deletion queue for resources whose destroy could touch more than
+/// one context (bindless-registry-tracked buffers/textures/views).
+pub(crate) struct DeviceDeletionQueue {
+    inner: super::super::shared::DeferredQueue<Vec<(super::ContextHandle, u64)>, PendingDeletion>,
+}
+
+impl DeviceDeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            inner: super::super::shared::DeferredQueue::new(),
+        }
+    }
+
+    pub fn queue(&mut self, requirements: Vec<(super::ContextHandle, u64)>, resource: PendingDeletion) {
+        self.inner.push(requirements, resource);
+    }
+
+    pub(crate) fn drain_ready(
+        &mut self,
+        completed_values: &HashMap<super::ContextHandle, u64>,
+    ) -> Vec<PendingDeletion> {
+        self.inner
+            .drain_where(|reqs| slot_requirements_met(reqs, completed_values))
+    }
+
+    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
+        self.inner.flush_all().collect()
+    }
+
+    pub(crate) fn pending_len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
 /// Deferred-delete one entry ([`SparseBufferTeardown`] needs [`LogicalDevice`] for the page pool).
 ///
 /// `registry` must be the already-locked `DescriptorRegistry` from `ld.descriptors`; passing it separately
@@ -1295,12 +1402,23 @@ pub(crate) fn destroy_pending_deletion(
 }
 
 impl LogicalDevice {
-    /// Drop deferred resources whose timeline barrier is `<= completed`.
+    /// Drain ready device-level deletions without locking the descriptor registry.
+    pub(crate) fn drain_deletion_queue_ready(
+        &self,
+        completed_values: &HashMap<super::ContextHandle, u64>,
+    ) -> Vec<PendingDeletion> {
+        self.deletion_queue.lock().unwrap().drain_ready(completed_values)
+    }
+
+    /// Drop deferred resources once every listed context requirement has retired.
     ///
     /// Locks the deletion queue and descriptor registry internally; takes `&self` so this
     /// can be called through an `Arc<LogicalDevice>` (Phase 5a).
-    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
-        let drained = self.deletion_queue.lock().unwrap().drain_up_to(completed);
+    pub(crate) fn process_deletion_queue_up_to(
+        &self,
+        completed_values: &HashMap<super::ContextHandle, u64>,
+    ) {
+        let drained = self.drain_deletion_queue_ready(completed_values);
         if drained.is_empty() {
             return;
         }
@@ -1311,9 +1429,19 @@ impl LogicalDevice {
         }
     }
 
+    /// Snapshot live context semaphores and drain the device deletion queue.
+    pub(crate) fn process_deletion_queue_for_device(
+        &self,
+        contexts: &SharedContextMap,
+        device_handle: super::DeviceHandle,
+    ) {
+        let completed_values = snapshot_context_completed_values(&self.device, contexts, device_handle);
+        self.process_deletion_queue_up_to(&completed_values);
+    }
+
     /// Drain all pending deletions (device teardown).
     pub(crate) fn flush_deletion_queue(&self) {
-        let batch = self.deletion_queue.lock().unwrap().flush_all_drain();
+        let batch = self.deletion_queue.lock().unwrap().drain_everything();
         if batch.is_empty() {
             return;
         }

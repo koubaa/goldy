@@ -274,9 +274,34 @@ impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {
         eligible
     }
 
+}
+
+impl<K, V> DeferredQueue<K, V> {
     /// Drain all entries unconditionally (device teardown).
     pub fn flush_all(&mut self) -> impl Iterator<Item = V> + '_ {
         self.pending.drain(..).map(|(_, v)| v)
+    }
+
+    /// Drain all entries whose key satisfies `ready`, returning them as an owned `Vec`.
+    ///
+    /// Unlike [`Self::drain_up_to`], this does not require `K: PartialOrd` — used when a
+    /// single entry's readiness depends on a multi-part requirement (e.g. a per-context
+    /// `(ContextHandle, u64)` snapshot) rather than one totally-ordered threshold.
+    pub fn drain_where<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<V> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let mut i = 0;
+        let mut eligible: Vec<V> = Vec::new();
+        while i < self.pending.len() {
+            if ready(&self.pending[i].0) {
+                let (_, v) = self.pending.swap_remove(i);
+                eligible.push(v);
+            } else {
+                i += 1;
+            }
+        }
+        eligible
     }
 }
 

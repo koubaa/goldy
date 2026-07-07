@@ -1638,13 +1638,21 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 
     let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
 
-    let pending_after_drop = {
+    let (ctx_pending, device_pending) = {
         drop(buf);
-        ctx.deferred_deletion_pending_count()
+        (
+            ctx.deferred_deletion_pending_count(),
+            device.device_deferred_deletion_pending_count(),
+        )
     };
+    assert_eq!(
+        ctx_pending,
+        0,
+        "bindless buffer destroys are queued on the device-level deletion queue, not per-context"
+    );
     assert!(
-        pending_after_drop > 0,
-        "expected deferred deletion queue to retain GPU resources until the timeline catches up"
+        device_pending > 0,
+        "expected device deferred deletion queue to retain GPU resources until the timeline catches up"
     );
 
     ctx.wait_until(tv).expect("wait_until");
@@ -1652,7 +1660,12 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
     assert_eq!(
         ctx.deferred_deletion_pending_count(),
         0,
-        "wait_until should drain deferred destruction for completed timeline values"
+        "per-context deletion queue should stay empty for bindless buffer destroys"
+    );
+    assert_eq!(
+        device.device_deferred_deletion_pending_count(),
+        0,
+        "wait_until should drain device deferred destruction for completed timeline values"
     );
 }
 

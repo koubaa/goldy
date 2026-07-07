@@ -932,6 +932,19 @@ pub(crate) trait GpuBackendTimelineWait {
     ) -> Result<Option<Box<dyn TimelineBlockingWait>>>;
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
+
+    /// Non-blocking half of context teardown: returns a waiter for `ctx`'s outstanding GPU
+    /// work (if any), cloned out from under the global backend lock so the caller can block
+    /// on it *without* holding that lock — mirrors `take_timeline_blocking_wait`.
+    ///
+    /// This matters because a context's last submission may carry a GPU-side `Wait` on
+    /// another context's future signal; if that other context's submission needs the same
+    /// global backend lock to be issued, blocking on the fence *while holding the lock*
+    /// (as a naive `destroy_context` would) deadlocks the whole backend.
+    fn take_context_destroy_wait(&self, ctx: ContextHandle) -> Option<Box<dyn TimelineBlockingWait>> {
+        let _ = ctx;
+        None
+    }
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
@@ -1607,6 +1620,13 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
     /// Resources queued for destruction after the GPU timeline advances (for tests).
     #[doc(hidden)]
     fn deferred_deletion_pending_count(&self, _ctx: ContextHandle) -> usize {
+        0
+    }
+
+    /// Device-level deferred deletions (bindless buffer/texture destroys that may span
+    /// contexts). Per-context [`Self::deferred_deletion_pending_count`] stays separate.
+    #[doc(hidden)]
+    fn device_deferred_deletion_pending_count(&self, _device: DeviceHandle) -> usize {
         0
     }
 

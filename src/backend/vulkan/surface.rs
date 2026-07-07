@@ -666,7 +666,7 @@ pub(super) fn acquire(
         state
             .devices
             .get(&device_handle)
-            .map(|d| d.deletion_queue.lock().unwrap().len())
+            .map(|d| d.deletion_queue.lock().unwrap().pending_len())
             .unwrap_or(0)
     };
 
@@ -794,14 +794,7 @@ pub(super) fn acquire(
             .devices
             .get(&device_handle)
             .context("Surface's device is invalid")?;
-        let drained = logical_device.deletion_queue.lock().unwrap().drain_up_to(completed);
-        if !drained.is_empty() {
-            let descriptors_arc = std::sync::Arc::clone(&logical_device.descriptors);
-            let mut registry = descriptors_arc.lock().unwrap();
-            for r in drained {
-                types::destroy_pending_deletion(logical_device, &mut registry, r);
-            }
-        }
+        logical_device.process_deletion_queue_for_device(&state.contexts, device_handle);
     }
 
     // Request the next swapchain image.  Semaphore-only: the CPU does not wait

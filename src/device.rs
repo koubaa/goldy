@@ -876,6 +876,13 @@ impl Device {
         backend.texture_heap_stats(self.inner.handle)
     }
 
+    /// Bindless buffer/texture destroys that may span contexts (device-level deferred queue).
+    #[doc(hidden)]
+    pub fn device_deferred_deletion_pending_count(&self) -> usize {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.device_deferred_deletion_pending_count(self.inner.handle)
+    }
+
     /// Get device capabilities and format preferences.
     ///
     /// Use this to query optimal formats for your use case:

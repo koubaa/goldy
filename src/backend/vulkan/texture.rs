@@ -7,7 +7,6 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
@@ -1033,6 +1032,7 @@ pub(super) fn read_to_cpu(
 
 /// Destroy a texture, unregistering it from bindless and cleaning up GPU resources.
 pub(super) fn destroy(
+    state: &super::types::VulkanState,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
     textures: &SharedTextureTable,
     texture_handle: TextureHandle,
@@ -1052,9 +1052,14 @@ pub(super) fn destroy(
                 return;
             }
 
-            let barrier = logical_device.timeline_next.load(Ordering::Relaxed).saturating_sub(1);
+            let ctx_h = super::context::destroy_attribution_context(state, texture.device_handle);
+            let base = super::context::reclamation_requirements(state, texture.device_handle, ctx_h);
+            let requirements = {
+                let registry = logical_device.descriptors.lock().unwrap();
+                registry.bindless_retirement_requirements_for_texture(texture_handle, base)
+            };
             logical_device.deletion_queue.lock().unwrap().queue(
-                barrier,
+                requirements,
                 types::PendingDeletion::Texture {
                     texture_handle,
                     image: texture.image,

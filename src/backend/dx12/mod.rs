@@ -201,8 +201,11 @@ impl Dx12Backend {
         Ok(Self { state })
     }
 
-    /// Wait for the GPU to finish all work on a device (sync fence path).
-    fn wait_for_gpu(&self, device: &LogicalDevice) -> Result<()> {
+    /// Wait for the GPU to finish all work on a device: every live context's own queue
+    /// (each context owns its own `ID3D12CommandQueue`), then the device's shared queue for
+    /// any remaining device-attributed (non-context) work.
+    fn wait_for_gpu(&self, device_handle: DeviceHandle, device: &LogicalDevice) -> Result<()> {
+        context::wait_for_all_contexts_on_device(&self.state, device_handle);
         let fence_value = device.timeline_next.load(std::sync::atomic::Ordering::Relaxed);
         unsafe { device.command_queue.Signal(&device.fence, fence_value) }.context("Failed to signal fence")?;
         utils::wait_for_fence_on_device(&device.fence, fence_value, Some(device))
@@ -215,7 +218,7 @@ impl Dx12Backend {
             api_log::log_device_destroy(device_handle);
         }
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
-            let _ = self.wait_for_gpu(&logical_device);
+            let _ = self.wait_for_gpu(device_handle, &logical_device);
             // Advance timeline_next past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
             // fence values. Without this, PendingDeletion::Buffer re-signals the same value
@@ -394,6 +397,16 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         Ok(Some(Box::new(Dx12TimelineBlockingWait { fence, value })))
     }
 
+    fn take_context_destroy_wait(&self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::TimelineBlockingWait>> {
+        let sc_arc = self.state.contexts.read().unwrap().get(&ctx).cloned()?;
+        let value = sc_arc.lock().unwrap().last_submitted_seq;
+        if value == 0 {
+            return None;
+        }
+        let fence = self.state.context_fences.read().unwrap().get(&ctx)?.1.clone();
+        Some(Box::new(Dx12TimelineBlockingWait { fence, value }))
+    }
+
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         let fence = self
@@ -421,15 +434,17 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             }
             anyhow::bail!("GPU device removed (TDR)");
         }
-        let retired = context::device_retired(&self.state, device_handle);
-        let drain_to = value.min(retired);
+        // Clamp to this context's own completed value: `value` is already in `ctx`'s own
+        // timeline space (the caller obtained it from `ctx`'s own submits), and the
+        // per-context deletion queue is only ever compared against `ctx`'s own fence.
+        let drain_to = value.min(completed);
         if let Some(ld) = self.state.devices.get(&device_handle) {
             if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                 let mut sc = sc_arc.lock().unwrap();
                 context::drain_context_deletion_queue_up_to(ld, &mut sc, drain_to);
             }
             let fences = self.state.context_fences.read().unwrap();
-            ld.process_deletion_queue_up_to(drain_to, &fences);
+            ld.process_deletion_queue_up_to(&fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
@@ -497,8 +512,9 @@ impl GpuBackend for Dx12Backend {
             .state
             .devices
             .get(&device_handle)
-            .context("Invalid device handle")?;
-        self.wait_for_gpu(logical_device)
+            .context("Invalid device handle")?
+            .clone();
+        self.wait_for_gpu(device_handle, &logical_device)
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
@@ -1014,15 +1030,15 @@ impl GpuBackend for Dx12Backend {
                 }
                 anyhow::bail!("GPU device removed (TDR)");
             }
-            let retired = context::device_retired(&self.state, device_handle);
-            let drain_to = value.min(retired);
+            // Clamp to this context's own completed value (see `finish_timeline_wait`).
+            let drain_to = value.min(completed);
             if let Some(dev) = self.state.devices.get(&device_handle) {
                 if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                     let mut sc = sc_arc.lock().unwrap();
                     context::drain_context_deletion_queue_up_to(dev, &mut sc, drain_to);
                 }
                 let fences = self.state.context_fences.read().unwrap();
-                dev.process_deletion_queue_up_to(drain_to, &fences);
+                dev.process_deletion_queue_up_to(&fences);
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
                 descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
             }
@@ -1279,7 +1295,16 @@ impl GpuBackend for Dx12Backend {
 
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device_handle = self.context_device(ctx);
-        let retired = context::device_retired(&self.state, device_handle);
+        // This context's own completed value: the per-context deletion queue is only ever
+        // compared against `ctx`'s own fence, never a cross-context aggregate.
+        let ctx_completed = self
+            .state
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+            .unwrap_or(0);
         if let Some(ld) = self.state.devices.get(&device_handle) {
             let ctx_batch: Vec<_> = self
                 .state
@@ -1287,7 +1312,7 @@ impl GpuBackend for Dx12Backend {
                 .read()
                 .unwrap()
                 .get(&ctx)
-                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to_completed(retired))
+                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to_completed(ctx_completed))
                 .unwrap_or_default();
             if !ctx_batch.is_empty() {
                 let mut registry = ld.descriptors.lock().unwrap();
@@ -1296,7 +1321,7 @@ impl GpuBackend for Dx12Backend {
                 }
             }
             let fences = self.state.context_fences.read().unwrap();
-            ld.process_deletion_queue_up_to(retired, &fences);
+            ld.process_deletion_queue_up_to(&fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
@@ -1314,6 +1339,14 @@ impl GpuBackend for Dx12Backend {
         // Per-context count only: device-global queue holds foreign/legacy destroys
         // and must not pollute this context's reclaim horizon (see scheme_two_contexts_reclaim_independently).
         ctx_pending
+    }
+
+    fn device_deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {
+        self.state
+            .devices
+            .get(&device)
+            .map(|ld| ld.deletion_queue.lock().unwrap().pending_len())
+            .unwrap_or(0)
     }
 }
 
@@ -1401,7 +1434,7 @@ struct Dx12ContextDeferredDeletionFlush {
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletionFlush {
-    fn flush(&self, device_retired: crate::timeline::TimelineValue) {
+    fn flush(&self, _device_retired: crate::timeline::TimelineValue) {
         let completed = self
             .context_fences
             .read()
@@ -1419,6 +1452,6 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             }
             registry.drain_ready_slot_reclamations(&fences);
         }
-        self.ld.process_deletion_queue_up_to(device_retired, &fences);
+        self.ld.process_deletion_queue_up_to(&fences);
     }
 }

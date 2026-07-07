@@ -464,6 +464,21 @@ pub(crate) struct ComputeAllocatorSlot {
 pub(crate) struct Dx12SubmissionContext {
     pub device: super::DeviceHandle,
     pub fence: Direct3D12::ID3D12Fence,
+    /// This context's own hardware command queue.
+    ///
+    /// Each context gets its own `ID3D12CommandQueue` so that an operation on one context
+    /// can never block an operation on another: a GPU-side cross-context `Wait` enqueued on
+    /// this queue only stalls *this* queue, never a sibling context's queue. Contexts used to
+    /// share `LogicalDevice::command_queue`, which meant one context's `Wait` on another
+    /// context's not-yet-submitted signal could wedge the entire device (see the `frame-table`
+    /// cross-submit hangs/TDRs under WARP).
+    pub command_queue: Direct3D12::ID3D12CommandQueue,
+    /// Serializes `Wait`/`ExecuteCommandLists`/`Signal` on [`Self::command_queue`] — the queue
+    /// is externally synchronized in D3D12 and this context's queue may still be submitted to
+    /// from multiple threads concurrently (e.g. several worker threads resubmitting different
+    /// retained graphs on the same context). Scoped per-context (unlike the old device-global
+    /// `LogicalDevice::queue_lock`) so contention here never involves other contexts.
+    pub queue_lock: Arc<Mutex<()>>,
     /// Last device-global seq value submitted on this context.
     pub last_submitted_seq: u64,
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
@@ -478,8 +493,8 @@ pub(crate) struct Dx12SubmissionContext {
     /// Pool that recycles texture-upload staging buffers across frames on this context.
     pub texture_staging_pool: super::staging::TextureStagingPool,
     /// Per-context deferred deletion queue — resources whose lifetime is bounded by this
-    /// context's timeline (dispatch-batch arg buffers, user buffers destroyed with context
-    /// attribution). Drained by this context's own completed fence value.
+    /// context's timeline (dispatch-batch arg buffers). Drained by this context's own
+    /// completed fence value.
     pub deletion_queue: DeletionQueue,
     /// Thread-scoped reclamation epoch from [`ContextReclamationScope::set_epoch`].
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
@@ -599,6 +614,46 @@ impl DeletionQueue {
 
     pub(crate) fn drain_up_to_completed(&mut self, completed: u64) -> Vec<PendingDeletion> {
         self.inner.drain_up_to(completed)
+    }
+
+    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
+        self.inner.flush_all().collect()
+    }
+
+    pub(crate) fn pending_len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+/// Device-level deferred deletion queue for resources whose destroy could touch more than
+/// one context (bindless-registry-tracked buffers/textures/views).
+///
+/// Per-context [`DeletionQueue`] entries are drained against that same context's own fence,
+/// which stays correct even though contexts no longer share a value space. This queue's
+/// entries have no single owning context (or may have been read by several), so they are
+/// keyed by a `(ContextHandle, min_seq)` requirement snapshot — the same shape already used
+/// for [`PendingSlotReclamation`]/[`PendingBufferGpuRelease`] — and only drained once every
+/// listed context's own fence has retired its recorded value.
+pub(crate) struct DeviceDeletionQueue {
+    inner: super::super::shared::DeferredQueue<Vec<(super::ContextHandle, u64)>, PendingDeletion>,
+}
+
+impl DeviceDeletionQueue {
+    pub fn new() -> Self {
+        Self {
+            inner: super::super::shared::DeferredQueue::new(),
+        }
+    }
+
+    pub fn queue(&mut self, requirements: Vec<(super::ContextHandle, u64)>, resource: PendingDeletion) {
+        self.inner.push(requirements, resource);
+    }
+
+    pub(crate) fn drain_ready(
+        &mut self,
+        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+    ) -> Vec<PendingDeletion> {
+        self.inner.drain_where(|reqs| slot_requirements_met(reqs, context_fences))
     }
 
     pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
@@ -735,13 +790,21 @@ impl DescriptorRegistry {
         }
     }
 
-    /// Minimum context timeline value that must retire before a buffer's GPU resource can be
-    /// released. Extends the thread-local [`reclamation_barrier`] with every live
-    /// `slot_last_seen` entry for this buffer's bindless slots so cross-context shader access
-    /// cannot outlive the D3D12 resource.
-    pub(crate) fn bindless_retirement_fence_for_buffer(&self, handle: BufferHandle, barrier: u64) -> u64 {
+    /// Per-context requirements that must retire before a buffer's GPU resource can be
+    /// released: `base` (the destroying context's own barrier, or a snapshot across every
+    /// live context when the destroy could not be attributed to one) merged with every live
+    /// `slot_last_seen` entry for this buffer's bindless slots, so cross-context shader
+    /// access cannot outlive the D3D12 resource.
+    ///
+    /// Returns per-context pairs rather than a single folded fence value: contexts do not
+    /// share a value space, so maxing raw counter values from different contexts together
+    /// would be meaningless.
+    pub(crate) fn bindless_retirement_requirements_for_buffer(
+        &self,
+        handle: BufferHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
         let rr = &self.resource_registry;
-        let mut fence = barrier;
         let mut slots = Vec::new();
         if let Some(&offset) = rr.buffer_offsets.get(&handle) {
             slots.push(offset);
@@ -749,14 +812,37 @@ impl DescriptorRegistry {
         if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
             slots.push(offset);
         }
-        for slot in slots {
+        self.merge_slot_requirements(&slots, base)
+    }
+
+    /// Same as [`Self::bindless_retirement_requirements_for_buffer`] but for a texture handle.
+    pub(crate) fn bindless_retirement_requirements_for_texture(
+        &self,
+        handle: TextureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let rr = &self.resource_registry;
+        let mut slots = Vec::new();
+        if let Some(&offset) = rr.texture_offsets.get(&handle) {
+            slots.push(offset);
+        }
+        self.merge_slot_requirements(&slots, base)
+    }
+
+    fn merge_slot_requirements(
+        &self,
+        slots: &[u32],
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let mut merged: HashMap<super::ContextHandle, u64> = base.into_iter().collect();
+        for &slot in slots {
             if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
-                for (_, seq) in map.iter() {
-                    fence = fence.max(*seq);
+                for (ctx, seq) in map.iter() {
+                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
                 }
             }
         }
-        fence
+        merged.into_iter().collect()
     }
 }
 
@@ -825,9 +911,10 @@ pub(crate) struct LogicalDevice {
     /// that caused silent corruption on WARP when multiple buffers were cleared in
     /// the same wave (all clears rewrote the same single-slot descriptor heap).
     pub zero_buffer: Direct3D12::ID3D12Resource,
-    /// Deferred deletion queue — resources are dropped only after the GPU finishes
-    /// the command list that was last submitted when the resource was queued.
-    pub deletion_queue: Mutex<DeletionQueue>,
+    /// Deferred deletion queue — resources are dropped only after every context listed in
+    /// their requirement snapshot has retired. Used for buffer/texture destroys that could
+    /// touch more than one context (see [`DeviceDeletionQueue`]).
+    pub deletion_queue: Mutex<DeviceDeletionQueue>,
     /// Buffer GPU memory held until bindless slot `slot_last_seen` requirements retire.
     pub pending_buffer_gpu_releases: Mutex<Vec<PendingBufferGpuRelease>>,
     /// Shared with [`Dx12State::device_removed`] — first `u64::MAX` fence triggers DRED once.
@@ -866,10 +953,9 @@ pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevic
 impl LogicalDevice {
     pub(crate) fn process_deletion_queue_up_to(
         &self,
-        completed: u64,
         context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
     ) {
-        let batch = self.deletion_queue.lock().unwrap().drain_up_to_completed(completed);
+        let batch = self.deletion_queue.lock().unwrap().drain_ready(context_fences);
         if batch.is_empty() {
             self.drain_pending_buffer_gpu_releases(context_fences);
             return;

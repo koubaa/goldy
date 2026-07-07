@@ -1025,20 +1025,19 @@ impl GpuBackend for MetalBackend {
     }
 
     fn deferred_deletion_pending_count(&self, ctx: ContextHandle) -> usize {
-        let device = self.context_device(ctx);
-        let ctx_count = self
-            .state
+        self.state
             .contexts
             .get(&ctx)
             .map(|sc_arc| sc_arc.lock().unwrap().deletion_queue.pending_len())
-            .unwrap_or(0);
-        let device_count = self
-            .state
+            .unwrap_or(0)
+    }
+
+    fn device_deferred_deletion_pending_count(&self, device: DeviceHandle) -> usize {
+        self.state
             .devices
             .get(&device)
             .map(|d| d.deletion_queue.lock().unwrap().pending_len())
-            .unwrap_or(0);
-        ctx_count + device_count
+            .unwrap_or(0)
     }
 
     fn buffer_heap_stats(&self, device: DeviceHandle) -> Option<super::BufferHeapStats> {
