@@ -208,20 +208,14 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-/// True when the default host process is using the Vulkan backend (e.g. Linux CI).  
+/// True when the active runtime backend is Vulkan (e.g. Linux CI or `GOLDY_BACKEND=vk`).
 /// On Windows with DX12 as default, returns false so we do not spawn a Vulkan-only subprocess.
 #[cfg(feature = "vulkan")]
 fn vk_api_validation_active_backend_is_vulkan() -> bool {
     let Ok(instance) = Instance::new() else {
         return false;
     };
-    let Ok(device) = instance
-        .request_adapter(&RequestAdapterOptions::default())
-        .and_then(|a| a.request_device(&DeviceDescriptor::default()))
-    else {
-        return false;
-    };
-    device.backend_type() == BackendType::Vulkan
+    instance.backend_type() == BackendType::Vulkan
 }
 
 /// Re-run this integration test binary in a subprocess with Vulkan validation enabled.
