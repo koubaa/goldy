@@ -1,7 +1,7 @@
 //! Vulkan frame-table buffers and prologue (staging upload + device-local copy).
 
 use super::types::{
-    self, BufferState, LogicalDevice, SharedBufferTable, SharedContextMap, SharedFrameTableDevice, SharedPipelineTable,
+    self, BufferState, LogicalDevice, SharedBufferTable, SharedContextMap, SharedContextFrameTable, SharedPipelineTable,
     VulkanState,
 };
 use super::utils::find_memory_type;
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Per-context frame-table GPU resources and ring state.
-pub(crate) struct FrameTableDevice {
+pub(crate) struct ContextFrameTable {
     pub selector: BufferHandle,
     pub device_table: BufferHandle,
     /// Bindless storage slot of this context's selector cell (shader `_rs1`).
@@ -54,7 +54,7 @@ pub(crate) fn init_context(
     instance: &ash::Instance,
     device_handle: super::DeviceHandle,
     ld: &LogicalDevice,
-) -> Result<SharedFrameTableDevice> {
+) -> Result<SharedContextFrameTable> {
     let (selector, selector_slot) = create_scattered_u32_buffer_registered(state, instance, device_handle, ld, 1)?;
     let (device_table, table_slot) =
         create_scattered_u32_buffer_registered(state, instance, device_handle, ld, FRAME_TABLE_TABLE_U32S as u32)?;
@@ -78,7 +78,7 @@ pub(crate) fn init_context(
         .unwrap()
         .element_stride = Some(4);
 
-    let ft = SharedFrameTableDevice::new(FrameTableDevice {
+    let ft = SharedContextFrameTable::new(ContextFrameTable {
         selector,
         device_table,
         selector_slot,
@@ -102,7 +102,7 @@ pub(crate) fn ensure_legacy_frame_table(
     state: &mut VulkanState,
     instance: &ash::Instance,
     device_handle: super::DeviceHandle,
-) -> Result<SharedFrameTableDevice> {
+) -> Result<SharedContextFrameTable> {
     let ld = state
         .devices
         .get(&device_handle)
@@ -123,7 +123,7 @@ pub(crate) fn ensure_legacy_frame_table(
 /// lifetime, so no rebinding at execute time is ever needed.
 pub(crate) fn bind_to_bindless_heap(
     ld: &LogicalDevice,
-    ft: &FrameTableDevice,
+    ft: &ContextFrameTable,
     buffers: &HashMap<BufferHandle, BufferState>,
 ) -> Result<()> {
     let Some(descriptor_set) = ld.bindless_descriptor_set else {
@@ -169,7 +169,7 @@ fn write_storage_at_slot(
 /// buffers, and their per-context bindless slots.
 ///
 /// Caller guarantees the context's GPU work has fully retired.
-pub(crate) fn destroy_context(state: &VulkanState, ld: &LogicalDevice, ft: &FrameTableDevice) {
+pub(crate) fn destroy_context(state: &VulkanState, ld: &LogicalDevice, ft: &ContextFrameTable) {
     unsafe {
         ld.device.destroy_buffer(ft.staging, None);
         ld.device.free_memory(ft.staging_memory, None);
@@ -326,7 +326,7 @@ fn prologue_post_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer) {
 }
 
 fn record_table_copies(
-    ft: &FrameTableDevice,
+    ft: &ContextFrameTable,
     buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
@@ -372,7 +372,7 @@ fn record_table_copies(
 }
 
 /// Pin a staging row so retained CB prologue copies keep valid source bytes.
-pub(crate) fn pin_row(ft: &FrameTableDevice, row: u32) -> Result<()> {
+pub(crate) fn pin_row(ft: &ContextFrameTable, row: u32) -> Result<()> {
     let bit = 1u32 << row;
     let prev = ft.pinned_rows.fetch_or(bit, Ordering::AcqRel);
     if prev & bit != 0 {
@@ -382,12 +382,12 @@ pub(crate) fn pin_row(ft: &FrameTableDevice, row: u32) -> Result<()> {
 }
 
 /// Release a row pinned by [`pin_row`].
-pub(crate) fn unpin_row(ft: &FrameTableDevice, row: u32) {
+pub(crate) fn unpin_row(ft: &ContextFrameTable, row: u32) {
     let bit = 1u32 << row;
     ft.pinned_rows.fetch_and(!bit, Ordering::AcqRel);
 }
 
-fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()> {
+fn assert_row_available(ft: &ContextFrameTable, sub: u32, row: u32) -> Result<()> {
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         anyhow::bail!(
             "frame table row {row} is still pinned after evicting retained graphs; \
@@ -411,7 +411,7 @@ fn assert_row_available(ft: &FrameTableDevice, sub: u32, row: u32) -> Result<()>
 fn write_staging_for_submission(
     contexts: &SharedContextMap,
     ctx: super::ContextHandle,
-    ft: &FrameTableDevice,
+    ft: &ContextFrameTable,
     data: &[u32],
 ) -> Result<u32> {
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
@@ -434,7 +434,7 @@ fn write_staging_for_submission(
 }
 
 /// CPU staging write for legacy standalone render (no context eviction).
-fn write_staging_standalone(ft: &FrameTableDevice, data: &[u32]) -> Result<u32> {
+fn write_staging_standalone(ft: &ContextFrameTable, data: &[u32]) -> Result<u32> {
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
     assert_row_available(ft, sub, row)?;
@@ -453,7 +453,7 @@ fn write_staging_standalone(ft: &FrameTableDevice, data: &[u32]) -> Result<u32> 
 
 /// CPU staging write + GPU copy prologue for legacy `render_to_target`.
 pub(crate) fn record_prologue_legacy(
-    frame_table: &FrameTableDevice,
+    frame_table: &ContextFrameTable,
     buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
@@ -476,7 +476,7 @@ pub(crate) fn record_prologue_legacy(
 pub(crate) fn record_prologue(
     contexts: &SharedContextMap,
     ctx: super::ContextHandle,
-    frame_table: &FrameTableDevice,
+    frame_table: &ContextFrameTable,
     buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
@@ -491,7 +491,7 @@ pub(crate) fn record_prologue(
 
 /// Refresh the active row in the device-local table without advancing the selector.
 pub(crate) fn sync_table_row_to_device(
-    frame_table: &SharedFrameTableDevice,
+    frame_table: &SharedContextFrameTable,
     buffers: &SharedBufferTable,
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,

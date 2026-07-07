@@ -499,7 +499,7 @@ pub(crate) struct Dx12SubmissionContext {
     /// Thread-scoped reclamation epoch from [`ContextReclamationScope::set_epoch`].
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
-    pub frame_table: SharedFrameTableDevice,
+    pub frame_table: SharedContextFrameTable,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
@@ -933,7 +933,7 @@ pub(crate) struct LogicalDevice {
     /// enqueue, matching Vulkan's `queue_lock` and Metal's present/compute pairing.
     pub queue_lock: Arc<Mutex<()>>,
     /// Frame table for legacy `render_to_target` (no submission context).
-    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
+    pub legacy_frame_table: Mutex<Option<SharedContextFrameTable>>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
@@ -948,7 +948,7 @@ pub(crate) type SharedSubmissionContext = Arc<Mutex<Dx12SubmissionContext>>;
 pub(crate) type SharedContextMap = Arc<std::sync::RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
 
 /// Per-context frame-table GPU state — cloned into submit sessions at context creation.
-pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
+pub(crate) type SharedContextFrameTable = Arc<super::frame_table::ContextFrameTable>;
 
 impl LogicalDevice {
     pub(crate) fn process_deletion_queue_up_to(

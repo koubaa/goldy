@@ -692,7 +692,7 @@ pub(crate) struct SubmissionContext {
     /// this context's timeline only.
     pub deletion_queue: DeletionQueue,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
-    pub frame_table: SharedFrameTableDevice,
+    pub frame_table: SharedContextFrameTable,
 }
 
 /// A logical Vulkan device with associated resources.
@@ -775,7 +775,7 @@ pub(crate) struct LogicalDevice {
     pub vk_timestamp_period_ns: f32,
 
     /// Frame table for legacy `render_to_target` (no submission context).
-    pub legacy_frame_table: Mutex<Option<SharedFrameTableDevice>>,
+    pub legacy_frame_table: Mutex<Option<SharedContextFrameTable>>,
 }
 
 /// A Vulkan command buffer retained for resubmission.
@@ -1475,7 +1475,7 @@ pub(super) type SharedComputeFencePool = Arc<ComputeFencePool>;
 pub(crate) type SharedContextMap = Arc<RwLock<HashMap<super::ContextHandle, SharedSubmissionContext>>>;
 
 /// Per-context frame-table GPU resources — cloned into submit sessions at context creation.
-pub(crate) type SharedFrameTableDevice = Arc<super::frame_table::FrameTableDevice>;
+pub(crate) type SharedContextFrameTable = Arc<super::frame_table::ContextFrameTable>;
 
 /// Map plus monotonic handle allocator for a single resource kind.
 ///

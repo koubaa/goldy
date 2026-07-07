@@ -2545,7 +2545,7 @@ pub(super) fn try_resubmit_retained(
 
 fn evict_retained_on_context(
     contexts: &types::SharedContextMap,
-    frame_table: &super::frame_table::FrameTableDevice,
+    frame_table: &super::frame_table::ContextFrameTable,
     ctx: ContextHandle,
     key: u64,
 ) {
@@ -2564,7 +2564,7 @@ fn evict_retained_on_context(
 
 pub(super) fn evict_retained_pinning_row_for_context(
     contexts: &types::SharedContextMap,
-    frame_table: &super::frame_table::FrameTableDevice,
+    frame_table: &super::frame_table::ContextFrameTable,
     ctx: ContextHandle,
     row: u32,
 ) {

@@ -545,7 +545,7 @@ where
 
 pub(super) struct RenderToResources<'a> {
     pub(super) devices: &'a HashMap<DeviceHandle, super::types::SharedLogicalDevice>,
-    pub(super) frame_table: &'a super::types::SharedFrameTableDevice,
+    pub(super) frame_table: &'a super::types::SharedContextFrameTable,
     pub(super) buffers: &'a super::types::SharedBufferTable,
     pub(super) pipelines: &'a super::types::SharedPipelineTable,
 }

@@ -4,9 +4,9 @@
 //! submit never touch the global backend mutex.
 
 use super::compute;
-use super::frame_table::FrameTableDevice;
+use super::frame_table::ContextFrameTable;
 use super::types::{
-    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextMap, SharedFrameTableDevice,
+    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextMap, SharedContextFrameTable,
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSamplerTable, SharedShaderTable,
     SharedSubmissionContext, SharedTextureTable,
 };
@@ -22,7 +22,7 @@ pub(crate) struct Dx12RecordState<'a> {
     pub ld: &'a SharedLogicalDevice,
     pub devices: &'a HashMap<DeviceHandle, SharedLogicalDevice>,
     pub contexts: &'a SharedContextMap,
-    pub frame_table: SharedFrameTableDevice,
+    pub frame_table: SharedContextFrameTable,
     pub buffers: &'a SharedBufferTable,
     pub shaders: &'a SharedShaderTable,
     pub pipelines: &'a SharedPipelineTable,
@@ -56,7 +56,7 @@ impl<'a> Dx12SubmitScope<'a> {
         self.record.contexts
     }
 
-    pub fn frame_table(&self) -> &FrameTableDevice {
+    pub fn frame_table(&self) -> &ContextFrameTable {
         &self.record.frame_table
     }
 
@@ -157,7 +157,7 @@ pub(crate) struct Dx12SubmitSession {
     ld: SharedLogicalDevice,
     devices: Arc<HashMap<DeviceHandle, SharedLogicalDevice>>,
     contexts: SharedContextMap,
-    frame_table: SharedFrameTableDevice,
+    frame_table: SharedContextFrameTable,
     context_fences: Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
     buffers: SharedBufferTable,
     shaders: SharedShaderTable,

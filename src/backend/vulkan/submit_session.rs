@@ -5,7 +5,7 @@
 
 use super::compute;
 use super::types::{
-    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextMap, SharedFrameTableDevice,
+    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextMap, SharedContextFrameTable,
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext, SharedTextureTable,
     VulkanState,
 };
@@ -53,7 +53,7 @@ pub(crate) struct VulkanSubmitScope<'a> {
     pub device_handle: DeviceHandle,
     pub sc: SharedSubmissionContext,
     pub view: VulkanSubmitView<'a>,
-    pub frame_table: SharedFrameTableDevice,
+    pub frame_table: SharedContextFrameTable,
 }
 
 impl<'a> VulkanSubmitScope<'a> {
@@ -79,7 +79,7 @@ pub(crate) struct VulkanSubmitSession {
     sc: SharedSubmissionContext,
     devices: Arc<HashMap<DeviceHandle, SharedLogicalDevice>>,
     contexts: SharedContextMap,
-    frame_table: SharedFrameTableDevice,
+    frame_table: SharedContextFrameTable,
     buffers: SharedBufferTable,
     pipelines: SharedPipelineTable,
     compute_pipelines: SharedComputePipelineTable,
