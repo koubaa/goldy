@@ -480,7 +480,7 @@ pub(crate) struct Dx12SubmissionContext {
     /// `LogicalDevice::queue_lock`) so contention here never involves other contexts.
     pub queue_lock: Arc<Mutex<()>>,
     /// Last device-global seq value submitted on this context.
-    pub last_submitted_seq: u64,
+    pub last_submitted_seq: Arc<AtomicU64>,
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
@@ -585,14 +585,21 @@ pub(crate) struct PendingBufferGpuRelease {
     pub reserved_tiles: Option<Vec<Option<(Direct3D12::ID3D12Heap, u64)>>>,
 }
 
+/// Per-context fence + last-submitted seq shared with [`Dx12SubmissionContext`].
+pub(crate) type ContextFenceEntry = (
+    DeviceHandle,
+    Direct3D12::ID3D12Fence,
+    Arc<AtomicU64>,
+);
+
 fn slot_requirements_met(
     requirements: &[(super::ContextHandle, u64)],
-    context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+    context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
 ) -> bool {
     requirements.iter().all(|(ctx_id, required_seq)| {
         context_fences
             .get(ctx_id)
-            .is_none_or(|(_, fence)| unsafe { fence.GetCompletedValue() >= *required_seq })
+            .is_none_or(|(_, fence, _)| unsafe { fence.GetCompletedValue() >= *required_seq })
     })
 }
 
@@ -651,7 +658,7 @@ impl DeviceDeletionQueue {
 
     pub(crate) fn drain_ready(
         &mut self,
-        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+        context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
     ) -> Vec<PendingDeletion> {
         self.inner.drain_where(|reqs| slot_requirements_met(reqs, context_fences))
     }
@@ -776,7 +783,7 @@ impl DescriptorRegistry {
     /// deadlock with per-context `Mutex<Dx12SubmissionContext>`.
     pub(crate) fn drain_ready_slot_reclamations(
         &mut self,
-        context_fences: &HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+        context_fences: &HashMap<ContextHandle, ContextFenceEntry>,
     ) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
@@ -950,7 +957,7 @@ pub(crate) type SharedContextFrameTable = Arc<super::frame_table::ContextFrameTa
 impl LogicalDevice {
     pub(crate) fn process_deletion_queue_up_to(
         &self,
-        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+        context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
     ) {
         let batch = self.deletion_queue.lock().unwrap().drain_ready(context_fences);
         if batch.is_empty() {
@@ -969,7 +976,7 @@ impl LogicalDevice {
     /// Drop deferred buffer GPU memory once every referencing context has retired.
     pub(crate) fn drain_pending_buffer_gpu_releases(
         &self,
-        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+        context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
     ) {
         let mut pending = self.pending_buffer_gpu_releases.lock().unwrap();
         let mut i = 0;
@@ -985,7 +992,7 @@ impl LogicalDevice {
 
     pub(crate) fn flush_deletion_queue(
         &self,
-        context_fences: &HashMap<super::ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>,
+        context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
     ) {
         // Called only at device teardown, after wait_for_gpu ensures all GPU work has
         // completed. Slots queued here via reclaim_*_slots will have empty requirements
@@ -1410,7 +1417,7 @@ pub(super) struct Dx12State {
     /// Shared via [`Arc<RwLock<>>`] so [`ContextDeferredDeletionFlush`] clones can drain slots
     /// without the global backend mutex.
     pub context_fences:
-        std::sync::Arc<std::sync::RwLock<HashMap<ContextHandle, (DeviceHandle, Direct3D12::ID3D12Fence)>>>,
+        std::sync::Arc<std::sync::RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
     pub buffers: SharedBufferTable,
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,

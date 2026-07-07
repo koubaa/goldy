@@ -15,7 +15,6 @@ use crate::timeline::TimelineValue;
 use anyhow::{Context as _, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 
 /// Resource tables + device handles used by compute and render command recording.
 pub(crate) struct Dx12RecordState<'a> {
@@ -39,7 +38,7 @@ pub(crate) struct Dx12SubmitScope<'a> {
     pub device_handle: DeviceHandle,
     pub sc: super::types::SharedSubmissionContext,
     pub record: Dx12RecordState<'a>,
-    pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
     pub use_global_buffer_barriers: bool,
 }
 
@@ -158,7 +157,7 @@ pub(crate) struct Dx12SubmitSession {
     devices: Arc<HashMap<DeviceHandle, SharedLogicalDevice>>,
     contexts: SharedContextMap,
     frame_table: SharedContextFrameTable,
-    context_fences: Arc<RwLock<HashMap<ContextHandle, (DeviceHandle, ID3D12Fence)>>>,
+    context_fences: Arc<RwLock<HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
     buffers: SharedBufferTable,
     shaders: SharedShaderTable,
     pipelines: SharedPipelineTable,

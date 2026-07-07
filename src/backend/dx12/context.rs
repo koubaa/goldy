@@ -16,8 +16,8 @@ pub(super) fn device_retired(state: &Dx12State, device: DeviceHandle) -> u64 {
     let fences = state.context_fences.read().unwrap();
     let max_ctx = fences
         .values()
-        .filter(|(dev, _)| *dev == device)
-        .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+        .filter(|(dev, _, _)| *dev == device)
+        .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
         .max()
         .unwrap_or(0);
     drop(fences);
@@ -88,6 +88,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     state.next_context_id = state.next_context_id.saturating_add(1);
 
     let frame_table = super::frame_table::init_context(state, device, &ld)?;
+    let last_submitted_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Register the fence in the lock-free index before inserting the context so that
     // any concurrent drain_ready_slot_reclamations sees a consistent view.
@@ -95,7 +96,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         .context_fences
         .write()
         .unwrap()
-        .insert(id, (device, fence.clone()));
+        .insert(id, (device, fence.clone(), std::sync::Arc::clone(&last_submitted_seq)));
     state.contexts.write().unwrap().insert(
         id,
         std::sync::Arc::new(std::sync::Mutex::new(        Dx12SubmissionContext {
@@ -103,7 +104,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence,
             command_queue,
             queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
-            last_submitted_seq: 0,
+            last_submitted_seq,
             signal_queue,
             fence_shutdown,
             fence_thread,
@@ -136,7 +137,7 @@ fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHan
         .read()
         .unwrap()
         .iter()
-        .filter(|(_, (dev, _))| *dev == device)
+        .filter(|(_, (dev, _, _))| *dev == device)
         .map(|(h, _)| *h)
         .collect();
     result
@@ -168,16 +169,14 @@ pub(super) fn context_handle_for_thread(state: &Dx12State, device: DeviceHandle)
 /// device has retired" barrier (device-wide idle wait, device teardown) must drain every
 /// context's own fence explicitly first.
 pub(super) fn wait_for_all_contexts_on_device(state: &Dx12State, device: DeviceHandle) {
+    let fences = state.context_fences.read().unwrap();
     for ctx in contexts_on_device(state, device) {
-        let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx).cloned() else {
+        let Some((_, fence, seq)) = fences.get(&ctx) else {
             continue;
         };
-        let (fence, seq) = {
-            let sc = sc_arc.lock().expect("context Mutex poisoned");
-            (sc.fence.clone(), sc.last_submitted_seq)
-        };
+        let seq = seq.load(std::sync::atomic::Ordering::Relaxed);
         if seq > 0 {
-            let _ = super::utils::wait_for_fence(&fence, seq);
+            let _ = super::utils::wait_for_fence(fence, seq);
         }
     }
 }
@@ -197,11 +196,12 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     let device = sc.device;
 
     // Drain in-flight GPU work before releasing command allocators / retained CLs.
-    if sc.last_submitted_seq > 0 {
+    let last_submitted = sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed);
+    if last_submitted > 0 {
         if super::api_log::enabled() {
-            super::api_log::log_fence_wait_cpu("context_destroy", sc.last_submitted_seq);
+            super::api_log::log_fence_wait_cpu("context_destroy", last_submitted);
         }
-        let _ = super::utils::wait_for_fence(&sc.fence, sc.last_submitted_seq);
+        let _ = super::utils::wait_for_fence(&sc.fence, last_submitted);
     }
 
     let completed_after_wait = unsafe { sc.fence.GetCompletedValue() };

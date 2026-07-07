@@ -649,7 +649,7 @@ fn resolve_epoch_waits(
     let fences = scope.context_fences.read().unwrap();
     let mut resolved = Vec::with_capacity(s.waits.len());
     for epoch in &s.waits {
-        let (_, producer_fence) = fences
+        let (_, producer_fence, _) = fences
             .get(&epoch.context)
             .with_context(|| format!("cross-submit wait: unknown producer context {:?}", epoch.context))?;
         resolved.push((producer_fence.clone(), epoch.value));
@@ -664,8 +664,8 @@ fn device_retired_for_scope(scope: &Dx12SubmitScope<'_>) -> u64 {
     let fences = scope.context_fences.read().unwrap();
     let max_ctx = fences
         .values()
-        .filter(|(dev, _)| *dev == device)
-        .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+        .filter(|(dev, _, _)| *dev == device)
+        .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
         .max()
         .unwrap_or(0);
     drop(fences);
@@ -1791,7 +1791,8 @@ fn execute_signal_and_finish(
                 );
             }
         }
-        sc.last_submitted_seq = fence_value;
+        sc.last_submitted_seq
+            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
     }
 
     {
@@ -2520,7 +2521,8 @@ pub(super) fn try_resubmit_retained_with_scope(
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
-        sc.last_submitted_seq = fence_value;
+        sc.last_submitted_seq
+            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
     }
 
     {

@@ -398,13 +398,16 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
     }
 
     fn take_context_destroy_wait(&self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::TimelineBlockingWait>> {
-        let sc_arc = self.state.contexts.read().unwrap().get(&ctx).cloned()?;
-        let value = sc_arc.lock().unwrap().last_submitted_seq;
+        let fences = self.state.context_fences.read().unwrap();
+        let (_, fence, seq) = fences.get(&ctx)?;
+        let value = seq.load(std::sync::atomic::Ordering::Relaxed);
         if value == 0 {
             return None;
         }
-        let fence = self.state.context_fences.read().unwrap().get(&ctx)?.1.clone();
-        Some(Box::new(Dx12TimelineBlockingWait { fence, value }))
+        Some(Box::new(Dx12TimelineBlockingWait {
+            fence: fence.clone(),
+            value,
+        }))
     }
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
@@ -879,11 +882,13 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn gpu_progress(&self, ctx: ContextHandle) -> crate::timeline::TimelineValue {
-        let contexts = self.state.contexts.read().unwrap();
-        match contexts.get(&ctx) {
-            Some(sc_arc) => unsafe { sc_arc.lock().unwrap().fence.GetCompletedValue() },
-            None => 0,
-        }
+        self.state
+            .context_fences
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
+            .unwrap_or(0)
     }
 
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue {
@@ -895,21 +900,18 @@ impl GpuBackend for Dx12Backend {
             return Ok(());
         }
         // Find the context that submitted value (or past it) and wait on its fence.
-        let fence = self
-            .state
-            .contexts
-            .read()
-            .unwrap()
-            .values()
-            .filter_map(|sc_arc| {
-                let sc = sc_arc.lock().unwrap();
-                if sc.device == device && sc.last_submitted_seq >= value {
-                    Some(sc.fence.clone())
-                } else {
-                    None
-                }
-            })
-            .next();
+        let fence = {
+            let fences = self.state.context_fences.read().unwrap();
+            fences
+                .iter()
+                .find_map(|(_, (dev, fence, seq))| {
+                    if *dev == device && seq.load(std::sync::atomic::Ordering::Relaxed) >= value {
+                        Some(fence.clone())
+                    } else {
+                        None
+                    }
+                })
+        };
         if let Some(fence) = fence {
             utils::wait_for_fence(&fence, value)?;
         }
@@ -954,11 +956,11 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn peek_oldest_in_flight(&self, ctx: ContextHandle) -> Option<crate::timeline::TimelineValue> {
-        let contexts = self.state.contexts.read().unwrap();
-        let sc_arc = contexts.get(&ctx)?;
-        let sc = sc_arc.lock().unwrap();
-        let progress = unsafe { sc.fence.GetCompletedValue() };
-        if progress < sc.last_submitted_seq {
+        let fences = self.state.context_fences.read().unwrap();
+        let (_, fence, last_submitted) = fences.get(&ctx)?;
+        let progress = unsafe { fence.GetCompletedValue() };
+        let last = last_submitted.load(std::sync::atomic::Ordering::Relaxed);
+        if progress < last {
             Some(progress.saturating_add(1))
         } else {
             None
@@ -1280,7 +1282,7 @@ impl GpuBackend for Dx12Backend {
             .read()
             .unwrap()
             .get(&ctx)
-            .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+            .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
             .unwrap_or(0);
         if let Some(ld) = self.state.devices.get(&device_handle) {
             let ctx_batch: Vec<_> = self
@@ -1371,7 +1373,7 @@ struct Dx12ContextDeferredDeletionFlush {
     ld: types::SharedLogicalDevice,
     context_fences: std::sync::Arc<
         std::sync::RwLock<
-            std::collections::HashMap<ContextHandle, (DeviceHandle, windows::Win32::Graphics::Direct3D12::ID3D12Fence)>,
+            std::collections::HashMap<ContextHandle, types::ContextFenceEntry>,
         >,
     >,
 }
@@ -1383,7 +1385,7 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             .read()
             .unwrap()
             .get(&self.ctx)
-            .map(|(_, fence)| unsafe { fence.GetCompletedValue() })
+            .map(|(_, fence, _)| unsafe { fence.GetCompletedValue() })
             .unwrap_or(0);
         let ctx_batch: Vec<_> = self.sc.lock().unwrap().deletion_queue.drain_up_to_completed(completed);
         let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
