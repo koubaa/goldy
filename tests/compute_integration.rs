@@ -1540,9 +1540,11 @@ mod imp {
     /// deferred-destruction queue until `wait_until` sees the matching timeline value.
     fn headless_deferred_buffer_destroy_drains_after_timeline_wait(device: &Device) {
         const MINIMAL_SHADER: &str = r#"
-    [shader("compute")]
+    import goldy_exp;
+
+    [goldy_compute]
     [numthreads(1, 1, 1)]
-    void cs_main(uint3 id : SV_DispatchThreadID) {
+    void cs_main(Scattered<uint> _unused, ThreadId id) {
     }
     "#;
 
@@ -1550,11 +1552,17 @@ mod imp {
         let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("compile");
         let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
 
-        let mut graph = TaskGraph::new();
-        graph.node("n0", &pipeline).dispatch(1, 1, 1);
-        let tv = graph.submit(&ctx).expect("submit");
-
+        // Buffer must be referenced at submit time so bindless retirement requirements
+        // include this context's timeline value; an unreferenced buffer has empty
+        // requirements and is drainable immediately by any sibling trial's wait_until.
         let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
+
+        let mut graph = TaskGraph::new();
+        graph
+            .node("n0", &pipeline)
+            .with_resources(&[&buf])
+            .dispatch(1, 1, 1);
+        let tv = graph.submit(&ctx).expect("submit");
 
         let (ctx_pending, device_pending) = {
             drop(buf);
