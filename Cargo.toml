@@ -217,3 +217,7 @@ required-features = ["update-screenshots"]
 name = "compute_integration"
 harness = false
 
+[[test]]
+name = "scheme_compute_integration"
+harness = false
+
