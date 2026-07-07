@@ -434,5 +434,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     }
 
     tracing::info!("Created DX12 device {} for adapter {}", handle, adapter_id);
+    if super::api_log::enabled() {
+        super::api_log::log_device_create(adapter_id, handle);
+    }
     Ok(handle)
 }

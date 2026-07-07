@@ -28,6 +28,7 @@
 //! - `types`: Internal state structs for devices, buffers, shaders, etc.
 //! - `utils`: Format conversion and helpers
 
+mod api_log;
 mod barriers;
 mod buffer;
 mod compute;
@@ -161,6 +162,10 @@ impl Dx12Backend {
     pub fn new() -> Result<Self> {
         tracing::info!("Initializing DX12 backend");
 
+        // Initialise API call logger (GOLDY_API_LOG) as early as possible so even
+        // device-creation calls can be captured if desired.
+        api_log::init();
+
         let shared = process_shared::process_shared()?;
         install_debug_layer_exception_handler();
 
@@ -206,6 +211,9 @@ impl Dx12Backend {
 
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
+        if api_log::enabled() {
+            api_log::log_device_destroy(device_handle);
+        }
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
             let _ = self.wait_for_gpu(&logical_device);
             // Advance timeline_next past the value consumed by wait_for_gpu so that

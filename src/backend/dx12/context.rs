@@ -101,6 +101,9 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             reclamation_context: None,
         })),
     );
+    if super::api_log::enabled() {
+        super::api_log::log_context_create(device, id, is_warp);
+    }
     Ok(id)
 }
 
@@ -199,6 +202,9 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
 
     // Drain in-flight GPU work before releasing command allocators / retained CLs.
     if sc.last_submitted_seq > 0 {
+        if super::api_log::enabled() {
+            super::api_log::log_fence_wait_cpu("context_destroy", sc.last_submitted_seq);
+        }
         let _ = super::utils::wait_for_fence(&sc.fence, sc.last_submitted_seq);
     }
 
@@ -236,6 +242,10 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     }
 
     super::frame_table::destroy_context(state, device, &sc.frame_table);
+
+    if super::api_log::enabled() {
+        super::api_log::log_context_destroy(device, ctx);
+    }
 }
 
 /// Drain per-context deferred deletions retired up to `completed` on the render/wait thread.
