@@ -651,19 +651,15 @@ pub(super) fn resize(
 
     // `old_resource` keeps the same bindless slot(s) as the new resource until the
     // descriptor rewrite above lands, so any context still reading through that slot's
-    // last-recorded fence value must retire before `old_resource` is freed. Using the
-    // device sync fence here (as this used to) is wrong: that fence is only signalled on
-    // explicit wait_for_gpu/resize paths, not per submit, so it under-reports how long
-    // in-flight per-context GPU work referencing the slot may still need `old_resource`.
-    let ctx_h = super::context::destroy_attribution_context(state, device_handle);
-    let base = super::context::reclamation_requirements(state, device_handle, ctx_h);
+    // last-recorded fence value must retire before `old_resource` is freed. Requirements
+    // come only from `slot_last_seen` (recorded at submit time), not destroy-time guessing.
     let requirements = {
         let dev = state
             .devices
             .get(&device_handle)
             .context("resize_buffer: queue deletion")?;
         let registry = dev.descriptors.lock().unwrap();
-        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle)
     };
 
     let dev = state
@@ -1366,16 +1362,14 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     let Some(device) = state.devices.get(&buffer.device_handle) else {
         return;
     };
-    let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
-    let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
     let requirements = {
         let registry = device.descriptors.lock().unwrap();
-        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle)
     };
 
     if buffer.is_view {
         let deletion = super::types::PendingDeletion::BufferView { buffer_handle };
-        queue_pending_deletion(device, ctx_h, requirements, deletion);
+        queue_pending_deletion(device, requirements, deletion);
         return;
     }
 
@@ -1403,7 +1397,7 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
             None
         },
     };
-    queue_pending_deletion(device, ctx_h, requirements, deletion);
+    queue_pending_deletion(device, requirements, deletion);
 }
 
 /// Queue a bindless-tracked (buffer/view) deletion on the device-level requirement-gated
@@ -1412,7 +1406,6 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
 /// a per-context queue can only ever be drained against its own single fence.
 fn queue_pending_deletion(
     device: &super::types::LogicalDevice,
-    _ctx_h: Option<super::ContextHandle>,
     requirements: Vec<(super::ContextHandle, u64)>,
     deletion: super::types::PendingDeletion,
 ) {

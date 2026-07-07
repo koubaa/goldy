@@ -802,7 +802,6 @@ impl DescriptorRegistry {
     pub(crate) fn bindless_retirement_requirements_for_buffer(
         &self,
         handle: BufferHandle,
-        base: Vec<(super::ContextHandle, u64)>,
     ) -> Vec<(super::ContextHandle, u64)> {
         let rr = &self.resource_registry;
         let mut slots = Vec::new();
@@ -812,29 +811,27 @@ impl DescriptorRegistry {
         if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
             slots.push(offset);
         }
-        self.merge_slot_requirements(&slots, base)
+        self.merge_slot_requirements(&slots)
     }
 
     /// Same as [`Self::bindless_retirement_requirements_for_buffer`] but for a texture handle.
     pub(crate) fn bindless_retirement_requirements_for_texture(
         &self,
         handle: TextureHandle,
-        base: Vec<(super::ContextHandle, u64)>,
     ) -> Vec<(super::ContextHandle, u64)> {
         let rr = &self.resource_registry;
         let mut slots = Vec::new();
         if let Some(&offset) = rr.texture_offsets.get(&handle) {
             slots.push(offset);
         }
-        self.merge_slot_requirements(&slots, base)
+        self.merge_slot_requirements(&slots)
     }
 
     fn merge_slot_requirements(
         &self,
         slots: &[u32],
-        base: Vec<(super::ContextHandle, u64)>,
     ) -> Vec<(super::ContextHandle, u64)> {
-        let mut merged: HashMap<super::ContextHandle, u64> = base.into_iter().collect();
+        let mut merged: HashMap<super::ContextHandle, u64> = HashMap::new();
         for &slot in slots {
             if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
                 for (ctx, seq) in map.iter() {

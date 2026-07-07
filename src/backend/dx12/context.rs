@@ -143,6 +143,7 @@ fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHan
 }
 
 /// Returns the `ContextHandle` whose reclamation context is installed on the current thread.
+#[allow(dead_code, reason = "reserved for thread-pinned reclamation scope (Metal parity)")]
 pub(super) fn context_handle_for_thread(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
     let thread = std::thread::current().id();
     let contexts = state.contexts.read().unwrap();
@@ -156,21 +157,6 @@ pub(super) fn context_handle_for_thread(state: &Dx12State, device: DeviceHandle)
         }
         None
     })
-}
-
-/// When exactly one live context exists on `device`, return it for destroy attribution.
-pub(super) fn sole_context_on_device(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
-    let mut on_device = contexts_on_device(state, device);
-    if on_device.len() == 1 {
-        on_device.pop()
-    } else {
-        None
-    }
-}
-
-/// Context to receive a user-initiated buffer destroy (thread reclamation scope, else sole context).
-pub(super) fn destroy_attribution_context(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
-    context_handle_for_thread(state, device).or_else(|| sole_context_on_device(state, device))
 }
 
 /// Block until every live context on `device` has drained its own per-context command
@@ -193,58 +179,6 @@ pub(super) fn wait_for_all_contexts_on_device(state: &Dx12State, device: DeviceH
         if seq > 0 {
             let _ = super::utils::wait_for_fence(&fence, seq);
         }
-    }
-}
-
-/// Deferred-deletion requirement for a buffer/texture destroy attributed to a single
-/// context (`ctx`). Returns `ctx`'s thread-pinned reclamation epoch if set, else `ctx`'s own
-/// last-submitted value — safe as a floor either way since both are values `ctx`'s own fence
-/// is guaranteed to eventually reach, and this is only ever compared against that same fence.
-pub(super) fn reclamation_barrier_for_context(state: &Dx12State, ctx: ContextHandle) -> u64 {
-    let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx).cloned() else {
-        return 0;
-    };
-    let sc = sc_arc.lock().expect("context Mutex poisoned");
-    let thread = std::thread::current().id();
-    if let Some((t, epoch)) = sc.reclamation_context {
-        if t == thread {
-            return epoch;
-        }
-    }
-    sc.last_submitted_seq
-}
-
-/// Per-context requirement snapshot for a destroy that could not be attributed to a single
-/// context: every live context on `device` must retire past its own current last-submitted
-/// value before the resource can be freed. Using each context's own bounded value (rather
-/// than e.g. the device-wide `timeline_next`) avoids waiting forever on a context that has
-/// gone idle below that shared-space floor and may never submit again.
-pub(super) fn reclamation_requirements_all_contexts(
-    state: &Dx12State,
-    device: DeviceHandle,
-) -> Vec<(ContextHandle, u64)> {
-    let handles = contexts_on_device(state, device);
-    let contexts = state.contexts.read().unwrap();
-    handles
-        .into_iter()
-        .filter_map(|h| {
-            let sc_arc = contexts.get(&h)?;
-            let sc = sc_arc.lock().expect("context Mutex poisoned");
-            Some((h, sc.last_submitted_seq))
-        })
-        .collect()
-}
-
-/// Full requirement snapshot for a buffer/texture destroy: the attributed context's own
-/// barrier (if attribution succeeded) or a snapshot across every live context on `device`.
-pub(super) fn reclamation_requirements(
-    state: &Dx12State,
-    device: DeviceHandle,
-    ctx_h: Option<ContextHandle>,
-) -> Vec<(ContextHandle, u64)> {
-    match ctx_h {
-        Some(ctx) => vec![(ctx, reclamation_barrier_for_context(state, ctx))],
-        None => reclamation_requirements_all_contexts(state, device),
     }
 }
 

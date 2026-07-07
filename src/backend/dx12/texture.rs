@@ -1169,11 +1169,9 @@ pub(super) fn destroy(state: &mut Dx12State, texture_handle: TextureHandle) {
                 dev.descriptors.lock().unwrap().reclaim_texture_slots(texture_handle);
                 return;
             }
-            let ctx_h = super::context::destroy_attribution_context(state, tex.device_handle);
-            let base = super::context::reclamation_requirements(state, tex.device_handle, ctx_h);
             let requirements = {
                 let registry = dev.descriptors.lock().unwrap();
-                registry.bindless_retirement_requirements_for_texture(texture_handle, base)
+                registry.bindless_retirement_requirements_for_texture(texture_handle)
             };
             dev.deletion_queue.lock().unwrap().queue(
                 requirements,
