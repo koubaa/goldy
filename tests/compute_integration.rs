@@ -2669,7 +2669,13 @@ mod imp {
         #[cfg(feature = "vulkan")]
         trial0!(vk_api_validation_two_device_teardown);
 
-        let conclusion = libtest_mimic::run(&libtest_mimic::Arguments::from_args(), trials);
+        let mut args = libtest_mimic::Arguments::from_args();
+        if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
+            // WARP has known contention under parallel trial execution; force serial
+            // regardless of --test-threads (hardware DX12 and other backends unchanged).
+            args.test_threads = Some(1);
+        }
+        let conclusion = libtest_mimic::run(&args, trials);
 
         drop(device);
 

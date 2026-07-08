@@ -10,7 +10,7 @@ mod imp {
     use crate::submission::submission_context;
     use crate::upload::write_to_parcel;
     use goldy::{
-        types::{BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
+        types::{BackendType, BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
         BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
         RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
     };
@@ -4054,7 +4054,11 @@ mod imp {
         trial!(cross_scheme_retained_worker_after_foreign_reader_reads_correct_values);
         trial!(cross_scheme_texture_readback_retained_loop_records_twice);
 
-        let conclusion = libtest_mimic::run(&libtest_mimic::Arguments::from_args(), trials);
+        let mut args = libtest_mimic::Arguments::from_args();
+        if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
+            args.test_threads = Some(1);
+        }
+        let conclusion = libtest_mimic::run(&args, trials);
 
         drop(device);
 
