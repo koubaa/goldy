@@ -809,6 +809,12 @@ impl LogicalDevice {
         let info = vk::MemoryUnmapInfoKHR::default().memory(memory);
         (self.map_memory2.fp().unmap_memory2_khr)(self.device.handle(), &info).result()
     }
+
+    /// `vkDeviceWaitIdle` under [`Self::queue_lock`]: externally synchronized like queue submits.
+    pub(crate) fn device_wait_idle_locked(&self) -> ash::prelude::VkResult<()> {
+        let _guard = self.queue_lock.lock().unwrap();
+        unsafe { self.device.device_wait_idle() }
+    }
 }
 
 /// GPU buffer state.
@@ -1302,7 +1308,8 @@ pub(crate) fn destroy_pending_deletion(
                                     .flags(vk::SparseMemoryBindFlags::empty()),
                             );
                         }
-                        if let Err(e) = super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds)
+                        if let Err(e) =
+                            super::sparse::queue_bind_sparse_sync(device, &ld.queue_lock, bind_queue, buffer, &sparse_binds)
                         {
                             tracing::warn!(?e, "sparse unbind on buffer destroy failed");
                         }
@@ -1360,7 +1367,9 @@ pub(crate) fn destroy_pending_deletion(
                                 .flags(vk::SparseMemoryBindFlags::empty()),
                         );
                     }
-                    if let Err(e) = super::sparse::queue_bind_sparse_sync(device, bind_queue, buffer, &sparse_binds) {
+                    if let Err(e) =
+                        super::sparse::queue_bind_sparse_sync(device, &ld.queue_lock, bind_queue, buffer, &sparse_binds)
+                    {
                         tracing::warn!(?e, "sparse unbind on replaced buffer failed");
                     }
                     for (_res_off, mem, mem_off) in &binds {

@@ -428,7 +428,7 @@ impl GpuBackend for VulkanBackend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        unsafe { ld.device.device_wait_idle() }.map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
+        ld.device_wait_idle_locked().map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
         Ok(())
     }
 

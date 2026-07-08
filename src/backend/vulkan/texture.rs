@@ -7,7 +7,7 @@ use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Create a texture with the given dimensions, format, access pattern, and flags.
 #[allow(clippy::too_many_arguments)]
@@ -465,6 +465,8 @@ pub(super) fn write(
         let cmd_buffers = [cmd_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
@@ -473,6 +475,7 @@ pub(super) fn write(
             .device
             .queue_wait_idle(logical_device.queue)
             .context("Failed to wait for queue")?;
+        drop(_queue_guard);
 
         // Cleanup
         logical_device
@@ -692,6 +695,8 @@ pub(super) fn write_region(
         let cmd_buffers = [cmd_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null())
@@ -700,6 +705,7 @@ pub(super) fn write_region(
             .device
             .queue_wait_idle(logical_device.queue)
             .context("Failed to wait for queue")?;
+        drop(_queue_guard);
 
         // Cleanup
         logical_device
@@ -994,15 +1000,17 @@ pub(super) fn read_to_cpu(
 
     let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
     unsafe {
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         logical_device.device.queue_submit(
             logical_device.queue,
             std::slice::from_ref(&submit_info),
             vk::Fence::null(),
         )
+        .context("Failed to submit command buffer")?;
+        logical_device.device.queue_wait_idle(logical_device.queue).context("Failed to wait for queue")?;
+        drop(_queue_guard);
     }
-    .context("Failed to submit command buffer")?;
-
-    unsafe { logical_device.device.queue_wait_idle(logical_device.queue) }.context("Failed to wait for queue")?;
 
     unsafe {
         logical_device
@@ -1152,12 +1160,15 @@ pub(super) fn transition_image_layout(
 
         let cmd_buffers_arr = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers_arr);
+        let queue_lock = Arc::clone(&logical_device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         let sub = logical_device
             .device
             .queue_submit(logical_device.queue, &[submit_info], vk::Fence::null());
         sub.context("Failed to submit layout transition")?;
         let wait = logical_device.device.queue_wait_idle(logical_device.queue);
         wait.context("Failed to wait for layout transition")?;
+        drop(_queue_guard);
 
         logical_device
             .device

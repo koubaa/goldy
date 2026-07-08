@@ -5,6 +5,7 @@
 use super::utils::find_memory_type;
 use anyhow::{Context, Result};
 use ash::vk;
+use std::sync::{Arc, Mutex};
 
 /// Pages per DEVICE_LOCAL chunk (16 MiB at 64 KiB blocks).
 const PAGES_PER_CHUNK: u32 = 256;
@@ -156,6 +157,7 @@ pub(crate) fn pages_needed_for_bytes(size: u64, block_size: u64) -> u32 {
 /// Blocking sparse bind (correctness-first).
 pub(crate) fn queue_bind_sparse_sync(
     device: &ash::Device,
+    queue_lock: &Arc<Mutex<()>>,
     bind_queue: vk::Queue,
     buffer: vk::Buffer,
     binds: &[vk::SparseMemoryBind],
@@ -170,6 +172,8 @@ pub(crate) fn queue_bind_sparse_sync(
     let fence_info = vk::FenceCreateInfo::default();
     let fence = unsafe { device.create_fence(&fence_info, None).context("sparse fence")? };
 
+    let queue_lock = Arc::clone(queue_lock);
+    let _queue_guard = queue_lock.lock().unwrap();
     unsafe {
         device
             .queue_bind_sparse(bind_queue, std::slice::from_ref(&bind_info), fence)

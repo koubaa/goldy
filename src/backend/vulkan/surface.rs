@@ -1342,7 +1342,7 @@ pub(super) fn resize(
     }
 
     // Wait for all in-flight frames to complete before resizing
-    unsafe { logical_device.device.device_wait_idle() }?;
+    logical_device.device_wait_idle_locked()?;
 
     // Destroy old depth buffer (must be before swapchain recreation)
     if let Some(surface_state) = surfaces.get(&surface_handle) {

@@ -484,7 +484,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         "destroying Vulkan device"
     );
     if let Some(logical_device) = state.devices.remove(&device_handle) {
-        let wait_result = unsafe { logical_device.device.device_wait_idle() };
+        let wait_result = logical_device.device_wait_idle_locked();
 
         if !matches!(wait_result, Err(vk::Result::ERROR_DEVICE_LOST)) {
             if let Some(ft) = logical_device.legacy_frame_table.lock().unwrap().take() {
@@ -493,7 +493,7 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
         }
 
         unsafe {
-            let wait_result = logical_device.device.device_wait_idle();
+            let wait_result = logical_device.device_wait_idle_locked();
 
             // When the device is lost, individual Vulkan destroy calls are unsafe
             // (driver bookkeeping is already corrupt). Per spec, vkDestroyDevice is

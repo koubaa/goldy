@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(
@@ -58,10 +59,13 @@ fn submit_copy(
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue_lock = Arc::clone(&device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         device
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
+        drop(_queue_guard);
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
@@ -339,7 +343,7 @@ pub(super) fn create_sparse_with_capacity(
         );
     }
 
-    sparse::queue_bind_sparse_sync(dev, bind_queue, buffer, &binds)?;
+    sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, buffer, &binds)?;
     drop(pool_guard);
 
     let bindless_descriptor_set = ld.bindless_descriptor_set;
@@ -462,7 +466,7 @@ pub(super) fn hint_unused_above(
         if binds.is_empty() {
             return;
         }
-        if let Err(e) = sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds) {
+        if let Err(e) = sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, vkbuf, &binds) {
             tracing::warn!(?e, "hint_unused_above sparse unbind failed");
             return;
         }
@@ -681,7 +685,7 @@ fn set_logical_size_sparse(
                         .flags(vk::SparseMemoryBindFlags::empty()),
                 );
             }
-            sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds)?;
+            sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, vkbuf, &binds)?;
         } else if new_pages < old_pages {
             let mut binds = Vec::new();
             let mut to_free: Vec<(vk::DeviceMemory, vk::DeviceSize)> = Vec::new();
@@ -700,7 +704,7 @@ fn set_logical_size_sparse(
                 }
             }
             if !binds.is_empty() {
-                sparse::queue_bind_sparse_sync(dev, bind_queue, vkbuf, &binds)?;
+                sparse::queue_bind_sparse_sync(dev, &ld.queue_lock, bind_queue, vkbuf, &binds)?;
             }
             for (mem, off) in to_free {
                 pool.free_page(mem, off);
@@ -967,10 +971,13 @@ fn submit_resize_transfer(
         device.device.end_command_buffer(cmd)?;
 
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue_lock = Arc::clone(&device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         device
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
+        drop(_queue_guard);
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 
@@ -1745,10 +1752,13 @@ pub(super) fn clear(
     // Submit and wait
     let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
     unsafe {
+        let queue_lock = Arc::clone(&device.queue_lock);
+        let _queue_guard = queue_lock.lock().unwrap();
         device
             .device
             .queue_submit(device.queue, &[submit_info], vk::Fence::null())?;
         device.device.queue_wait_idle(device.queue)?;
+        drop(_queue_guard);
         device.device.free_command_buffers(device.command_pool, &cmd_buffers);
     }
 

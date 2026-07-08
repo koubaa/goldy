@@ -588,7 +588,7 @@ pub(super) fn destroy(
     if let Some(pipeline) = compute_pipelines.write().unwrap().entries.remove(&pipeline_handle) {
         if let Some(logical_device) = devices.get(&pipeline.device_handle) {
             unsafe {
-                logical_device.device.device_wait_idle().ok();
+                logical_device.device_wait_idle_locked().ok();
                 logical_device.device.destroy_pipeline(pipeline.pipeline, None);
                 // Only destroy layout if we own it (not the global bindless layout)
                 if pipeline.owns_layout {
