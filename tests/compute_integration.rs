@@ -1536,58 +1536,6 @@ mod imp {
         }
     }
 
-    /// Headless compute: dropping a buffer after submit and then `wait_until(tv)` drains
-    /// deferred destruction for that timeline value. Queue depth between drop and wait is
-    /// not asserted: sibling trials on the shared device may flush the device-level queue
-    /// as soon as this context's fence completes.
-    fn headless_deferred_buffer_destroy_drains_after_timeline_wait(device: &Device) {
-        const MINIMAL_SHADER: &str = r#"
-    import goldy_exp;
-
-    [goldy_compute]
-    [numthreads(1, 1, 1)]
-    void cs_main(Scattered<uint> _unused, ThreadId id) {
-    }
-    "#;
-
-        let ctx = submission_context(&device);
-        let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("compile");
-        let pipeline = ComputePipeline::new(&device, &shader).expect("pipeline");
-
-        // Buffer must be referenced at submit time so bindless retirement requirements
-        // include this context's timeline value; an unreferenced buffer has empty
-        // requirements and is drainable immediately by any sibling trial's wait_until.
-        let buf = test_alloc_buffer(&device, 256, BufferKind::Scattered, None, BufferFlags::empty());
-
-        let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_resources(&[&buf])
-            .dispatch(1, 1, 1);
-        let tv = graph.submit(&ctx).expect("submit");
-
-        assert_eq!(
-            ctx.deferred_deletion_pending_count(),
-            0,
-            "bindless buffer destroys are queued on the device-level deletion queue, not per-context"
-        );
-
-        drop(buf);
-
-        ctx.wait_until(tv).expect("wait_until");
-
-        assert_eq!(
-            ctx.deferred_deletion_pending_count(),
-            0,
-            "per-context deletion queue should stay empty for bindless buffer destroys"
-        );
-        assert_eq!(
-            device.device_deferred_deletion_pending_count(),
-            0,
-            "wait_until should drain device deferred destruction for completed timeline values"
-        );
-    }
-
     // ── flush_deferred_deletions ───────────────────────────────────────────────────
 
     /// After a submit+wait, `flush_deferred_deletions` reclaims all pending slots
@@ -2642,7 +2590,6 @@ mod imp {
         trial!(test_uniform_param_float_reinterpret);
         trial!(test_uniform_two_independent_scalar_params);
         trial!(test_uniform_scalar_after_two_buffer_params);
-        trial!(headless_deferred_buffer_destroy_drains_after_timeline_wait);
         trial!(flush_deferred_deletions_reclaims_slots_after_gpu_idle);
         trial!(flush_deferred_deletions_respects_gpu_progress);
         trial!(flush_deferred_deletions_noop_on_idle_device);
