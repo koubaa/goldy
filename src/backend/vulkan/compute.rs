@@ -5,10 +5,10 @@ use super::super::shared::DISPATCH_BATCH_STRIDE;
 use super::staging;
 use super::submit_session::{VulkanSubmitScope, VulkanSubmitView};
 use super::types::{
-    ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable, SharedComputePipelineTable,
-    SharedPipelineTable, SlotKey,
+    BufferState, ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable,
+    SharedComputePipelineTable, SharedPipelineTable, SlotKey,
 };
-use super::{ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
+use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::gpu_profiler::{self, DispatchGpuNs};
 use crate::task_graph::{NodeAccessUnion, SlotUsageSet, UsageKindFlags};
@@ -60,13 +60,13 @@ fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Op
 }
 
 fn buffer_stride_for_bindless_index(
-    buffers: &SharedBufferTable,
+    buffers: &HashMap<BufferHandle, BufferState>,
     device_handle: DeviceHandle,
     index: u32,
     cat: crate::types::ResourceCategory,
 ) -> Option<u32> {
     // Uniform and storage buffers use separate bindless array indices; both may be 0.
-    for b in buffers.read().unwrap().entries.values() {
+    for b in buffers.values() {
         if b.device_handle != device_handle {
             continue;
         }
@@ -908,8 +908,6 @@ pub(super) fn submit_with_scope(
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut belt_idx = 0usize;
         let mut texture_upload_idx = 0usize;
-        let compute_pipelines_read = compute_pipelines.read().unwrap();
-        let buffers_read = buffers.read().unwrap();
 
         // Process commands (same logic as dispatch)
         for command in &commands {
@@ -943,13 +941,21 @@ pub(super) fn submit_with_scope(
                     user: raw_user,
                     frame_table_base,
                 } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|h| compute_pipelines_read.entries.get(&h)) {
+                    let pipelines_read = compute_pipelines.read().unwrap();
+                    if let Some(pipeline) = current_pipeline.and_then(|h| pipelines_read.entries.get(&h)) {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
                                 &pipeline.push_constant_categories,
                                 &pipeline.binding_element_strides,
-                                |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                                |idx, cat| {
+                                    buffer_stride_for_bindless_index(
+                                        &buffers.read().unwrap().entries,
+                                        device_handle,
+                                        idx,
+                                        cat,
+                                    )
+                                },
                                 &pipeline.shader_debug_name,
                             )
                         })?;
@@ -972,7 +978,8 @@ pub(super) fn submit_with_scope(
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles: typed_handles } => {
-                    if let Some(pipeline) = current_pipeline.and_then(|h| compute_pipelines_read.entries.get(&h)) {
+                    let pipelines_read = compute_pipelines.read().unwrap();
+                    if let Some(pipeline) = current_pipeline.and_then(|h| pipelines_read.entries.get(&h)) {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,
@@ -1024,8 +1031,9 @@ pub(super) fn submit_with_scope(
                     let _tz = tracy_zone!("vk.dispatch_batch");
                     let push_size = std::mem::size_of::<crate::backend::shared::PushLayout>();
                     let stride = crate::backend::shared::DISPATCH_BATCH_STRIDE;
+                    let pipelines_read = compute_pipelines.read().unwrap();
                     let pipeline_layout = current_pipeline
-                        .and_then(|h| compute_pipelines_read.entries.get(&h))
+                        .and_then(|h| pipelines_read.entries.get(&h))
                         .map(|p| p.layout);
                     // Arg data is built during context-agnostic lowering; patch in
                     // this context's frame-table slots (`_rs1`/`_rs2`) at record time.
@@ -1064,7 +1072,9 @@ pub(super) fn submit_with_scope(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let vk_buf = buffers_read
+                    let vk_buf = buffers
+                        .read()
+                        .unwrap()
                         .entries
                         .get(buffer)
                         .context("DispatchIndirect: invalid buffer handle")?
@@ -1112,10 +1122,11 @@ pub(super) fn submit_with_scope(
                 } => {
                     let _tz = tracy_zone!("vk.resource_barrier");
                     unsafe {
+                        let buffers_guard = buffers.read().unwrap();
                         let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_entries
                             .iter()
                             .filter_map(|(h, usage)| {
-                                buffers.read().unwrap().entries.get(h).map(|bs| {
+                                buffers_guard.entries.get(h).map(|bs| {
                                     vk::BufferMemoryBarrier2::default()
                                         .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
                                         .src_access_mask(slot_usage_to_vk_access(&usage.src, true))
@@ -1172,7 +1183,8 @@ pub(super) fn submit_with_scope(
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
                     let (vk_buf, buf_size) = {
-                        let bs = buffers_read
+                        let buffers_guard = buffers.read().unwrap();
+                        let bs = buffers_guard
                             .entries
                             .get(buffer)
                             .context("ClearBuffer: invalid buffer handle")?;
@@ -1207,7 +1219,8 @@ pub(super) fn submit_with_scope(
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
                     let (is_storage, host_mapped, vk_buf) = {
-                        let bs = buffers_read
+                        let buffers_guard = buffers.read().unwrap();
+                        let bs = buffers_guard
                             .entries
                             .get(buf_handle)
                             .context("WriteBuffer: invalid buffer handle")?;
@@ -1926,8 +1939,6 @@ pub(super) fn submit_graph_with_scope(
     // --- Walk GraphCommands (inline to satisfy the borrow checker) ---
     let compute_pipelines = &view.compute_pipelines;
     let buffers = &view.buffers;
-    let compute_pipelines_read = compute_pipelines.read().unwrap();
-    let buffers_read = buffers.read().unwrap();
     let mut current_compute_pipeline: Option<ComputePipelineHandle> = None;
     let mut belt_idx = 0usize;
     let mut texture_upload_idx = 0usize;
@@ -1969,15 +1980,23 @@ pub(super) fn submit_graph_with_scope(
                     user: raw_user,
                     frame_table_base,
                 } => {
+                    let pipelines_read = compute_pipelines.read().unwrap();
                     if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p))
+                        current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p))
                     {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
                                 &pipeline.push_constant_categories,
                                 &pipeline.binding_element_strides,
-                                |idx, cat| buffer_stride_for_bindless_index(buffers, device_handle, idx, cat),
+                                |idx, cat| {
+                                    buffer_stride_for_bindless_index(
+                                        &buffers.read().unwrap().entries,
+                                        device_handle,
+                                        idx,
+                                        cat,
+                                    )
+                                },
                                 &pipeline.shader_debug_name,
                             )
                         })?;
@@ -2000,8 +2019,9 @@ pub(super) fn submit_graph_with_scope(
                     }
                 }
                 GpuCommand::BindResourcesTyped { handles: typed_handles } => {
+                    let pipelines_read = compute_pipelines.read().unwrap();
                     if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| compute_pipelines_read.entries.get(&p))
+                        current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p))
                     {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
@@ -2054,8 +2074,9 @@ pub(super) fn submit_graph_with_scope(
                     let _tz = tracy_zone!("vk.dispatch_batch");
                     let push_size = std::mem::size_of::<crate::backend::shared::PushLayout>();
                     let stride = crate::backend::shared::DISPATCH_BATCH_STRIDE;
+                    let pipelines_read = compute_pipelines.read().unwrap();
                     let pipeline_layout = current_compute_pipeline
-                        .and_then(|h| compute_pipelines_read.entries.get(&h))
+                        .and_then(|h| pipelines_read.entries.get(&h))
                         .map(|p| p.layout);
                     // Arg data is built during context-agnostic lowering; patch in
                     // this context's frame-table slots (`_rs1`/`_rs2`) at record time.
@@ -2094,7 +2115,9 @@ pub(super) fn submit_graph_with_scope(
                     offset,
                 } => {
                     let _tz = tracy_zone!("vk.dispatch_indirect");
-                    let vk_buf = buffers_read
+                    let vk_buf = buffers
+                        .read()
+                        .unwrap()
                         .entries
                         .get(buffer)
                         .context("DispatchIndirect: invalid buffer handle")?
@@ -2142,10 +2165,11 @@ pub(super) fn submit_graph_with_scope(
                 } => {
                     let _tz = tracy_zone!("vk.resource_barrier");
                     unsafe {
+                        let buffers_guard = buffers.read().unwrap();
                         let buf_barriers: Vec<vk::BufferMemoryBarrier2> = buf_entries
                             .iter()
                             .filter_map(|(h, usage)| {
-                                buffers.read().unwrap().entries.get(h).map(|bs| {
+                                buffers_guard.entries.get(h).map(|bs| {
                                     vk::BufferMemoryBarrier2::default()
                                         .src_stage_mask(slot_usage_to_vk_stage(&usage.src))
                                         .src_access_mask(slot_usage_to_vk_access(&usage.src, true))
@@ -2202,7 +2226,8 @@ pub(super) fn submit_graph_with_scope(
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
                     let _tz = tracy_zone!("vk.clear_buffer");
                     let (vk_buf, buf_size) = {
-                        let bs = buffers_read
+                        let buffers_guard = buffers.read().unwrap();
+                        let bs = buffers_guard
                             .entries
                             .get(buffer)
                             .context("ClearBuffer: invalid buffer handle")?;
@@ -2236,7 +2261,8 @@ pub(super) fn submit_graph_with_scope(
                 } => {
                     let _tz = tracy_zone!("vk.write_buffer");
                     let (is_storage, host_mapped, vk_buf) = {
-                        let bs = buffers_read
+                        let buffers_guard = buffers.read().unwrap();
+                        let bs = buffers_guard
                             .entries
                             .get(buf_handle)
                             .context("WriteBuffer: invalid buffer handle")?;
