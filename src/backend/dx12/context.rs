@@ -2,6 +2,7 @@
 
 use super::types::{Dx12State, Dx12SubmissionContext};
 use super::{ContextHandle, DeviceHandle};
+use crate::backend::ContextDestroyHandle;
 use anyhow::{Context as _, Result};
 use windows::Win32::Graphics::Direct3D12::*;
 
@@ -181,39 +182,71 @@ pub(super) fn wait_for_all_contexts_on_device(state: &Dx12State, device: DeviceH
     }
 }
 
-pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
-    // Remove from the context map first so lookups by handle stop finding this context.
-    let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
-        return;
-    };
+pub(super) struct Dx12ContextDestroyWork {
+    ctx: ContextHandle,
+    sc: super::types::Dx12SubmissionContext,
+    device: DeviceHandle,
+    ld: super::types::SharedLogicalDevice,
+    buffers: super::types::SharedBufferTable,
+    context_fences: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
+}
+
+impl ContextDestroyHandle for Dx12ContextDestroyWork {
+    fn wait(&self) -> Result<()> {
+        let last_submitted = self.sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed);
+        if last_submitted > 0 {
+            super::utils::wait_for_fence(&self.sc.fence, last_submitted)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        finish_destroy(self);
+        Ok(())
+    }
+}
+
+/// Remove `ctx` from live lookup tables.
+pub(super) fn detach_for_destroy(state: &Dx12State, ctx: ContextHandle) -> Option<Dx12ContextDestroyWork> {
+    let sc_arc = state.contexts.write().unwrap().remove(&ctx)?;
 
     // Cloned per-context handles (`ContextDeferredDeletionFlush`, `ContextReclamationScope`, …)
     // must be dropped by [`crate::Context`] before this runs; see `ContextInner::drop`.
     let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
         .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
-    let mut sc = sc_mutex.into_inner().expect("context Mutex poisoned");
+    let sc = sc_mutex.into_inner().expect("context Mutex poisoned");
 
     let device = sc.device;
+    let ld = state.devices.get(&device)?.clone();
 
-    // Drain in-flight GPU work before releasing command allocators / retained CLs.
-    let last_submitted = sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed);
-    if last_submitted > 0 {
-        if super::api_log::enabled() {
-            super::api_log::log_fence_wait_cpu("context_destroy", last_submitted);
-        }
-        let _ = super::utils::wait_for_fence(&sc.fence, last_submitted);
-    }
+    Some(Dx12ContextDestroyWork {
+        ctx,
+        sc,
+        device,
+        ld,
+        buffers: std::sync::Arc::clone(&state.buffers),
+        context_fences: std::sync::Arc::clone(&state.context_fences),
+    })
+}
+
+fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
+    let Dx12ContextDestroyWork {
+        ctx,
+        mut sc,
+        device,
+        ld,
+        buffers,
+        context_fences,
+    } = *work;
 
     let completed_after_wait = unsafe { sc.fence.GetCompletedValue() };
     if completed_after_wait == u64::MAX {
-        if let Some(ld) = state.devices.get(&device) {
-            if super::api_log::enabled() {
-                let hresult: i32 = match unsafe { ld.device.GetDeviceRemovedReason() } {
-                    Ok(()) => 0,
-                    Err(e) => e.code().0,
-                };
-                super::api_log::log_device_removed(device, hresult);
-            }
+        if super::api_log::enabled() {
+            let hresult: i32 = match unsafe { ld.device.GetDeviceRemovedReason() } {
+                Ok(()) => 0,
+                Err(e) => e.code().0,
+            };
+            super::api_log::log_device_removed(device, hresult);
         }
     }
 
@@ -222,13 +255,11 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
     // context as "already retired" (see `slot_requirements_met`). Removing this earlier (before
     // the GPU-drain wait above) let concurrent drains on other threads see `ctx` as gone and
     // release resources this context's still in-flight work could still be touching.
-    state.context_fences.write().unwrap().remove(&ctx);
+    context_fences.write().unwrap().remove(&ctx);
 
     let completed = unsafe { sc.fence.GetCompletedValue() };
-    if let Some(ld) = state.devices.get(&device) {
-        ld.retired_floor
-            .fetch_max(completed, std::sync::atomic::Ordering::Relaxed);
-    }
+    ld.retired_floor
+        .fetch_max(completed, std::sync::atomic::Ordering::Relaxed);
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
 
@@ -241,23 +272,20 @@ pub(super) fn destroy(state: &mut Dx12State, ctx: ContextHandle) {
         }
     }
 
-    // GPU is idle for this context (waited above); destroy per-context staging resources.
+    // GPU is idle for this context (waited before detach); destroy per-context staging resources.
     unsafe { sc.staging_belt.destroy_all() };
     unsafe { sc.texture_staging_pool.destroy_all() };
 
     // Drain any remaining per-context pending deletions now that the GPU is idle.
     let batch = sc.deletion_queue.drain_everything();
     if !batch.is_empty() {
-        if let Some(ld) = state.devices.get(&device) {
-            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            let mut registry = descriptors_arc.lock().unwrap();
-            for resource in batch {
-                super::types::destroy_pending_deletion(ld, &mut registry, resource);
-            }
+        let mut registry = ld.descriptors.lock().unwrap();
+        for resource in batch {
+            super::types::destroy_pending_deletion(&ld, &mut registry, resource);
         }
     }
 
-    super::frame_table::destroy_context(state, device, &sc.frame_table);
+    super::frame_table::destroy_context_resources(&buffers, &ld, &sc.frame_table);
 
     if super::api_log::enabled() {
         super::api_log::log_context_destroy(device, ctx);

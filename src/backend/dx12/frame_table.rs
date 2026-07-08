@@ -166,18 +166,28 @@ fn write_uav_at_slot(ld: &LogicalDevice, bindless_slot: u32, resource: &ID3D12Re
 ///
 /// Caller guarantees the context's GPU work has fully retired.
 pub(crate) fn destroy_context(state: &Dx12State, device_handle: super::DeviceHandle, ft: &ContextFrameTable) {
+    let ld = state
+        .devices
+        .get(&device_handle)
+        .expect("frame table destroy: invalid device handle");
+    destroy_context_resources(&state.buffers, ld, ft);
+}
+
+pub(crate) fn destroy_context_resources(
+    buffers: &super::types::SharedBufferTable,
+    ld: &super::types::LogicalDevice,
+    ft: &ContextFrameTable,
+) {
     unsafe {
         ft.staging.Unmap(0, None);
     }
-    let mut buffers = state.buffers.write().unwrap();
-    buffers.entries.remove(&ft.selector);
-    buffers.entries.remove(&ft.device_table);
-    drop(buffers);
-    if let Some(ld) = state.devices.get(&device_handle) {
-        let mut registry = ld.descriptors.lock().unwrap();
-        registry.reclaim_buffer_slots(ft.selector);
-        registry.reclaim_buffer_slots(ft.device_table);
-    }
+    let mut buffers_write = buffers.write().unwrap();
+    buffers_write.entries.remove(&ft.selector);
+    buffers_write.entries.remove(&ft.device_table);
+    drop(buffers_write);
+    let mut registry = ld.descriptors.lock().unwrap();
+    registry.reclaim_buffer_slots(ft.selector);
+    registry.reclaim_buffer_slots(ft.device_table);
 }
 
 fn create_upload_table_buffer(ld: &LogicalDevice) -> Result<(ID3D12Resource, usize)> {

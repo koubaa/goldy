@@ -1199,6 +1199,7 @@ impl DeletionQueue {
     }
 
     /// Queue a resource for deferred deletion once the device timeline reaches `barrier`.
+    #[allow(dead_code, reason = "per-context deferred deletion API; device queue used today")]
     pub fn queue(&mut self, barrier: TimelineValue, resource: PendingDeletion) {
         self.inner.push(barrier, resource);
     }

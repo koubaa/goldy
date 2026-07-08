@@ -720,6 +720,36 @@ pub(crate) trait TimelineBlockingWait: Send {
     }
 }
 
+/// Context teardown detached from live lookup tables. [`Self::wait`] and [`Self::finish`]
+/// run without holding the global backend mutex.
+#[doc(hidden)]
+pub trait ContextDestroyHandle: Send {
+    fn wait(&self) -> Result<()>;
+    fn finish(self: Box<Self>) -> Result<()>;
+}
+
+/// Drain GPU work then release resources for a detached context.
+pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
+    let _ = handle.wait();
+    let _ = handle.finish();
+}
+
+/// Like [`destroy_context`] for an already-unlocked concrete backend (tests, `destroy_device`).
+pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHandle) {
+    if let Some(handle) = backend.detach_context_for_destroy(ctx) {
+        run_context_destroy(handle);
+    }
+}
+/// Destroy `ctx` without holding the global backend lock across blocking GPU work.
+pub(crate) fn destroy_context(backend: &std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>, ctx: ContextHandle) {
+    if let Some(handle) = {
+        let mut guard = backend.lock().unwrap();
+        guard.detach_context_for_destroy(ctx)
+    } {
+        run_context_destroy(handle);
+    }
+}
+
 
 /// Per-context deferred GPU deletion flush cloned out of the backend so
 /// [`Context::boundary_crossed`](crate::Context::boundary_crossed) does not need the global
@@ -919,18 +949,6 @@ pub(crate) trait GpuBackendTimelineWait {
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
-    /// Non-blocking half of context teardown: returns a waiter for `ctx`'s outstanding GPU
-    /// work (if any), cloned out from under the global backend lock so the caller can block
-    /// on it *without* holding that lock — mirrors `take_timeline_blocking_wait`.
-    ///
-    /// This matters because a context's last submission may carry a GPU-side `Wait` on
-    /// another context's future signal; if that other context's submission needs the same
-    /// global backend lock to be issued, blocking on the fence *while holding the lock*
-    /// (as a naive `destroy_context` would) deadlocks the whole backend.
-    fn take_context_destroy_wait(&self, ctx: ContextHandle) -> Option<Box<dyn TimelineBlockingWait>> {
-        let _ = ctx;
-        None
-    }
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
@@ -962,7 +980,14 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
 
     // Submission context (timeline / submit / reclaim API is keyed by context)
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle>;
-    fn destroy_context(&mut self, ctx: ContextHandle);
+
+    /// Detach `ctx` from live lookup tables under a brief global-backend lock.
+    ///
+    /// The caller should release the lock before [`ContextDestroyHandle::wait`] /
+    /// [`ContextDestroyHandle::finish`]. Prefer [`destroy_context`] when destroying
+    /// from code that holds the wrapping `Arc<Mutex<Box<dyn GpuBackend>>>`.
+    #[doc(hidden)]
+    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>>;
 
     /// Clone the per-context deferred-deletion flusher for [`Context::boundary_crossed`].
     #[doc(hidden)]

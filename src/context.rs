@@ -68,29 +68,14 @@ impl Drop for ContextInner {
         if let Ok(mut pool_guard) = self.transient_pool.lock() {
             *pool_guard = TransientPool::new();
         }
-        // Release cloned per-context backend handles before destroy_context.
+        // Release cloned per-context backend handles before teardown.
         // Backends expect sole ownership of the per-context Arc at teardown.
         self.deletion_flush.take();
         self.reclamation_scope.take();
         self.submit_session.take();
         // Runs while `Context` still holds `Arc<Device>`; joins per-context pollers
         // (Vulkan/DX12) before [`DeviceInner::drop`] calls `device_wait_idle`.
-        //
-        // The GPU-drain wait for this context's outstanding work must happen *without*
-        // holding the global backend lock: this context's last submission may carry a
-        // GPU-side wait on another context's future signal, and that other context's
-        // submission needs this same lock to be issued. Blocking on the fence while
-        // holding the lock (as a single `destroy_context` call would) deadlocks the
-        // whole backend whenever that cross-context dependency is still outstanding.
-        let blocking = {
-            let backend = self.device.inner.backend.lock().unwrap();
-            backend.take_context_destroy_wait(self.handle)
-        };
-        if let Some(wait) = blocking {
-            let _ = wait.block();
-        }
-        let mut backend = self.device.inner.backend.lock().unwrap();
-        backend.destroy_context(self.handle);
+        crate::backend::destroy_context(&self.device.inner.backend, self.handle);
     }
 }
 

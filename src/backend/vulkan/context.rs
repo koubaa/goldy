@@ -2,6 +2,7 @@
 
 use super::types::{SubmissionContext, VulkanState};
 use super::{ContextHandle, DeviceHandle};
+use crate::backend::ContextDestroyHandle;
 use anyhow::{Context as _, Result};
 use ash::vk;
 use std::sync::atomic::Ordering;
@@ -99,56 +100,69 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
     Ok(id)
 }
 
-pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
-    let Some(sc_arc) = state.contexts.write().unwrap().remove(&ctx) else {
-        return;
-    };
-    let mut sc = sc_arc.lock().unwrap();
-    let device = sc.device;
-    let completed = unsafe {
-        state
-            .devices
-            .get(&device)
-            .and_then(|ld| ld.device.get_semaphore_counter_value(sc.timeline_semaphore).ok())
-            .unwrap_or(0)
-    };
-    if let Some(ld) = state.devices.get(&device) {
-        ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
+pub(super) struct VulkanContextDestroyWork {
+    sc: SubmissionContext,
+    ld: super::types::SharedLogicalDevice,
+    buffers: super::types::SharedBufferTable,
+}
+
+impl ContextDestroyHandle for VulkanContextDestroyWork {
+    fn wait(&self) -> Result<()> {
+        if self.sc.last_submitted_seq > 0 {
+            let wait = vk::SemaphoreWaitInfo::default()
+                .semaphores(std::slice::from_ref(&self.sc.timeline_semaphore))
+                .values(std::slice::from_ref(&self.sc.last_submitted_seq));
+            unsafe { self.ld.device.wait_semaphores(&wait, u64::MAX) }
+                .context("Vulkan context destroy wait")?;
+        }
+        Ok(())
     }
 
-    let last_seq = sc.last_submitted_seq;
-    let timeline_semaphore = sc.timeline_semaphore;
+    fn finish(self: Box<Self>) -> Result<()> {
+        finish_destroy(self);
+        Ok(())
+    }
+}
+
+pub(super) fn detach_for_destroy(state: &VulkanState, ctx: ContextHandle) -> Option<VulkanContextDestroyWork> {
+    let sc_arc = state.contexts.write().unwrap().remove(&ctx)?;
+    let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
+        .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
+    let sc = sc_mutex.into_inner().expect("context Mutex poisoned");
+    let device = sc.device;
+    let ld = state.devices.get(&device)?.clone();
+    Some(VulkanContextDestroyWork {
+        sc,
+        ld,
+        buffers: std::sync::Arc::clone(&state.buffers),
+    })
+}
+
+fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
+    let VulkanContextDestroyWork { mut sc, ld, buffers } = *work;
+    let device = sc.device;
+
+    let completed = unsafe {
+        ld.device
+            .get_semaphore_counter_value(sc.timeline_semaphore)
+            .unwrap_or(0)
+    };
+    ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
 
     let fence_thread = sc.fence_thread.take();
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, fence_thread);
 
     let ctx_batch = sc.deletion_queue.flush_all_drain();
-
-    {
-        let Some(ld) = state.devices.get(&device) else {
-            return;
-        };
-        if last_seq > 0 {
-            let wait = vk::SemaphoreWaitInfo::default()
-                .semaphores(std::slice::from_ref(&timeline_semaphore))
-                .values(std::slice::from_ref(&last_seq));
-            let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
-        }
-        if !ctx_batch.is_empty() {
-            let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            let mut registry = descriptors_arc.lock().unwrap();
-            for r in ctx_batch {
-                super::types::destroy_pending_deletion(ld, &mut registry, r);
-            }
+    if !ctx_batch.is_empty() {
+        let mut registry = ld.descriptors.lock().unwrap();
+        for r in ctx_batch {
+            super::types::destroy_pending_deletion(&ld, &mut registry, r);
         }
     }
 
-    let Some(ld) = state.devices.get(&device) else {
-        return;
-    };
     unsafe {
-        sc.staging_belt.destroy_all(ld);
-        sc.texture_staging_pool.destroy_all(ld);
+        sc.staging_belt.destroy_all(&ld);
+        sc.texture_staging_pool.destroy_all(&ld);
         let command_pool = sc.command_pool;
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {
             for cb in cbs {
@@ -168,8 +182,9 @@ pub(super) fn destroy(state: &mut VulkanState, ctx: ContextHandle) {
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);
-        super::frame_table::destroy_context(state, ld, &sc.frame_table);
+        super::frame_table::destroy_context_resources(&buffers, &ld, &sc.frame_table);
     }
+    let _ = device;
 }
 
 /// Block until the device-global submission sequence `seq` has been signalled on the GPU.

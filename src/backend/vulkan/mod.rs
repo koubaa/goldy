@@ -319,25 +319,6 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
         })))
     }
 
-    fn take_context_destroy_wait(&self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::TimelineBlockingWait>> {
-        let device_handle = self.context_device(ctx);
-        let sc_arc = self.state.contexts.read().unwrap().get(&ctx).cloned()?;
-        let (value, sem) = {
-            let sc = sc_arc.lock().unwrap();
-            (sc.last_submitted_seq, sc.timeline_semaphore)
-        };
-        if value == 0 {
-            return None;
-        }
-        let device = self.state.devices.get(&device_handle)?.device.clone();
-        Some(Box::new(VulkanTimelineBlockingWait {
-            device,
-            semaphore: sem,
-            value,
-            device_lost: std::sync::Arc::clone(&self.state.device_lost),
-        }))
-    }
-
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         {
@@ -436,7 +417,7 @@ impl GpuBackend for VulkanBackend {
             .map(|(k, _)| *k)
             .collect();
         for ctx in ctxs {
-            context::destroy(&mut self.state, ctx);
+            crate::backend::destroy_context_mut(self, ctx);
         }
         device::destroy(&mut self.state, device_handle);
     }
@@ -455,8 +436,8 @@ impl GpuBackend for VulkanBackend {
         context::create(&mut self.state, device)
     }
 
-    fn destroy_context(&mut self, ctx: ContextHandle) {
-        context::destroy(&mut self.state, ctx);
+    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&self.state, ctx).map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(

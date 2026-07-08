@@ -305,7 +305,7 @@ impl GpuBackend for MetalBackend {
             .map(|(id, _)| *id)
             .collect();
         for ctx in ctxs {
-            context::destroy(&mut self.state, ctx);
+            crate::backend::destroy_context_mut(self, ctx);
         }
         device::destroy(&mut self.state, device);
     }
@@ -318,8 +318,8 @@ impl GpuBackend for MetalBackend {
         context::create(&mut self.state, device)
     }
 
-    fn destroy_context(&mut self, ctx: ContextHandle) {
-        context::destroy(&mut self.state, ctx);
+    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&mut self.state, ctx).map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(

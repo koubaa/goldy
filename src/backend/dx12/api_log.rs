@@ -241,18 +241,6 @@ pub(super) fn log_queue_signal(queue: u64, ctx_fence: u64, value: u64) {
     ));
 }
 
-/// `fence_wait_cpu` — a CPU-side blocking `SetEventOnCompletion`/`WaitForSingleObject` on a
-/// fence (e.g. context destroy draining in-flight GPU work, or a device-wide idle wait).
-pub(super) fn log_fence_wait_cpu(location: &str, target_value: u64) {
-    emit(format!(
-        r#"{{"t_us":{:.3},"tid":"{}","op":"fence_wait_cpu","location":"{}","target_value":{}}}"#,
-        t_us(),
-        tid_name(),
-        location,
-        target_value
-    ));
-}
-
 /// `device_removed` — a fence read returned `u64::MAX`; logs `GetDeviceRemovedReason()`.
 pub(super) fn log_device_removed(device: super::DeviceHandle, hresult: i32) {
     emit(format!(

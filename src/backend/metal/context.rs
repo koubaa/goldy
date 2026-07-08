@@ -3,6 +3,7 @@
 use super::staging::{StagingBelt, TextureStagingPool, DEFAULT_STAGING_CHUNK_SIZE};
 use super::types::{MetalState, MetalSubmissionContext, TimelineWaiter};
 use super::{ContextHandle, DeviceHandle};
+use crate::backend::ContextDestroyHandle;
 use ::metal as mtl;
 use anyhow::{Context as _, Result};
 use mtl::MTLCommandBufferStatus;
@@ -106,40 +107,56 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
 }
 
 pub(super) fn destroy(state: &mut MetalState, ctx: ContextHandle) {
-    let Some(sc_arc) = state.contexts.remove(&ctx) else {
-        return;
-    };
-    let mut sc = sc_arc.lock().unwrap();
+    if let Some(work) = detach_for_destroy(state, ctx) {
+        crate::backend::run_context_destroy(Box::new(work));
+    }
+}
+
+pub(super) struct MetalContextDestroyWork {
+    sc: super::types::MetalSubmissionContext,
+    ld: super::types::SharedLogicalDevice,
+}
+
+impl ContextDestroyHandle for MetalContextDestroyWork {
+    fn wait(&self) -> Result<()> {
+        for (_, cb) in self.sc.in_flight_command_buffers.iter() {
+            cb.wait_until_completed();
+        }
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        finish_destroy(self);
+        Ok(())
+    }
+}
+
+pub(super) fn detach_for_destroy(state: &mut MetalState, ctx: ContextHandle) -> Option<MetalContextDestroyWork> {
+    let sc_arc = state.contexts.remove(&ctx)?;
+    let sc_mutex = std::sync::Arc::try_unwrap(sc_arc)
+        .unwrap_or_else(|_| panic!("context {ctx} Arc still has extra owners at destroy"));
+    let sc = sc_mutex.into_inner().expect("context Mutex poisoned");
+    let device = sc.device;
+    let ld = state.devices.get(&device)?.clone();
+    Some(MetalContextDestroyWork { sc, ld })
+}
+
+fn finish_destroy(work: Box<MetalContextDestroyWork>) {
+    let MetalContextDestroyWork { mut sc, ld } = *work;
     let device = sc.device;
 
-    // Drop all retained graph snapshots first so Arc<[GraphCommand]> payloads are
-    // released before in-flight CBs are drained and the staging belt is torn down.
     sc.retained_graphs.clear();
 
     sc.staging_belt.destroy_all();
     sc.texture_staging_pool.destroy_all();
-    // Wait for tracked in-flight command buffers so `MTLSharedEvent::signaled_value`
-    // catches up. `TimelineWaiter` (completion-handler condvar) can run ahead of the
-    // shared event; `device_retired` reads the event, so skipping CB waits leaves
-    // `device_wait_idle` spinning until timeout (see debug session 182c27).
     let last_seq = sc.last_submitted_seq;
-    for (_, cb) in sc.in_flight_command_buffers.iter() {
-        cb.wait_until_completed();
-    }
     super::drain_completed_cbs(&mut sc);
     sc.in_flight_command_buffers.clear();
     let signaled_after = sc.timeline_event.as_ref().signaled_value();
-    // Persist retirement on the descriptor registry: once this context is removed,
-    // `device_retired` no longer reads its shared event. `last_submitted_seq` only
-    // counts committed command buffers, so it is a safe floor if the shared event lags.
     let retired_horizon = signaled_after.max(last_seq);
-    if let Some(ld) = state.devices.get(&device) {
-        ld.retired_floor.fetch_max(retired_horizon, Ordering::Relaxed);
-    }
-    // All CBs have completed; flush any resources still parked in the per-context
-    // deletion queue.  At this point every timeline value is retired so every
-    // barrier has been passed.
+    ld.retired_floor.fetch_max(retired_horizon, Ordering::Relaxed);
     sc.deletion_queue.flush_all();
+    let _ = device;
 }
 
 pub(super) fn context_device(state: &MetalState, ctx: ContextHandle) -> DeviceHandle {

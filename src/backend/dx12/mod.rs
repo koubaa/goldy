@@ -397,19 +397,6 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
         Ok(Some(Box::new(Dx12TimelineBlockingWait { fence, value })))
     }
 
-    fn take_context_destroy_wait(&self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::TimelineBlockingWait>> {
-        let fences = self.state.context_fences.read().unwrap();
-        let (_, fence, seq) = fences.get(&ctx)?;
-        let value = seq.load(std::sync::atomic::Ordering::Relaxed);
-        if value == 0 {
-            return None;
-        }
-        Some(Box::new(Dx12TimelineBlockingWait {
-            fence: fence.clone(),
-            value,
-        }))
-    }
-
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
         let fence = self
@@ -505,7 +492,7 @@ impl GpuBackend for Dx12Backend {
             .map(|(k, _)| *k)
             .collect();
         for ctx in ctxs {
-            context::destroy(&mut self.state, ctx);
+            crate::backend::destroy_context_mut(self, ctx);
         }
         self.destroy_device_inner(device_handle);
     }
@@ -524,8 +511,8 @@ impl GpuBackend for Dx12Backend {
         context::create(&mut self.state, device)
     }
 
-    fn destroy_context(&mut self, ctx: ContextHandle) {
-        context::destroy(&mut self.state, ctx);
+    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&self.state, ctx).map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(

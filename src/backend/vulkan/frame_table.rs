@@ -170,20 +170,28 @@ fn write_storage_at_slot(
 ///
 /// Caller guarantees the context's GPU work has fully retired.
 pub(crate) fn destroy_context(state: &VulkanState, ld: &LogicalDevice, ft: &ContextFrameTable) {
+    destroy_context_resources(&state.buffers, ld, ft);
+}
+
+pub(crate) fn destroy_context_resources(
+    buffers: &super::types::SharedBufferTable,
+    ld: &LogicalDevice,
+    ft: &ContextFrameTable,
+) {
     unsafe {
         ld.device.destroy_buffer(ft.staging, None);
         ld.device.free_memory(ft.staging_memory, None);
     }
-    let mut buffers = state.buffers.write().unwrap();
+    let mut buffers_write = buffers.write().unwrap();
     for handle in [ft.selector, ft.device_table] {
-        if let Some(entry) = buffers.entries.remove(&handle) {
+        if let Some(entry) = buffers_write.entries.remove(&handle) {
             unsafe {
                 ld.device.destroy_buffer(entry.buffer, None);
                 ld.device.free_memory(entry.memory, None);
             }
         }
     }
-    drop(buffers);
+    drop(buffers_write);
     let mut registry = ld.descriptors.lock().unwrap();
     registry.reclaim_buffer_slots(ft.selector);
     registry.reclaim_buffer_slots(ft.device_table);

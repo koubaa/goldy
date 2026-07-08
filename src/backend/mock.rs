@@ -96,6 +96,17 @@ struct MockContextState {
     signal_queue: crate::signal::SignalQueue,
 }
 
+struct MockContextDestroyHandle;
+
+impl ContextDestroyHandle for MockContextDestroyHandle {
+    fn wait(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+}
 
 #[allow(dead_code)]
 struct MockBuffer {
@@ -562,13 +573,16 @@ impl GpuBackend for MockBackend {
         Ok(id)
     }
 
-    fn destroy_context(&mut self, ctx: ContextHandle) {
+    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
         if let Some(state) = self.contexts.remove(&ctx) {
             let state = state.lock().unwrap();
             let retired_horizon = state.completed.max(state.last_submitted_seq);
             if let Some(floor) = self.device_retired_floor.get(&state.device) {
                 floor.fetch_max(retired_horizon, std::sync::atomic::Ordering::Relaxed);
             }
+            Some(Box::new(MockContextDestroyHandle) as Box<dyn crate::backend::ContextDestroyHandle>)
+        } else {
+            None
         }
     }
 
@@ -2438,7 +2452,7 @@ mod tests {
         }
         *backend.device_timeline_next.entry(device).or_insert(0) = 10;
 
-        backend.destroy_context(ctx);
+        crate::backend::destroy_context_mut(&mut backend, ctx);
 
         assert_eq!(
             backend.device_retired(device),
