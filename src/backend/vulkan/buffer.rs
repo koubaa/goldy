@@ -1214,56 +1214,61 @@ pub(super) fn resize(
 /// For views, only the descriptor index is deferred — the underlying VkBuffer/memory
 /// belongs to the parent and is not freed.
 pub(super) fn destroy(state: &super::types::VulkanState, buffer_handle: BufferHandle) {
-    if let Some(buffer) = state.buffers.write().unwrap().entries.remove(&buffer_handle) {
-        if let Some(device) = state.devices.get(&buffer.device_handle) {
-            let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
-            let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
-            let requirements = {
-                let registry = device.descriptors.lock().unwrap();
-                registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
-            };
+    let buffer = {
+        let mut buffers = state.buffers.write().unwrap();
+        buffers.entries.remove(&buffer_handle)
+    };
+    let Some(buffer) = buffer else {
+        return;
+    };
+    if let Some(device) = state.devices.get(&buffer.device_handle) {
+        let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
+        let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
+        let requirements = {
+            let registry = device.descriptors.lock().unwrap();
+            registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
+        };
 
-            if buffer.is_view {
-                let deletion = types::PendingDeletion::BufferView { buffer_handle };
-                queue_pending_deletion(device, requirements, deletion);
-                return;
-            }
-
-            if buffer.transient_heap_suballoc {
-                device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
-                unsafe {
-                    device.device.destroy_buffer(buffer.buffer, None);
-                }
-                return;
-            }
-            if buffer.host_mapped.is_some() && !buffer.is_sparse {
-                if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
-                    tracing::warn!(?e, "unmap_memory2 failed for CPU_READABLE buffer on destroy");
-                }
-            }
-            let sparse_teardown = if buffer.is_sparse {
-                Some(types::SparseBufferTeardown {
-                    allocation_size: buffer.allocation_size,
-                    block_size: buffer.sparse_block_size,
-                    binds: sparse::collect_sparse_binds_for_teardown(buffer.sparse_block_size, &buffer.sparse_pages),
-                })
-            } else {
-                None
-            };
-            let deletion = types::PendingDeletion::Buffer {
-                buffer_handle,
-                buffer: buffer.buffer,
-                memory: if buffer.is_sparse {
-                    vk::DeviceMemory::null()
-                } else {
-                    buffer.memory
-                },
-                staging_buffer: buffer.staging_buffer,
-                staging_memory: buffer.staging_memory,
-                sparse_teardown,
-            };
+        if buffer.is_view {
+            let deletion = types::PendingDeletion::BufferView { buffer_handle };
             queue_pending_deletion(device, requirements, deletion);
+            return;
         }
+
+        if buffer.transient_heap_suballoc {
+            device.descriptors.lock().unwrap().reclaim_buffer_slots(buffer_handle);
+            unsafe {
+                device.device.destroy_buffer(buffer.buffer, None);
+            }
+            return;
+        }
+        if buffer.host_mapped.is_some() && !buffer.is_sparse {
+            if let Err(e) = unsafe { device.unmap_memory2(buffer.memory) } {
+                tracing::warn!(?e, "unmap_memory2 failed for CPU_READABLE buffer on destroy");
+            }
+        }
+        let sparse_teardown = if buffer.is_sparse {
+            Some(types::SparseBufferTeardown {
+                allocation_size: buffer.allocation_size,
+                block_size: buffer.sparse_block_size,
+                binds: sparse::collect_sparse_binds_for_teardown(buffer.sparse_block_size, &buffer.sparse_pages),
+            })
+        } else {
+            None
+        };
+        let deletion = types::PendingDeletion::Buffer {
+            buffer_handle,
+            buffer: buffer.buffer,
+            memory: if buffer.is_sparse {
+                vk::DeviceMemory::null()
+            } else {
+                buffer.memory
+            },
+            staging_buffer: buffer.staging_buffer,
+            staging_memory: buffer.staging_memory,
+            sparse_teardown,
+        };
+        queue_pending_deletion(device, requirements, deletion);
     }
 }
 

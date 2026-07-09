@@ -1045,7 +1045,11 @@ pub(super) fn destroy(
     textures: &SharedTextureTable,
     texture_handle: TextureHandle,
 ) {
-    if let Some(texture) = textures.write().unwrap().entries.remove(&texture_handle) {
+    let texture = {
+        let mut textures = textures.write().unwrap();
+        textures.entries.remove(&texture_handle)
+    };
+    if let Some(texture) = texture {
         if let Some(logical_device) = devices.get(&texture.device_handle) {
             if texture.transient_heap_suballoc {
                 logical_device
@@ -1261,45 +1265,33 @@ pub(super) fn allocate_compute_texture_staging(
     })
 }
 
-/// Stage a [`GpuCommand::CopyBufferToTexture`] upload from a CPU-writable source buffer.
+/// Copy flat texel bytes from a CPU-writable source buffer for [`GpuCommand::CopyBufferToTexture`].
+///
+/// Does not touch the context staging pool — safe to call before locking `SubmissionContext`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn allocate_copy_buffer_to_texture_staging(
-    instance: &ash::Instance,
-    devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,
+pub(super) fn copy_buffer_to_texture_flat_bytes(
     textures: &SharedTextureTable,
     buffers: &super::types::SharedBufferTable,
-    pool: &mut super::staging::TextureStagingPool,
     src: crate::backend::BufferHandle,
     src_offset: u64,
     texture_handle: TextureHandle,
-    x: u32,
-    y: u32,
     width: u32,
     height: u32,
-) -> Result<ComputeTextureScratch> {
-    let textures_guard = textures.read().unwrap();
-    let texture = textures_guard
-        .entries
-        .get(&texture_handle)
-        .context("allocate_copy_buffer_to_texture_staging: invalid texture")?;
-    let bpp = texture.format.bytes_per_pixel();
+) -> Result<Vec<u8>> {
+    let bpp = {
+        let textures_guard = textures.read().unwrap();
+        let texture = textures_guard
+            .entries
+            .get(&texture_handle)
+            .context("copy_buffer_to_texture_flat_bytes: invalid texture")?;
+        texture.format.bytes_per_pixel()
+    };
     let flat_len = (width as usize)
         .checked_mul(height as usize)
         .and_then(|h| h.checked_mul(bpp as usize))
         .context("CopyBufferToTexture: flat byte size overflow")?;
     let data = super::buffer::cpu_writable_flat_slice(buffers, src, src_offset, flat_len)?;
-    allocate_compute_texture_staging(
-        instance,
-        devices,
-        textures,
-        pool,
-        texture_handle,
-        data,
-        x,
-        y,
-        width,
-        height,
-    )
+    Ok(data.to_vec())
 }
 
 /// Record buffer→image copy + layout transitions into an open command buffer.

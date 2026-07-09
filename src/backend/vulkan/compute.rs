@@ -805,17 +805,23 @@ pub(super) fn submit_with_scope(
                 height,
                 ..
             } => {
-                let mut sc_guard = scope.sc.lock().unwrap();
-                let pool = &mut sc_guard.texture_staging_pool;
-                texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
-                    view.instance,
-                    view.devices,
+                let flat = super::texture::copy_buffer_to_texture_flat_bytes(
                     view.textures,
                     view.buffers,
-                    pool,
                     *src,
                     *src_offset,
                     *dst,
+                    *width,
+                    *height,
+                )?;
+                let mut sc_guard = scope.sc.lock().unwrap();
+                texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                    view.instance,
+                    view.devices,
+                    view.textures,
+                    &mut sc_guard.texture_staging_pool,
+                    *dst,
+                    &flat,
                     *x,
                     *y,
                     *width,
@@ -1827,17 +1833,23 @@ pub(super) fn submit_graph_with_scope(
                         height,
                         ..
                     } => {
-                        let mut sc_guard = scope.sc.lock().unwrap();
-                        let pool = &mut sc_guard.texture_staging_pool;
-                        texture_upload_scratch.push(super::texture::allocate_copy_buffer_to_texture_staging(
-                            view.instance,
-                            view.devices,
+                        let flat = super::texture::copy_buffer_to_texture_flat_bytes(
                             view.textures,
                             view.buffers,
-                            pool,
                             *src,
                             *src_offset,
                             *dst,
+                            *width,
+                            *height,
+                        )?;
+                        let mut sc_guard = scope.sc.lock().unwrap();
+                        texture_upload_scratch.push(super::texture::allocate_compute_texture_staging(
+                            view.instance,
+                            view.devices,
+                            view.textures,
+                            &mut sc_guard.texture_staging_pool,
+                            *dst,
+                            &flat,
                             *x,
                             *y,
                             *width,
