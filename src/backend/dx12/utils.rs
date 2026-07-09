@@ -220,6 +220,9 @@ pub(super) fn execute_with_waits_and_signal_device(
     }
     unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
         .context("Failed to signal device fence")?;
+    logical_device
+        .device_last_submitted_seq
+        .store(fence_value, Ordering::Relaxed);
     if api_log_on {
         super::api_log::log_queue_signal(
             queue_id,

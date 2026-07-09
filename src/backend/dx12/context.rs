@@ -52,28 +52,52 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     // Own queue per context (see `Dx12SubmissionContext::command_queue`): a GPU-side
     // cross-context `Wait` enqueued here only ever stalls this context. This is a
     // backend-agnostic invariant that holds for WARP too.
-    //
-    // `GOLDY_DX12_SINGLE_QUEUE=1` aliases the device queue + lock for A/B tracing (main topology).
-    let (command_queue, queue_lock) = if super::env_single_queue() {
-        tracing::info!("GOLDY_DX12_SINGLE_QUEUE=1 — context shares device command queue");
-        (
-            ld.command_queue.clone(),
-            std::sync::Arc::clone(&ld.queue_lock),
-        )
-    } else {
-        let queue_desc = D3D12_COMMAND_QUEUE_DESC {
-            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
-            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
-            Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
-            NodeMask: 0,
-        };
-        let command_queue: ID3D12CommandQueue = unsafe { ld.device.CreateCommandQueue(&queue_desc) }
-            .context("Failed to create per-context DX12 command queue")?;
-        (command_queue, std::sync::Arc::new(std::sync::Mutex::new(())))
+    let queue_style = super::env_context_queue_style();
+    let (command_queue, queue_lock) = match queue_style {
+        super::ContextQueueStyle::Device => {
+            if std::env::var("GOLDY_DX12_CONTEXT_QUEUE_STYLE")
+                .ok()
+                .is_some_and(|s| s.eq_ignore_ascii_case("device"))
+            {
+                tracing::info!("GOLDY_DX12_CONTEXT_QUEUE_STYLE=device — context shares device command queue");
+            }
+            (
+                ld.command_queue.clone(),
+                std::sync::Arc::clone(&ld.queue_lock),
+            )
+        }
+        super::ContextQueueStyle::Direct => {
+            let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+                Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+                Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+                Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+                NodeMask: 0,
+            };
+            let command_queue: ID3D12CommandQueue = unsafe { ld.device.CreateCommandQueue(&queue_desc) }
+                .context("Failed to create per-context DX12 command queue")?;
+            (command_queue, std::sync::Arc::new(std::sync::Mutex::new(())))
+        }
+        super::ContextQueueStyle::Compute => {
+            let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+                Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+                Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+                NodeMask: 0,
+            };
+            let command_queue: ID3D12CommandQueue = unsafe { ld.device.CreateCommandQueue(&queue_desc) }
+                .context("Failed to create per-context DX12 compute command queue")?;
+            (command_queue, std::sync::Arc::new(std::sync::Mutex::new(())))
+        }
     };
 
+    let list_type = match queue_style {
+        super::ContextQueueStyle::Compute => D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        super::ContextQueueStyle::Direct | super::ContextQueueStyle::Device => {
+            D3D12_COMMAND_LIST_TYPE_DIRECT
+        }
+    };
     let compute_initial_allocator: ID3D12CommandAllocator =
-        unsafe { ld.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
+        unsafe { ld.device.CreateCommandAllocator(list_type) }
             .context("Failed to create per-context compute command allocator")?;
     let compute_allocator_pool = vec![super::types::ComputeAllocatorSlot {
         allocator: compute_initial_allocator,
@@ -116,6 +140,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             fence,
             command_queue,
             queue_lock,
+            queue_style,
             last_submitted_seq,
             signal_queue,
             fence_shutdown,

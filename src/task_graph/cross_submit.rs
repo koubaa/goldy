@@ -360,9 +360,29 @@ pub fn compute_cross_submit_sync_into(
                 }
             }
             for (&ctx, &tv) in &sync.last_reads {
-                // Same-context WAR against Goldy-scheduled reads: live wait today; may relax
-                // to a baked prologue barrier once structural baking exists (see exchange harvest).
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                if ctx == submitting_ctx {
+                    // Same per-context queue: prior submits are already strictly ordered.
+                    // A live Wait on this context's own fence can wedge the queue when the
+                    // waited value would be signaled by work still behind that Wait.
+                    let usage = BarrierUsage {
+                        src: {
+                            let mut s = SlotUsageSet::default();
+                            s.merge(
+                                NodeAccess::Read,
+                                UsageKindFlags::COMPUTE | UsageKindFlags::RENDER | UsageKindFlags::TRANSFER,
+                            );
+                            s
+                        },
+                        dst: {
+                            let mut d = SlotUsageSet::default();
+                            d.merge(NodeAccess::Write, access.write_kinds);
+                            d
+                        },
+                    };
+                    merge_barrier(prologue, *key, usage);
+                } else {
+                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                }
             }
             for (&ctx, &tv) in &sync.foreign_reads {
                 // Same-context WAR against exercised-claim reads (e.g. present easement).
@@ -775,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn war_same_context_write_after_read_records_wait_not_prologue_from_reads() {
+    fn war_same_context_write_after_read_uses_prologue_not_live_wait() {
         let ctx = 1;
         let key = ResourceKey::Texture(4);
         let mut sync = ResourceSync::default();
@@ -801,12 +821,10 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
 
-        assert_eq!(sync.waits.len(), 1, "same-context WAR must emit a live wait");
-        assert_eq!(sync.waits[0].value, 45);
-        assert_eq!(
-            sync.prologue.textures.len(),
-            1,
-            "loop-carried WAW against own last_write still needs a baked prologue barrier"
+        assert!(sync.waits.is_empty(), "same-context WAR must not live-wait on own queue");
+        assert!(
+            !sync.prologue.textures.is_empty(),
+            "loop-carried WAW and same-context WAR need baked prologue barriers"
         );
     }
 
@@ -881,9 +899,10 @@ mod tests {
 
         assert_eq!(sync.waits.len(), 1);
         assert_eq!(
-            sync.waits[0].value, 9,
-            "merged WAR must use max read epoch across provenances"
+            sync.waits[0].value, 7,
+            "foreign same-context WAR still uses a live wait; scheduled reads use prologue"
         );
+        assert_eq!(sync.prologue.buffers.len(), 1);
     }
 
     #[test]
@@ -1007,15 +1026,16 @@ mod tests {
     }
 
     #[test]
-    fn war_same_context_emits_wait() {
+    fn war_same_context_emits_prologue_not_live_wait() {
         let ctx = 1;
         let key = buf_key(10);
         let ledger = ledger_with_read(ctx, key, 3);
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
-        assert!(sync.prologue.is_empty());
-        assert_eq!(sync.waits, vec![Epoch { context: ctx, value: 3 }]);
+        assert!(sync.waits.is_empty());
+        assert_eq!(sync.prologue.buffers.len(), 1);
+        assert!(sync.prologue.buffers[0].1.dst.access.writes());
     }
 
     #[test]

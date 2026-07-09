@@ -570,6 +570,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
+    /// Per-context queue topology (see [`super::ContextQueueStyle`]).
+    pub queue_style: super::ContextQueueStyle,
     /// Pool of command allocators for non-blocking compute submission on this context.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
     /// Retained command lists keyed by scheme fingerprint for zero-recording-cost re-submission.
@@ -1008,6 +1010,13 @@ impl PsoCache {
     }
 }
 
+/// Reusable DIRECT command allocator/list for render partitions on the device queue.
+pub(crate) struct DeviceDirectSlot {
+    pub allocator: Direct3D12::ID3D12CommandAllocator,
+    pub command_list: Direct3D12::ID3D12GraphicsCommandList,
+    pub fence_value: u64,
+}
+
 /// A logical D3D12 device with associated resources.
 #[allow(dead_code)]
 pub(crate) struct LogicalDevice {
@@ -1071,6 +1080,10 @@ pub(crate) struct LogicalDevice {
     /// Phase 5 lock-free submit clones this `Arc` and holds it only across the GPU
     /// enqueue, matching Vulkan's `queue_lock` and Metal's present/compute pairing.
     pub queue_lock: Arc<Mutex<()>>,
+    /// Last device-queue submission seq (signals [`Self::fence`]).
+    pub device_last_submitted_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Lazy pool for render-partition recording on the device DIRECT queue (compute style).
+    pub device_direct_slot: std::sync::Mutex<Option<DeviceDirectSlot>>,
     /// Frame table for legacy `render_to_target` (no submission context).
     pub legacy_frame_table: Mutex<Option<SharedContextFrameTable>>,
 }
@@ -1589,6 +1602,8 @@ pub(super) struct Dx12State {
     pub next_device_handle: DeviceHandle,
     pub contexts: SharedContextMap,
     pub next_context_id: super::ContextHandle,
+    /// Synthetic context handle per device for device-queue epoch stamps (compute style).
+    pub device_owner_handles: HashMap<DeviceHandle, super::ContextHandle>,
     /// Fence handles for every live context, keyed by context ID.
     ///
     /// Maintained in sync with `contexts` (inserted on create, removed on destroy).

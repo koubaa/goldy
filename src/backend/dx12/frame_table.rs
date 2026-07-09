@@ -316,6 +316,26 @@ fn create_scattered_u32_buffer_registered(
     Ok((handle, bindless_slot))
 }
 
+fn legacy_state_to_barrier(state: D3D12_RESOURCE_STATES) -> (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS) {
+    if state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS {
+        (
+            D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        )
+    } else if state == D3D12_RESOURCE_STATE_COPY_DEST {
+        (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST)
+    } else if state == D3D12_RESOURCE_STATE_COPY_SOURCE {
+        (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_SOURCE)
+    } else if state == D3D12_RESOURCE_STATE_GENERIC_READ {
+        // Upload-buffer implicit read — express as copy-source (valid on compute queues).
+        (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_SOURCE)
+    } else if state == D3D12_RESOURCE_STATE_COMMON {
+        (D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON)
+    } else {
+        (D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON)
+    }
+}
+
 fn transition_buffer(
     cl: &ID3D12GraphicsCommandList7,
     resource: &ID3D12Resource,
@@ -325,20 +345,18 @@ fn transition_buffer(
     if before == after {
         return;
     }
-    let barrier = D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: unsafe { std::mem::transmute_copy(resource) },
-                StateBefore: before,
-                StateAfter: after,
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-            }),
-        },
-    };
+    let (sync_before, access_before) = legacy_state_to_barrier(before);
+    let (sync_after, access_after) = legacy_state_to_barrier(after);
+    let mut barrier = [super::barriers::buffer_barrier_full(
+        resource,
+        sync_before,
+        sync_after,
+        access_before,
+        access_after,
+    )];
     unsafe {
-        cl.ResourceBarrier(&[barrier]);
+        super::barriers::barrier_buffers(cl, &barrier);
+        super::barriers::drop_buffer_barriers(&mut barrier);
     }
 }
 

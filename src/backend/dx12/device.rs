@@ -387,6 +387,8 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
         |cache_root| pso_cache::load_maps(&cache_root.join("goldy").join(format!("dx12_pso_{adapter_id}.bin"))),
     );
 
+    let device_last_submitted_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     state.devices.insert(
         handle,
         std::sync::Arc::new(LogicalDevice {
@@ -424,9 +426,22 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
                 compute_pso_blobs,
             ))),
             queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            device_last_submitted_seq: std::sync::Arc::clone(&device_last_submitted_seq),
+            device_direct_slot: std::sync::Mutex::new(None),
             legacy_frame_table: std::sync::Mutex::new(None),
         }),
     );
+
+    // Synthetic context handle for device-queue epoch stamps (render partitions under compute style).
+    let owner_id = state.next_context_id;
+    state.next_context_id = state.next_context_id.saturating_add(1);
+    let ld = state.devices.get(&handle).unwrap();
+    state
+        .context_fences
+        .write()
+        .unwrap()
+        .insert(owner_id, (handle, ld.fence.clone(), device_last_submitted_seq));
+    state.device_owner_handles.insert(handle, owner_id);
 
     {
         let ld = state.devices.get(&handle).unwrap();

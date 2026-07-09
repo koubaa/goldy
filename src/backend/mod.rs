@@ -813,6 +813,16 @@ pub(crate) trait PresentGpuWork: Send {
 /// tables so IR lowering + command recording + queue submit can run without the global
 /// backend mutex. Resource create/destroy still takes the global lock (write access).
 pub(crate) trait ContextSubmitSession: Send + Sync {
+    /// When true, compute and render partitions use separate GPU queues and must not merge.
+    fn separate_graphics_queue(&self) -> bool {
+        false
+    }
+
+    /// Synthetic context handle for device-queue producer epochs (DX12 compute style).
+    fn device_queue_owner(&self, _ctx: ContextHandle) -> Option<ContextHandle> {
+        None
+    }
+
     fn retains_present_partitions(&self) -> bool;
     fn submit_standalone(
         &self,

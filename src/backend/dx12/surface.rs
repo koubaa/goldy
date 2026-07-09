@@ -787,7 +787,7 @@ pub(super) fn finish_present(
             .entries
             .get_mut(&finish.scratch_texture.expect("scratch texture"))
         {
-            tex.last_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS;
+            tex.last_layout = D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
         }
     }
 
@@ -856,7 +856,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                 ),
                 barriers::texture_barrier_full(
@@ -891,7 +891,7 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
                     D3D12_BARRIER_ACCESS_COPY_SOURCE,
                     D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-                    D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+                    D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
                 ),
             ];
             unsafe { barriers::barrier_textures(&self.cmd7, &post_barriers) };

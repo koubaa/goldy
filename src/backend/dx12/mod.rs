@@ -10,9 +10,9 @@
 //! to it, even when hardware GPUs are present. Use on headless CI (no GPU) or locally to
 //! reproduce WARP-specific rendering bugs.
 //!
-//! Set **`GOLDY_DX12_SINGLE_QUEUE=1`** to alias each context's command queue and queue lock to
-//! the device's shared queue (main-branch topology) for A/B tracing. Reintroduces cross-context
-//! queue coupling; not for production.
+//! Set **`GOLDY_DX12_CONTEXT_QUEUE_STYLE`** to control per-context queue topology:
+//! `device` (default), `direct` (each context owns a DIRECT queue), or `compute`
+//! (per-context COMPUTE + device DIRECT for graphics/present).
 //!
 //! After the first WARP device is created, Goldy logs one stderr line showing which
 //! `d3d10warp.dll` was loaded — useful to confirm a side-loaded NuGet build is active.
@@ -75,12 +75,56 @@ pub(crate) fn env_force_warp() -> bool {
     std::env::var("GOLDY_DX12_FORCE_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// Whether `GOLDY_DX12_SINGLE_QUEUE=1` is set.
-///
-/// Contexts share [`LogicalDevice::command_queue`] and [`LogicalDevice::queue_lock`] instead of
-/// owning a per-context queue. For performance comparison / tracing only.
-pub(crate) fn env_single_queue() -> bool {
-    std::env::var("GOLDY_DX12_SINGLE_QUEUE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+/// Per-context queue topology for DX12 contexts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextQueueStyle {
+    /// Each context owns a DIRECT queue (compute + render + copy on one queue).
+    Direct,
+    /// Each context owns a COMPUTE queue; graphics and present use the device DIRECT queue.
+    Compute,
+    /// Each context aliases [`LogicalDevice::command_queue`] (shared DIRECT queue).
+    Device,
+}
+
+/// Resolved from **`GOLDY_DX12_CONTEXT_QUEUE_STYLE`** (`direct` | `compute` | `device`).
+pub(crate) fn env_context_queue_style() -> ContextQueueStyle {
+    match std::env::var("GOLDY_DX12_CONTEXT_QUEUE_STYLE")
+        .ok()
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("direct") => ContextQueueStyle::Direct,
+        Some("compute") => ContextQueueStyle::Compute,
+        Some("device") | None => ContextQueueStyle::Device,
+        Some(other) => {
+            tracing::warn!(
+                "GOLDY_DX12_CONTEXT_QUEUE_STYLE={other:?} unrecognized; using device"
+            );
+            ContextQueueStyle::Device
+        }
+    }
+}
+
+/// UAV layout tag for storage textures on the context submission path.
+pub(crate) fn context_storage_uav_layout(style: ContextQueueStyle) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+    use windows::Win32::Graphics::Direct3D12::*;
+    match style {
+        ContextQueueStyle::Compute => D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
+        ContextQueueStyle::Direct | ContextQueueStyle::Device => {
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+        }
+    }
+}
+
+/// SRV layout tag for sampled textures on the context submission path.
+pub(crate) fn context_shader_resource_layout(style: ContextQueueStyle) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+    use windows::Win32::Graphics::Direct3D12::*;
+    match style {
+        ContextQueueStyle::Compute => D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+        ContextQueueStyle::Direct | ContextQueueStyle::Device => {
+            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
+        }
+    }
 }
 
 fn env_allow_warp() -> bool {
@@ -192,6 +236,7 @@ impl Dx12Backend {
             next_device_handle: 1,
             contexts: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             next_context_id: 1,
+            device_owner_handles: HashMap::new(),
             context_fences: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             buffers: std::sync::Arc::new(std::sync::RwLock::new(types::BufferTable::new())),
             shaders: std::sync::Arc::new(std::sync::RwLock::new(types::ShaderTable::new())),
@@ -230,6 +275,9 @@ impl Dx12Backend {
             api_log::log_device_destroy(device_handle);
         }
         if let Some(logical_device) = self.state.devices.remove(&device_handle) {
+            if let Some(owner) = self.state.device_owner_handles.remove(&device_handle) {
+                self.state.context_fences.write().unwrap().remove(&owner);
+            }
             let _ = self.wait_for_gpu(device_handle, &logical_device);
             // Advance timeline_next past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing

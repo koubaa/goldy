@@ -54,10 +54,12 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
         D3D12_BARRIER_ACCESS_COMMON
     } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
         || layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+        || layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE
     {
         D3D12_BARRIER_ACCESS_SHADER_RESOURCE
     } else if layout == D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
         || layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+        || layout == D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS
     {
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
     } else if layout == D3D12_BARRIER_LAYOUT_COPY_DEST {
@@ -66,6 +68,23 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
         D3D12_BARRIER_ACCESS_COPY_SOURCE
     } else {
         D3D12_BARRIER_ACCESS_COMMON
+    }
+}
+
+fn post_copy_texture_state(
+    is_storage: bool,
+    queue_style: super::ContextQueueStyle,
+) -> (D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
+    if is_storage {
+        (
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+            super::context_storage_uav_layout(queue_style),
+        )
+    } else {
+        (
+            D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+            super::context_shader_resource_layout(queue_style),
+        )
     }
 }
 
@@ -575,12 +594,14 @@ pub(super) fn record_staged_texture_upload(
     command_list7: &ID3D12GraphicsCommandList7,
     textures: &mut std::collections::HashMap<TextureHandle, TextureState>,
     upload: &StagedTextureUpload,
+    queue_style: super::ContextQueueStyle,
 ) -> Result<()> {
-    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
     let texture = textures
         .get(&upload.texture_handle)
         .context("record_staged_texture_upload: invalid texture")?;
     let layout_before = upload.layout_before;
+    let is_storage = texture.is_storage;
+    let (post_access, after_layout) = post_copy_texture_state(is_storage, queue_style);
 
     let mut b_to_copy = [barriers::texture_barrier_full(
         &texture.resource,
@@ -620,7 +641,7 @@ pub(super) fn record_staged_texture_upload(
         D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_ACCESS_COPY_DEST,
-        D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
+        post_access,
         D3D12_BARRIER_LAYOUT_COPY_DEST,
         after_layout,
     )];
@@ -894,6 +915,7 @@ pub(super) fn record_copy_texture_to_readback(
     src: TextureHandle,
     dst: BufferHandle,
     layout: crate::backend::TextureCopyFootprint,
+    queue_style: super::ContextQueueStyle,
 ) -> Result<()> {
     // Extract everything we need from the immutable borrow before any mutable access.
     let (src_resource, dst_resource, layout_before, is_storage, dxgi_format) = {
@@ -946,16 +968,7 @@ pub(super) fn record_copy_texture_to_readback(
     };
     unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
 
-    let post_access = if is_storage {
-        D3D12_BARRIER_ACCESS_UNORDERED_ACCESS
-    } else {
-        D3D12_BARRIER_ACCESS_SHADER_RESOURCE
-    };
-    let post_layout = if is_storage {
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-    } else {
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
-    };
+    let (post_access, post_layout) = post_copy_texture_state(is_storage, queue_style);
     let b_back = barriers::texture_barrier_full(
         &src_resource,
         D3D12_BARRIER_SYNC_COPY,

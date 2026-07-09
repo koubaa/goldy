@@ -41,6 +41,7 @@ GOLDY_VALIDATION=1 cargo run --example triangle
 | `GOLDY_DX12_GBV` | `1`, `true` | *(not set)* | Enable D3D12 GPU-Based Validation. Catches UAV/SRV descriptor mismatches, resource state errors, and out-of-bounds access on the GPU timeline. Very slow — use for targeted debugging only. |
 | `GOLDY_DX12_FORCE_WARP` | `1`, `true` | *(not set)* | Force the DX12 backend to use the WARP software rasterizer, even when hardware GPUs are present. Use for headless CI or reproducing WARP-specific rendering bugs. |
 | `GOLDY_DX12_ALLOW_WARP` | `1`, `true` | *(not set)* | Allow the WARP adapter to appear in device enumeration. Without this or `GOLDY_DX12_FORCE_WARP`, WARP is hidden. |
+| `GOLDY_DX12_CONTEXT_QUEUE_STYLE` | `direct`, `compute`, `device` | `device` | Per-context queue topology. `device`: all contexts alias the device DIRECT queue (shared). `direct`: each context owns a DIRECT queue. `compute`: each context owns a COMPUTE queue; graphics and present use the device DIRECT queue. |
 
 ## Debugging
 
