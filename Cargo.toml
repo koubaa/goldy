@@ -225,3 +225,7 @@ harness = false
 name = "scheme_compute_integration"
 harness = false
 
+[[test]]
+name = "cross_submit_gpu"
+harness = false
+
