@@ -20,10 +20,40 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 /// Build GPU-side timeline-semaphore waits for cross-context [`SubmitSync::waits`].
+fn apply_cpu_epoch_waits(view: &VulkanSubmitView<'_>, sync: Option<&SubmitSync>) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.cpu_waits.is_empty() {
+        return Ok(());
+    }
+    for epoch in &s.cpu_waits {
+        let (device_handle, sem) = {
+            let contexts = view.contexts.read().unwrap();
+            let sc = contexts
+                .get(&epoch.context)
+                .with_context(|| format!("cross-submit cpu wait: invalid context {:?}", epoch.context))?;
+            let sc = sc.lock().unwrap();
+            (sc.device, sc.timeline_semaphore)
+        };
+        let ld = view
+            .devices
+            .get(&device_handle)
+            .with_context(|| format!("cross-submit cpu wait: invalid device {:?}", device_handle))?;
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&sem))
+            .values(std::slice::from_ref(&epoch.value));
+        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }
+            .context("cross-submit cpu wait on timeline semaphore")?;
+    }
+    Ok(())
+}
+
 fn build_cross_submit_wait_infos(
     view: &VulkanSubmitView<'_>,
     sync: Option<&SubmitSync>,
 ) -> Result<Vec<vk::SemaphoreSubmitInfo<'static>>> {
+    apply_cpu_epoch_waits(view, sync)?;
     let Some(s) = sync else {
         return Ok(Vec::new());
     };

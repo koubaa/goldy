@@ -152,11 +152,13 @@ pub struct CrossSubmitSync {
     pub prologue: BarrierSet,
     /// Cross-context GPU queue-waits (one per producer context, max tv).
     pub waits: Vec<Epoch>,
+    /// Cross-context WAR hazards retired on the CPU before GPU enqueue (see [`SubmitSync::cpu_waits`]).
+    pub cpu_waits: Vec<Epoch>,
 }
 
 impl CrossSubmitSync {
     pub fn is_empty(&self) -> bool {
-        self.prologue.is_empty() && self.waits.is_empty()
+        self.prologue.is_empty() && self.waits.is_empty() && self.cpu_waits.is_empty()
     }
 }
 
@@ -293,7 +295,9 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
 pub fn compute_cross_submit_sync_into(
     prologue: &mut BarrierSet,
     waits: &mut Vec<Epoch>,
+    cpu_waits: &mut Vec<Epoch>,
     wait_map: &mut HashMap<ContextHandle, u64>,
+    cpu_wait_map: &mut HashMap<ContextHandle, u64>,
     net: &HashMap<ResourceKey, NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: ContextHandle,
@@ -302,6 +306,7 @@ pub fn compute_cross_submit_sync_into(
     prologue.textures.clear();
     prologue.transient_ids.clear();
     wait_map.clear();
+    cpu_wait_map.clear();
 
     for (key, access) in net {
         let Some(entry) = find_ledger_entry(ledger, *key) else {
@@ -381,7 +386,10 @@ pub fn compute_cross_submit_sync_into(
                     };
                     merge_barrier(prologue, *key, usage);
                 } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                    // Cross-context WAR: retire the prior read on the CPU, not via a GPU
+                    // queue Wait — pairing with a cross-context RAW live wait on the peer
+                    // context can wedge both per-context queues under pipelined submit.
+                    cpu_wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
             }
             for (&ctx, &tv) in &sync.foreign_reads {
@@ -396,6 +404,9 @@ pub fn compute_cross_submit_sync_into(
     waits.clear();
     waits.extend(wait_map.drain().map(|(context, value)| Epoch { context, value }));
     waits.sort_by_key(|e| (e.context, e.value));
+    cpu_waits.clear();
+    cpu_waits.extend(cpu_wait_map.drain().map(|(context, value)| Epoch { context, value }));
+    cpu_waits.sort_by_key(|e| (e.context, e.value));
 }
 
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
@@ -410,10 +421,13 @@ pub fn compute_cross_submit_sync(
 ) -> CrossSubmitSync {
     let mut result = CrossSubmitSync::default();
     let mut wait_map = HashMap::new();
+    let mut cpu_wait_map = HashMap::new();
     compute_cross_submit_sync_into(
         &mut result.prologue,
         &mut result.waits,
+        &mut result.cpu_waits,
         &mut wait_map,
+        &mut cpu_wait_map,
         net,
         ledger,
         submitting_ctx,
@@ -491,6 +505,7 @@ pub(crate) struct CrossSubmitScratch {
     seen: HashSet<ResourceKey>,
     ledger: LedgerSnapshot,
     wait_map: HashMap<ContextHandle, u64>,
+    cpu_wait_map: HashMap<ContextHandle, u64>,
     submit_sync: SubmitSync,
 }
 
@@ -502,6 +517,7 @@ impl Default for CrossSubmitScratch {
             seen: HashSet::with_capacity(32),
             ledger: HashMap::with_capacity(32),
             wait_map: HashMap::with_capacity(4),
+            cpu_wait_map: HashMap::with_capacity(4),
             submit_sync: SubmitSync::default(),
         }
     }
@@ -518,10 +534,12 @@ impl CrossSubmitScratch {
         self.seen.clear();
         self.ledger.clear();
         self.wait_map.clear();
+        self.cpu_wait_map.clear();
         self.submit_sync.prologue.buffers.clear();
         self.submit_sync.prologue.textures.clear();
         self.submit_sync.prologue.transient_ids.clear();
         self.submit_sync.waits.clear();
+        self.submit_sync.cpu_waits.clear();
     }
 
     /// Plan cross-submit sync for one partition, reusing internal buffers.
@@ -550,7 +568,9 @@ impl CrossSubmitScratch {
             compute_cross_submit_sync_into(
                 &mut self.submit_sync.prologue,
                 &mut self.submit_sync.waits,
+                &mut self.submit_sync.cpu_waits,
                 &mut self.wait_map,
+                &mut self.cpu_wait_map,
                 &self.net,
                 &self.ledger,
                 submitting_ctx,
@@ -1062,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn war_cross_context_emits_wait_from_reads() {
+    fn war_cross_context_emits_cpu_wait_from_reads() {
         let producer = 1;
         let consumer = 2;
         let key = buf_key(10);
@@ -1071,8 +1091,9 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
         assert!(sync.prologue.is_empty());
+        assert!(sync.waits.is_empty());
         assert_eq!(
-            sync.waits,
+            sync.cpu_waits,
             vec![Epoch {
                 context: producer,
                 value: 4

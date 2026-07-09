@@ -481,17 +481,24 @@ pub struct SubmitSync {
     pub prologue: crate::task_graph::BarrierSet,
     /// Cross-context GPU queue-waits on producer timeline values.
     pub waits: Vec<crate::timeline::Epoch>,
+    /// Cross-context WAR hazards resolved on the CPU before enqueueing GPU work.
+    ///
+    /// A live GPU `Wait` for a cross-context WAR can form opposing queue dependencies
+    /// with a concurrent cross-context RAW wait (producer upload vs consumer reader),
+    /// wedging per-context queues. CPU-side retirement breaks the cycle.
+    pub cpu_waits: Vec<crate::timeline::Epoch>,
 }
 
 impl SubmitSync {
     pub fn is_empty(&self) -> bool {
-        self.prologue.is_empty() && self.waits.is_empty()
+        self.prologue.is_empty() && self.waits.is_empty() && self.cpu_waits.is_empty()
     }
 
     pub fn from_cross_submit(cross: &crate::task_graph::CrossSubmitSync) -> Self {
         Self {
             prologue: cross.prologue.clone(),
             waits: cross.waits.clone(),
+            cpu_waits: cross.cpu_waits.clone(),
         }
     }
 

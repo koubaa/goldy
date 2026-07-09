@@ -166,11 +166,39 @@ fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Op
 }
 
 /// Encode GPU-side waits on producer-context shared events before consumer work.
+fn apply_cpu_epoch_waits(state: &MetalState, sync: Option<&SubmitSync>) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.cpu_waits.is_empty() {
+        return Ok(());
+    }
+    for epoch in &s.cpu_waits {
+        let waiter = state
+            .contexts
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit cpu wait: unknown producer context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_waiter
+            .clone();
+        if !waiter.wait_until(epoch.value, std::time::Duration::from_secs(120)) {
+            anyhow::bail!(
+                "cross-submit cpu wait timed out waiting for context {:?} value {}",
+                epoch.context,
+                epoch.value
+            );
+        }
+    }
+    Ok(())
+}
+
 fn encode_wait_for_epochs(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     sync: Option<&SubmitSync>,
 ) -> Result<()> {
+    apply_cpu_epoch_waits(state, sync)?;
     let Some(s) = sync else {
         return Ok(());
     };

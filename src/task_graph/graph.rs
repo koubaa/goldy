@@ -216,6 +216,7 @@ fn backend_submit_standalone(
     let waits_only = sync.map(|s| SubmitSync {
         prologue: Default::default(),
         waits: s.waits.clone(),
+        cpu_waits: s.cpu_waits.clone(),
     });
     session.submit_standalone(ctx, &cmds, waits_only.as_ref())
 }
@@ -248,6 +249,7 @@ fn submit_sync_waits_only(sync: Option<&SubmitSync>) -> Option<SubmitSync> {
     sync.map(|s| SubmitSync {
         prologue: Default::default(),
         waits: s.waits.clone(),
+        cpu_waits: s.cpu_waits.clone(),
     })
 }
 
@@ -299,6 +301,7 @@ fn merge_queue_boundary_waits(
     Some(SubmitSync {
         prologue: sync.map(|s| s.prologue.clone()).unwrap_or_default(),
         waits,
+        cpu_waits: sync.map(|s| s.cpu_waits.clone()).unwrap_or_default(),
     })
 }
 

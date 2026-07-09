@@ -659,10 +659,28 @@ pub(super) fn destroy(state: &mut Dx12State, pipeline_handle: ComputePipelineHan
 /// the same `queue_lock` hold as `ExecuteCommandLists`/`Signal` (see
 /// [`super::utils::execute_with_waits_and_signal_context`]). Enqueuing waits outside that lock
 /// races the externally-synchronized command queue and can reorder sibling submits.
+fn apply_cpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.cpu_waits.is_empty() {
+        return Ok(());
+    }
+    let fences = scope.context_fences.read().unwrap();
+    for epoch in &s.cpu_waits {
+        let (_, producer_fence, _) = fences
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit cpu wait: unknown producer context {:?}", epoch.context))?;
+        super::utils::wait_for_fence(producer_fence, epoch.value)?;
+    }
+    Ok(())
+}
+
 fn resolve_epoch_waits(
     scope: &Dx12SubmitScope<'_>,
     sync: Option<&SubmitSync>,
 ) -> Result<Vec<(ID3D12Fence, u64)>> {
+    apply_cpu_epoch_waits(scope, sync)?;
     let Some(s) = sync else {
         return Ok(Vec::new());
     };
