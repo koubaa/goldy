@@ -1476,7 +1476,7 @@ pub(crate) struct SamplerState {
 }
 
 /// Maximum number of frames that can be in-flight at once.
-pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
+pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
 /// Per-frame synchronization resources for proper swapchain pipelining.
 #[allow(dead_code)]

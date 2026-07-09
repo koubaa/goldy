@@ -31,7 +31,10 @@ use super::barriers;
 use super::render_commands;
 use super::texture;
 use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
-use super::utils::{depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device};
+use super::utils::{
+    depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device,
+    execute_with_waits_and_signal_device,
+};
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};
 use crate::types::{Color, DepthFormat, TextureFlags, TextureFormat, TextureKind};
@@ -361,8 +364,8 @@ pub(super) fn acquire(
 
     // Fix 1: Ensure this slot's command allocator and scratch texture are no
     // longer in use by the GPU before we reset and reuse them.  With
-    // MAX_FRAMES_IN_FLIGHT=2 this is almost always a near-zero stall because
-    // roughly two CPU frames have elapsed since the slot was last submitted.
+    // With MAX_FRAMES_IN_FLIGHT=3 this is almost always a near-zero stall because
+    // enough CPU frames have elapsed since the slot was last submitted.
     if prev_fence > 0 {
         {
             let _tz = crate::tracy_zone!("surface.acquire.fence_wait");
@@ -689,7 +692,7 @@ pub(super) fn present_frame(state: &mut Dx12State, frame: FrameToken, submit_tv:
 pub(super) fn prepare_present_work(
     state: &mut Dx12State,
     frame: crate::backend::FrameToken,
-    _submit_tv: u64,
+    submit_tv: u64,
 ) -> Result<Box<dyn crate::backend::PresentGpuWork>> {
     let surface_handle = frame.surface;
     let image_index = frame.image as usize;
@@ -729,6 +732,16 @@ pub(super) fn prepare_present_work(
         .resource
         .clone();
     let existing_fence = surface.frame_sync[present_slot].fence_value;
+    let ctx_fence = {
+        let contexts_read = state.contexts.read().unwrap();
+        let sc_arc = contexts_read
+            .get(&frame.context)
+            .context("Invalid context handle")?
+            .clone();
+        drop(contexts_read);
+        let fence = sc_arc.lock().unwrap().fence.clone();
+        fence
+    };
 
     Ok(Box::new(Dx12PresentGpuWork {
         frame,
@@ -736,6 +749,8 @@ pub(super) fn prepare_present_work(
         present_slot,
         scratch_handle,
         render_pass_submitted,
+        submit_tv,
+        ctx_fence,
         logical_device,
         scratch_res,
         backbuffer,
@@ -801,6 +816,8 @@ struct Dx12PresentGpuWork {
     present_slot: usize,
     scratch_handle: TextureHandle,
     render_pass_submitted: bool,
+    submit_tv: u64,
+    ctx_fence: ID3D12Fence,
     logical_device: std::sync::Arc<LogicalDevice>,
     scratch_res: ID3D12Resource,
     backbuffer: ID3D12Resource,
@@ -883,7 +900,12 @@ impl crate::backend::PresentGpuWork for Dx12PresentGpuWork {
             unsafe { cmd_gfx.Close() }.context("Failed to close present copy command list")?;
 
             let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
-            return_fence = execute_command_lists_and_signal_device(&self.logical_device, &[Some(cmd_list)])?;
+            return_fence = if self.submit_tv > 0 {
+                let waits = [(self.ctx_fence.clone(), self.submit_tv)];
+                execute_with_waits_and_signal_device(&self.logical_device, &waits, &[Some(cmd_list)])?
+            } else {
+                execute_command_lists_and_signal_device(&self.logical_device, &[Some(cmd_list)])?
+            };
             scratch_layout_updated = true;
         }
 

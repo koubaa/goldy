@@ -10,6 +10,10 @@
 //! to it, even when hardware GPUs are present. Use on headless CI (no GPU) or locally to
 //! reproduce WARP-specific rendering bugs.
 //!
+//! Set **`GOLDY_DX12_SINGLE_QUEUE=1`** to alias each context's command queue and queue lock to
+//! the device's shared queue (main-branch topology) for A/B tracing. Reintroduces cross-context
+//! queue coupling; not for production.
+//!
 //! After the first WARP device is created, Goldy logs one stderr line showing which
 //! `d3d10warp.dll` was loaded — useful to confirm a side-loaded NuGet build is active.
 //!
@@ -69,6 +73,14 @@ pub const WARP_ADAPTER_ID: u32 = u32::MAX;
 /// to the WARP adapter regardless of what hardware GPUs are present.
 pub(crate) fn env_force_warp() -> bool {
     std::env::var("GOLDY_DX12_FORCE_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// Whether `GOLDY_DX12_SINGLE_QUEUE=1` is set.
+///
+/// Contexts share [`LogicalDevice::command_queue`] and [`LogicalDevice::queue_lock`] instead of
+/// owning a per-context queue. For performance comparison / tracing only.
+pub(crate) fn env_single_queue() -> bool {
+    std::env::var("GOLDY_DX12_SINGLE_QUEUE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn env_allow_warp() -> bool {

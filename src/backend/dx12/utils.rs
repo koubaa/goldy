@@ -183,14 +183,50 @@ pub(super) fn execute_command_lists_and_signal_device(
     logical_device: &LogicalDevice,
     command_lists: &[Option<ID3D12CommandList>],
 ) -> Result<u64> {
+    execute_with_waits_and_signal_device(logical_device, &[], command_lists)
+}
+
+/// Enqueue cross-queue GPU waits, execute command lists, and signal the device fence — all
+/// under a single hold of [`LogicalDevice::queue_lock`].
+///
+/// Used by the present copy path: frame compute runs on a per-context queue, but the
+/// scratch→backbuffer copy must run on the swapchain-associated device queue. A
+/// `queue.Wait(ctx_fence, submit_tv)` here orders the copy after the context submission
+/// (mirrors Vulkan's `wait_compute_done` in `present_split.rs`).
+pub(super) fn execute_with_waits_and_signal_device(
+    logical_device: &LogicalDevice,
+    waits: &[(ID3D12Fence, u64)],
+    command_lists: &[Option<ID3D12CommandList>],
+) -> Result<u64> {
     let queue_lock = Arc::clone(&logical_device.queue_lock);
     let _guard = queue_lock.lock().unwrap();
+    let api_log_on = super::api_log::enabled();
+    let queue_id = api_log_on
+        .then(|| super::api_log::com_identity(&logical_device.command_queue))
+        .unwrap_or(0);
+    for (producer_fence, value) in waits {
+        if api_log_on {
+            super::api_log::log_queue_wait(queue_id, super::api_log::com_identity(producer_fence), *value);
+        }
+        unsafe { logical_device.command_queue.Wait(producer_fence, *value) }
+            .context("device queue Wait before present copy")?;
+    }
     let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+    if api_log_on {
+        super::api_log::log_execute_command_lists(queue_id, command_lists.len());
+    }
     unsafe {
         logical_device.command_queue.ExecuteCommandLists(command_lists);
     }
     unsafe { logical_device.command_queue.Signal(&logical_device.fence, fence_value) }
         .context("Failed to signal device fence")?;
+    if api_log_on {
+        super::api_log::log_queue_signal(
+            queue_id,
+            super::api_log::com_identity(&logical_device.fence),
+            fence_value,
+        );
+    }
     Ok(fence_value)
 }
 

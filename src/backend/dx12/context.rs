@@ -52,14 +52,25 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
     // Own queue per context (see `Dx12SubmissionContext::command_queue`): a GPU-side
     // cross-context `Wait` enqueued here only ever stalls this context. This is a
     // backend-agnostic invariant that holds for WARP too.
-    let queue_desc = D3D12_COMMAND_QUEUE_DESC {
-        Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
-        Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
-        Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
-        NodeMask: 0,
+    //
+    // `GOLDY_DX12_SINGLE_QUEUE=1` aliases the device queue + lock for A/B tracing (main topology).
+    let (command_queue, queue_lock) = if super::env_single_queue() {
+        tracing::info!("GOLDY_DX12_SINGLE_QUEUE=1 — context shares device command queue");
+        (
+            ld.command_queue.clone(),
+            std::sync::Arc::clone(&ld.queue_lock),
+        )
+    } else {
+        let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+            Priority: D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,
+            Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+            NodeMask: 0,
+        };
+        let command_queue: ID3D12CommandQueue = unsafe { ld.device.CreateCommandQueue(&queue_desc) }
+            .context("Failed to create per-context DX12 command queue")?;
+        (command_queue, std::sync::Arc::new(std::sync::Mutex::new(())))
     };
-    let command_queue: ID3D12CommandQueue =
-        unsafe { ld.device.CreateCommandQueue(&queue_desc) }.context("Failed to create per-context DX12 command queue")?;
 
     let compute_initial_allocator: ID3D12CommandAllocator =
         unsafe { ld.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) }
@@ -104,7 +115,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
             device,
             fence,
             command_queue,
-            queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            queue_lock,
             last_submitted_seq,
             signal_queue,
             fence_shutdown,
