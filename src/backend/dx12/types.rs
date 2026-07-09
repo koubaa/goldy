@@ -432,6 +432,92 @@ mod registry_tests {
         drain_pending(&retired, &mut reg, &mut pending);
         assert_eq!(reg.cbv_srv_uav.free_count(), 1);
     }
+
+    /// Retained-graph pin blocks slot free even when GPU requirements are met.
+    #[test]
+    fn retained_pin_blocks_slot_free_until_unpin() {
+        let mut dr = DescriptorRegistry::new();
+        let handle = 3u64 as BufferHandle;
+        let slot = dr.resource_registry.register_buffer_uav(handle);
+        let deferred = DeferredSlot::CbvSrvUav(slot);
+
+        dr.pin_retained_slots([deferred]);
+        dr.queue_slot_reclamation(deferred);
+        dr.resource_registry.extract_buffer_slots(handle);
+
+        let fences: HashMap<ContextHandle, ContextFenceEntry> = HashMap::new();
+        dr.drain_ready_slot_reclamations(&fences);
+        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 0, "pinned slot must not free");
+        assert_eq!(dr.retained_user_count(deferred), 1);
+
+        dr.unpin_retained_slots([deferred]);
+        dr.drain_ready_slot_reclamations(&fences);
+        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 1, "unpin then drain frees");
+    }
+
+    /// Two retained graphs sharing a slot require two unpins.
+    #[test]
+    fn retained_pin_shared_slot_needs_two_unpins() {
+        let mut dr = DescriptorRegistry::new();
+        let slot = dr.resource_registry.register_buffer_uav(4);
+        let deferred = DeferredSlot::CbvSrvUav(slot);
+
+        dr.pin_retained_slots([deferred]);
+        dr.pin_retained_slots([deferred]);
+        dr.queue_slot_reclamation(deferred);
+        dr.resource_registry.buffer_offsets.remove(&4);
+
+        let fences: HashMap<ContextHandle, ContextFenceEntry> = HashMap::new();
+        dr.drain_ready_slot_reclamations(&fences);
+        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 0);
+
+        dr.unpin_retained_slots([deferred]);
+        dr.drain_ready_slot_reclamations(&fences);
+        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 0, "one pin remains");
+
+        dr.unpin_retained_slots([deferred]);
+        dr.drain_ready_slot_reclamations(&fences);
+        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 1);
+    }
+
+    /// Replacing a retained graph: unpin old-only slots, new slots stay pinned.
+    #[test]
+    fn retained_pin_replace_frees_old_only_slots() {
+        let mut dr = DescriptorRegistry::new();
+        let slot_old = dr.resource_registry.register_buffer_uav(5);
+        let slot_new = dr.resource_registry.register_buffer_uav(6);
+        let old_deferred = DeferredSlot::CbvSrvUav(slot_old);
+        let new_deferred = DeferredSlot::CbvSrvUav(slot_new);
+
+        dr.pin_retained_slots([old_deferred]);
+        dr.pin_retained_slots([new_deferred]);
+        dr.unpin_retained_slots([old_deferred]);
+
+        dr.queue_slot_reclamation(old_deferred);
+        dr.queue_slot_reclamation(new_deferred);
+        dr.resource_registry.buffer_offsets.remove(&5);
+        dr.resource_registry.buffer_offsets.remove(&6);
+
+        let fences: HashMap<ContextHandle, ContextFenceEntry> = HashMap::new();
+        dr.drain_ready_slot_reclamations(&fences);
+        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 1, "old slot freed");
+        assert_eq!(dr.retained_user_count(new_deferred), 1);
+        assert_eq!(dr.retained_user_count(old_deferred), 0);
+    }
+
+    /// Retained-graph pin blocks physical GPU release readiness (same gate as slot reclaim).
+    #[test]
+    fn retained_pin_blocks_gpu_release_readiness() {
+        let mut dr = DescriptorRegistry::new();
+        let slot = dr.resource_registry.register_buffer_uav(7);
+        let deferred = DeferredSlot::CbvSrvUav(slot);
+
+        dr.pin_retained_slots([deferred]);
+        assert!(!dr.retained_pins_clear(&[deferred]));
+
+        dr.unpin_retained_slots([deferred]);
+        assert!(dr.retained_pins_clear(&[deferred]));
+    }
 }
 
 /// Information about a physical DXGI adapter.
@@ -579,6 +665,9 @@ pub(crate) struct PendingSlotReclamation {
 /// GPU buffer resources held until bindless slot requirements retire.
 pub(crate) struct PendingBufferGpuRelease {
     pub requirements: Vec<(super::ContextHandle, u64)>,
+    /// Bindless slots reclaimed from the destroyed buffer; physical free waits until
+    /// retained-graph pins on these slots drop to zero.
+    pub retained_slots: Vec<DeferredSlot>,
     pub resource: Direct3D12::ID3D12Resource,
     pub upload_buffer: Option<Direct3D12::ID3D12Resource>,
     pub coherent_readback: Option<Direct3D12::ID3D12Resource>,
@@ -592,6 +681,9 @@ pub(crate) type ContextFenceEntry = (
     Arc<AtomicU64>,
 );
 
+pub(crate) type SharedContextFences =
+    Arc<std::sync::RwLock<HashMap<super::ContextHandle, ContextFenceEntry>>>;
+
 fn slot_requirements_met(
     requirements: &[(super::ContextHandle, u64)],
     context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
@@ -601,6 +693,19 @@ fn slot_requirements_met(
             .get(ctx_id)
             .is_none_or(|(_, fence, _)| unsafe { fence.GetCompletedValue() >= *required_seq })
     })
+}
+
+/// Device-global deletions with no recorded cross-context bindless requirements may still be
+/// referenced by retained command lists on other live contexts. Only drain those once every
+/// context fence is gone (teardown / last-context destroy).
+fn device_deletion_requirements_met(
+    requirements: &[(super::ContextHandle, u64)],
+    context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
+) -> bool {
+    if requirements.is_empty() {
+        return context_fences.is_empty();
+    }
+    slot_requirements_met(requirements, context_fences)
 }
 
 /// Deferred deletion queue for a DX12 device.
@@ -656,15 +761,23 @@ impl DeviceDeletionQueue {
         self.inner.push(requirements, resource);
     }
 
+    /// Drain ready entries, preserving each entry's requirement snapshot so GPU release
+    /// can reuse it (instead of re-snapshotting `slot_last_seen`, which misses non-bindless
+    /// uses such as `CopyBuffer`).
     pub(crate) fn drain_ready(
         &mut self,
         context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
-    ) -> Vec<PendingDeletion> {
-        self.inner.drain_where(|reqs| slot_requirements_met(reqs, context_fences))
+    ) -> Vec<(Vec<(super::ContextHandle, u64)>, PendingDeletion)> {
+        self.inner
+            .drain_where_with_keys(|reqs| device_deletion_requirements_met(reqs, context_fences))
     }
 
-    pub(crate) fn drain_everything(&mut self) -> Vec<PendingDeletion> {
-        self.inner.flush_all().collect()
+    pub(crate) fn drain_everything(
+        &mut self,
+    ) -> Vec<(Vec<(super::ContextHandle, u64)>, PendingDeletion)> {
+        // Teardown path: return original requirement keys (unused once the device is idle).
+        self.inner
+            .drain_where_with_keys(|_| true)
     }
 
     pub(crate) fn pending_len(&self) -> usize {
@@ -687,6 +800,8 @@ pub(crate) struct DescriptorRegistry {
     pub slot_last_seen: HashMap<DeferredSlot, HashMap<super::ContextHandle, u64>>,
     /// Slots waiting for referencing contexts to retire before returning to the free list.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
+    /// Retained command lists still baking each bindless slot (incremental refcount).
+    retained_users: HashMap<DeferredSlot, u32>,
 }
 
 impl DescriptorRegistry {
@@ -695,7 +810,39 @@ impl DescriptorRegistry {
             resource_registry: ResourceRegistry::new(),
             slot_last_seen: HashMap::new(),
             pending_slot_reclamations: Vec::new(),
+            retained_users: HashMap::new(),
         }
+    }
+
+    /// Increment pin count for each slot baked into a newly retained command list.
+    pub(crate) fn pin_retained_slots(&mut self, slots: impl IntoIterator<Item = DeferredSlot>) {
+        for slot in slots {
+            *self.retained_users.entry(slot).or_insert(0) += 1;
+        }
+    }
+
+    /// Decrement pin count when a retained graph is evicted or a context is destroyed.
+    pub(crate) fn unpin_retained_slots(&mut self, slots: impl IntoIterator<Item = DeferredSlot>) {
+        for slot in slots {
+            if let Some(count) = self.retained_users.get_mut(&slot) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.retained_users.remove(&slot);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_user_count(&self, slot: DeferredSlot) -> u32 {
+        self.retained_users.get(&slot).copied().unwrap_or(0)
+    }
+
+    /// True when no retained command list still bakes any of `slots`.
+    pub(crate) fn retained_pins_clear(&self, slots: &[DeferredSlot]) -> bool {
+        slots
+            .iter()
+            .all(|slot| self.retained_users.get(slot).copied().unwrap_or(0) == 0)
     }
 
     /// Record that `ctx` submitted `seq` referencing each bindless slot in `slots`.
@@ -722,42 +869,22 @@ impl DescriptorRegistry {
             .remove(&slot)
             .map(|m| m.into_iter().collect())
             .unwrap_or_default();
-        if requirements.is_empty() {
-            self.resource_registry.free_deferred_slot(slot);
-        } else {
-            self.pending_slot_reclamations
-                .push(PendingSlotReclamation { slot, requirements });
-        }
-    }
-
-    /// Union of per-context last-seen seqs for all bindless slots owned by `handle`.
-    /// Must be called before [`Self::reclaim_buffer_slots`] removes `slot_last_seen` entries.
-    pub(crate) fn snapshot_buffer_slot_requirements(&self, handle: BufferHandle) -> Vec<(super::ContextHandle, u64)> {
-        let rr = &self.resource_registry;
-        let mut merged: HashMap<super::ContextHandle, u64> = HashMap::new();
-        let mut slots = Vec::new();
-        if let Some(&offset) = rr.buffer_offsets.get(&handle) {
-            slots.push(offset);
-        }
-        if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
-            slots.push(offset);
-        }
-        for slot in slots {
-            if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
-                for (ctx, seq) in map.iter() {
-                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
-                }
-            }
-        }
-        merged.into_iter().collect()
+        // Always defer: empty requirements may still be referenced by retained command lists
+        // on other live contexts (see `device_deletion_requirements_met`).
+        self.pending_slot_reclamations
+            .push(PendingSlotReclamation { slot, requirements });
     }
 
     /// Reclaim all descriptor slots for a destroyed buffer handle.
-    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) {
+    ///
+    /// Returns the deferred slots that were reclaimed (for gating physical GPU free).
+    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) -> Vec<DeferredSlot> {
         let slots = self.resource_registry.extract_buffer_slots(handle);
+        let deferred: Vec<DeferredSlot> = slots.iter().map(|&s| DeferredSlot::CbvSrvUav(s)).collect();
         for slot in slots {
             self.queue_slot_reclamation(DeferredSlot::CbvSrvUav(slot));
         }
+        deferred
     }
 
     /// Reclaim all descriptor slots for a destroyed texture handle.
@@ -787,8 +914,13 @@ impl DescriptorRegistry {
     ) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
-            let ready = slot_requirements_met(&self.pending_slot_reclamations[i].requirements, context_fences);
-            if ready {
+            let slot = self.pending_slot_reclamations[i].slot;
+            let gpu_ready = device_deletion_requirements_met(
+                &self.pending_slot_reclamations[i].requirements,
+                context_fences,
+            );
+            let pin_clear = self.retained_users.get(&slot).copied().unwrap_or(0) == 0;
+            if gpu_ready && pin_clear {
                 let entry = self.pending_slot_reclamations.swap_remove(i);
                 self.resource_registry.free_deferred_slot(entry.slot);
             } else {
@@ -801,7 +933,7 @@ impl DescriptorRegistry {
     /// released: `base` (the destroying context's own barrier, or a snapshot across every
     /// live context when the destroy could not be attributed to one) merged with every live
     /// `slot_last_seen` entry for this buffer's bindless slots, so cross-context shader
-    /// access cannot outlive the D3D12 resource.
+    /// access and non-bindless GPU uses (copies) cannot outlive the D3D12 resource.
     ///
     /// Returns per-context pairs rather than a single folded fence value: contexts do not
     /// share a value space, so maxing raw counter values from different contexts together
@@ -809,6 +941,7 @@ impl DescriptorRegistry {
     pub(crate) fn bindless_retirement_requirements_for_buffer(
         &self,
         handle: BufferHandle,
+        base: Vec<(super::ContextHandle, u64)>,
     ) -> Vec<(super::ContextHandle, u64)> {
         let rr = &self.resource_registry;
         let mut slots = Vec::new();
@@ -818,27 +951,29 @@ impl DescriptorRegistry {
         if let Some(&offset) = rr.buffer_srv_offsets.get(&handle) {
             slots.push(offset);
         }
-        self.merge_slot_requirements(&slots)
+        self.merge_slot_requirements(&slots, base)
     }
 
     /// Same as [`Self::bindless_retirement_requirements_for_buffer`] but for a texture handle.
     pub(crate) fn bindless_retirement_requirements_for_texture(
         &self,
         handle: TextureHandle,
+        base: Vec<(super::ContextHandle, u64)>,
     ) -> Vec<(super::ContextHandle, u64)> {
         let rr = &self.resource_registry;
         let mut slots = Vec::new();
         if let Some(&offset) = rr.texture_offsets.get(&handle) {
             slots.push(offset);
         }
-        self.merge_slot_requirements(&slots)
+        self.merge_slot_requirements(&slots, base)
     }
 
     fn merge_slot_requirements(
         &self,
         slots: &[u32],
+        base: Vec<(super::ContextHandle, u64)>,
     ) -> Vec<(super::ContextHandle, u64)> {
-        let mut merged: HashMap<super::ContextHandle, u64> = HashMap::new();
+        let mut merged: HashMap<super::ContextHandle, u64> = base.into_iter().collect();
         for &slot in slots {
             if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
                 for (ctx, seq) in map.iter() {
@@ -955,22 +1090,54 @@ pub(crate) type SharedContextMap = Arc<std::sync::RwLock<HashMap<super::ContextH
 pub(crate) type SharedContextFrameTable = Arc<super::frame_table::ContextFrameTable>;
 
 impl LogicalDevice {
-    pub(crate) fn process_deletion_queue_up_to(
+    pub(crate) fn process_deletion_queue_up_to(&self, context_fences: &SharedContextFences) {
+        let batch = {
+            let fences = context_fences.read().unwrap();
+            self.deletion_queue.lock().unwrap().drain_ready(&fences)
+        };
+
+        if !batch.is_empty() {
+            let descriptors_arc = Arc::clone(&self.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
+            for (requirements, resource) in batch {
+                destroy_pending_deletion(self, &mut registry, resource, requirements);
+            }
+        }
+
+        // Take ready GPU releases under the fences + descriptors locks, then drop COM refs
+        // without holding them — reserved-tile teardown may Signal+wait and must not stall
+        // other contexts that need `context_fences`.
+        let ready = {
+            let fences = context_fences.read().unwrap();
+            let registry = self.descriptors.lock().unwrap();
+            self.take_ready_buffer_gpu_releases(&fences, &registry)
+        };
+        for entry in ready {
+            release_buffer_gpu_resources(self, entry);
+        }
+    }
+
+    /// Collect deferred buffer GPU releases whose requirements have retired.
+    /// Caller must release the `context_fences` read lock before calling
+    /// [`release_buffer_gpu_resources`] (reserved-tile path may block).
+    pub(crate) fn take_ready_buffer_gpu_releases(
         &self,
         context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
-    ) {
-        let batch = self.deletion_queue.lock().unwrap().drain_ready(context_fences);
-        if batch.is_empty() {
-            self.drain_pending_buffer_gpu_releases(context_fences);
-            return;
+        registry: &DescriptorRegistry,
+    ) -> Vec<PendingBufferGpuRelease> {
+        let mut pending = self.pending_buffer_gpu_releases.lock().unwrap();
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < pending.len() {
+            let gpu_ready = device_deletion_requirements_met(&pending[i].requirements, context_fences);
+            let pin_clear = registry.retained_pins_clear(&pending[i].retained_slots);
+            if gpu_ready && pin_clear {
+                ready.push(pending.swap_remove(i));
+            } else {
+                i += 1;
+            }
         }
-        let descriptors_arc = Arc::clone(&self.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for resource in batch {
-            destroy_pending_deletion(self, &mut registry, resource);
-        }
-        drop(registry);
-        self.drain_pending_buffer_gpu_releases(context_fences);
+        ready
     }
 
     /// Drop deferred buffer GPU memory once every referencing context has retired.
@@ -978,15 +1145,12 @@ impl LogicalDevice {
         &self,
         context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
     ) {
-        let mut pending = self.pending_buffer_gpu_releases.lock().unwrap();
-        let mut i = 0;
-        while i < pending.len() {
-            if slot_requirements_met(&pending[i].requirements, context_fences) {
-                let entry = pending.swap_remove(i);
-                release_buffer_gpu_resources(self, entry);
-            } else {
-                i += 1;
-            }
+        let ready = {
+            let registry = self.descriptors.lock().unwrap();
+            self.take_ready_buffer_gpu_releases(context_fences, &registry)
+        };
+        for entry in ready {
+            release_buffer_gpu_resources(self, entry);
         }
     }
 
@@ -1001,48 +1165,62 @@ impl LogicalDevice {
         // have requirements are just dropped with the LogicalDevice — the whole allocator
         // is discarded at this point, so skipping drain_ready_slot_reclamations is safe.
         let batch = self.deletion_queue.lock().unwrap().drain_everything();
-        if batch.is_empty() {
-            return;
+        if !batch.is_empty() {
+            let descriptors_arc = Arc::clone(&self.descriptors);
+            let mut registry = descriptors_arc.lock().unwrap();
+            for (requirements, resource) in batch {
+                destroy_pending_deletion(self, &mut registry, resource, requirements);
+            }
         }
-        let descriptors_arc = Arc::clone(&self.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        for resource in batch {
-            destroy_pending_deletion(self, &mut registry, resource);
-        }
-        drop(registry);
         self.drain_pending_buffer_gpu_releases(context_fences);
     }
 }
 
+/// Release GPU buffer memory after its retirement requirements have already been observed
+/// as met. Ordinary buffers drop immediately (no new Signal). Reserved/tiled buffers still
+/// need a queue flush after unmap before `Release`, or the driver can remove the device.
 fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelease) {
     let PendingBufferGpuRelease {
         requirements: _,
+        retained_slots: _,
         resource,
         upload_buffer,
         coherent_readback,
         reserved_tiles,
     } = entry;
     if let Some(tiles) = reserved_tiles {
-        let mut pool = ld.tile_heap_pool.lock().unwrap();
-        super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
-    }
-    let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-    let signaled = super::utils::with_queue_lock(ld, || {
-        unsafe { ld.command_queue.Signal(&ld.fence, fv) }
-            .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
-    });
-    if signaled.is_ok() {
-        let _ = super::utils::wait_for_fence_on_device(&ld.fence, fv, Some(ld));
+        {
+            let mut pool = ld.tile_heap_pool.lock().unwrap();
+            super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
+        }
+        // Flush the queue so the unmap is processed before releasing the resource.
+        let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+        let signaled = super::utils::with_queue_lock(ld, || {
+            unsafe { ld.command_queue.Signal(&ld.fence, fv) }.map_err(|e| {
+                anyhow::anyhow!("Failed to signal device fence for reserved buffer deletion: {e:?}")
+            })
+        });
+        if signaled.is_ok() {
+            let _ = super::utils::wait_for_fence_on_device(&ld.fence, fv, Some(ld));
+        }
     }
     drop(resource);
     drop(upload_buffer);
     drop(coherent_readback);
 }
 
+/// Process a drained pending deletion.
+///
+/// `queue_requirements` is the requirement set that gated the deletion-queue entry
+/// (device-global: destroy/resize attribution + `slot_last_seen`; per-context: empty —
+/// already gated on that context's fence). For [`PendingDeletion::Buffer`], this set is
+/// propagated into [`PendingBufferGpuRelease`] so GPU free does not re-snapshot
+/// `slot_last_seen` alone (which misses non-bindless uses such as `CopyBuffer`).
 pub(crate) fn destroy_pending_deletion(
     ld: &LogicalDevice,
     registry: &mut DescriptorRegistry,
     resource: PendingDeletion,
+    queue_requirements: Vec<(super::ContextHandle, u64)>,
 ) {
     match resource {
         PendingDeletion::Buffer {
@@ -1052,20 +1230,19 @@ pub(crate) fn destroy_pending_deletion(
             coherent_readback,
             reserved_tiles,
         } => {
-            let requirements = registry.snapshot_buffer_slot_requirements(buffer_handle);
-            registry.reclaim_buffer_slots(buffer_handle);
+            // Reclaim descriptor slots now (handle is already gone from the API). Keep the
+            // D3D12 resource alive until `queue_requirements` retire — do not replace that
+            // set with a fresh `slot_last_seen` snapshot.
+            let retained_slots = registry.reclaim_buffer_slots(buffer_handle);
             let release = PendingBufferGpuRelease {
-                requirements: requirements.clone(),
+                requirements: queue_requirements,
+                retained_slots,
                 resource,
                 upload_buffer,
                 coherent_readback,
                 reserved_tiles,
             };
-            if requirements.is_empty() {
-                release_buffer_gpu_resources(ld, release);
-            } else {
-                ld.pending_buffer_gpu_releases.lock().unwrap().push(release);
-            }
+            ld.pending_buffer_gpu_releases.lock().unwrap().push(release);
         }
         PendingDeletion::BufferView { buffer_handle } => {
             registry.reclaim_buffer_slots(buffer_handle);
@@ -1075,6 +1252,8 @@ pub(crate) fn destroy_pending_deletion(
             upload_buffer,
             coherent_readback,
         } => {
+            // Requirements already met by the deletion-queue drain; drop without a new Signal.
+            let _ = queue_requirements;
             drop(resource);
             drop(upload_buffer);
             drop(coherent_readback);
@@ -1085,6 +1264,7 @@ pub(crate) fn destroy_pending_deletion(
             upload_buffer,
             coherent_readback,
         } => {
+            let _ = queue_requirements;
             {
                 let mut pool = ld.tile_heap_pool.lock().unwrap();
                 super::tiles::teardown_reserved_mappings(&ld.command_queue, &mut pool, &resource, &tiles);
@@ -1103,10 +1283,12 @@ pub(crate) fn destroy_pending_deletion(
             texture_handle,
             resource,
         } => {
+            let _ = queue_requirements;
             registry.reclaim_texture_slots(texture_handle);
             drop(resource);
         }
         PendingDeletion::StandaloneResource(resource) => {
+            let _ = queue_requirements;
             drop(resource);
         }
     }

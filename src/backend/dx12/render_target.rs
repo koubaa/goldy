@@ -349,6 +349,7 @@ pub(super) fn record_render_pass_to_list_with_record(
         } else if let Some(ctx) = recording_ctx {
             prologue_row = Some(super::frame_table::record_prologue(
                 record.contexts,
+                logical_device,
                 ctx,
                 &record.frame_table,
                 &record.buffers.read().unwrap().entries,

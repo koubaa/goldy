@@ -380,8 +380,7 @@ pub(super) fn acquire(
     // Process deferred deletions now that the fence wait has completed.
     if let Some(device) = state.devices.get(&device_handle) {
         let _tz = crate::tracy_zone!("surface.acquire.deletion_queue");
-        let fences = state.context_fences.read().unwrap();
-        device.process_deletion_queue_up_to(&fences);
+        device.process_deletion_queue_up_to(&state.context_fences);
     }
 
     let surface = state
@@ -627,6 +626,7 @@ pub(super) fn render(
         // per-submit rebinding needed.
         let _row = super::frame_table::record_prologue(
             &state.contexts,
+            logical_device,
             ctx,
             &ft,
             &state.buffers.read().unwrap().entries,

@@ -381,6 +381,7 @@ fn assert_row_available(ft: &ContextFrameTable, sub: u32, row: u32) -> Result<()
 /// CPU staging write before a submission (row bump + table bytes; GPU copy is in the CB).
 pub(crate) fn write_staging_for_submission(
     contexts: &super::types::SharedContextMap,
+    ld: &super::types::SharedLogicalDevice,
     ctx: super::ContextHandle,
     frame_table: &ContextFrameTable,
     data: &[u32],
@@ -388,7 +389,7 @@ pub(crate) fn write_staging_for_submission(
     let sub = frame_table.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
     if frame_table.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
-        super::compute::evict_retained_pinning_row_for_context(contexts, frame_table, ctx, row);
+        super::compute::evict_retained_pinning_row_for_context(contexts, frame_table, ld, ctx, row);
     }
     assert_row_available(frame_table, sub, row)?;
     frame_table.last_sub_for_row[row as usize].store(sub, Ordering::Release);
@@ -570,13 +571,14 @@ pub(crate) fn record_prologue_legacy(
 /// selector while an earlier list's dispatches are still executing.
 pub(crate) fn record_prologue(
     contexts: &super::types::SharedContextMap,
+    ld: &super::types::SharedLogicalDevice,
     ctx: super::ContextHandle,
     frame_table: &ContextFrameTable,
     buffers: &HashMap<BufferHandle, BufferState>,
     cl: &ID3D12GraphicsCommandList7,
     data: &[u32],
 ) -> Result<u32> {
-    let row = write_staging_for_submission(contexts, ctx, frame_table, data)?;
+    let row = write_staging_for_submission(contexts, ld, ctx, frame_table, data)?;
     record_prologue_gpu_copies(frame_table, buffers, cl, data, row)?;
     Ok(row)
 }

@@ -650,16 +650,17 @@ pub(super) fn resize(
     patch_buffer_views_after_parent_resize(state, buffer_handle)?;
 
     // `old_resource` keeps the same bindless slot(s) as the new resource until the
-    // descriptor rewrite above lands, so any context still reading through that slot's
-    // last-recorded fence value must retire before `old_resource` is freed. Requirements
-    // come only from `slot_last_seen` (recorded at submit time), not destroy-time guessing.
+    // descriptor rewrite above lands. Merge a live-context last-submitted base with
+    // `slot_last_seen` so copy/grant users (invisible to bindless tracking) also gate free.
+    let ctx_h = super::context::destroy_attribution_context(state, device_handle);
+    let base = super::context::reclamation_requirements(state, device_handle, ctx_h);
     let requirements = {
         let dev = state
             .devices
             .get(&device_handle)
             .context("resize_buffer: queue deletion")?;
         let registry = dev.descriptors.lock().unwrap();
-        registry.bindless_retirement_requirements_for_buffer(buffer_handle)
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
     };
 
     let dev = state
@@ -1362,11 +1363,12 @@ pub(super) fn destroy(state: &mut Dx12State, buffer_handle: BufferHandle) {
     let Some(device) = state.devices.get(&buffer.device_handle) else {
         return;
     };
+    let ctx_h = super::context::destroy_attribution_context(state, buffer.device_handle);
+    let base = super::context::reclamation_requirements(state, buffer.device_handle, ctx_h);
     let requirements = {
         let registry = device.descriptors.lock().unwrap();
-        registry.bindless_retirement_requirements_for_buffer(buffer_handle)
+        registry.bindless_retirement_requirements_for_buffer(buffer_handle, base)
     };
-
     if buffer.is_view {
         let deletion = super::types::PendingDeletion::BufferView { buffer_handle };
         queue_pending_deletion(device, requirements, deletion);

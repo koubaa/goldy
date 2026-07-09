@@ -418,6 +418,7 @@ fn assert_row_available(ft: &ContextFrameTable, sub: u32, row: u32) -> Result<()
 /// CPU staging write before a submission (row bump + table bytes; GPU copy is in the CB).
 fn write_staging_for_submission(
     contexts: &SharedContextMap,
+    ld: &super::types::LogicalDevice,
     ctx: super::ContextHandle,
     ft: &ContextFrameTable,
     data: &[u32],
@@ -425,7 +426,7 @@ fn write_staging_for_submission(
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
-        super::compute::evict_retained_pinning_row_for_context(contexts, ft, ctx, row);
+        super::compute::evict_retained_pinning_row_for_context(contexts, ft, ld, ctx, row);
     }
     assert_row_available(ft, sub, row)?;
     ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
@@ -490,7 +491,7 @@ pub(crate) fn record_prologue(
     cmd: vk::CommandBuffer,
     data: &[u32],
 ) -> Result<u32> {
-    let row = write_staging_for_submission(contexts, ctx, frame_table, data)?;
+    let row = write_staging_for_submission(contexts, ld, ctx, frame_table, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true)?;

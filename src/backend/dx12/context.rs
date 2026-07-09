@@ -144,6 +144,64 @@ fn contexts_on_device(state: &Dx12State, device: DeviceHandle) -> Vec<ContextHan
     result
 }
 
+/// When exactly one live context exists on `device`, return it for destroy attribution.
+pub(super) fn sole_context_on_device(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
+    let mut on_device = contexts_on_device(state, device);
+    if on_device.len() == 1 {
+        on_device.pop()
+    } else {
+        None
+    }
+}
+
+/// Context to receive a user-initiated buffer/texture destroy when attribution is unambiguous.
+pub(super) fn destroy_attribution_context(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
+    sole_context_on_device(state, device)
+}
+
+/// Deferred-deletion requirement for a destroy attributed to a single context.
+///
+/// Reads `last_submitted_seq` from the lock-free `context_fences` index (no `sc` mutex).
+pub(super) fn reclamation_barrier_for_context(state: &Dx12State, ctx: ContextHandle) -> u64 {
+    state
+        .context_fences
+        .read()
+        .unwrap()
+        .get(&ctx)
+        .map(|(_, _, seq)| seq.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// Per-context requirement snapshot when destroy could not be attributed to one context.
+///
+/// Covers GPU uses that never update `slot_last_seen` (e.g. `CopyBuffer` / grant readback):
+/// every live context on the device must retire its last submit before the resource is freed.
+pub(super) fn reclamation_requirements_all_contexts(
+    state: &Dx12State,
+    device: DeviceHandle,
+) -> Vec<(ContextHandle, u64)> {
+    state
+        .context_fences
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|(_, (dev, _, _))| *dev == device)
+        .map(|(h, (_, _, seq))| (*h, seq.load(std::sync::atomic::Ordering::Relaxed)))
+        .collect()
+}
+
+/// Full base requirement snapshot for a buffer/texture destroy (before merging `slot_last_seen`).
+pub(super) fn reclamation_requirements(
+    state: &Dx12State,
+    device: DeviceHandle,
+    ctx_h: Option<ContextHandle>,
+) -> Vec<(ContextHandle, u64)> {
+    match ctx_h {
+        Some(ctx) => vec![(ctx, reclamation_barrier_for_context(state, ctx))],
+        None => reclamation_requirements_all_contexts(state, device),
+    }
+}
+
 /// Returns the `ContextHandle` whose reclamation context is installed on the current thread.
 #[allow(dead_code, reason = "reserved for thread-pinned reclamation scope (Metal parity)")]
 pub(super) fn context_handle_for_thread(state: &Dx12State, device: DeviceHandle) -> Option<ContextHandle> {
@@ -257,18 +315,28 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     // release resources this context's still in-flight work could still be touching.
     context_fences.write().unwrap().remove(&ctx);
 
+    // Do not drain the device-global deletion queue here. Context destroy only waits on
+    // this context's own submitted work; device-owned reclamation is serviced at
+    // boundary_crossed / flush_deferred_deletions / timeline waits (see runtime §7).
+    // Eagerly sweeping device deletions on context death conflates "handle gone" with
+    // "physically reclaimed" and can stall / DeviceLost under multi-context sharing.
+
     let completed = unsafe { sc.fence.GetCompletedValue() };
     ld.retired_floor
         .fetch_max(completed, std::sync::atomic::Ordering::Relaxed);
 
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, sc.fence_thread.take());
 
-    for old in sc.retained_graphs.drain().map(|(_, g)| g) {
-        if let Some(row) = old.frame_table_row {
-            super::frame_table::unpin_row(&sc.frame_table, row);
-        }
-        if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
-            slot.retained = false;
+    {
+        let mut registry = ld.descriptors.lock().unwrap();
+        for (_, old) in sc.retained_graphs.drain() {
+            registry.unpin_retained_slots(old.used_slots);
+            if let Some(row) = old.frame_table_row {
+                super::frame_table::unpin_row(&sc.frame_table, row);
+            }
+            if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
+                slot.retained = false;
+            }
         }
     }
 
@@ -281,7 +349,7 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     if !batch.is_empty() {
         let mut registry = ld.descriptors.lock().unwrap();
         for resource in batch {
-            super::types::destroy_pending_deletion(&ld, &mut registry, resource);
+            super::types::destroy_pending_deletion(&ld, &mut registry, resource, Vec::new());
         }
     }
 
@@ -304,7 +372,9 @@ pub(super) fn drain_context_deletion_queue_up_to(
     }
     let mut registry = ld.descriptors.lock().unwrap();
     for resource in batch {
-        super::types::destroy_pending_deletion(ld, &mut registry, resource);
+        // Per-context queue entries are already gated on this context's fence; no
+        // cross-context requirement set is attached at enqueue time.
+        super::types::destroy_pending_deletion(ld, &mut registry, resource, Vec::new());
     }
 }
 

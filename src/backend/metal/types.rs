@@ -484,7 +484,11 @@ impl TextureHeapAllocator {
 /// Nothing reads the inner fields; `#[allow(dead_code)]` is intentional.
 #[allow(dead_code)]
 pub(crate) enum PendingDeletion {
-    Buffer { buffer: MTLBuffer },
+    Buffer {
+        buffer: MTLBuffer,
+        /// Bindless slots reclaimed at destroy; MTL object drop waits until pins clear.
+        retained_slots: Vec<MetalSlotKey>,
+    },
     Texture { texture: MTLTexture },
     Sampler { sampler: SamplerState },
 }
@@ -507,7 +511,15 @@ impl DeletionQueue {
     /// Destroy resources whose `barrier` has been signaled by the GPU (`signaled_value >= barrier`).
     /// The variants are dropped here which releases the MTL objects.
     pub fn process_up_to(&mut self, signaled: TimelineValue) {
-        drop(self.inner.drain_up_to(signaled));
+        self.process_up_to_gated(signaled, |_| true);
+    }
+
+    /// Like [`Self::process_up_to`], but skips entries for which `can_drop` returns false.
+    pub fn process_up_to_gated<F>(&mut self, signaled: TimelineValue, can_drop: F)
+    where
+        F: Fn(&PendingDeletion) -> bool,
+    {
+        drop(self.inner.drain_up_to_filtered(signaled, can_drop));
     }
 
     pub fn flush_all(&mut self) {
@@ -620,7 +632,31 @@ pub(crate) struct MetalSubmissionContext {
     /// original `GraphCommand` slice; resubmit re-records from it. The `Arc` makes
     /// resubmit clones allocation-free. Multiple schemes can share one context without
     /// evicting each other because each fingerprint is a distinct map key.
-    pub retained_graphs: std::collections::HashMap<u64, std::sync::Arc<[super::super::GraphCommand]>>,
+    pub retained_graphs: std::collections::HashMap<u64, MetalRetainedGraph>,
+}
+
+/// Retained graph IR plus bindless slots baked at record time.
+pub(crate) struct MetalRetainedGraph {
+    pub commands: std::sync::Arc<[super::super::GraphCommand]>,
+    pub used_slots: Vec<MetalSlotKey>,
+}
+
+/// Bindless slot identity for retained-graph pin tracking (category + local index).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum MetalSlotKey {
+    StorageBuffer(u32),
+    UniformBuffer(u32),
+    Texture(u32),
+    StorageImage(u32),
+}
+
+impl MetalSlotKey {
+    pub(crate) fn from_buffer(access: BufferKind, local_index: u32) -> Self {
+        match access {
+            BufferKind::Scattered => Self::StorageBuffer(local_index),
+            BufferKind::Broadcast => Self::UniformBuffer(local_index),
+        }
+    }
 }
 
 /// A logical Metal device with associated resources.
@@ -690,11 +726,19 @@ pub(crate) struct LogicalDevice {
 impl LogicalDevice {
     /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
     pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
-        self.deletion_queue.lock().unwrap().process_up_to(completed);
+        {
+            let registry = self.descriptors.lock().unwrap();
+            self.deletion_queue
+                .lock()
+                .unwrap()
+                .process_up_to_gated(completed, |deletion| match deletion {
+                    PendingDeletion::Buffer { retained_slots, .. } => registry.retained_pins_clear(retained_slots),
+                    _ => true,
+                });
+        }
         self.descriptors
             .lock()
             .unwrap()
-            .resource_registry
             .drain_pending_slots_up_to(completed);
     }
 }
@@ -865,11 +909,16 @@ impl ResourceRegistry {
     /// that might still reference this slot's descriptor; the slot parks in
     /// the pending list until `drain_pending_slots_up_to(signaled)` promotes
     /// it. Pass `None` when the GPU is known idle.
-    pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
-        match barrier {
-            Some(b) => self.pending_free_texture_slots.push((local_index, b)),
-            None => self.texture.free(local_index),
-        }
+    pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
+        let key = MetalSlotKey::Texture(local_index);
+        self.release_slot(
+            local_index,
+            barrier,
+            slot_pinned,
+            key,
+            &mut self.pending_free_texture_slots,
+            &mut self.texture,
+        );
     }
 
     /// Returns the global argument buffer index for a sampled texture.
@@ -908,11 +957,21 @@ impl ResourceRegistry {
     /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
     ///
     /// See [`Self::release_texture_slot`] for the `barrier` semantics.
-    pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
-        match barrier {
-            Some(b) => self.pending_free_storage_image_slots.push((local_index, b)),
-            None => self.storage_image.free(local_index),
-        }
+    pub fn release_storage_image_slot(
+        &mut self,
+        local_index: u32,
+        barrier: Option<TimelineValue>,
+        slot_pinned: bool,
+    ) {
+        let key = MetalSlotKey::StorageImage(local_index);
+        self.release_slot(
+            local_index,
+            barrier,
+            slot_pinned,
+            key,
+            &mut self.pending_free_storage_image_slots,
+            &mut self.storage_image,
+        );
     }
 
     /// Returns the global argument buffer index for a storage image.
@@ -944,22 +1003,44 @@ impl ResourceRegistry {
     /// this slot's descriptor is still in-flight; the slot parks in the pending
     /// list and is promoted by `drain_pending_slots_up_to(signaled)` once
     /// `signaled >= barrier`. Pass `None` when the GPU is known idle.
-    pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>) {
+    pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>, slot_pinned: bool) {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
-            match (access, barrier) {
-                (BufferKind::Scattered, None) => {
-                    self.storage_buffer.free(local_index);
-                }
-                (BufferKind::Scattered, Some(b)) => {
-                    self.pending_free_storage_buffer_slots.push((local_index, b));
-                }
-                (BufferKind::Broadcast, None) => {
-                    self.uniform_buffer.free(local_index);
-                }
-                (BufferKind::Broadcast, Some(b)) => {
-                    self.pending_free_uniform_buffer_slots.push((local_index, b));
-                }
+            let key = MetalSlotKey::from_buffer(access, local_index);
+            match access {
+                BufferKind::Scattered => self.release_slot(
+                    local_index,
+                    barrier,
+                    slot_pinned,
+                    key,
+                    &mut self.pending_free_storage_buffer_slots,
+                    &mut self.storage_buffer,
+                ),
+                BufferKind::Broadcast => self.release_slot(
+                    local_index,
+                    barrier,
+                    slot_pinned,
+                    key,
+                    &mut self.pending_free_uniform_buffer_slots,
+                    &mut self.uniform_buffer,
+                ),
             }
+        }
+    }
+
+    fn release_slot(
+        &mut self,
+        local_index: u32,
+        barrier: Option<TimelineValue>,
+        slot_pinned: bool,
+        _key: MetalSlotKey,
+        pending: &mut Vec<(u32, TimelineValue)>,
+        alloc: &mut SlotAllocator,
+    ) {
+        if slot_pinned || barrier.is_some() {
+            let b = barrier.unwrap_or(0);
+            pending.push((local_index, b));
+        } else {
+            alloc.free(local_index);
         }
     }
 
@@ -977,13 +1058,16 @@ impl ResourceRegistry {
     /// free list; entries still waiting for a higher timeline value stay pending.
     /// This is the per-frame call path — invoked on every `acquire_frame` /
     /// `present` so slots are recycled as soon as the GPU catches up.
-    pub fn drain_pending_slots_up_to(&mut self, signaled: TimelineValue) {
+    pub fn drain_pending_slots_up_to<F>(&mut self, signaled: TimelineValue, can_free: F)
+    where
+        F: Fn(MetalSlotKey) -> bool,
+    {
         macro_rules! drain_to_allocator {
-            ($pending:expr, $alloc:expr) => {{
+            ($pending:expr, $alloc:expr, $key:expr) => {{
                 let mut i = 0;
                 while i < $pending.len() {
                     let (slot, barrier) = $pending[i];
-                    if barrier <= signaled {
+                    if barrier <= signaled && can_free($key(slot)) {
                         $pending.swap_remove(i);
                         $alloc.free(slot);
                     } else {
@@ -992,10 +1076,27 @@ impl ResourceRegistry {
                 }
             }};
         }
-        drain_to_allocator!(self.pending_free_storage_buffer_slots, self.storage_buffer);
-        drain_to_allocator!(self.pending_free_uniform_buffer_slots, self.uniform_buffer);
-        drain_to_allocator!(self.pending_free_texture_slots, self.texture);
-        drain_to_allocator!(self.pending_free_storage_image_slots, self.storage_image);
+        drain_to_allocator!(
+            self.pending_free_storage_buffer_slots,
+            self.storage_buffer,
+            MetalSlotKey::StorageBuffer
+        );
+        drain_to_allocator!(
+            self.pending_free_uniform_buffer_slots,
+            self.uniform_buffer,
+            MetalSlotKey::UniformBuffer
+        );
+        drain_to_allocator!(self.pending_free_texture_slots, self.texture, MetalSlotKey::Texture);
+        drain_to_allocator!(
+            self.pending_free_storage_image_slots,
+            self.storage_image,
+            MetalSlotKey::StorageImage
+        );
+    }
+
+    /// Promote pending slots whose GPU barrier has been signaled (no retained-graph pin gate).
+    pub fn drain_pending_slots_up_to_unpinned(&mut self, signaled: TimelineValue) {
+        self.drain_pending_slots_up_to(signaled, |_| true);
     }
 
     /// Promote all pending slots unconditionally.
@@ -1004,7 +1105,7 @@ impl ResourceRegistry {
     /// GPU command buffers are in-flight. For the per-frame path use
     /// `drain_pending_slots_up_to(signaled)` instead.
     pub fn drain_pending_slots(&mut self) {
-        self.drain_pending_slots_up_to(TimelineValue::MAX);
+        self.drain_pending_slots_up_to_unpinned(TimelineValue::MAX);
     }
 
     /// Number of available (allocatable) slots in the given category.
@@ -1058,13 +1159,89 @@ impl ResourceRegistry {
 /// `device_retired` GC drain is kept as a safety net (see issue #190).
 pub(crate) struct DescriptorRegistry {
     pub resource_registry: ResourceRegistry,
+    /// Retained graphs still baking each bindless slot (incremental refcount).
+    retained_users: HashMap<MetalSlotKey, u32>,
 }
 
 impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
+            retained_users: HashMap::new(),
         }
+    }
+
+    pub(crate) fn pin_retained_slots(&mut self, slots: impl IntoIterator<Item = MetalSlotKey>) {
+        for slot in slots {
+            *self.retained_users.entry(slot).or_insert(0) += 1;
+        }
+    }
+
+    pub(crate) fn unpin_retained_slots(&mut self, slots: impl IntoIterator<Item = MetalSlotKey>) {
+        for slot in slots {
+            if let Some(count) = self.retained_users.get_mut(&slot) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.retained_users.remove(&slot);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_user_count(&self, slot: MetalSlotKey) -> u32 {
+        self.retained_users.get(&slot).copied().unwrap_or(0)
+    }
+
+    fn slot_pinned(&self, slot: MetalSlotKey) -> bool {
+        self.retained_users.get(&slot).copied().unwrap_or(0) > 0
+    }
+
+    pub(crate) fn retained_pins_clear(&self, slots: &[MetalSlotKey]) -> bool {
+        slots.iter().all(|slot| !self.slot_pinned(*slot))
+    }
+
+    pub(crate) fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>) {
+        let pinned = self
+            .resource_registry
+            .buffer_indices
+            .get(&handle)
+            .map(|&(local, access)| self.slot_pinned(MetalSlotKey::from_buffer(access, local)))
+            .unwrap_or(false);
+        self.resource_registry.unregister_buffer(handle, barrier, pinned);
+    }
+
+    pub(crate) fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
+        let key = MetalSlotKey::Texture(local_index);
+        let pinned = self.slot_pinned(key);
+        self.resource_registry
+            .release_texture_slot(local_index, barrier, pinned);
+    }
+
+    pub(crate) fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
+        let key = MetalSlotKey::StorageImage(local_index);
+        let pinned = self.slot_pinned(key);
+        self.resource_registry
+            .release_storage_image_slot(local_index, barrier, pinned);
+    }
+
+    pub(crate) fn drain_pending_slots_up_to(&mut self, signaled: TimelineValue) {
+        let retained = &self.retained_users;
+        self.resource_registry
+            .drain_pending_slots_up_to(signaled, |slot| retained.get(&slot).copied().unwrap_or(0) == 0);
+    }
+
+    pub(crate) fn drain_pending_slots(&mut self) {
+        self.drain_pending_slots_up_to(TimelineValue::MAX);
+    }
+
+    /// Slot keys for a live buffer handle (for gating physical GPU free).
+    pub(crate) fn buffer_retained_slot_keys(&self, handle: BufferHandle) -> Vec<MetalSlotKey> {
+        self.resource_registry
+            .buffer_indices
+            .get(&handle)
+            .map(|&(local_index, access)| vec![MetalSlotKey::from_buffer(access, local_index)])
+            .unwrap_or_default()
     }
 }
 
@@ -1331,7 +1508,7 @@ mod tests {
             all_indices.push(idx);
             // defer=false: simulate the "GPU idle when destroy fires" case,
             // e.g. ekrano's end-of-frame deferred_free_buffers after flush.
-            reg.unregister_buffer(handle, None);
+            reg.unregister_buffer(handle, None, false);
         }
 
         assert!(
@@ -1352,7 +1529,7 @@ mod tests {
         for handle in 0..(MAX_RESOURCES_PER_CATEGORY as u64 * 4) {
             let idx = reg.register_uniform_buffer(handle);
             all_indices.push(idx);
-            reg.unregister_buffer(handle, None);
+            reg.unregister_buffer(handle, None, false);
         }
         assert!(
             all_indices.iter().all(|&i| i < MAX_RESOURCES_PER_CATEGORY),
@@ -1377,8 +1554,8 @@ mod tests {
 
         let _ = reg.register_uniform_buffer(h_uni);
         let _ = reg.register_storage_buffer(h_sto);
-        reg.unregister_buffer(h_uni, None);
-        reg.unregister_buffer(h_sto, None);
+        reg.unregister_buffer(h_uni, None, false);
+        reg.unregister_buffer(h_sto, None, false);
 
         assert_eq!(
             reg.free_uniform_buffer_count(),
@@ -1406,8 +1583,8 @@ mod tests {
         assert_eq!(i0, 0);
         assert_eq!(i1, 1);
 
-        reg.unregister_buffer(h0, None);
-        reg.unregister_buffer(h1, None);
+        reg.unregister_buffer(h0, None, false);
+        reg.unregister_buffer(h1, None, false);
 
         let h2: BufferHandle = 3;
         let i2 = reg.register_storage_buffer(h2);
@@ -1427,7 +1604,7 @@ mod tests {
         assert_eq!(i0, 0);
 
         // GPU is "busy" → park on pending.
-        reg.unregister_buffer(h0, Some(1));
+        reg.unregister_buffer(h0, Some(1), false);
         assert_eq!(reg.pending_buffer_slot_count(), 1, "expected slot to land in pending");
 
         // Until drain, register must NOT re-hand out slot 0.
@@ -1439,7 +1616,7 @@ mod tests {
         reg.drain_pending_slots();
         assert_eq!(reg.pending_buffer_slot_count(), 0);
 
-        reg.unregister_buffer(h1, None);
+        reg.unregister_buffer(h1, None, false);
         let h2: BufferHandle = 3;
         let i2 = reg.register_storage_buffer(h2);
         assert_eq!(i2, 1, "LIFO pick from free list after drain");
@@ -1456,8 +1633,8 @@ mod tests {
         let _ = reg.register_storage_buffer(h_sto);
         let _ = reg.register_uniform_buffer(h_uni);
 
-        reg.unregister_buffer(h_sto, Some(1));
-        reg.unregister_buffer(h_uni, Some(1));
+        reg.unregister_buffer(h_sto, Some(1), false);
+        reg.unregister_buffer(h_uni, Some(1), false);
         reg.drain_pending_slots();
 
         assert_eq!(reg.free_storage_buffer_count(), 1);
@@ -1474,14 +1651,14 @@ mod tests {
         let mut reg = ResourceRegistry::new();
         let h0: TextureHandle = 100;
         let i0 = reg.register_texture(h0);
-        reg.release_texture_slot(i0, Some(1));
+        reg.release_texture_slot(i0, Some(1), false);
 
         let h1: TextureHandle = 101;
         let i1 = reg.register_texture(h1);
         assert_ne!(i1, i0, "texture slot must not be recycled while still pending");
 
         reg.drain_pending_slots();
-        reg.release_texture_slot(i1, None);
+        reg.release_texture_slot(i1, None, false);
         let h2: TextureHandle = 102;
         let i2 = reg.register_texture(h2);
         // Either the just-released i1 or the drained i0 is acceptable; the
@@ -1491,5 +1668,60 @@ mod tests {
             i2 == i0 || i2 == i1,
             "expected texture slot reuse after drain, got {i2}"
         );
+    }
+
+    /// Retained-graph pin blocks slot promotion even when the GPU barrier is met.
+    #[test]
+    fn retained_pin_blocks_drain_until_unpin() {
+        let mut dr = DescriptorRegistry::new();
+        let h0: BufferHandle = 1;
+        let i0 = dr.resource_registry.register_storage_buffer(h0);
+        let key = MetalSlotKey::StorageBuffer(i0);
+
+        dr.pin_retained_slots([key]);
+        dr.unregister_buffer(h0, Some(0));
+        dr.drain_pending_slots_up_to(TimelineValue::MAX);
+        assert_eq!(dr.resource_registry.free_storage_buffer_count(), 0, "pin blocks drain");
+        assert_eq!(dr.retained_user_count(key), 1);
+
+        dr.unpin_retained_slots([key]);
+        dr.drain_pending_slots_up_to(TimelineValue::MAX);
+        assert_eq!(dr.resource_registry.free_storage_buffer_count(), 1);
+    }
+
+    /// Immediate unregister (GPU idle) still respects retained-graph pins.
+    #[test]
+    fn retained_pin_blocks_immediate_unregister() {
+        let mut dr = DescriptorRegistry::new();
+        let h0: BufferHandle = 2;
+        let i0 = dr.resource_registry.register_storage_buffer(h0);
+        let key = MetalSlotKey::StorageBuffer(i0);
+
+        dr.pin_retained_slots([key]);
+        dr.unregister_buffer(h0, None);
+        assert_eq!(dr.resource_registry.free_storage_buffer_count(), 0);
+        assert_eq!(dr.resource_registry.pending_buffer_slot_count(), 1);
+
+        dr.unpin_retained_slots([key]);
+        dr.drain_pending_slots();
+        assert_eq!(dr.resource_registry.free_storage_buffer_count(), 1);
+    }
+
+    /// After unpin, LIFO slot reuse resumes.
+    #[test]
+    fn retained_pin_unpin_then_lifo_reuse() {
+        let mut dr = DescriptorRegistry::new();
+        let h0: BufferHandle = 3;
+        let i0 = dr.resource_registry.register_storage_buffer(h0);
+        let key = MetalSlotKey::StorageBuffer(i0);
+
+        dr.pin_retained_slots([key]);
+        dr.unregister_buffer(h0, Some(1));
+        dr.unpin_retained_slots([key]);
+        dr.drain_pending_slots_up_to(1);
+
+        let h1: BufferHandle = 4;
+        let i1 = dr.resource_registry.register_storage_buffer(h1);
+        assert_eq!(i1, i0, "LIFO reuse after unpin + drain");
     }
 }

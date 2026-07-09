@@ -205,7 +205,6 @@ pub(super) fn destroy(state: &mut MetalState, surface: SurfaceHandle) {
                     .descriptors
                     .lock()
                     .unwrap()
-                    .resource_registry
                     .release_storage_image_slot(local, slot_barrier);
             }
         }
@@ -308,17 +307,15 @@ pub(super) fn acquire(
 
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
-        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-        sc.deletion_queue.process_up_to(ctx_signaled);
-    }
-    {
-        let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get(&device_handle) {
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+            }
+            let retired = super::context::device_retired(state, device_handle);
             ld.process_deletion_queue_up_to(retired);
         }
-    }
 
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
@@ -474,11 +471,15 @@ pub(super) fn prepare_present_work(
     surface_state.last_acquired_image_index = None;
 
     let Some(drawable_ptr) = drawable_ptr else {
-        let present_timeline = if let Some(sc_arc) = state.contexts.get(&ctx) {
-            let mut sc = sc_arc.lock().unwrap();
-            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-            sc.deletion_queue.process_up_to(ctx_signaled);
-            ctx_signaled
+        let present_timeline = if let Some(ld) = state.devices.get(&device_handle) {
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+                ctx_signaled
+            } else {
+                super::context::device_retired(state, device_handle)
+            }
         } else {
             super::context::device_retired(state, device_handle)
         };
@@ -556,17 +557,15 @@ pub(super) fn finish_present(
         }
     }
 
-    if let Some(sc_arc) = state.contexts.get(&ctx) {
-        let mut sc = sc_arc.lock().unwrap();
-        let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-        sc.deletion_queue.process_up_to(ctx_signaled);
-    }
-    {
-        let retired = super::context::device_retired(state, device_handle);
         if let Some(ld) = state.devices.get(&device_handle) {
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+            }
+            let retired = super::context::device_retired(state, device_handle);
             ld.process_deletion_queue_up_to(retired);
         }
-    }
 
     Ok(finish.present_timeline)
 }

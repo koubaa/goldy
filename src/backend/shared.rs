@@ -258,13 +258,21 @@ impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {
     /// Drain all entries whose key is `<= threshold`, returning them as an
     /// owned `Vec`. Entries with keys above `threshold` are kept in the queue.
     pub fn drain_up_to(&mut self, threshold: K) -> Vec<V> {
+        self.drain_up_to_filtered(threshold, |_| true)
+    }
+
+    /// Drain entries whose key is `<= threshold` and `can_take(&value)` is true.
+    pub fn drain_up_to_filtered<F>(&mut self, threshold: K, can_take: F) -> Vec<V>
+    where
+        F: Fn(&V) -> bool,
+    {
         if self.pending.is_empty() {
             return Vec::new();
         }
         let mut i = 0;
         let mut eligible: Vec<V> = Vec::new();
         while i < self.pending.len() {
-            if self.pending[i].0 <= threshold {
+            if self.pending[i].0 <= threshold && can_take(&self.pending[i].1) {
                 let (_, v) = self.pending.swap_remove(i);
                 eligible.push(v);
             } else {
@@ -273,7 +281,6 @@ impl<K: PartialOrd + Copy, V> DeferredQueue<K, V> {
         }
         eligible
     }
-
 }
 
 impl<K, V> DeferredQueue<K, V> {
@@ -288,15 +295,23 @@ impl<K, V> DeferredQueue<K, V> {
     /// single entry's readiness depends on a multi-part requirement (e.g. a per-context
     /// `(ContextHandle, u64)` snapshot) rather than one totally-ordered threshold.
     pub fn drain_where<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<V> {
+        self.drain_where_with_keys(ready)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect()
+    }
+
+    /// Like [`Self::drain_where`], but returns `(key, value)` pairs for diagnostics.
+    pub fn drain_where_with_keys<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<(K, V)> {
         if self.pending.is_empty() {
             return Vec::new();
         }
         let mut i = 0;
-        let mut eligible: Vec<V> = Vec::new();
+        let mut eligible: Vec<(K, V)> = Vec::new();
         while i < self.pending.len() {
             if ready(&self.pending[i].0) {
-                let (_, v) = self.pending.swap_remove(i);
-                eligible.push(v);
+                let (k, v) = self.pending.swap_remove(i);
+                eligible.push((k, v));
             } else {
                 i += 1;
             }

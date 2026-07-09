@@ -160,6 +160,13 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
         }
     }
 
+    {
+        let mut registry = ld.descriptors.lock().unwrap();
+        for (_, retained) in sc.retained_compute_cbs.drain() {
+            registry.unpin_retained_slots(retained.used_slots);
+        }
+    }
+
     unsafe {
         sc.staging_belt.destroy_all(&ld);
         sc.texture_staging_pool.destroy_all(&ld);

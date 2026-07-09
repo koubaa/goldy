@@ -2716,7 +2716,8 @@ pub(super) fn submit_graph_with_scope(
         let mut sc = scope.sc.lock().unwrap();
         sc.last_submitted_seq = signal_value;
         if let Some((key, frame_table_row)) = retain_plan {
-            sc.retained_compute_cbs.insert(
+            let pin_slots = used_slots.clone();
+            let replaced = sc.retained_compute_cbs.insert(
                 key,
                 super::types::RetainedVkCb {
                     command_buffer: cmd,
@@ -2725,6 +2726,18 @@ pub(super) fn submit_graph_with_scope(
                     last_signal_value: signal_value,
                 },
             );
+            let unpin_slots = replaced.map(|old| old.used_slots).unwrap_or_default();
+            drop(sc);
+            if !unpin_slots.is_empty() || !pin_slots.is_empty() {
+                let ld = scope
+                    .view
+                    .devices
+                    .get(&scope.device_handle)
+                    .expect("submit scope device handle must exist");
+                let mut registry = ld.descriptors.lock().unwrap();
+                registry.unpin_retained_slots(unpin_slots);
+                registry.pin_retained_slots(pin_slots);
+            }
         } else {
             sc.timeline_cmd_buffers.entry(signal_value).or_default().push(cmd);
         }
@@ -2900,17 +2913,27 @@ pub(super) fn try_resubmit_retained_with_scope(
 
 fn evict_retained_on_context(
     frame_table: &super::frame_table::ContextFrameTable,
+    ld: &super::types::LogicalDevice,
     ctx: super::ContextHandle,
     key: u64,
     contexts: &super::types::SharedContextMap,
 ) {
-    if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
+    let removed = if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_compute_cbs.remove(&key) {
-            if let Some(row) = old.frame_table_row {
-                super::frame_table::unpin_row(frame_table, row);
-            }
-            sc.timeline_cmd_buffers
+        sc.retained_compute_cbs.remove(&key)
+    } else {
+        None
+    };
+    if let Some(old) = removed {
+        ld.descriptors.lock().unwrap().unpin_retained_slots(old.used_slots);
+        if let Some(row) = old.frame_table_row {
+            super::frame_table::unpin_row(frame_table, row);
+        }
+        if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
+            sc_arc
+                .lock()
+                .unwrap()
+                .timeline_cmd_buffers
                 .entry(old.last_signal_value)
                 .or_default()
                 .push(old.command_buffer);
@@ -2921,6 +2944,7 @@ fn evict_retained_on_context(
 pub(super) fn evict_retained_pinning_row_for_context(
     contexts: &super::types::SharedContextMap,
     frame_table: &super::frame_table::ContextFrameTable,
+    ld: &super::types::LogicalDevice,
     ctx: super::ContextHandle,
     row: u32,
 ) {
@@ -2937,14 +2961,19 @@ pub(super) fn evict_retained_pinning_row_for_context(
             .collect()
     };
     for key in keys {
-        evict_retained_on_context(frame_table, ctx, key, contexts);
+        evict_retained_on_context(frame_table, ld, ctx, key, contexts);
     }
 }
 
 /// Evict the retained dispatch CB for `key`, returning the `VkCommandBuffer` to `free_cmd_buffers`.
 pub(super) fn evict_retained_with_scope(scope: &VulkanSubmitScope<'_>, ctx: super::ContextHandle, key: u64) {
     scope.assert_ctx(ctx);
-    evict_retained_on_context(&scope.frame_table, ctx, key, scope.view.contexts);
+    let ld = scope
+        .view
+        .devices
+        .get(&scope.device_handle)
+        .expect("submit scope device handle must exist");
+    evict_retained_on_context(&scope.frame_table, ld, ctx, key, scope.view.contexts);
 }
 
 pub(super) fn evict_retained(state: &super::types::VulkanState, ctx: super::ContextHandle, key: u64) {

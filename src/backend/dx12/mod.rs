@@ -433,10 +433,13 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
                 let mut sc = sc_arc.lock().unwrap();
                 context::drain_context_deletion_queue_up_to(ld, &mut sc, drain_to);
             }
-            let fences = self.state.context_fences.read().unwrap();
-            ld.process_deletion_queue_up_to(&fences);
+            ld.process_deletion_queue_up_to(&self.state.context_fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
+            let fences = self.state.context_fences.read().unwrap();
+            descriptors_arc
+                .lock()
+                .unwrap()
+                .drain_ready_slot_reclamations(&fences);
         }
         Ok(())
     }
@@ -1003,10 +1006,13 @@ impl GpuBackend for Dx12Backend {
                     let mut sc = sc_arc.lock().unwrap();
                     context::drain_context_deletion_queue_up_to(dev, &mut sc, drain_to);
                 }
-                let fences = self.state.context_fences.read().unwrap();
-                dev.process_deletion_queue_up_to(&fences);
+                dev.process_deletion_queue_up_to(&self.state.context_fences);
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
-                descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
+                let fences = self.state.context_fences.read().unwrap();
+                descriptors_arc
+                    .lock()
+                    .unwrap()
+                    .drain_ready_slot_reclamations(&fences);
             }
         }
         Ok(ok)
@@ -1283,13 +1289,16 @@ impl GpuBackend for Dx12Backend {
             if !ctx_batch.is_empty() {
                 let mut registry = ld.descriptors.lock().unwrap();
                 for resource in ctx_batch {
-                    types::destroy_pending_deletion(ld, &mut registry, resource);
+                    types::destroy_pending_deletion(ld, &mut registry, resource, Vec::new());
                 }
             }
-            let fences = self.state.context_fences.read().unwrap();
-            ld.process_deletion_queue_up_to(&fences);
+            ld.process_deletion_queue_up_to(&self.state.context_fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
-            descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
+            let fences = self.state.context_fences.read().unwrap();
+            descriptors_arc
+                .lock()
+                .unwrap()
+                .drain_ready_slot_reclamations(&fences);
         }
     }
 
@@ -1376,14 +1385,17 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
             .unwrap_or(0);
         let ctx_batch: Vec<_> = self.sc.lock().unwrap().deletion_queue.drain_up_to_completed(completed);
         let descriptors_arc = std::sync::Arc::clone(&self.ld.descriptors);
-        let fences = self.context_fences.read().unwrap();
-        {
+        if !ctx_batch.is_empty() {
             let mut registry = descriptors_arc.lock().unwrap();
             for r in ctx_batch {
-                types::destroy_pending_deletion(&self.ld, &mut registry, r);
+                types::destroy_pending_deletion(&self.ld, &mut registry, r, Vec::new());
             }
-            registry.drain_ready_slot_reclamations(&fences);
         }
-        self.ld.process_deletion_queue_up_to(&fences);
+        self.ld.process_deletion_queue_up_to(&self.context_fences);
+        let fences = self.context_fences.read().unwrap();
+        descriptors_arc
+            .lock()
+            .unwrap()
+            .drain_ready_slot_reclamations(&fences);
     }
 }

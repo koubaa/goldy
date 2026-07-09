@@ -43,6 +43,18 @@ pub(in crate::backend::metal) fn gpu_is_idle(state: &MetalState) -> bool {
     })
 }
 
+pub(in crate::backend::metal) fn drain_context_deletion_queue_up_to(
+    ld: &types::LogicalDevice,
+    queue: &mut types::DeletionQueue,
+    signaled: crate::timeline::TimelineValue,
+) {
+    let registry = ld.descriptors.lock().unwrap();
+    queue.process_up_to_gated(signaled, |deletion| match deletion {
+        types::PendingDeletion::Buffer { retained_slots, .. } => registry.retained_pins_clear(retained_slots),
+        _ => true,
+    });
+}
+
 /// Move every entry in each device's pending-slot list to its free list.
 ///
 /// Called after [`GpuBackend::wait_until`] has confirmed GPU completion so slots
@@ -53,7 +65,6 @@ pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState)
             .descriptors
             .lock()
             .unwrap()
-            .resource_registry
             .drain_pending_slots();
     }
 }
@@ -238,12 +249,12 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
         let device = self.context_device(ctx);
         let _dz = crate::tracy_zone!("mtl.wait_until.deletion_queue");
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            let mut sc = sc_arc.lock().unwrap();
-            drain_completed_cbs(&mut sc);
-            sc.deletion_queue.process_up_to(value);
-        }
         if let Some(ld) = self.state.devices.get(&device) {
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                drain_completed_cbs(&mut sc);
+                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, value);
+            }
             ld.process_deletion_queue_up_to(value.min(retired));
         }
         {
@@ -842,10 +853,10 @@ impl GpuBackend for MetalBackend {
         }
 
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            sc_arc.lock().unwrap().deletion_queue.process_up_to(value);
-        }
         if let Some(ld) = self.state.devices.get(&device) {
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                drain_context_deletion_queue_up_to(ld, &mut sc_arc.lock().unwrap().deletion_queue, value);
+            }
             ld.process_deletion_queue_up_to(value.min(retired));
         }
         drain_all_pending_slots(&mut self.state);
@@ -944,12 +955,12 @@ impl GpuBackend for MetalBackend {
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
         let device = self.context_device(ctx);
         let retired = context::device_retired(&self.state, device);
-        if let Some(sc_arc) = self.state.contexts.get(&ctx) {
-            let mut sc = sc_arc.lock().unwrap();
-            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-            sc.deletion_queue.process_up_to(ctx_signaled);
-        }
         if let Some(ld) = self.state.devices.get(&device) {
+            if let Some(sc_arc) = self.state.contexts.get(&ctx) {
+                let mut sc = sc_arc.lock().unwrap();
+                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+            }
             ld.process_deletion_queue_up_to(retired);
         }
     }
@@ -1138,7 +1149,7 @@ impl crate::backend::ContextDeferredDeletionFlush for MetalContextDeferredDeleti
         // retired value for items enqueued up to this context's last submission.
         let device_retired = self.ld.retired_floor.load(std::sync::atomic::Ordering::Relaxed).max(ctx_signaled);
         if let Ok(mut sc) = self.sc.lock() {
-            sc.deletion_queue.process_up_to(ctx_signaled);
+            drain_context_deletion_queue_up_to(&self.ld, &mut sc.deletion_queue, ctx_signaled);
         }
         self.ld.process_deletion_queue_up_to(device_retired);
     }

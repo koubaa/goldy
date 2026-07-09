@@ -794,6 +794,7 @@ fn record_gpu_command(
         GpuCommand::FrameTableStaging { data } => {
             let row = super::frame_table::record_prologue(
                 scope.contexts(),
+                scope.ld(),
                 _ctx_handle,
                 scope.frame_table(),
                 &scope.buffers().read().unwrap().entries,
@@ -1757,11 +1758,14 @@ fn execute_signal_and_finish(
 
     {
         let mut sc = scope.sc.lock().unwrap();
+        let mut unpin_slots: Vec<super::types::DeferredSlot> = Vec::new();
+        let mut pin_slots: Vec<super::types::DeferredSlot> = Vec::new();
         if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
             slot.fence_value = fence_value;
         }
         if let Some(key) = retain_key {
             if let Some(old) = sc.retained_graphs.remove(&key) {
+                unpin_slots = old.used_slots;
                 if let Some(row) = old.frame_table_row {
                     super::frame_table::unpin_row(scope.frame_table(), row);
                 }
@@ -1779,6 +1783,7 @@ fn execute_signal_and_finish(
                 .and_then(|s| s.command_list.clone())
             {
                 sc.compute_allocator_pool[slot_idx].retained = true;
+                pin_slots = used_slots.clone();
                 sc.retained_graphs.insert(
                     key,
                     types::RetainedGraph {
@@ -1793,13 +1798,19 @@ fn execute_signal_and_finish(
         }
         sc.last_submitted_seq
             .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        drop(sc);
+        if !unpin_slots.is_empty() || !pin_slots.is_empty() {
+            let mut registry = scope.ld().descriptors.lock().unwrap();
+            registry.unpin_retained_slots(unpin_slots);
+            registry.pin_retained_slots(pin_slots);
+        }
     }
 
     {
+        let fences = scope.context_fences.read().unwrap();
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();
-        let fences = scope.context_fences.read().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }
 
@@ -2526,10 +2537,10 @@ pub(super) fn try_resubmit_retained_with_scope(
     }
 
     {
+        let fences = scope.context_fences.read().unwrap();
         let dev = scope.ld();
         let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
         let mut registry = descriptors_arc.lock().unwrap();
-        let fences = scope.context_fences.read().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }
 
@@ -2548,16 +2559,32 @@ pub(super) fn try_resubmit_retained(
 fn evict_retained_on_context(
     contexts: &types::SharedContextMap,
     frame_table: &super::frame_table::ContextFrameTable,
+    descriptors: &types::SharedLogicalDevice,
     ctx: ContextHandle,
     key: u64,
 ) {
-    if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
+    let removed = if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
         let mut sc = sc_arc.lock().unwrap();
-        if let Some(old) = sc.retained_graphs.remove(&key) {
-            if let Some(row) = old.frame_table_row {
-                super::frame_table::unpin_row(frame_table, row);
-            }
-            if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
+        sc.retained_graphs.remove(&key)
+    } else {
+        None
+    };
+    if let Some(old) = removed {
+        descriptors
+            .descriptors
+            .lock()
+            .unwrap()
+            .unpin_retained_slots(old.used_slots);
+        if let Some(row) = old.frame_table_row {
+            super::frame_table::unpin_row(frame_table, row);
+        }
+        if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
+            if let Some(slot) = sc_arc
+                .lock()
+                .unwrap()
+                .compute_allocator_pool
+                .get_mut(old.slot_idx)
+            {
                 slot.retained = false;
             }
         }
@@ -2567,6 +2594,7 @@ fn evict_retained_on_context(
 pub(super) fn evict_retained_pinning_row_for_context(
     contexts: &types::SharedContextMap,
     frame_table: &super::frame_table::ContextFrameTable,
+    descriptors: &types::SharedLogicalDevice,
     ctx: ContextHandle,
     row: u32,
 ) {
@@ -2583,12 +2611,18 @@ pub(super) fn evict_retained_pinning_row_for_context(
             .collect()
     };
     for key in keys {
-        evict_retained_on_context(contexts, frame_table, ctx, key);
+        evict_retained_on_context(contexts, frame_table, descriptors, ctx, key);
     }
 }
 
 pub(super) fn evict_retained_with_scope(scope: &Dx12SubmitScope<'_>, ctx: ContextHandle, key: u64) {
-    evict_retained_on_context(scope.contexts(), scope.frame_table(), ctx, key);
+    evict_retained_on_context(
+        scope.contexts(),
+        scope.frame_table(),
+        scope.ld(),
+        ctx,
+        key,
+    );
 }
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.

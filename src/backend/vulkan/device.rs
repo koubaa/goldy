@@ -451,6 +451,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             bindless_pipeline_layout,
             descriptors: Arc::new(Mutex::new(types::DescriptorRegistry::new())),
             deletion_queue: Mutex::new(types::DeviceDeletionQueue::new()),
+            pending_buffer_gpu_releases: Mutex::new(Vec::new()),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),
             queue_lock: Arc::new(Mutex::new(())),

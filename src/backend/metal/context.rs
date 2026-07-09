@@ -145,6 +145,13 @@ fn finish_destroy(work: Box<MetalContextDestroyWork>) {
     let MetalContextDestroyWork { mut sc, ld } = *work;
     let device = sc.device;
 
+    {
+        let mut registry = ld.descriptors.lock().unwrap();
+        for (_, graph) in sc.retained_graphs.drain() {
+            registry.unpin_retained_slots(graph.used_slots);
+        }
+    }
+
     sc.retained_graphs.clear();
 
     sc.staging_belt.destroy_all();
