@@ -4055,6 +4055,7 @@ mod imp {
         trial!(cross_scheme_texture_readback_retained_loop_records_twice);
 
         let mut args = libtest_mimic::Arguments::from_args();
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
         if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
             args.test_threads = Some(1);
         }

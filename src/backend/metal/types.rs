@@ -910,12 +910,10 @@ impl ResourceRegistry {
     /// the pending list until `drain_pending_slots_up_to(signaled)` promotes
     /// it. Pass `None` when the GPU is known idle.
     pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
-        let key = MetalSlotKey::Texture(local_index);
-        self.release_slot(
+        release_slot(
             local_index,
             barrier,
             slot_pinned,
-            key,
             &mut self.pending_free_texture_slots,
             &mut self.texture,
         );
@@ -963,12 +961,10 @@ impl ResourceRegistry {
         barrier: Option<TimelineValue>,
         slot_pinned: bool,
     ) {
-        let key = MetalSlotKey::StorageImage(local_index);
-        self.release_slot(
+        release_slot(
             local_index,
             barrier,
             slot_pinned,
-            key,
             &mut self.pending_free_storage_image_slots,
             &mut self.storage_image,
         );
@@ -1005,42 +1001,22 @@ impl ResourceRegistry {
     /// `signaled >= barrier`. Pass `None` when the GPU is known idle.
     pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>, slot_pinned: bool) {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
-            let key = MetalSlotKey::from_buffer(access, local_index);
             match access {
-                BufferKind::Scattered => self.release_slot(
+                BufferKind::Scattered => release_slot(
                     local_index,
                     barrier,
                     slot_pinned,
-                    key,
                     &mut self.pending_free_storage_buffer_slots,
                     &mut self.storage_buffer,
                 ),
-                BufferKind::Broadcast => self.release_slot(
+                BufferKind::Broadcast => release_slot(
                     local_index,
                     barrier,
                     slot_pinned,
-                    key,
                     &mut self.pending_free_uniform_buffer_slots,
                     &mut self.uniform_buffer,
                 ),
             }
-        }
-    }
-
-    fn release_slot(
-        &mut self,
-        local_index: u32,
-        barrier: Option<TimelineValue>,
-        slot_pinned: bool,
-        _key: MetalSlotKey,
-        pending: &mut Vec<(u32, TimelineValue)>,
-        alloc: &mut SlotAllocator,
-    ) {
-        if slot_pinned || barrier.is_some() {
-            let b = barrier.unwrap_or(0);
-            pending.push((local_index, b));
-        } else {
-            alloc.free(local_index);
         }
     }
 
@@ -1145,6 +1121,21 @@ impl ResourceRegistry {
     }
 }
 
+fn release_slot(
+    local_index: u32,
+    barrier: Option<TimelineValue>,
+    slot_pinned: bool,
+    pending: &mut Vec<(u32, TimelineValue)>,
+    alloc: &mut SlotAllocator,
+) {
+    if slot_pinned || barrier.is_some() {
+        let b = barrier.unwrap_or(0);
+        pending.push((local_index, b));
+    } else {
+        alloc.free(local_index);
+    }
+}
+
 /// Device-shared descriptor registry.
 ///
 /// Wraps `ResourceRegistry` (the bindless slot allocator + pending-free lists)
@@ -1209,6 +1200,10 @@ impl DescriptorRegistry {
             .map(|&(local, access)| self.slot_pinned(MetalSlotKey::from_buffer(access, local)))
             .unwrap_or(false);
         self.resource_registry.unregister_buffer(handle, barrier, pinned);
+    }
+
+    pub(crate) fn unregister_texture(&mut self, handle: TextureHandle) {
+        self.resource_registry.unregister_texture(handle);
     }
 
     pub(crate) fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
@@ -1300,6 +1295,8 @@ pub(crate) struct PipelineState {
     pub pipeline: RenderPipelineState,
     pub depth_stencil: Option<MTLDepthStencilState>,
     pub primitive_type: MTLPrimitiveType,
+    /// Per push-constant slot category expectations from shader analysis.
+    pub push_constant_categories: Vec<Option<crate::types::ResourceCategory>>,
     /// Per push-constant slot expected element stride (bytes) from reflection.
     pub binding_element_strides: Vec<Option<u32>>,
     /// Human-readable identifier for debugging.

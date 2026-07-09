@@ -152,11 +152,12 @@ fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Op
         .remove(&key);
     if let Some(graph) = removed {
         if let Some(device) = state.devices.get(&device_handle) {
+            let used_slots = graph.used_slots.clone();
             device
                 .descriptors
                 .lock()
                 .unwrap()
-                .unpin_retained_slots(graph.used_slots);
+                .unpin_retained_slots(used_slots);
         }
         Some(graph)
     } else {
@@ -1486,7 +1487,7 @@ pub(super) fn submit(
             if let Some(sc_arc) = state.contexts.get(&ctx) {
                 let mut sc = sc_arc.lock().unwrap();
                 let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
             }
             let retired = super::context::device_retired(state, device_handle);
             ld.process_deletion_queue_up_to(retired);
@@ -1757,7 +1758,7 @@ pub(super) fn submit_graph(
             if let Some(sc_arc) = state.contexts.get(&ctx) {
                 let mut sc = sc_arc.lock().unwrap();
                 let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
+                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
             }
             let retired = super::context::device_retired(state, device_handle);
             ld.process_deletion_queue_up_to(retired);
