@@ -10,9 +10,8 @@
 //! to it, even when hardware GPUs are present. Use on headless CI (no GPU) or locally to
 //! reproduce WARP-specific rendering bugs.
 //!
-//! Set **`GOLDY_DX12_CONTEXT_QUEUE_STYLE`** to control per-context queue topology:
-//! `device` (default), `direct` (each context owns a DIRECT queue), or `compute`
-//! (per-context COMPUTE + device DIRECT for graphics/present).
+//! Each submission context owns a **COMPUTE** queue. Graphics (`RenderPass`) and
+//! present run on the device **DIRECT** queue (`LogicalDevice::command_queue`).
 //!
 //! After the first WARP device is created, Goldy logs one stderr line showing which
 //! `d3d10warp.dll` was loaded — useful to confirm a side-loaded NuGet build is active.
@@ -75,55 +74,26 @@ pub(crate) fn env_force_warp() -> bool {
     std::env::var("GOLDY_DX12_FORCE_WARP").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// Per-context queue topology for DX12 contexts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContextQueueStyle {
-    /// Each context owns a DIRECT queue (compute + render + copy on one queue).
-    Direct,
-    /// Each context owns a COMPUTE queue; graphics and present use the device DIRECT queue.
-    Compute,
-    /// Each context aliases [`LogicalDevice::command_queue`] (shared DIRECT queue).
-    Device,
-}
-
-/// Resolved from **`GOLDY_DX12_CONTEXT_QUEUE_STYLE`** (`direct` | `compute` | `device`).
-pub(crate) fn env_context_queue_style() -> ContextQueueStyle {
-    match std::env::var("GOLDY_DX12_CONTEXT_QUEUE_STYLE")
-        .ok()
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("direct") => ContextQueueStyle::Direct,
-        Some("compute") => ContextQueueStyle::Compute,
-        Some("device") | None => ContextQueueStyle::Device,
-        Some(other) => {
-            tracing::warn!(
-                "GOLDY_DX12_CONTEXT_QUEUE_STYLE={other:?} unrecognized; using device"
-            );
-            ContextQueueStyle::Device
-        }
+/// UAV layout tag for storage textures.
+///
+/// Context compute queues use the queue-agnostic UAV layout; work recorded on the
+/// device DIRECT queue (render partitions) uses the direct-queue-specific tag.
+pub(crate) fn storage_uav_layout(on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+    use windows::Win32::Graphics::Direct3D12::*;
+    if on_direct_queue {
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+    } else {
+        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
     }
 }
 
-/// UAV layout tag for storage textures on the context submission path.
-pub(crate) fn context_storage_uav_layout(style: ContextQueueStyle) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+/// SRV layout tag for sampled textures (see [`storage_uav_layout`]).
+pub(crate) fn shader_resource_layout(on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
     use windows::Win32::Graphics::Direct3D12::*;
-    match style {
-        ContextQueueStyle::Compute => D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
-        ContextQueueStyle::Direct | ContextQueueStyle::Device => {
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-        }
-    }
-}
-
-/// SRV layout tag for sampled textures on the context submission path.
-pub(crate) fn context_shader_resource_layout(style: ContextQueueStyle) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
-    use windows::Win32::Graphics::Direct3D12::*;
-    match style {
-        ContextQueueStyle::Compute => D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
-        ContextQueueStyle::Direct | ContextQueueStyle::Device => {
-            D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
-        }
+    if on_direct_queue {
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
+    } else {
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
     }
 }
 

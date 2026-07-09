@@ -3814,7 +3814,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     /// shader and `copy_texture_to_present` on the same persistent `out_image` must resolve
     /// to one ledger cell (`ResourceSync`), and a present-path submit must record the copy
-    /// read on that cell so cross-frame WAR enforcement can key off `last_reads`.
+    /// read on that cell so cross-frame WAR enforcement can key off `foreign_reads`
+    /// (present easement is an exercised-claim / foreign read, not a scheduled `last_reads`).
     #[test]
     fn out_image_fine_write_and_present_copy_share_ledger_identity() {
         use crate::task_graph::cross_submit::{compute_cross_submit_sync, net_access_per_resource, ResourceKey};
@@ -3902,11 +3903,14 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
         present.consume(&sub1).expect("present frame 1");
 
-        // Frame 2 submit gate folds the resolved present epoch into last_reads.
+        // Frame 2 submit gate folds the resolved present epoch into foreign_reads.
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
             let sync = registered.sync.lock().unwrap();
-            *sync.last_reads.get(&ctx_handle).expect("last_reads after present fold")
+            *sync
+                .foreign_reads
+                .get(&ctx_handle)
+                .expect("foreign_reads after present fold")
         };
         assert!(
             present_read_tv >= frame1_tv,

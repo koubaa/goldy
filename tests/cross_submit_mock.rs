@@ -255,7 +255,7 @@ fn same_context_raw_emits_barrier_not_wait() {
 }
 
 #[test]
-fn war_same_context_emits_wait_on_write_after_read() {
+fn war_same_context_emits_prologue_on_write_after_read() {
     let device = mock_device();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
@@ -274,22 +274,19 @@ fn war_same_context_emits_wait_on_write_after_read() {
     clear_mock(&device);
     let mut writer = write_scheme(&ctx, &parcel, &write_pipe);
     writer.submit().expect("write after read");
-    assert!(
-        barrier_buffers(&device).is_empty(),
-        "WAR: same-context write-after-read must not use a baked prologue barrier"
-    );
     assert_eq!(
-        recorded_waits(&device).last(),
-        Some(&vec![goldy::timeline::Epoch {
-            context: ctx.test_backend_handle(),
-            value: 1
-        }]),
-        "WAR: writer after reader must wait on the reader's timeline epoch"
+        barrier_buffers(&device).len(),
+        1,
+        "WAR: same-context scheduled write-after-read uses a baked prologue barrier"
+    );
+    assert!(
+        recorded_waits(&device).iter().all(|w| w.is_empty()),
+        "WAR: same-context scheduled read must not live-wait on the submitting context's own queue"
     );
 }
 
 #[test]
-fn war_retained_resubmit_emits_live_wait() {
+fn war_retained_resubmit_against_scheduled_read_needs_no_live_wait() {
     let device = mock_device();
     let ctx = mock_ctx(&device);
     let write_shader = ShaderModule::from_slang(&device, WRITE_SHADER).expect("shader");
@@ -310,7 +307,7 @@ fn war_retained_resubmit_emits_live_wait() {
     reader.submit().expect("reader establishes last_reads");
 
     if writer.is_topology_dirty() {
-        writer.submit().expect("writer settle after foreign read");
+        writer.submit().expect("writer settle after scheduled read");
         assert!(!writer.is_topology_dirty());
     }
 
@@ -318,9 +315,11 @@ fn war_retained_resubmit_emits_live_wait() {
     writer.submit().expect("writer retained resubmit");
     assert_eq!(retained_resubmits(&device), 1);
     let waits = recorded_waits(&device).last().cloned().unwrap_or_default();
-    assert_eq!(waits.len(), 1, "retained WAR resubmit must restate a live queue wait");
-    assert_eq!(waits[0].context, ctx.test_backend_handle());
-    assert_eq!(waits[0].value, 2, "retained WAR resubmit must wait on the reader epoch");
+    assert!(
+        waits.is_empty(),
+        "retained WAR against a same-context scheduled read relies on queue FIFO + baked prologue; \
+         no live wait (got {waits:?})"
+    );
 }
 
 fn recorded_graph_syncs(device: &Device) -> Vec<bool> {

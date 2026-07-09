@@ -550,14 +550,12 @@ pub(crate) struct ComputeAllocatorSlot {
 pub(crate) struct Dx12SubmissionContext {
     pub device: super::DeviceHandle,
     pub fence: Direct3D12::ID3D12Fence,
-    /// This context's own hardware command queue.
+    /// This context's own COMPUTE command queue.
     ///
-    /// Each context gets its own `ID3D12CommandQueue` so that an operation on one context
-    /// can never block an operation on another: a GPU-side cross-context `Wait` enqueued on
-    /// this queue only stalls *this* queue, never a sibling context's queue. Contexts used to
-    /// share `LogicalDevice::command_queue`, which meant one context's `Wait` on another
-    /// context's not-yet-submitted signal could wedge the entire device (see the `frame-table`
-    /// cross-submit hangs/TDRs under WARP).
+    /// Each context gets its own `ID3D12CommandQueue` (`COMPUTE`) so that an operation on one
+    /// context can never block an operation on another: a GPU-side cross-context `Wait`
+    /// enqueued on this queue only stalls *this* queue, never a sibling context's queue.
+    /// Graphics and present use [`LogicalDevice::command_queue`] (DIRECT).
     pub command_queue: Direct3D12::ID3D12CommandQueue,
     /// Serializes `Wait`/`ExecuteCommandLists`/`Signal` on [`Self::command_queue`] — the queue
     /// is externally synchronized in D3D12 and this context's queue may still be submitted to
@@ -570,8 +568,6 @@ pub(crate) struct Dx12SubmissionContext {
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     pub fence_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
-    /// Per-context queue topology (see [`super::ContextQueueStyle`]).
-    pub queue_style: super::ContextQueueStyle,
     /// Pool of command allocators for non-blocking compute submission on this context.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
     /// Retained command lists keyed by scheme fingerprint for zero-recording-cost re-submission.

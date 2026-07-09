@@ -73,17 +73,17 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
 
 fn post_copy_texture_state(
     is_storage: bool,
-    queue_style: super::ContextQueueStyle,
+    on_direct_queue: bool,
 ) -> (D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
     if is_storage {
         (
             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
-            super::context_storage_uav_layout(queue_style),
+            super::storage_uav_layout(on_direct_queue),
         )
     } else {
         (
             D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
-            super::context_shader_resource_layout(queue_style),
+            super::shader_resource_layout(on_direct_queue),
         )
     }
 }
@@ -594,14 +594,14 @@ pub(super) fn record_staged_texture_upload(
     command_list7: &ID3D12GraphicsCommandList7,
     textures: &mut std::collections::HashMap<TextureHandle, TextureState>,
     upload: &StagedTextureUpload,
-    queue_style: super::ContextQueueStyle,
+    on_direct_queue: bool,
 ) -> Result<()> {
     let texture = textures
         .get(&upload.texture_handle)
         .context("record_staged_texture_upload: invalid texture")?;
     let layout_before = upload.layout_before;
     let is_storage = texture.is_storage;
-    let (post_access, after_layout) = post_copy_texture_state(is_storage, queue_style);
+    let (post_access, after_layout) = post_copy_texture_state(is_storage, on_direct_queue);
 
     let mut b_to_copy = [barriers::texture_barrier_full(
         &texture.resource,
@@ -915,7 +915,7 @@ pub(super) fn record_copy_texture_to_readback(
     src: TextureHandle,
     dst: BufferHandle,
     layout: crate::backend::TextureCopyFootprint,
-    queue_style: super::ContextQueueStyle,
+    on_direct_queue: bool,
 ) -> Result<()> {
     // Extract everything we need from the immutable borrow before any mutable access.
     let (src_resource, dst_resource, layout_before, is_storage, dxgi_format) = {
@@ -968,7 +968,7 @@ pub(super) fn record_copy_texture_to_readback(
     };
     unsafe { command_list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, None) };
 
-    let (post_access, post_layout) = post_copy_texture_state(is_storage, queue_style);
+    let (post_access, post_layout) = post_copy_texture_state(is_storage, on_direct_queue);
     let b_back = barriers::texture_barrier_full(
         &src_resource,
         D3D12_BARRIER_SYNC_COPY,

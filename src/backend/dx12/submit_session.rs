@@ -168,7 +168,6 @@ pub(crate) struct Dx12SubmitSession {
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
     use_global_buffer_barriers: bool,
-    queue_style: super::ContextQueueStyle,
     device_owner_handle: Option<ContextHandle>,
 }
 
@@ -182,9 +181,9 @@ impl Dx12SubmitSession {
                 .get(&ctx)
                 .with_context(|| format!("Invalid context handle {ctx}"))?,
         );
-        let (device_handle, frame_table, queue_style) = {
+        let (device_handle, frame_table) = {
             let sc_guard = sc.lock().unwrap();
-            (sc_guard.device, Arc::clone(&sc_guard.frame_table), sc_guard.queue_style)
+            (sc_guard.device, Arc::clone(&sc_guard.frame_table))
         };
         let ld = Arc::clone(
             state
@@ -198,11 +197,7 @@ impl Dx12SubmitSession {
             .map(|(handle, device)| (*handle, Arc::clone(device)))
             .collect();
         let use_global_buffer_barriers = ld.adapter_id == super::WARP_ADAPTER_ID;
-        let device_owner_handle = if queue_style == super::ContextQueueStyle::Compute {
-            state.device_owner_handles.get(&device_handle).copied()
-        } else {
-            None
-        };
+        let device_owner_handle = state.device_owner_handles.get(&device_handle).copied();
         Ok(Arc::new(Self {
             ctx,
             device_handle,
@@ -220,7 +215,6 @@ impl Dx12SubmitSession {
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
             use_global_buffer_barriers,
-            queue_style,
             device_owner_handle,
         }))
     }
@@ -252,7 +246,7 @@ impl Dx12SubmitSession {
 
 impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
     fn separate_graphics_queue(&self) -> bool {
-        self.queue_style == super::ContextQueueStyle::Compute
+        true
     }
 
     fn device_queue_owner(&self, _ctx: ContextHandle) -> Option<ContextHandle> {
