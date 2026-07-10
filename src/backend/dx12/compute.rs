@@ -1947,6 +1947,7 @@ fn execute_signal_and_finish_device(
     scope: &Dx12SubmitScope<'_>,
     command_list: &ID3D12GraphicsCommandList,
     device_handle: DeviceHandle,
+    submit_ctx: ContextHandle,
     stamp_ctx: ContextHandle,
     used_slots: Vec<super::types::DeferredSlot>,
     sync: Option<&SubmitSync>,
@@ -1969,6 +1970,31 @@ fn execute_signal_and_finish_device(
         let waits = resolve_epoch_waits(scope, sync)?;
         super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)])?
     };
+
+    // Device-queue render submits share the device timeline counter but must also publish
+    // the value on the submitting context's fence — `Context::wait_until` blocks there.
+    let ctx_fence = scope
+        .context_fences
+        .read()
+        .unwrap()
+        .get(&submit_ctx)
+        .context("Invalid submitting context handle")?
+        .1
+        .clone();
+    if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence) {
+        super::utils::with_queue_lock(logical_device, || -> Result<()> {
+            unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
+                .context("Failed to signal submitting context fence after device render submit")?;
+            Ok(())
+        })?;
+    }
+
+    scope
+        .sc
+        .lock()
+        .unwrap()
+        .last_submitted_seq
+        .store(fence_value, std::sync::atomic::Ordering::Relaxed);
 
     if let Some(slot) = logical_device.device_direct_slot.lock().unwrap().as_mut() {
         slot.fence_value = fence_value;
@@ -2579,6 +2605,7 @@ pub(super) fn submit_graph_with_scope(
             scope,
             &command_list,
             device_handle,
+            ctx,
             stamp_ctx,
             used_slots,
             sync,
