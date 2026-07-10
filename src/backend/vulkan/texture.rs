@@ -1002,13 +1002,18 @@ pub(super) fn read_to_cpu(
     unsafe {
         let queue_lock = Arc::clone(&logical_device.queue_lock);
         let _queue_guard = queue_lock.lock().unwrap();
-        logical_device.device.queue_submit(
-            logical_device.queue,
-            std::slice::from_ref(&submit_info),
-            vk::Fence::null(),
-        )
-        .context("Failed to submit command buffer")?;
-        logical_device.device.queue_wait_idle(logical_device.queue).context("Failed to wait for queue")?;
+        logical_device
+            .device
+            .queue_submit(
+                logical_device.queue,
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
+            .context("Failed to submit command buffer")?;
+        logical_device
+            .device
+            .queue_wait_idle(logical_device.queue)
+            .context("Failed to wait for queue")?;
         drop(_queue_guard);
     }
 

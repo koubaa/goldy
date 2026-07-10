@@ -895,13 +895,7 @@ pub(crate) fn submit_resolved_ir(
         boundary.record(separate, has_render_part, last_tv);
         if let Some(state) = submit_state {
             let stamp_ctx = partition_stamp_context(separate, has_render_part, ctx, device_owner);
-            state.apply_partition_reference_stamps(
-                stamp_ctx,
-                &context.device().inner,
-                ir,
-                &waves,
-                last_tv,
-            );
+            state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
         }
     }
     Ok(last_tv)
@@ -1107,13 +1101,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
             boundary.record(separate, has_render, last_tv);
             if let Some(state) = submit_state {
                 let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
-                state.apply_partition_reference_stamps(
-                    stamp_ctx,
-                    &context.device().inner,
-                    ir,
-                    &waves,
-                    last_tv,
-                );
+                state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
             }
             part_idx += 1;
             continue;
@@ -1129,13 +1117,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 boundary.record(separate, has_render, last_tv);
                 if let Some(state) = submit_state {
                     let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
-                    state.apply_partition_reference_stamps(
-                        stamp_ctx,
-                        &context.device().inner,
-                        ir,
-                        &waves,
-                        last_tv,
-                    );
+                    state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
                 }
                 part_idx += 1;
                 continue;
@@ -1157,13 +1139,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         boundary.record(separate, has_render, last_tv);
         if let Some(state) = submit_state {
             let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
-            state.apply_partition_reference_stamps(
-                stamp_ctx,
-                &context.device().inner,
-                ir,
-                &waves,
-                last_tv,
-            );
+            state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
         }
         part_idx += 1;
     }

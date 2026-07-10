@@ -15,9 +15,8 @@ mod imp {
 
     use crate::submission::submission_context;
     use goldy::{
-        types::BufferFlags,
-        Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance, RequestAdapterOptions,
-        ShaderModule, TaskGraph,
+        types::BufferFlags, Buffer, BufferKind, ComputePipeline, Device, DeviceDescriptor, Instance,
+        RequestAdapterOptions, ShaderModule, TaskGraph,
     };
     use std::sync::Arc;
 
@@ -70,10 +69,7 @@ mod imp {
         let buf = test_alloc_buffer(device, 256, BufferKind::Scattered, None, BufferFlags::empty());
 
         let mut graph = TaskGraph::new();
-        graph
-            .node("n0", &pipeline)
-            .with_resources(&[&buf])
-            .dispatch(1, 1, 1);
+        graph.node("n0", &pipeline).with_resources(&[&buf]).dispatch(1, 1, 1);
         let tv = graph.submit(&ctx).expect("submit");
 
         assert_eq!(

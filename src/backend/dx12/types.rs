@@ -447,12 +447,20 @@ mod registry_tests {
 
         let fences: HashMap<ContextHandle, ContextFenceEntry> = HashMap::new();
         dr.drain_ready_slot_reclamations(&fences);
-        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 0, "pinned slot must not free");
+        assert_eq!(
+            dr.resource_registry.cbv_srv_uav.free_count(),
+            0,
+            "pinned slot must not free"
+        );
         assert_eq!(dr.retained_user_count(deferred), 1);
 
         dr.unpin_retained_slots([deferred]);
         dr.drain_ready_slot_reclamations(&fences);
-        assert_eq!(dr.resource_registry.cbv_srv_uav.free_count(), 1, "unpin then drain frees");
+        assert_eq!(
+            dr.resource_registry.cbv_srv_uav.free_count(),
+            1,
+            "unpin then drain frees"
+        );
     }
 
     /// Two retained graphs sharing a slot require two unpins.
@@ -677,14 +685,9 @@ pub(crate) struct PendingBufferGpuRelease {
 }
 
 /// Per-context fence + last-submitted seq shared with [`Dx12SubmissionContext`].
-pub(crate) type ContextFenceEntry = (
-    DeviceHandle,
-    Direct3D12::ID3D12Fence,
-    Arc<AtomicU64>,
-);
+pub(crate) type ContextFenceEntry = (DeviceHandle, Direct3D12::ID3D12Fence, Arc<AtomicU64>);
 
-pub(crate) type SharedContextFences =
-    Arc<std::sync::RwLock<HashMap<super::ContextHandle, ContextFenceEntry>>>;
+pub(crate) type SharedContextFences = Arc<std::sync::RwLock<HashMap<super::ContextHandle, ContextFenceEntry>>>;
 
 fn slot_requirements_met(
     requirements: &[(super::ContextHandle, u64)],
@@ -774,12 +777,9 @@ impl DeviceDeletionQueue {
             .drain_where_with_keys(|reqs| device_deletion_requirements_met(reqs, context_fences))
     }
 
-    pub(crate) fn drain_everything(
-        &mut self,
-    ) -> Vec<(Vec<(super::ContextHandle, u64)>, PendingDeletion)> {
+    pub(crate) fn drain_everything(&mut self) -> Vec<(Vec<(super::ContextHandle, u64)>, PendingDeletion)> {
         // Teardown path: return original requirement keys (unused once the device is idle).
-        self.inner
-            .drain_where_with_keys(|_| true)
+        self.inner.drain_where_with_keys(|_| true)
     }
 
     pub(crate) fn pending_len(&self) -> usize {
@@ -910,17 +910,12 @@ impl DescriptorRegistry {
     /// Takes the per-state `context_fences` index (not the full context map) so this
     /// method can be called while holding the descriptors lock without risking a lock-ordering
     /// deadlock with per-context `Mutex<Dx12SubmissionContext>`.
-    pub(crate) fn drain_ready_slot_reclamations(
-        &mut self,
-        context_fences: &HashMap<ContextHandle, ContextFenceEntry>,
-    ) {
+    pub(crate) fn drain_ready_slot_reclamations(&mut self, context_fences: &HashMap<ContextHandle, ContextFenceEntry>) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
             let slot = self.pending_slot_reclamations[i].slot;
-            let gpu_ready = device_deletion_requirements_met(
-                &self.pending_slot_reclamations[i].requirements,
-                context_fences,
-            );
+            let gpu_ready =
+                device_deletion_requirements_met(&self.pending_slot_reclamations[i].requirements, context_fences);
             let pin_clear = self.retained_users.get(&slot).copied().unwrap_or(0) == 0;
             if gpu_ready && pin_clear {
                 let entry = self.pending_slot_reclamations.swap_remove(i);
@@ -1172,10 +1167,7 @@ impl LogicalDevice {
         }
     }
 
-    pub(crate) fn flush_deletion_queue(
-        &self,
-        context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
-    ) {
+    pub(crate) fn flush_deletion_queue(&self, context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>) {
         // Called only at device teardown, after wait_for_gpu ensures all GPU work has
         // completed. Slots queued here via reclaim_*_slots will have empty requirements
         // (slot_last_seen was cleared as contexts were destroyed before the device) and
@@ -1214,9 +1206,8 @@ fn release_buffer_gpu_resources(ld: &LogicalDevice, entry: PendingBufferGpuRelea
         // Flush the queue so the unmap is processed before releasing the resource.
         let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
         let signaled = super::utils::with_queue_lock(ld, || {
-            unsafe { ld.command_queue.Signal(&ld.fence, fv) }.map_err(|e| {
-                anyhow::anyhow!("Failed to signal device fence for reserved buffer deletion: {e:?}")
-            })
+            unsafe { ld.command_queue.Signal(&ld.fence, fv) }
+                .map_err(|e| anyhow::anyhow!("Failed to signal device fence for reserved buffer deletion: {e:?}"))
         });
         if signaled.is_ok() {
             let _ = super::utils::wait_for_fence_on_device(&ld.fence, fv, Some(ld));
@@ -1618,8 +1609,7 @@ pub(super) struct Dx12State {
     ///
     /// Shared via [`Arc<RwLock<>>`] so [`ContextDeferredDeletionFlush`] clones can drain slots
     /// without the global backend mutex.
-    pub context_fences:
-        std::sync::Arc<std::sync::RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
+    pub context_fences: std::sync::Arc<std::sync::RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
     pub buffers: SharedBufferTable,
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,

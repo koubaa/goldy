@@ -6,7 +6,7 @@
 use super::compute;
 use super::frame_table::ContextFrameTable;
 use super::types::{
-    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextMap, SharedContextFrameTable,
+    Dx12State, SharedBufferTable, SharedComputePipelineTable, SharedContextFrameTable, SharedContextMap,
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSamplerTable, SharedShaderTable,
     SharedSubmissionContext, SharedTextureTable,
 };

@@ -992,6 +992,7 @@ fn submit_resize_transfer(
 }
 
 /// Resize a root buffer in place. [`BufferHandle`] and bindless slot stay stable.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resize(
     state: &super::types::VulkanState,
     instance: &ash::Instance,

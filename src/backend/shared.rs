@@ -295,10 +295,7 @@ impl<K, V> DeferredQueue<K, V> {
     /// single entry's readiness depends on a multi-part requirement (e.g. a per-context
     /// `(ContextHandle, u64)` snapshot) rather than one totally-ordered threshold.
     pub fn drain_where<F: Fn(&K) -> bool>(&mut self, ready: F) -> Vec<V> {
-        self.drain_where_with_keys(ready)
-            .into_iter()
-            .map(|(_, v)| v)
-            .collect()
+        self.drain_where_with_keys(ready).into_iter().map(|(_, v)| v).collect()
     }
 
     /// Like [`Self::drain_where`], but returns `(key, value)` pairs for diagnostics.

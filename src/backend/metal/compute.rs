@@ -1,9 +1,12 @@
 //! Compute pipeline and dispatch logic.
 
 use super::super::shared;
-use super::super::{ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, GraphCommand, RenderCommand, ShaderHandle, SubmitSync};
-use super::types::MetalSlotKey;
+use super::super::{
+    ComputePipelineHandle, ContextHandle, DeviceHandle, GpuCommand, GraphCommand, RenderCommand, ShaderHandle,
+    SubmitSync,
+};
 use super::staging::TextureStagingEntry;
+use super::types::MetalSlotKey;
 use super::types::RESOURCE_SLOT_BUFFER;
 use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
@@ -43,10 +46,7 @@ fn metal_slot_key_from_category(cat: ResourceCategory, index: u32) -> Option<Met
     }
 }
 
-fn collect_metal_slots_from_raw_bind(
-    indices: &[u32],
-    categories: &[Option<ResourceCategory>],
-) -> Vec<MetalSlotKey> {
+fn collect_metal_slots_from_raw_bind(indices: &[u32], categories: &[Option<ResourceCategory>]) -> Vec<MetalSlotKey> {
     let mut slots = Vec::new();
     for (i, &idx) in indices.iter().enumerate() {
         if let Some(Some(cat)) = categories.get(i) {
@@ -143,21 +143,11 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
 
 fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Option<super::types::MetalRetainedGraph> {
     let device_handle = super::context::context_device(state, ctx);
-    let removed = state
-        .contexts
-        .get(&ctx)?
-        .lock()
-        .unwrap()
-        .retained_graphs
-        .remove(&key);
+    let removed = state.contexts.get(&ctx)?.lock().unwrap().retained_graphs.remove(&key);
     if let Some(graph) = removed {
         if let Some(device) = state.devices.get(&device_handle) {
             let used_slots = graph.used_slots.clone();
-            device
-                .descriptors
-                .lock()
-                .unwrap()
-                .unpin_retained_slots(used_slots);
+            device.descriptors.lock().unwrap().unpin_retained_slots(used_slots);
         }
         Some(graph)
     } else {
@@ -1511,16 +1501,16 @@ pub(super) fn submit(
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-        if let Some(ld) = state.devices.get(&device_handle) {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
-            }
-            let retired = super::context::device_retired(state, device_handle);
-            ld.process_deletion_queue_up_to(retired);
-            maybe_log_mem_diag(ld);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
+        let retired = super::context::device_retired(state, device_handle);
+        ld.process_deletion_queue_up_to(retired);
+        maybe_log_mem_diag(ld);
+    }
 
     Ok(signal_value)
 }
@@ -1782,16 +1772,16 @@ pub(super) fn submit_graph(
     }
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-        if let Some(ld) = state.devices.get(&device_handle) {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
-            }
-            let retired = super::context::device_retired(state, device_handle);
-            ld.process_deletion_queue_up_to(retired);
-            maybe_log_mem_diag(ld);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
+        let retired = super::context::device_retired(state, device_handle);
+        ld.process_deletion_queue_up_to(retired);
+        maybe_log_mem_diag(ld);
+    }
 
     // Mark render targets as rendered.
     for cmd in commands {
@@ -1812,11 +1802,7 @@ pub(super) fn submit_graph(
             let replaced = sc_arc.lock().unwrap().retained_graphs.insert(key, graph);
             if let Some(old) = replaced {
                 if let Some(device) = state.devices.get(&device_handle) {
-                    device
-                        .descriptors
-                        .lock()
-                        .unwrap()
-                        .unpin_retained_slots(old.used_slots);
+                    device.descriptors.lock().unwrap().unpin_retained_slots(old.used_slots);
                 }
             }
             if let Some(device) = state.devices.get(&device_handle) {
@@ -1857,7 +1843,12 @@ pub(super) fn try_resubmit_retained(
 ) -> Result<Option<TimelineValue>> {
     let commands = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
-        sc_arc.lock().unwrap().retained_graphs.get(&key).map(|g| g.commands.clone())
+        sc_arc
+            .lock()
+            .unwrap()
+            .retained_graphs
+            .get(&key)
+            .map(|g| g.commands.clone())
     };
     let Some(commands) = commands else {
         return Ok(None);

@@ -293,18 +293,16 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
 
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
 pub fn compute_cross_submit_sync_into(
-    prologue: &mut BarrierSet,
-    waits: &mut Vec<Epoch>,
-    cpu_waits: &mut Vec<Epoch>,
+    out: &mut SubmitSync,
     wait_map: &mut HashMap<ContextHandle, u64>,
     cpu_wait_map: &mut HashMap<ContextHandle, u64>,
     net: &HashMap<ResourceKey, NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: ContextHandle,
 ) {
-    prologue.buffers.clear();
-    prologue.textures.clear();
-    prologue.transient_ids.clear();
+    out.prologue.buffers.clear();
+    out.prologue.textures.clear();
+    out.prologue.transient_ids.clear();
     wait_map.clear();
     cpu_wait_map.clear();
 
@@ -333,7 +331,7 @@ pub fn compute_cross_submit_sync_into(
                             d
                         },
                     };
-                    merge_barrier(prologue, *key, usage);
+                    merge_barrier(&mut out.prologue, *key, usage);
                 } else {
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
@@ -359,7 +357,7 @@ pub fn compute_cross_submit_sync_into(
                             d
                         },
                     };
-                    merge_barrier(prologue, *key, usage);
+                    merge_barrier(&mut out.prologue, *key, usage);
                 } else {
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
@@ -384,7 +382,7 @@ pub fn compute_cross_submit_sync_into(
                             d
                         },
                     };
-                    merge_barrier(prologue, *key, usage);
+                    merge_barrier(&mut out.prologue, *key, usage);
                 } else {
                     // Cross-context WAR: retire the prior read on the CPU, not via a GPU
                     // queue Wait — pairing with a cross-context RAW live wait on the peer
@@ -401,12 +399,14 @@ pub fn compute_cross_submit_sync_into(
         }
     }
 
-    waits.clear();
-    waits.extend(wait_map.drain().map(|(context, value)| Epoch { context, value }));
-    waits.sort_by_key(|e| (e.context, e.value));
-    cpu_waits.clear();
-    cpu_waits.extend(cpu_wait_map.drain().map(|(context, value)| Epoch { context, value }));
-    cpu_waits.sort_by_key(|e| (e.context, e.value));
+    out.waits.clear();
+    out.waits
+        .extend(wait_map.drain().map(|(context, value)| Epoch { context, value }));
+    out.waits.sort_by_key(|e| (e.context, e.value));
+    out.cpu_waits.clear();
+    out.cpu_waits
+        .extend(cpu_wait_map.drain().map(|(context, value)| Epoch { context, value }));
+    out.cpu_waits.sort_by_key(|e| (e.context, e.value));
 }
 
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
@@ -419,20 +419,15 @@ pub fn compute_cross_submit_sync(
     ledger: &LedgerSnapshot,
     submitting_ctx: crate::backend::ContextHandle,
 ) -> CrossSubmitSync {
-    let mut result = CrossSubmitSync::default();
+    let mut sync = SubmitSync::default();
     let mut wait_map = HashMap::new();
     let mut cpu_wait_map = HashMap::new();
-    compute_cross_submit_sync_into(
-        &mut result.prologue,
-        &mut result.waits,
-        &mut result.cpu_waits,
-        &mut wait_map,
-        &mut cpu_wait_map,
-        net,
-        ledger,
-        submitting_ctx,
-    );
-    result
+    compute_cross_submit_sync_into(&mut sync, &mut wait_map, &mut cpu_wait_map, net, ledger, submitting_ctx);
+    CrossSubmitSync {
+        prologue: sync.prologue,
+        waits: sync.waits,
+        cpu_waits: sync.cpu_waits,
+    }
 }
 
 /// Build a ledger snapshot from registered stamp bindings.
@@ -566,9 +561,7 @@ impl CrossSubmitScratch {
         {
             let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
             compute_cross_submit_sync_into(
-                &mut self.submit_sync.prologue,
-                &mut self.submit_sync.waits,
-                &mut self.submit_sync.cpu_waits,
+                &mut self.submit_sync,
                 &mut self.wait_map,
                 &mut self.cpu_wait_map,
                 &self.net,
@@ -841,7 +834,10 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);
 
-        assert!(sync.waits.is_empty(), "same-context WAR must not live-wait on own queue");
+        assert!(
+            sync.waits.is_empty(),
+            "same-context WAR must not live-wait on own queue"
+        );
         assert!(
             !sync.prologue.textures.is_empty(),
             "loop-carried WAW and same-context WAR need baked prologue barriers"

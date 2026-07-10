@@ -11,8 +11,9 @@ mod imp {
     use crate::upload::write_to_parcel;
     use goldy::{
         types::{BackendType, BufferFlags, DispatchShape, TextureFlags, TextureFormat, TextureKind},
-        BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel, ReadGrant,
-        RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement, Submission,
+        BufferKind, ComputePipeline, Device, DeviceDescriptor, Grant, GrantBuffer, Instance, NodeAccess, Parcel,
+        ReadGrant, RequestAdapterOptions, RetainedPool, Sampler, Scheme, ShaderModule, StructuredBufferElement,
+        Submission,
     };
     use std::sync::Arc;
 
@@ -247,7 +248,8 @@ mod imp {
 
         let double_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap()).unwrap();
-        let add_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
+        let add_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let src = pool
@@ -289,8 +291,10 @@ mod imp {
     fn scheme_graph_independent_dispatches(device: &Device) {
         let ctx = submission_context(&device);
 
-        let pipe_42 = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap()).unwrap();
-        let pipe_99 = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_99_SHADER).unwrap()).unwrap();
+        let pipe_42 =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_42_SHADER).unwrap()).unwrap();
+        let pipe_99 =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, FILL_99_SHADER).unwrap()).unwrap();
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let buf_a = pool
@@ -407,7 +411,8 @@ mod imp {
     fn scheme_zeros_then_dispatch_reads_zeros(device: &Device) {
         let ctx = submission_context(&device);
 
-        let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+        let copy_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let buf = pool
@@ -437,7 +442,8 @@ mod imp {
     fn scheme_write_then_dispatch_reads_uploaded_data(device: &Device) {
         let ctx = submission_context(&device);
 
-        let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+        let copy_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
         let buf = pool
@@ -468,7 +474,8 @@ mod imp {
     fn scheme_stress_zeros_then_dispatch_large(device: &Device) {
         let ctx = submission_context(&device);
 
-        let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+        let copy_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 16384;
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -498,7 +505,8 @@ mod imp {
     fn scheme_stress_many_zero_writes_many_dispatches(device: &Device) {
         let ctx = submission_context(&device);
 
-        let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+        let copy_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 1024;
         const NUM_BUFS: usize = 8;
@@ -545,7 +553,8 @@ mod imp {
     fn scheme_stress_write_then_dispatch_chain(device: &Device) {
         let ctx = submission_context(&device);
 
-        let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+        let copy_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 1024;
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -579,7 +588,8 @@ mod imp {
 
         let double_pipe =
             ComputePipeline::new(&device, &ShaderModule::from_slang(&device, DOUBLE_SHADER).unwrap()).unwrap();
-        let add_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
+        let add_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
         const N: usize = 4096;
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -620,7 +630,8 @@ mod imp {
     fn scheme_stress_rapid_submissions(device: &Device) {
         let ctx = submission_context(&device);
 
-        let add_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
+        let add_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, ADD_TEN_SHADER).unwrap()).unwrap();
 
         const N: usize = 256;
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -2479,7 +2490,8 @@ mod imp {
     fn scheme_stress_alternating_write_dispatch(device: &Device) {
         let ctx = submission_context(&device);
 
-        let copy_pipe = ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
+        let copy_pipe =
+            ComputePipeline::new(&device, &ShaderModule::from_slang(&device, COPY_SHADER).unwrap()).unwrap();
 
         const N: usize = 256;
         let mut pool = RetainedPool::new(Arc::new(device.clone()));
@@ -3019,7 +3031,8 @@ mod imp {
             for x in 0..W as usize {
                 let base = (y * W as usize + x) * 4;
                 let pixel = &output[base..base + 4];
-                let in_region = x >= RX as usize && x < (RX + RW) as usize && y >= RY as usize && y < (RY + RH) as usize;
+                let in_region =
+                    x >= RX as usize && x < (RX + RW) as usize && y >= RY as usize && y < (RY + RH) as usize;
                 if in_region {
                     assert_eq!(pixel[0], 200, "R at ({x},{y}): should be region color");
                     assert_eq!(pixel[1], 100, "G at ({x},{y}): should be region color");
@@ -4065,7 +4078,6 @@ mod imp {
 
         conclusion.exit_if_failed();
     }
-
 }
 
 fn main() {

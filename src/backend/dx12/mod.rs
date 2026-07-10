@@ -85,7 +85,9 @@ pub(crate) fn storage_uav_layout(_on_direct_queue: bool) -> windows::Win32::Grap
 }
 
 /// SRV layout tag for sampled textures (see [`storage_uav_layout`]).
-pub(crate) fn shader_resource_layout(_on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+pub(crate) fn shader_resource_layout(
+    _on_direct_queue: bool,
+) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
     windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
 }
 
@@ -101,10 +103,12 @@ pub(crate) fn texture_layout_for_command_list(
 ) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
     use windows::Win32::Graphics::Direct3D12::*;
     match stored {
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-        | D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS => D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
-        | D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE => D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS | D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS => {
+            D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
+        }
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE | D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE => {
+            D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+        }
         _ => stored,
     }
 }
@@ -478,10 +482,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             ld.process_deletion_queue_up_to(&self.state.context_fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             let fences = self.state.context_fences.read().unwrap();
-            descriptors_arc
-                .lock()
-                .unwrap()
-                .drain_ready_slot_reclamations(&fences);
+            descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
         Ok(())
     }
@@ -556,8 +557,12 @@ impl GpuBackend for Dx12Backend {
         context::create(&mut self.state, device)
     }
 
-    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
-        context::detach_for_destroy(&self.state, ctx).map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
+    fn detach_context_for_destroy(
+        &mut self,
+        ctx: ContextHandle,
+    ) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&self.state, ctx)
+            .map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(
@@ -934,15 +939,13 @@ impl GpuBackend for Dx12Backend {
         // Find the context that submitted value (or past it) and wait on its fence.
         let fence = {
             let fences = self.state.context_fences.read().unwrap();
-            fences
-                .iter()
-                .find_map(|(_, (dev, fence, seq))| {
-                    if *dev == device && seq.load(std::sync::atomic::Ordering::Relaxed) >= value {
-                        Some(fence.clone())
-                    } else {
-                        None
-                    }
-                })
+            fences.iter().find_map(|(_, (dev, fence, seq))| {
+                if *dev == device && seq.load(std::sync::atomic::Ordering::Relaxed) >= value {
+                    Some(fence.clone())
+                } else {
+                    None
+                }
+            })
         };
         if let Some(fence) = fence {
             utils::wait_for_fence(&fence, value)?;
@@ -1051,10 +1054,7 @@ impl GpuBackend for Dx12Backend {
                 dev.process_deletion_queue_up_to(&self.state.context_fences);
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
                 let fences = self.state.context_fences.read().unwrap();
-                descriptors_arc
-                    .lock()
-                    .unwrap()
-                    .drain_ready_slot_reclamations(&fences);
+                descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
             }
         }
         Ok(ok)
@@ -1337,10 +1337,7 @@ impl GpuBackend for Dx12Backend {
             ld.process_deletion_queue_up_to(&self.state.context_fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
             let fences = self.state.context_fences.read().unwrap();
-            descriptors_arc
-                .lock()
-                .unwrap()
-                .drain_ready_slot_reclamations(&fences);
+            descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
         }
     }
 
@@ -1409,11 +1406,8 @@ struct Dx12ContextDeferredDeletionFlush {
     ctx: ContextHandle,
     sc: types::SharedSubmissionContext,
     ld: types::SharedLogicalDevice,
-    context_fences: std::sync::Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<ContextHandle, types::ContextFenceEntry>,
-        >,
-    >,
+    context_fences:
+        std::sync::Arc<std::sync::RwLock<std::collections::HashMap<ContextHandle, types::ContextFenceEntry>>>,
 }
 
 impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletionFlush {
@@ -1435,9 +1429,6 @@ impl crate::backend::ContextDeferredDeletionFlush for Dx12ContextDeferredDeletio
         }
         self.ld.process_deletion_queue_up_to(&self.context_fences);
         let fences = self.context_fences.read().unwrap();
-        descriptors_arc
-            .lock()
-            .unwrap()
-            .drain_ready_slot_reclamations(&fences);
+        descriptors_arc.lock().unwrap().drain_ready_slot_reclamations(&fences);
     }
 }

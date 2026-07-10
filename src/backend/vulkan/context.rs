@@ -112,8 +112,7 @@ impl ContextDestroyHandle for VulkanContextDestroyWork {
             let wait = vk::SemaphoreWaitInfo::default()
                 .semaphores(std::slice::from_ref(&self.sc.timeline_semaphore))
                 .values(std::slice::from_ref(&self.sc.last_submitted_seq));
-            unsafe { self.ld.device.wait_semaphores(&wait, u64::MAX) }
-                .context("Vulkan context destroy wait")?;
+            unsafe { self.ld.device.wait_semaphores(&wait, u64::MAX) }.context("Vulkan context destroy wait")?;
         }
         Ok(())
     }

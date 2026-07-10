@@ -507,9 +507,7 @@ impl<T> Grant for ReadGrant<T> {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
             match self.read_kind {
                 GrantReadKind::Buffer => backend.read_readback_buffer(handle, &mut bytes),
-                GrantReadKind::Texture(layout) => {
-                    backend.read_texture_readback_staging(handle, layout, &mut bytes)
-                }
+                GrantReadKind::Texture(layout) => backend.read_texture_readback_staging(handle, layout, &mut bytes),
             }
         };
         read_result.map_err(|e| self.ctx.classify(e))?;

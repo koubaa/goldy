@@ -489,8 +489,12 @@ pub(crate) enum PendingDeletion {
         /// Bindless slots reclaimed at destroy; MTL object drop waits until pins clear.
         retained_slots: Vec<MetalSlotKey>,
     },
-    Texture { texture: MTLTexture },
-    Sampler { sampler: SamplerState },
+    Texture {
+        texture: MTLTexture,
+    },
+    Sampler {
+        sampler: SamplerState,
+    },
 }
 
 pub(crate) struct DeletionQueue {
@@ -736,10 +740,7 @@ impl LogicalDevice {
                     _ => true,
                 });
         }
-        self.descriptors
-            .lock()
-            .unwrap()
-            .drain_pending_slots_up_to(completed);
+        self.descriptors.lock().unwrap().drain_pending_slots_up_to(completed);
     }
 }
 
@@ -955,12 +956,7 @@ impl ResourceRegistry {
     /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
     ///
     /// See [`Self::release_texture_slot`] for the `barrier` semantics.
-    pub fn release_storage_image_slot(
-        &mut self,
-        local_index: u32,
-        barrier: Option<TimelineValue>,
-        slot_pinned: bool,
-    ) {
+    pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
         release_slot(
             local_index,
             barrier,

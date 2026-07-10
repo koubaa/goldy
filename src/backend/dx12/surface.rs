@@ -32,8 +32,7 @@ use super::render_commands;
 use super::texture;
 use super::types::{FrameSync, LogicalDevice, SendSyncHandle, SurfaceState, MAX_FRAMES_IN_FLIGHT};
 use super::utils::{
-    depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device,
-    execute_with_waits_and_signal_device,
+    depth_format_to_dxgi, dxgi_to_format, execute_command_lists_and_signal_device, execute_with_waits_and_signal_device,
 };
 use super::{DeviceHandle, Dx12State, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::{FrameToken, GpuCommand, RenderCommand};

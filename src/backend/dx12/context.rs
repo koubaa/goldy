@@ -101,7 +101,7 @@ pub(super) fn create(state: &mut Dx12State, device: DeviceHandle) -> Result<Cont
         .insert(id, (device, fence.clone(), std::sync::Arc::clone(&last_submitted_seq)));
     state.contexts.write().unwrap().insert(
         id,
-        std::sync::Arc::new(std::sync::Mutex::new(        Dx12SubmissionContext {
+        std::sync::Arc::new(std::sync::Mutex::new(Dx12SubmissionContext {
             device,
             fence,
             command_queue,
@@ -247,7 +247,8 @@ pub(super) struct Dx12ContextDestroyWork {
     device: DeviceHandle,
     ld: super::types::SharedLogicalDevice,
     buffers: super::types::SharedBufferTable,
-    context_fences: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
+    context_fences:
+        std::sync::Arc<std::sync::RwLock<std::collections::HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
 }
 
 impl ContextDestroyHandle for Dx12ContextDestroyWork {
@@ -299,14 +300,12 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     } = *work;
 
     let completed_after_wait = unsafe { sc.fence.GetCompletedValue() };
-    if completed_after_wait == u64::MAX {
-        if super::api_log::enabled() {
-            let hresult: i32 = match unsafe { ld.device.GetDeviceRemovedReason() } {
-                Ok(()) => 0,
-                Err(e) => e.code().0,
-            };
-            super::api_log::log_device_removed(device, hresult);
-        }
+    if completed_after_wait == u64::MAX && super::api_log::enabled() {
+        let hresult: i32 = match unsafe { ld.device.GetDeviceRemovedReason() } {
+            Ok(()) => 0,
+            Err(e) => e.code().0,
+        };
+        super::api_log::log_device_removed(device, hresult);
     }
 
     // Only now is it safe to drop the fence out of the shared lookup table: any deferred

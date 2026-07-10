@@ -5,8 +5,8 @@ use super::super::shared::DISPATCH_BATCH_STRIDE;
 use super::staging;
 use super::submit_session::{VulkanSubmitScope, VulkanSubmitView};
 use super::types::{
-    BufferState, ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable,
-    SharedComputePipelineTable, SharedPipelineTable, SlotKey,
+    BufferState, ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable, SharedComputePipelineTable,
+    SharedPipelineTable, SlotKey,
 };
 use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
@@ -43,8 +43,7 @@ fn apply_cpu_epoch_waits(view: &VulkanSubmitView<'_>, sync: Option<&SubmitSync>)
         let wait = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&sem))
             .values(std::slice::from_ref(&epoch.value));
-        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }
-            .context("cross-submit cpu wait on timeline semaphore")?;
+        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }.context("cross-submit cpu wait on timeline semaphore")?;
     }
     Ok(())
 }
@@ -2023,9 +2022,7 @@ pub(super) fn submit_graph_with_scope(
                     frame_table_base,
                 } => {
                     let pipelines_read = compute_pipelines.read().unwrap();
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p))
-                    {
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p)) {
                         crate::backend::with_layout_validation(|| {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
@@ -2062,9 +2059,7 @@ pub(super) fn submit_graph_with_scope(
                 }
                 GpuCommand::BindResourcesTyped { handles: typed_handles } => {
                     let pipelines_read = compute_pipelines.read().unwrap();
-                    if let Some(pipeline) =
-                        current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p))
-                    {
+                    if let Some(pipeline) = current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p)) {
                         crate::backend::validate_typed_push_constants(
                             typed_handles,
                             &pipeline.push_constant_categories,

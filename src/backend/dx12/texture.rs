@@ -71,10 +71,7 @@ fn access_for_layout(layout: D3D12_BARRIER_LAYOUT) -> D3D12_BARRIER_ACCESS {
     }
 }
 
-fn post_copy_texture_state(
-    is_storage: bool,
-    on_direct_queue: bool,
-) -> (D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
+fn post_copy_texture_state(is_storage: bool, on_direct_queue: bool) -> (D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT) {
     if is_storage {
         (
             D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
@@ -912,6 +909,7 @@ pub(super) fn query_texture_copy_footprint(
 }
 
 /// Record copy from a texture into a grant-readback staging buffer.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_copy_texture_to_readback(
     command_list: &ID3D12GraphicsCommandList,
     command_list7: &ID3D12GraphicsCommandList7,

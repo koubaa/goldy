@@ -61,11 +61,7 @@ pub(in crate::backend::metal) fn drain_context_deletion_queue_up_to(
 /// parked pending while work was in flight can be recycled.
 pub(in crate::backend::metal) fn drain_all_pending_slots(state: &mut MetalState) {
     for device in state.devices.values() {
-        device
-            .descriptors
-            .lock()
-            .unwrap()
-            .drain_pending_slots();
+        device.descriptors.lock().unwrap().drain_pending_slots();
     }
 }
 
@@ -329,8 +325,12 @@ impl GpuBackend for MetalBackend {
         context::create(&mut self.state, device)
     }
 
-    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
-        context::detach_for_destroy(&mut self.state, ctx).map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
+    fn detach_context_for_destroy(
+        &mut self,
+        ctx: ContextHandle,
+    ) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&mut self.state, ctx)
+            .map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(
@@ -1147,7 +1147,11 @@ impl crate::backend::ContextDeferredDeletionFlush for MetalContextDeferredDeleti
         };
         // Metal uses a single shared queue, so this context's progress is the device
         // retired value for items enqueued up to this context's last submission.
-        let device_retired = self.ld.retired_floor.load(std::sync::atomic::Ordering::Relaxed).max(ctx_signaled);
+        let device_retired = self
+            .ld
+            .retired_floor
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(ctx_signaled);
         if let Ok(mut sc) = self.sc.lock() {
             drain_context_deletion_queue_up_to(&self.ld, &mut sc.deletion_queue, ctx_signaled);
         }

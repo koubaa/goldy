@@ -170,7 +170,13 @@ impl Context {
     pub fn gpu_progress(&self) -> TimelineValue {
         let _tz = crate::tracy_zone!("context.gpu_progress");
         let _query = crate::tracy_zone!("context.gpu_progress.query");
-        self.inner.device.inner.backend.lock().unwrap().gpu_progress(self.inner.handle)
+        self.inner
+            .device
+            .inner
+            .backend
+            .lock()
+            .unwrap()
+            .gpu_progress(self.inner.handle)
     }
 
     /// Block until the timeline reaches at least `value`.
@@ -244,7 +250,13 @@ impl Context {
 
     /// Oldest timeline ticket not yet retired by the GPU, if work is still in flight.
     pub fn peek_oldest_in_flight(&self) -> Option<TimelineValue> {
-        self.inner.device.inner.backend.lock().unwrap().peek_oldest_in_flight(self.inner.handle)
+        self.inner
+            .device
+            .inner
+            .backend
+            .lock()
+            .unwrap()
+            .peek_oldest_in_flight(self.inner.handle)
     }
 
     /// The largest [`TimelineValue`] ever returned by [`submit`](Self::submit) on this context.
@@ -298,11 +310,7 @@ impl Context {
         let retired = self.device().timeline_retired();
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_pre");
-            self.inner
-                .deletion_flush
-                .as_ref()
-                .expect("deletion flush")
-                .flush();
+            self.inner.deletion_flush.as_ref().expect("deletion flush").flush();
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.reclaim");
@@ -333,11 +341,7 @@ impl Context {
                 .as_ref()
                 .expect("reclamation scope")
                 .set_epoch(None);
-            self.inner
-                .deletion_flush
-                .as_ref()
-                .expect("deletion flush")
-                .flush();
+            self.inner.deletion_flush.as_ref().expect("deletion flush").flush();
         }
     }
 

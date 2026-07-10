@@ -329,8 +329,6 @@ fn legacy_state_to_barrier(state: D3D12_RESOURCE_STATES) -> (D3D12_BARRIER_SYNC,
     } else if state == D3D12_RESOURCE_STATE_GENERIC_READ {
         // Upload-buffer implicit read — express as copy-source (valid on compute queues).
         (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_SOURCE)
-    } else if state == D3D12_RESOURCE_STATE_COMMON {
-        (D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON)
     } else {
         (D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_ACCESS_COMMON)
     }

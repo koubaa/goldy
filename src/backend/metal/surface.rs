@@ -307,15 +307,15 @@ pub(super) fn acquire(
 
     // Drain per-context deletion queue on the context's own clock (hot path),
     // then the device-level queue as the async GC safety net (see issue #190).
-        if let Some(ld) = state.devices.get(&device_handle) {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
-            }
-            let retired = super::context::device_retired(state, device_handle);
-            ld.process_deletion_queue_up_to(retired);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
+        let retired = super::context::device_retired(state, device_handle);
+        ld.process_deletion_queue_up_to(retired);
+    }
 
     Ok((image_index as SwapchainImageHandle, frame_slot as u32))
 }
@@ -557,15 +557,15 @@ pub(super) fn finish_present(
         }
     }
 
-        if let Some(ld) = state.devices.get(&device_handle) {
-            if let Some(sc_arc) = state.contexts.get(&ctx) {
-                let mut sc = sc_arc.lock().unwrap();
-                let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
-                super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
-            }
-            let retired = super::context::device_retired(state, device_handle);
-            ld.process_deletion_queue_up_to(retired);
+    if let Some(ld) = state.devices.get(&device_handle) {
+        if let Some(sc_arc) = state.contexts.get(&ctx) {
+            let mut sc = sc_arc.lock().unwrap();
+            let ctx_signaled = sc.timeline_event.as_ref().signaled_value();
+            super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
+        let retired = super::context::device_retired(state, device_handle);
+        ld.process_deletion_queue_up_to(retired);
+    }
 
     Ok(finish.present_timeline)
 }

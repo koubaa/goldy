@@ -573,7 +573,10 @@ impl GpuBackend for MockBackend {
         Ok(id)
     }
 
-    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+    fn detach_context_for_destroy(
+        &mut self,
+        ctx: ContextHandle,
+    ) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
         if let Some(state) = self.contexts.remove(&ctx) {
             let state = state.lock().unwrap();
             let retired_horizon = state.completed.max(state.last_submitted_seq);

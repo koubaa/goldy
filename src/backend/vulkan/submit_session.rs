@@ -5,7 +5,7 @@
 
 use super::compute;
 use super::types::{
-    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextMap, SharedContextFrameTable,
+    SharedBufferTable, SharedComputeFencePool, SharedComputePipelineTable, SharedContextFrameTable, SharedContextMap,
     SharedLogicalDevice, SharedPipelineTable, SharedRenderTargetTable, SharedSubmissionContext, SharedTextureTable,
     VulkanState,
 };

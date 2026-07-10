@@ -1,8 +1,8 @@
 //! Vulkan frame-table buffers and prologue (staging upload + device-local copy).
 
 use super::types::{
-    self, BufferState, LogicalDevice, SharedBufferTable, SharedContextMap, SharedContextFrameTable, SharedPipelineTable,
-    VulkanState,
+    self, BufferState, LogicalDevice, SharedBufferTable, SharedContextFrameTable, SharedContextMap,
+    SharedPipelineTable, VulkanState,
 };
 use super::utils::find_memory_type;
 use super::BufferHandle;

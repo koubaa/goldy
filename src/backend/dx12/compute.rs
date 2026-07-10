@@ -685,10 +685,7 @@ fn apply_cpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>)
     Ok(())
 }
 
-fn resolve_epoch_waits(
-    scope: &Dx12SubmitScope<'_>,
-    sync: Option<&SubmitSync>,
-) -> Result<Vec<(ID3D12Fence, u64)>> {
+fn resolve_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>) -> Result<Vec<(ID3D12Fence, u64)>> {
     apply_cpu_epoch_waits(scope, sync)?;
     let Some(s) = sync else {
         return Ok(Vec::new());
@@ -795,12 +792,8 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
         };
         (list, idx)
     } else {
-        let new_allocator: ID3D12CommandAllocator = unsafe {
-            logical_device
-                .device
-                .CreateCommandAllocator(list_type)
-        }
-        .context("Failed to create command allocator")?;
+        let new_allocator: ID3D12CommandAllocator = unsafe { logical_device.device.CreateCommandAllocator(list_type) }
+            .context("Failed to create command allocator")?;
         let new_list: ID3D12GraphicsCommandList = unsafe {
             logical_device
                 .device
@@ -836,12 +829,8 @@ fn acquire_device_direct_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Grap
             .context("Failed to reset device render command list")?;
         (slot.command_list.clone(), idx)
     } else {
-        let new_allocator: ID3D12CommandAllocator = unsafe {
-            logical_device
-                .device
-                .CreateCommandAllocator(list_type)
-        }
-        .context("Failed to create device render command allocator")?;
+        let new_allocator: ID3D12CommandAllocator = unsafe { logical_device.device.CreateCommandAllocator(list_type) }
+            .context("Failed to create device render command allocator")?;
         let new_list: ID3D12GraphicsCommandList = unsafe {
             logical_device
                 .device
@@ -1974,6 +1963,7 @@ fn execute_signal_and_finish(
 /// When `retain_key` is `Some`, the closed list is stored in the submitting
 /// context's `retained_graphs` with `on_device_queue: true` so
 /// [`try_resubmit_retained_with_scope`] can re-Execute it on the device queue.
+#[allow(clippy::too_many_arguments)]
 fn execute_signal_and_finish_device(
     scope: &Dx12SubmitScope<'_>,
     command_list: &ID3D12GraphicsCommandList,
@@ -2374,9 +2364,7 @@ pub(super) fn submit_graph_with_scope(
     let frame_table_staging = super::frame_table::extract_staging_from_graph(commands);
     let device_handle = scope.device_handle;
     let _tz = tracy_zone!("dx12.submit_graph");
-    let has_render = commands
-        .iter()
-        .any(|c| matches!(c, GraphCommand::Render { .. }));
+    let has_render = commands.iter().any(|c| matches!(c, GraphCommand::Render { .. }));
     let route_device = has_render;
     let (command_list, slot_idx, on_device_queue) = if route_device {
         let (cl, idx) = acquire_device_direct_slot(scope)?;
@@ -2769,8 +2757,7 @@ pub(super) fn try_resubmit_retained_with_scope(
         })
     };
 
-    let Some((command_list, slot_idx, on_device_queue, used_slots, _frame_table_staging)) = retained
-    else {
+    let Some((command_list, slot_idx, on_device_queue, used_slots, _frame_table_staging)) = retained else {
         return Ok(None);
     };
 
@@ -2810,12 +2797,10 @@ pub(super) fn try_resubmit_retained_with_scope(
         let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
         let fence_value =
             super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)])?;
-        if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence)
-        {
+        if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence) {
             super::utils::with_queue_lock(logical_device, || -> Result<()> {
-                unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }.context(
-                    "Failed to signal submitting context fence after device render resubmit",
-                )?;
+                unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }
+                    .context("Failed to signal submitting context fence after device render resubmit")?;
                 Ok(())
             })?;
         }
@@ -2830,11 +2815,11 @@ pub(super) fn try_resubmit_retained_with_scope(
         let stamp_ctx = scope
             .device_owner
             .context("device owner handle missing for device-queue render resubmit")?;
-        logical_device
-            .descriptors
-            .lock()
-            .unwrap()
-            .record_slot_usage(stamp_ctx, fence_value, used_slots.iter().copied());
+        logical_device.descriptors.lock().unwrap().record_slot_usage(
+            stamp_ctx,
+            fence_value,
+            used_slots.iter().copied(),
+        );
         fence_value
     } else {
         let (queue, queue_lock, prior_signal) = {
@@ -2965,13 +2950,7 @@ pub(super) fn evict_retained_pinning_row_for_context(
 }
 
 pub(super) fn evict_retained_with_scope(scope: &Dx12SubmitScope<'_>, ctx: ContextHandle, key: u64) {
-    evict_retained_on_context(
-        scope.contexts(),
-        scope.frame_table(),
-        scope.ld(),
-        ctx,
-        key,
-    );
+    evict_retained_on_context(scope.contexts(), scope.frame_table(), scope.ld(), ctx, key);
 }
 
 /// Drop the retained command list for `key`, marking its pool slot as reusable.
@@ -3124,7 +3103,10 @@ mod barrier_lowering_tests {
             D3D12_BARRIER_ACCESS_COMMON.0
         );
         assert_eq!(slot_usage_to_dx12_sync(&empty, false, true).0, D3D12_BARRIER_SYNC_ALL.0);
-        assert_eq!(slot_usage_to_dx12_sync(&empty, false, false).0, D3D12_BARRIER_SYNC_ALL.0);
+        assert_eq!(
+            slot_usage_to_dx12_sync(&empty, false, false).0,
+            D3D12_BARRIER_SYNC_ALL.0
+        );
     }
 
     // --- Sync-stage / access pairing invariant (ID 1331 / barriers.rs assert) ---

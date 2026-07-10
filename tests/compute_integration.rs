@@ -50,7 +50,6 @@ mod imp {
     "#;
 
     fn test_compute_pipeline_creation(device: &Device) {
-
         let shader = ShaderModule::from_slang(&device, DOUBLE_SHADER).expect("Failed to compile shader");
 
         let pipeline = ComputePipeline::new(&device, &shader);
@@ -71,7 +70,6 @@ mod imp {
         // Do nothing - just test pipeline creation
     }
     "#;
-
 
         let shader = ShaderModule::from_slang(&device, MINIMAL_SHADER).expect("Failed to compile shader");
 
@@ -333,7 +331,6 @@ mod imp {
     /// `Buffer::clear` (standalone, immediate) zeros the whole buffer.
     // Scheme migration: see scheme_parcel_write_zeros_full
     fn test_buffer_clear_standalone(device: &Device) {
-
         let data: Vec<u32> = vec![0xDEAD_BEEF; 64];
         let buffer = test_alloc_buffer_with_data(&device, &data, BufferKind::Scattered);
 
@@ -351,7 +348,6 @@ mod imp {
     /// `Buffer::clear` with an explicit range zeros only that slice.
     // Scheme migration: see scheme_parcel_write_zeros_partial
     fn test_buffer_clear_partial(device: &Device) {
-
         // 64 u32s = 256 bytes. Clear bytes 64–128 (elements 16–31).
         let sentinel = 0xDEAD_BEEFu32;
         let data: Vec<u32> = vec![sentinel; 64];
@@ -372,7 +368,6 @@ mod imp {
     /// `Buffer::clear` with `size = 0` clears from offset to end of buffer.
     // Scheme migration: see scheme_parcel_write_zeros_to_end
     fn test_buffer_clear_to_end(device: &Device) {
-
         // Fill with sentinel, then clear from element 32 to end (offset 128, size 0).
         let sentinel = 0xCAFE_BABEu32;
         let data: Vec<u32> = vec![sentinel; 64];
@@ -1271,7 +1266,6 @@ mod imp {
     /// On DX12 the primary resource is a DEFAULT-heap UAV (not host-visible), so
     /// `read_to_cpu` copies UAV → READBACK internally.
     fn test_cpu_readable_cpu_write_read_roundtrip(device: &Device) {
-
         const N: usize = 16;
         let initial: Vec<u32> = vec![0xABCD_1234u32; N];
 
@@ -2629,7 +2623,6 @@ mod imp {
 
         conclusion.exit_if_failed();
     }
-
 }
 
 fn main() {

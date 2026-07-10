@@ -45,11 +45,9 @@ fn slot_requirements_met(
     requirements: &[(super::ContextHandle, u64)],
     completed_values: &HashMap<super::ContextHandle, u64>,
 ) -> bool {
-    requirements.iter().all(|(ctx_id, required_seq)| {
-        completed_values
-            .get(ctx_id)
-            .is_none_or(|&v| v >= *required_seq)
-    })
+    requirements
+        .iter()
+        .all(|(ctx_id, required_seq)| completed_values.get(ctx_id).is_none_or(|&v| v >= *required_seq))
 }
 
 /// Device-shared descriptor registry.
@@ -702,7 +700,11 @@ mod registry_tests {
 
         dr.unpin_retained_slots([slot_key]);
         dr.drain_ready_slot_reclamations(&completed);
-        assert_eq!(dr.resource_registry.storage_buffer.free_count(), 1, "unpin then drain frees");
+        assert_eq!(
+            dr.resource_registry.storage_buffer.free_count(),
+            1,
+            "unpin then drain frees"
+        );
     }
 
     /// Two retained graphs sharing a slot: free only after both unpinned.
@@ -1399,14 +1401,17 @@ pub(crate) fn destroy_pending_deletion(
             sparse_teardown,
         } => {
             let retained_slots = registry.reclaim_buffer_slots(buffer_handle);
-            ld.pending_buffer_gpu_releases.lock().unwrap().push(PendingBufferGpuRelease {
-                retained_slots,
-                buffer,
-                memory,
-                staging_buffer,
-                staging_memory,
-                sparse_teardown,
-            });
+            ld.pending_buffer_gpu_releases
+                .lock()
+                .unwrap()
+                .push(PendingBufferGpuRelease {
+                    retained_slots,
+                    buffer,
+                    memory,
+                    staging_buffer,
+                    staging_memory,
+                    sparse_teardown,
+                });
         }
         PendingDeletion::BufferView { buffer_handle } => {
             registry.reclaim_buffer_slots(buffer_handle);
@@ -1571,10 +1576,7 @@ impl LogicalDevice {
     ///
     /// Locks the deletion queue and descriptor registry internally; takes `&self` so this
     /// can be called through an `Arc<LogicalDevice>` (Phase 5a).
-    pub(crate) fn process_deletion_queue_up_to(
-        &self,
-        completed_values: &HashMap<super::ContextHandle, u64>,
-    ) {
+    pub(crate) fn process_deletion_queue_up_to(&self, completed_values: &HashMap<super::ContextHandle, u64>) {
         let drained = self.drain_deletion_queue_ready(completed_values);
         if !drained.is_empty() {
             let descriptors_arc = Arc::clone(&self.descriptors);
@@ -1592,10 +1594,7 @@ impl LogicalDevice {
         }
     }
 
-    pub(crate) fn take_ready_buffer_gpu_releases(
-        &self,
-        registry: &DescriptorRegistry,
-    ) -> Vec<PendingBufferGpuRelease> {
+    pub(crate) fn take_ready_buffer_gpu_releases(&self, registry: &DescriptorRegistry) -> Vec<PendingBufferGpuRelease> {
         let mut pending = self.pending_buffer_gpu_releases.lock().unwrap();
         let mut ready = Vec::new();
         let mut i = 0;

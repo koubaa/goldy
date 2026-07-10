@@ -332,12 +332,10 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                 .read()
                 .unwrap()
                 .get(&ctx)
-                .map(|sc| {
-                    unsafe {
-                        ld.device
-                            .get_semaphore_counter_value(sc.lock().unwrap().timeline_semaphore)
-                            .unwrap_or(0)
-                    }
+                .map(|sc| unsafe {
+                    ld.device
+                        .get_semaphore_counter_value(sc.lock().unwrap().timeline_semaphore)
+                        .unwrap_or(0)
                 })
                 .unwrap_or(0);
             let drain_to = value.min(ctx_completed);
@@ -428,7 +426,8 @@ impl GpuBackend for VulkanBackend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.device_wait_idle_locked().map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
+        ld.device_wait_idle_locked()
+            .map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
         Ok(())
     }
 
@@ -436,8 +435,12 @@ impl GpuBackend for VulkanBackend {
         context::create(&mut self.state, device)
     }
 
-    fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
-        context::detach_for_destroy(&self.state, ctx).map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
+    fn detach_context_for_destroy(
+        &mut self,
+        ctx: ContextHandle,
+    ) -> Option<Box<dyn crate::backend::ContextDestroyHandle>> {
+        context::detach_for_destroy(&self.state, ctx)
+            .map(|work| Box::new(work) as Box<dyn crate::backend::ContextDestroyHandle>)
     }
 
     fn clone_context_deletion_flush(
@@ -1306,9 +1309,7 @@ impl GpuBackend for VulkanBackend {
             Ok(()) => {
                 compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
-                    let ctx_completed = unsafe {
-                        ld.device.get_semaphore_counter_value(sem).unwrap_or(0)
-                    };
+                    let ctx_completed = unsafe { ld.device.get_semaphore_counter_value(sem).unwrap_or(0) };
                     let drain_to = value.min(ctx_completed);
                     let ctx_batch: Vec<_> = self
                         .state

@@ -201,9 +201,11 @@ pub(super) fn execute_with_waits_and_signal_device(
     let queue_lock = Arc::clone(&logical_device.queue_lock);
     let _guard = queue_lock.lock().unwrap();
     let api_log_on = super::api_log::enabled();
-    let queue_id = api_log_on
-        .then(|| super::api_log::com_identity(&logical_device.command_queue))
-        .unwrap_or(0);
+    let queue_id = if api_log_on {
+        super::api_log::com_identity(&logical_device.command_queue)
+    } else {
+        0
+    };
     for (producer_fence, value) in waits {
         if api_log_on {
             super::api_log::log_queue_wait(queue_id, super::api_log::com_identity(producer_fence), *value);
@@ -266,7 +268,11 @@ pub(super) fn execute_with_waits_and_signal_context(
 ) -> Result<u64> {
     let _guard = queue_lock.lock().unwrap();
     let api_log_on = super::api_log::enabled();
-    let queue_id = api_log_on.then(|| super::api_log::com_identity(queue)).unwrap_or(0);
+    let queue_id = if api_log_on {
+        super::api_log::com_identity(queue)
+    } else {
+        0
+    };
     for (producer_fence, value) in waits {
         if api_log_on {
             super::api_log::log_queue_wait(queue_id, super::api_log::com_identity(producer_fence), *value);

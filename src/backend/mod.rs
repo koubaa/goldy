@@ -742,6 +742,12 @@ pub(crate) fn run_context_destroy(handle: Box<dyn ContextDestroyHandle>) {
 }
 
 /// Like [`destroy_context`] for an already-unlocked concrete backend (tests, `destroy_device`).
+#[cfg(any(
+    test,
+    feature = "vulkan",
+    all(feature = "dx12", target_os = "windows"),
+    all(feature = "metal", target_os = "macos"),
+))]
 pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHandle) {
     if let Some(handle) = backend.detach_context_for_destroy(ctx) {
         run_context_destroy(handle);
@@ -756,7 +762,6 @@ pub(crate) fn destroy_context(backend: &std::sync::Arc<std::sync::Mutex<Box<dyn 
         run_context_destroy(handle);
     }
 }
-
 
 /// Per-context deferred GPU deletion flush cloned out of the backend so
 /// [`Context::boundary_crossed`](crate::Context::boundary_crossed) does not need the global
@@ -965,7 +970,6 @@ pub(crate) trait GpuBackendTimelineWait {
     ) -> Result<Option<Box<dyn TimelineBlockingWait>>>;
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
-
 }
 
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
