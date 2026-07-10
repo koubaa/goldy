@@ -595,8 +595,12 @@ pub(crate) struct RetainedGraph {
     /// The closed (but not reset) command list.  Cloned from the pool slot so both
     /// the pool and this struct hold a reference-counted pointer to the same COM object.
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,
-    /// Index into [`Dx12SubmissionContext::compute_allocator_pool`] for the backing allocator slot.
+    /// Index into the backing allocator pool — [`Dx12SubmissionContext::compute_allocator_pool`]
+    /// when [`Self::on_device_queue`] is false, else [`LogicalDevice::device_direct_pool`].
     pub slot_idx: usize,
+    /// When true, the list was recorded for the device DIRECT queue and must be
+    /// re-executed there (not on the context COMPUTE queue).
+    pub on_device_queue: bool,
     /// Bindless heap indices baked into this command list (for slot retirement on resubmit).
     pub used_slots: Vec<DeferredSlot>,
     /// Snapshot of staging at record time (prologue copy offsets are baked into the CB).
@@ -1011,6 +1015,9 @@ pub(crate) struct DeviceDirectSlot {
     pub allocator: Direct3D12::ID3D12CommandAllocator,
     pub command_list: Direct3D12::ID3D12GraphicsCommandList,
     pub fence_value: u64,
+    /// When `true`, this slot holds a retained command list that must not be reset
+    /// until the caller explicitly releases it via `evict_retained`.
+    pub retained: bool,
 }
 
 /// A logical D3D12 device with associated resources.
@@ -1078,8 +1085,10 @@ pub(crate) struct LogicalDevice {
     pub queue_lock: Arc<Mutex<()>>,
     /// Last device-queue submission seq (signals [`Self::fence`]).
     pub device_last_submitted_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Lazy pool for render-partition recording on the device DIRECT queue (compute style).
-    pub device_direct_slot: std::sync::Mutex<Option<DeviceDirectSlot>>,
+    /// Pool for render-partition recording on the device DIRECT queue (compute style).
+    /// Retained render lists pin a slot until `evict_retained` (same contract as the
+    /// per-context compute allocator pool).
+    pub device_direct_pool: std::sync::Mutex<Vec<DeviceDirectSlot>>,
     /// Frame table for legacy `render_to_target` (no submission context).
     pub legacy_frame_table: Mutex<Option<SharedContextFrameTable>>,
 }

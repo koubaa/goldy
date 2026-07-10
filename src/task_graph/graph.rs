@@ -1120,7 +1120,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         }
 
         // Try to resubmit from the retained cache if the fingerprint matches.
-        if cached_key == Some(part_fp) && !(separate && has_render) {
+        if cached_key == Some(part_fp) {
             let _tz = crate::tracy_zone!("goldy.resubmit.partition");
             if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, sync.as_ref())? {
                 last_tv = tv;
@@ -1150,12 +1150,8 @@ pub(crate) fn submit_resolved_ir_and_retain(
         };
         let _tz = crate::tracy_zone!("goldy.submit_partition.record");
         ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-        if separate && has_render {
-            last_tv = backend_submit_graph(session, ctx, &graph_cmds, sync.as_ref())?;
-        } else {
-            last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync.as_ref())?;
-            cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
-        }
+        last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync.as_ref())?;
+        cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
         record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
         result.records += 1;
         boundary.record(separate, has_render, last_tv);
@@ -1482,7 +1478,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             }
 
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
-            if cached_key == Some(part_fp) && !(separate && has_render) {
+            if cached_key == Some(part_fp) {
                 let _tz = crate::tracy_zone!("goldy.resubmit.partition");
                 if let Some(tv) = backend_try_resubmit_retained(session, ctx, part_fp, sync.as_ref())? {
                     last_tv = tv;
@@ -1501,12 +1497,8 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
             ensure_partition_retired_before_rerecord(context, cache.as_ref().unwrap().partition_last_tv[part_idx])?;
-            if separate && has_render {
-                last_tv = backend_submit_graph(session, ctx, &graph_cmds, sync.as_ref())?;
-            } else {
-                last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync.as_ref())?;
-                cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
-            }
+            last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, sync.as_ref())?;
+            cache.as_mut().unwrap().partition_retention_keys[part_idx] = Some(part_fp);
             record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
             result.records += 1;
             boundary.record(separate, has_render, last_tv);

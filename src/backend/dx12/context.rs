@@ -331,11 +331,15 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     {
         let mut registry = ld.descriptors.lock().unwrap();
         for (_, old) in sc.retained_graphs.drain() {
-            registry.unpin_retained_slots(old.used_slots);
+            registry.unpin_retained_slots(old.used_slots.clone());
             if let Some(row) = old.frame_table_row {
                 super::frame_table::unpin_row(&sc.frame_table, row);
             }
-            if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
+            if old.on_device_queue {
+                if let Some(slot) = ld.device_direct_pool.lock().unwrap().get_mut(old.slot_idx) {
+                    slot.retained = false;
+                }
+            } else if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
                 slot.retained = false;
             }
         }

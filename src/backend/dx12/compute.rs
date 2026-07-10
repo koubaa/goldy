@@ -818,37 +818,60 @@ fn acquire_allocator_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12Graphics
     Ok((cmd_list, slot_idx))
 }
 
-/// Acquire the device DIRECT command list used for render partitions under compute style.
-fn acquire_device_direct_slot(scope: &Dx12SubmitScope<'_>) -> Result<ID3D12GraphicsCommandList> {
+/// Acquire (or create) a device DIRECT allocator slot for render partitions.
+///
+/// Returns `(command_list, slot_idx)`. Retained slots are skipped until
+/// `evict_retained` clears their `retained` bit — same contract as
+/// [`acquire_allocator_slot`].
+fn acquire_device_direct_slot(scope: &Dx12SubmitScope<'_>) -> Result<(ID3D12GraphicsCommandList, usize)> {
     let logical_device = scope.ld();
     let completed = unsafe { logical_device.fence.GetCompletedValue() };
-    let mut slot_guard = logical_device.device_direct_slot.lock().unwrap();
-    if let Some(slot) = slot_guard.as_mut() {
-        if completed >= slot.fence_value {
-            unsafe { slot.allocator.Reset() }.context("Failed to reset device render allocator")?;
-            unsafe { slot.command_list.Reset(&slot.allocator, None) }
-                .context("Failed to reset device render command list")?;
-            return Ok(slot.command_list.clone());
+    let list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    let mut pool = logical_device.device_direct_pool.lock().unwrap();
+    let slot_idx = pool.iter().position(|s| completed >= s.fence_value && !s.retained);
+    let (cmd_list, slot_idx) = if let Some(idx) = slot_idx {
+        let slot = &mut pool[idx];
+        unsafe { slot.allocator.Reset() }.context("Failed to reset device render allocator")?;
+        unsafe { slot.command_list.Reset(&slot.allocator, None) }
+            .context("Failed to reset device render command list")?;
+        (slot.command_list.clone(), idx)
+    } else {
+        let new_allocator: ID3D12CommandAllocator = unsafe {
+            logical_device
+                .device
+                .CreateCommandAllocator(list_type)
         }
+        .context("Failed to create device render command allocator")?;
+        let new_list: ID3D12GraphicsCommandList = unsafe {
+            logical_device
+                .device
+                .CreateCommandList(0, list_type, &new_allocator, None)
+        }
+        .context("Failed to create device render command list")?;
+        pool.push(super::types::DeviceDirectSlot {
+            allocator: new_allocator,
+            command_list: new_list.clone(),
+            fence_value: 0,
+            retained: false,
+        });
+        (new_list, pool.len() - 1)
+    };
+    Ok((cmd_list, slot_idx))
+}
+
+/// Clear the `retained` bit on the allocator slot backing `old`.
+fn clear_retained_allocator_flag(
+    sc: &mut types::Dx12SubmissionContext,
+    ld: &types::LogicalDevice,
+    old: &types::RetainedGraph,
+) {
+    if old.on_device_queue {
+        if let Some(slot) = ld.device_direct_pool.lock().unwrap().get_mut(old.slot_idx) {
+            slot.retained = false;
+        }
+    } else if let Some(slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
+        slot.retained = false;
     }
-    let allocator: ID3D12CommandAllocator = unsafe {
-        logical_device
-            .device
-            .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-    }
-    .context("Failed to create device render command allocator")?;
-    let command_list: ID3D12GraphicsCommandList = unsafe {
-        logical_device
-            .device
-            .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
-    }
-    .context("Failed to create device render command list")?;
-    *slot_guard = Some(super::types::DeviceDirectSlot {
-        allocator,
-        command_list: command_list.clone(),
-        fence_value: 0,
-    });
-    Ok(command_list)
 }
 
 /// Mutable state threaded through the per-command recording loop.
@@ -1872,13 +1895,11 @@ fn execute_signal_and_finish(
         }
         if let Some(key) = retain_key {
             if let Some(old) = sc.retained_graphs.remove(&key) {
-                unpin_slots = old.used_slots;
+                unpin_slots = old.used_slots.clone();
                 if let Some(row) = old.frame_table_row {
                     super::frame_table::unpin_row(scope.frame_table(), row);
                 }
-                if let Some(old_slot) = sc.compute_allocator_pool.get_mut(old.slot_idx) {
-                    old_slot.retained = false;
-                }
+                clear_retained_allocator_flag(&mut sc, logical_device, &old);
             }
             let pin_row_index = frame_table_staging.is_some().then_some(frame_table_row).flatten();
             if let Some(row) = pin_row_index {
@@ -1896,6 +1917,7 @@ fn execute_signal_and_finish(
                     types::RetainedGraph {
                         command_list: cl,
                         slot_idx,
+                        on_device_queue: false,
                         used_slots,
                         frame_table_staging,
                         frame_table_row: pin_row_index,
@@ -1948,13 +1970,21 @@ fn execute_signal_and_finish(
 }
 
 /// Close, execute on the device DIRECT queue, and signal [`LogicalDevice::fence`].
+///
+/// When `retain_key` is `Some`, the closed list is stored in the submitting
+/// context's `retained_graphs` with `on_device_queue: true` so
+/// [`try_resubmit_retained_with_scope`] can re-Execute it on the device queue.
 fn execute_signal_and_finish_device(
     scope: &Dx12SubmitScope<'_>,
     command_list: &ID3D12GraphicsCommandList,
     device_handle: DeviceHandle,
     submit_ctx: ContextHandle,
     stamp_ctx: ContextHandle,
+    slot_idx: usize,
+    retain_key: Option<u64>,
     used_slots: Vec<super::types::DeferredSlot>,
+    frame_table_staging: Option<std::sync::Arc<[u32]>>,
+    frame_table_row: Option<u32>,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     if let Err(e) = unsafe { command_list.Close() } {
@@ -1994,15 +2024,55 @@ fn execute_signal_and_finish_device(
         })?;
     }
 
-    scope
-        .sc
-        .lock()
-        .unwrap()
-        .last_submitted_seq
-        .store(fence_value, std::sync::atomic::Ordering::Relaxed);
-
-    if let Some(slot) = logical_device.device_direct_slot.lock().unwrap().as_mut() {
-        slot.fence_value = fence_value;
+    {
+        let mut sc = scope.sc.lock().unwrap();
+        let mut unpin_slots: Vec<super::types::DeferredSlot> = Vec::new();
+        let mut pin_slots: Vec<super::types::DeferredSlot> = Vec::new();
+        if let Some(slot) = logical_device.device_direct_pool.lock().unwrap().get_mut(slot_idx) {
+            slot.fence_value = fence_value;
+        }
+        if let Some(key) = retain_key {
+            if let Some(old) = sc.retained_graphs.remove(&key) {
+                unpin_slots = old.used_slots.clone();
+                if let Some(row) = old.frame_table_row {
+                    super::frame_table::unpin_row(scope.frame_table(), row);
+                }
+                clear_retained_allocator_flag(&mut sc, logical_device, &old);
+            }
+            let pin_row_index = frame_table_staging.is_some().then_some(frame_table_row).flatten();
+            if let Some(row) = pin_row_index {
+                super::frame_table::pin_row(scope.frame_table(), row)?;
+            }
+            let cl = {
+                let pool = logical_device.device_direct_pool.lock().unwrap();
+                pool.get(slot_idx).map(|s| s.command_list.clone())
+            };
+            if let Some(cl) = cl {
+                if let Some(slot) = logical_device.device_direct_pool.lock().unwrap().get_mut(slot_idx) {
+                    slot.retained = true;
+                }
+                pin_slots = used_slots.clone();
+                sc.retained_graphs.insert(
+                    key,
+                    types::RetainedGraph {
+                        command_list: cl,
+                        slot_idx,
+                        on_device_queue: true,
+                        used_slots: used_slots.clone(),
+                        frame_table_staging,
+                        frame_table_row: pin_row_index,
+                    },
+                );
+            }
+        }
+        sc.last_submitted_seq
+            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        drop(sc);
+        if !unpin_slots.is_empty() || !pin_slots.is_empty() {
+            let mut registry = scope.ld().descriptors.lock().unwrap();
+            registry.unpin_retained_slots(unpin_slots);
+            registry.pin_retained_slots(pin_slots);
+        }
     }
 
     scope
@@ -2309,7 +2379,8 @@ pub(super) fn submit_graph_with_scope(
         .any(|c| matches!(c, GraphCommand::Render { .. }));
     let route_device = has_render;
     let (command_list, slot_idx, on_device_queue) = if route_device {
-        (acquire_device_direct_slot(scope)?, 0usize, true)
+        let (cl, idx) = acquire_device_direct_slot(scope)?;
+        (cl, idx, true)
     } else {
         let (cl, idx) = acquire_allocator_slot(scope)?;
         (cl, idx, false)
@@ -2613,7 +2684,11 @@ pub(super) fn submit_graph_with_scope(
             device_handle,
             ctx,
             stamp_ctx,
+            slot_idx,
+            retain_key,
             used_slots,
+            frame_table_staging,
+            frame_table_row,
             sync,
         )?
     } else {
@@ -2663,11 +2738,13 @@ pub(super) fn submit_graph(
 /// Re-execute a previously retained command list without re-recording.
 ///
 /// Calls `ExecuteCommandLists` on the closed list stored by a prior
-/// `submit_graph(..., Some(key))` call, then signals the device fence.
+/// `submit_graph(..., Some(key))` call, then signals the appropriate fence.
 /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
 ///
-/// The retained slot's allocator is not reset while in flight (`acquire_allocator_slot`
-/// skips retained slots). Unlike Vulkan's `SIMULTANEOUS_USE`, DXGI does not allow
+/// Compute-retained lists re-execute on the context COMPUTE queue; device-queue
+/// render lists re-execute on [`LogicalDevice::command_queue`]. The retained
+/// slot's allocator is not reset while in flight (`acquire_*_slot` skips
+/// retained slots). Unlike Vulkan's `SIMULTANEOUS_USE`, DXGI does not allow
 /// re-executing a closed list while a prior execution from the same slot is still
 /// in flight — we retire the previous signal on the CPU before re-execute.
 pub(super) fn try_resubmit_retained_with_scope(
@@ -2685,13 +2762,15 @@ pub(super) fn try_resubmit_retained_with_scope(
             (
                 r.command_list.clone(),
                 r.slot_idx,
+                r.on_device_queue,
                 r.used_slots.clone(),
                 r.frame_table_staging.clone(),
             )
         })
     };
 
-    let Some((command_list, slot_idx, used_slots, _frame_table_staging)) = retained else {
+    let Some((command_list, slot_idx, on_device_queue, used_slots, _frame_table_staging)) = retained
+    else {
         return Ok(None);
     };
 
@@ -2709,59 +2788,108 @@ pub(super) fn try_resubmit_retained_with_scope(
             .clone()
     };
     let logical_device = scope.ld();
-    let (queue, queue_lock, prior_signal) = {
-        let sc = scope.sc.lock().unwrap();
-        let prior_signal = sc
-            .compute_allocator_pool
+
+    let fence_value = if on_device_queue {
+        let prior_signal = logical_device
+            .device_direct_pool
+            .lock()
+            .unwrap()
             .get(slot_idx)
             .map(|s| s.fence_value)
             .unwrap_or(0);
-        (
-            sc.command_queue.clone(),
-            std::sync::Arc::clone(&sc.queue_lock),
-            prior_signal,
-        )
-    };
-    if prior_signal > 0 {
-        let completed = unsafe { ctx_fence.GetCompletedValue() };
-        if completed < prior_signal {
-            super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
+        if prior_signal > 0 {
+            let completed = unsafe { logical_device.fence.GetCompletedValue() };
+            if completed < prior_signal {
+                super::utils::wait_for_fence(&logical_device.fence, prior_signal)?;
+            }
         }
-    }
-    let fence_value = {
         let waits = {
             let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
             resolve_epoch_waits(scope, sync)?
         };
         let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
-        super::utils::execute_with_waits_and_signal_context(
+        let fence_value =
+            super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)])?;
+        if super::api_log::com_identity(&ctx_fence) != super::api_log::com_identity(&logical_device.fence)
+        {
+            super::utils::with_queue_lock(logical_device, || -> Result<()> {
+                unsafe { logical_device.command_queue.Signal(&ctx_fence, fence_value) }.context(
+                    "Failed to signal submitting context fence after device render resubmit",
+                )?;
+                Ok(())
+            })?;
+        }
+        if let Some(slot) = logical_device.device_direct_pool.lock().unwrap().get_mut(slot_idx) {
+            slot.fence_value = fence_value;
+        }
+        {
+            let sc = scope.sc.lock().unwrap();
+            sc.last_submitted_seq
+                .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        }
+        let stamp_ctx = scope
+            .device_owner
+            .context("device owner handle missing for device-queue render resubmit")?;
+        logical_device
+            .descriptors
+            .lock()
+            .unwrap()
+            .record_slot_usage(stamp_ctx, fence_value, used_slots.iter().copied());
+        fence_value
+    } else {
+        let (queue, queue_lock, prior_signal) = {
+            let sc = scope.sc.lock().unwrap();
+            let prior_signal = sc
+                .compute_allocator_pool
+                .get(slot_idx)
+                .map(|s| s.fence_value)
+                .unwrap_or(0);
+            (
+                sc.command_queue.clone(),
+                std::sync::Arc::clone(&sc.queue_lock),
+                prior_signal,
+            )
+        };
+        if prior_signal > 0 {
+            let completed = unsafe { ctx_fence.GetCompletedValue() };
+            if completed < prior_signal {
+                super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
+            }
+        }
+        let waits = {
+            let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
+            resolve_epoch_waits(scope, sync)?
+        };
+        let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
+        let fence_value = super::utils::execute_with_waits_and_signal_context(
             logical_device,
             &queue,
             &queue_lock,
             &waits,
             &ctx_fence,
             &[Some(cmd_list)],
-        )?
-    };
+        )?;
 
-    {
-        let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
-        logical_device
-            .descriptors
-            .lock()
-            .unwrap()
-            .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
-    }
-
-    {
-        let _tz_book = tracy_zone!("dx12.resubmit_retained.bookkeeping");
-        let mut sc = scope.sc.lock().unwrap();
-        if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
-            slot.fence_value = fence_value;
+        {
+            let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
+            logical_device
+                .descriptors
+                .lock()
+                .unwrap()
+                .record_slot_usage(ctx, fence_value, used_slots.iter().copied());
         }
-        sc.last_submitted_seq
-            .store(fence_value, std::sync::atomic::Ordering::Relaxed);
-    }
+
+        {
+            let _tz_book = tracy_zone!("dx12.resubmit_retained.bookkeeping");
+            let mut sc = scope.sc.lock().unwrap();
+            if let Some(slot) = sc.compute_allocator_pool.get_mut(slot_idx) {
+                slot.fence_value = fence_value;
+            }
+            sc.last_submitted_seq
+                .store(fence_value, std::sync::atomic::Ordering::Relaxed);
+        }
+        fence_value
+    };
 
     {
         let fences = scope.context_fences.read().unwrap();
@@ -2801,19 +2929,13 @@ fn evict_retained_on_context(
             .descriptors
             .lock()
             .unwrap()
-            .unpin_retained_slots(old.used_slots);
+            .unpin_retained_slots(old.used_slots.clone());
         if let Some(row) = old.frame_table_row {
             super::frame_table::unpin_row(frame_table, row);
         }
         if let Some(sc_arc) = contexts.read().unwrap().get(&ctx) {
-            if let Some(slot) = sc_arc
-                .lock()
-                .unwrap()
-                .compute_allocator_pool
-                .get_mut(old.slot_idx)
-            {
-                slot.retained = false;
-            }
+            let mut sc = sc_arc.lock().unwrap();
+            clear_retained_allocator_flag(&mut sc, descriptors, &old);
         }
     }
 }
