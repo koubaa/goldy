@@ -503,17 +503,16 @@ impl<T> Grant for ReadGrant<T> {
         let byte_size = usize::try_from(self.byte_size)
             .map_err(|_| GoldyError::Backend(anyhow::anyhow!("grant readback byte size exceeds address space")))?;
         let mut bytes = vec![0u8; byte_size];
-        {
+        let read_result = {
             let backend = self.ctx.device().inner.backend.lock().unwrap();
             match self.read_kind {
-                GrantReadKind::Buffer => backend
-                    .read_readback_buffer(handle, &mut bytes)
-                    .map_err(|e| self.ctx.classify(e))?,
-                GrantReadKind::Texture(layout) => backend
-                    .read_texture_readback_staging(handle, layout, &mut bytes)
-                    .map_err(|e| self.ctx.classify(e))?,
+                GrantReadKind::Buffer => backend.read_readback_buffer(handle, &mut bytes),
+                GrantReadKind::Texture(layout) => {
+                    backend.read_texture_readback_staging(handle, layout, &mut bytes)
+                }
             }
-        }
+        };
+        read_result.map_err(|e| self.ctx.classify(e))?;
         Ok(Loan {
             bytes,
             handle,
@@ -1279,10 +1278,11 @@ impl Scheme {
         }
 
         let tv_copy = {
-            let mut backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend
-                .submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
-                .map_err(|e| self.ctx.classify(e))?
+            let submit_result = {
+                let mut backend = self.ctx.device().inner.backend.lock().unwrap();
+                backend.submit_standalone(self.ctx.backend_handle(), &copy_cmds, None)
+            };
+            submit_result.map_err(|e| self.ctx.classify(e))?
         };
         self.ctx.advance_high_water_timeline(tv_copy);
 
@@ -1609,10 +1609,11 @@ impl Scheme {
             )));
         }
         let layout = {
-            let backend = self.ctx.device().inner.backend.lock().unwrap();
-            backend
-                .query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
-                .map_err(|e| self.ctx.classify(e))?
+            let query_result = {
+                let backend = self.ctx.device().inner.backend.lock().unwrap();
+                backend.query_texture_copy_footprint(self.ctx.device().inner.handle, width, height, format)
+            };
+            query_result.map_err(|e| self.ctx.classify(e))?
         };
         let ir_grant_id = self.next_grant_id;
         self.next_grant_id += 1;

@@ -1695,8 +1695,13 @@ fn record_gpu_command(
                     texture_post_copy_layout(false, ctx.on_direct_queue),
                 )
             };
-            let mut post_barriers = vec![
-                barriers::texture_barrier_full(
+            // Restore the RT to RENDER_TARGET only on a DIRECT list. CopyRenderTarget is
+            // often emitted in a compute-only partition after the render pass; COMPUTE
+            // lists reject RENDER_TARGET access/layout (debug layer ID 1332). Leaving the
+            // RT in COPY_SOURCE is fine — the next DIRECT render pass transitions it.
+            let mut post_barriers = Vec::with_capacity(2);
+            if ctx.on_direct_queue {
+                post_barriers.push(barriers::texture_barrier_full(
                     &src_res,
                     D3D12_BARRIER_SYNC_COPY,
                     D3D12_BARRIER_SYNC_RENDER_TARGET,
@@ -1704,17 +1709,17 @@ fn record_gpu_command(
                     D3D12_BARRIER_ACCESS_RENDER_TARGET,
                     D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                     D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-                ),
-                barriers::texture_barrier_full(
-                    &dst_res,
-                    D3D12_BARRIER_SYNC_COPY,
-                    D3D12_BARRIER_SYNC_COMPUTE_SHADING,
-                    D3D12_BARRIER_ACCESS_COPY_DEST,
-                    dst_post_state.0,
-                    D3D12_BARRIER_LAYOUT_COPY_DEST,
-                    dst_post_state.1,
-                ),
-            ];
+                ));
+            }
+            post_barriers.push(barriers::texture_barrier_full(
+                &dst_res,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+                D3D12_BARRIER_ACCESS_COPY_DEST,
+                dst_post_state.0,
+                D3D12_BARRIER_LAYOUT_COPY_DEST,
+                dst_post_state.1,
+            ));
             unsafe { barriers::barrier_textures(cl7, &post_barriers) };
             unsafe { barriers::drop_texture_barriers(&mut post_barriers) };
 
@@ -2276,7 +2281,8 @@ pub(super) fn submit(
     commands: &[GpuCommand],
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    submit_with_scope(&scope_from_state(state, ctx)?, ctx, commands, sync)
+    let scope = scope_from_state(state, ctx)?;
+    submit_with_scope(&scope, ctx, commands, sync)
 }
 
 /// Submit mixed compute + render graph commands in a single command list.

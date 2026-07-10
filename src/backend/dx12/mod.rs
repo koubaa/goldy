@@ -76,24 +76,36 @@ pub(crate) fn env_force_warp() -> bool {
 
 /// UAV layout tag for storage textures.
 ///
-/// Context compute queues use the queue-agnostic UAV layout; work recorded on the
-/// device DIRECT queue (render partitions) uses the direct-queue-specific tag.
-pub(crate) fn storage_uav_layout(on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
-    use windows::Win32::Graphics::Direct3D12::*;
-    if on_direct_queue {
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
-    } else {
-        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
-    }
+/// Always the queue-agnostic tag. Textures are shared across context COMPUTE lists and
+/// the device DIRECT queue; `DIRECT_QUEUE_*` / `COMPUTE_QUEUE_*` layouts are illegal as
+/// `LayoutBefore` on the other queue type, and remapping the enum without a matching
+/// transition fails the debug layer's layout tracker.
+pub(crate) fn storage_uav_layout(_on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+    windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS
 }
 
 /// SRV layout tag for sampled textures (see [`storage_uav_layout`]).
-pub(crate) fn shader_resource_layout(on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+pub(crate) fn shader_resource_layout(_on_direct_queue: bool) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
+    windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+}
+
+/// Normalize a stored [`TextureState::last_layout`] for the queue recording the barrier.
+///
+/// Legacy / init paths may still leave queue-specific tags in `last_layout`. Map those to
+/// the queue-agnostic equivalents so COMPUTE and DIRECT lists can both record barriers.
+/// Prefer storing agnostic layouts going forward ([`storage_uav_layout`] /
+/// [`shader_resource_layout`]).
+pub(crate) fn texture_layout_for_command_list(
+    stored: windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT,
+    _on_direct_queue: bool,
+) -> windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT {
     use windows::Win32::Graphics::Direct3D12::*;
-    if on_direct_queue {
+    match stored {
+        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS
+        | D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS => D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
         D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE
-    } else {
-        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+        | D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE => D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+        _ => stored,
     }
 }
 

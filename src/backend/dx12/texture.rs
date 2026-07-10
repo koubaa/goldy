@@ -113,6 +113,8 @@ pub(super) fn init_storage_texture_uav_layout(
     .context("Failed to create init barrier command list")?;
     let init_cmd7: ID3D12GraphicsCommandList7 = init_cmd.cast().context("ID3D12GraphicsCommandList7")?;
 
+    // Queue-agnostic UAV layout: textures are later used from context COMPUTE lists.
+    let after_layout = D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
     let b = barriers::texture_barrier_full(
         resource,
         D3D12_BARRIER_SYNC_NONE,
@@ -120,7 +122,7 @@ pub(super) fn init_storage_texture_uav_layout(
         D3D12_BARRIER_ACCESS_NO_ACCESS,
         D3D12_BARRIER_ACCESS_NO_ACCESS,
         last_layout,
-        D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS,
+        after_layout,
     );
     unsafe {
         barriers::barrier_textures(&init_cmd7, &[b]);
@@ -132,7 +134,7 @@ pub(super) fn init_storage_texture_uav_layout(
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
     super::utils::wait_for_fence(&logical_device.fence, fence_value)?;
 
-    Ok(D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS)
+    Ok(after_layout)
 }
 
 /// Create a texture.
@@ -600,6 +602,7 @@ pub(super) fn record_staged_texture_upload(
         .get(&upload.texture_handle)
         .context("record_staged_texture_upload: invalid texture")?;
     let layout_before = upload.layout_before;
+    let layout_before_barrier = super::texture_layout_for_command_list(layout_before, on_direct_queue);
     let is_storage = texture.is_storage;
     let (post_access, after_layout) = post_copy_texture_state(is_storage, on_direct_queue);
 
@@ -609,7 +612,7 @@ pub(super) fn record_staged_texture_upload(
         D3D12_BARRIER_SYNC_COPY,
         access_for_layout(layout_before),
         D3D12_BARRIER_ACCESS_COPY_DEST,
-        layout_before,
+        layout_before_barrier,
         D3D12_BARRIER_LAYOUT_COPY_DEST,
     )];
     unsafe { barriers::barrier_textures(command_list7, &b_to_copy) };
@@ -766,11 +769,13 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
             .push(i);
     }
 
-    let after_layout = D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE;
+    // Queue-agnostic: this DIRECT list may hand the texture to a context COMPUTE list next.
+    let after_layout = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
 
     for tex_handle in &texture_order {
         let indices = &groups[tex_handle];
         let layout_before = copies[indices[0]].layout_before;
+        let layout_before_barrier = super::texture_layout_for_command_list(layout_before, true);
         let resource = {
             let textures_read = state.textures.read().unwrap();
             textures_read
@@ -787,7 +792,7 @@ pub(super) fn execute_staged_uploads_sync(state: &mut Dx12State, uploads: Vec<St
             D3D12_BARRIER_SYNC_COPY,
             access_for_layout(layout_before),
             D3D12_BARRIER_ACCESS_COPY_DEST,
-            layout_before,
+            layout_before_barrier,
             D3D12_BARRIER_LAYOUT_COPY_DEST,
         )];
         unsafe { barriers::barrier_textures(&command_list7, &b_to_copy) };
@@ -934,13 +939,15 @@ pub(super) fn record_copy_texture_to_readback(
         )
     };
 
+    let layout_before_barrier = super::texture_layout_for_command_list(layout_before, on_direct_queue);
+
     let b_to_src = barriers::texture_barrier_full(
         &src_resource,
         D3D12_BARRIER_SYNC_ALL,
         D3D12_BARRIER_SYNC_COPY,
         access_for_layout(layout_before),
         D3D12_BARRIER_ACCESS_COPY_SOURCE,
-        layout_before,
+        layout_before_barrier,
         D3D12_BARRIER_LAYOUT_COPY_SOURCE,
     );
     unsafe { barriers::barrier_textures(command_list7, &[b_to_src]) };
