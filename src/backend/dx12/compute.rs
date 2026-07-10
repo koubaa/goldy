@@ -666,12 +666,21 @@ fn apply_cpu_epoch_waits(scope: &Dx12SubmitScope<'_>, sync: Option<&SubmitSync>)
     if s.cpu_waits.is_empty() {
         return Ok(());
     }
-    let fences = scope.context_fences.read().unwrap();
-    for epoch in &s.cpu_waits {
-        let (_, producer_fence, _) = fences
-            .get(&epoch.context)
-            .with_context(|| format!("cross-submit cpu wait: unknown producer context {:?}", epoch.context))?;
-        super::utils::wait_for_fence(producer_fence, epoch.value)?;
+    // Clone producer fences then drop the map lock before blocking. Holding
+    // `context_fences` across `wait_for_fence` stalls create/destroy (write lock).
+    let pending: Vec<(ID3D12Fence, u64, ContextHandle)> = {
+        let fences = scope.context_fences.read().unwrap();
+        let mut out = Vec::with_capacity(s.cpu_waits.len());
+        for epoch in &s.cpu_waits {
+            let (_, producer_fence, _) = fences
+                .get(&epoch.context)
+                .with_context(|| format!("cross-submit cpu wait: unknown producer context {:?}", epoch.context))?;
+            out.push((producer_fence.clone(), epoch.value, epoch.context));
+        }
+        out
+    };
+    for (producer_fence, value, _) in pending {
+        super::utils::wait_for_fence(&producer_fence, value)?;
     }
     Ok(())
 }
@@ -2624,8 +2633,10 @@ pub(super) fn submit_graph(
 /// `submit_graph(..., Some(key))` call, then signals the device fence.
 /// Returns `Ok(Some(tv))` on success, `Ok(None)` if no retained list matches `key`.
 ///
-/// No CPU wait is required: the retained slot's allocator is not reset while in flight
-/// (`acquire_allocator_slot` skips retained slots), and re-executing a closed list is legal.
+/// The retained slot's allocator is not reset while in flight (`acquire_allocator_slot`
+/// skips retained slots). Unlike Vulkan's `SIMULTANEOUS_USE`, DXGI does not allow
+/// re-executing a closed list while a prior execution from the same slot is still
+/// in flight — we retire the previous signal on the CPU before re-execute.
 pub(super) fn try_resubmit_retained_with_scope(
     scope: &Dx12SubmitScope<'_>,
     ctx: ContextHandle,
@@ -2665,10 +2676,25 @@ pub(super) fn try_resubmit_retained_with_scope(
             .clone()
     };
     let logical_device = scope.ld();
-    let (queue, queue_lock) = {
+    let (queue, queue_lock, prior_signal) = {
         let sc = scope.sc.lock().unwrap();
-        (sc.command_queue.clone(), std::sync::Arc::clone(&sc.queue_lock))
+        let prior_signal = sc
+            .compute_allocator_pool
+            .get(slot_idx)
+            .map(|s| s.fence_value)
+            .unwrap_or(0);
+        (
+            sc.command_queue.clone(),
+            std::sync::Arc::clone(&sc.queue_lock),
+            prior_signal,
+        )
     };
+    if prior_signal > 0 {
+        let completed = unsafe { ctx_fence.GetCompletedValue() };
+        if completed < prior_signal {
+            super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
+        }
+    }
     let fence_value = {
         let waits = {
             let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
