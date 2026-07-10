@@ -3318,7 +3318,6 @@ impl<'a> RenderPassBuilder<'a> {
             label,
             target,
             bindings,
-            push_constant_handles: _,
             ..
         } = self;
         graph.ir.nodes.push(TaskNode {
