@@ -860,7 +860,10 @@ pub(crate) fn submit_resolved_ir(
         let _tz = crate::tracy_zone!("goldy.submit_partition");
         let waves = cache.as_ref().unwrap().schedule.waves[range.clone()].to_vec();
         let has_render_part = partition_waves_have_render(ir, &waves);
-        let base_sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &waves);
+        // Plan hazards against the queue that will actually execute this partition
+        // (device graphics owner for DX12 render), not the recording context.
+        let stamp_ctx = partition_stamp_context(separate, has_render_part, ctx, device_owner);
+        let base_sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, stamp_ctx, &waves);
         let sync = merge_queue_boundary_waits(
             base_sync,
             separate,
@@ -894,7 +897,6 @@ pub(crate) fn submit_resolved_ir(
         }
         boundary.record(separate, has_render_part, last_tv);
         if let Some(state) = submit_state {
-            let stamp_ctx = partition_stamp_context(separate, has_render_part, ctx, device_owner);
             state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
         }
     }
@@ -1074,9 +1076,12 @@ pub(crate) fn submit_resolved_ir_and_retain(
         let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
         let can_retain = partition_waves_can_retain(ir, &waves);
         let has_render = partition_waves_have_render(ir, &waves);
+        // Plan hazards against the queue that will actually execute this partition
+        // (device graphics owner for DX12 render), not the recording context.
+        let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
         let base_sync = {
             let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-            cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &waves)
+            cross_sync_for_ir(&mut cross_scratch, submit_state, ir, stamp_ctx, &waves)
         };
         let sync = merge_queue_boundary_waits(
             base_sync,
@@ -1100,7 +1105,6 @@ pub(crate) fn submit_resolved_ir_and_retain(
             record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
             boundary.record(separate, has_render, last_tv);
             if let Some(state) = submit_state {
-                let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
                 state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
             }
             part_idx += 1;
@@ -1116,7 +1120,6 @@ pub(crate) fn submit_resolved_ir_and_retain(
                 record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
                 if let Some(state) = submit_state {
-                    let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
                     state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
                 }
                 part_idx += 1;
@@ -1138,7 +1141,6 @@ pub(crate) fn submit_resolved_ir_and_retain(
         result.records += 1;
         boundary.record(separate, has_render, last_tv);
         if let Some(state) = submit_state {
-            let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
             state.apply_partition_reference_stamps(stamp_ctx, &context.device().inner, ir, &waves, last_tv);
         }
         part_idx += 1;
@@ -1324,9 +1326,12 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let can_retain = partition_waves_can_retain(ir, &waves);
             let has_render = partition_waves_have_render(ir, &waves);
             let has_present = analysis::partition_waves_have_present(ir, &waves);
+            // Plan hazards against the queue that will actually execute this partition
+            // (device graphics owner for DX12 render), not the recording context.
+            let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
             let base_sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &waves)
+                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, stamp_ctx, &waves)
             };
             let sync = merge_queue_boundary_waits(
                 base_sync,
@@ -1337,7 +1342,6 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 boundary.last_compute_tv,
                 boundary.last_render_tv,
             );
-            let stamp_ctx = || partition_stamp_context(separate, has_render, ctx, device_owner);
 
             if !can_retain {
                 let cache_entry = cache.as_ref().unwrap();
@@ -1357,7 +1361,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 last_tv = backend_submit_standalone(session, ctx, &cmds, sync.as_ref())?;
                 record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx(), ir, &waves, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                 part_idx += 1;
                 continue;
             }
@@ -1387,7 +1391,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     last_tv = backend_submit_standalone(session, ctx, &cmds, sync.as_ref())?;
                     record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx(), ir, &waves, last_tv);
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                     part_idx += 1;
                     continue;
                 }
@@ -1417,7 +1421,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                         result.resubmit_hits += 1;
                         record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                         boundary.record(separate, has_render, last_tv);
-                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx(), ir, &waves, last_tv);
+                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                         part_idx += 1;
                         continue;
                     }
@@ -1448,7 +1452,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 }
                 result.records += 1;
                 boundary.record(separate, has_render, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx(), ir, &waves, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                 part_idx += 1;
                 continue;
             }
@@ -1461,7 +1465,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                     result.resubmit_hits += 1;
                     record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx(), ir, &waves, last_tv);
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
                     part_idx += 1;
                     continue;
                 }
@@ -1478,7 +1482,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             record_partition_last_tv(cache.as_mut().unwrap(), part_idx, last_tv);
             result.records += 1;
             boundary.record(separate, has_render, last_tv);
-            apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx(), ir, &waves, last_tv);
+            apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
             part_idx += 1;
         }
     }
