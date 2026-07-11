@@ -17,7 +17,7 @@ use crate::parcel::Parcel;
 use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
 use crate::swapchain_pool::{PresentLease, SwapchainPool};
-use crate::task_graph::cross_submit::ResourceKey;
+use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
 use crate::task_graph::IrSubmitState;
 use crate::task_graph::ResolvedPresentSlot;
 use crate::task_graph::ResourceId;
@@ -323,7 +323,7 @@ struct PresentGrantInfo {
 fn present_easement_source_stamps(
     ir: &GraphIR,
     lease_id: u32,
-    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Arc<crate::parcel::ParcelStamp>> {
     let dst = ResourceId::PresentLease(lease_id);
     let mut out = Vec::new();
@@ -361,7 +361,7 @@ fn present_easement_source_stamps(
 fn claim_present_easement_promises(
     ir: &GraphIR,
     present_grants: &[PresentGrantInfo],
-    resource_stamps: &std::collections::HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) -> Vec<Mutex<Option<PromiseResolver>>> {
     let mut resolvers = Vec::with_capacity(present_grants.len());
     for grant in present_grants {
@@ -3744,7 +3744,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let stamp = scheme.submit_state.resource_stamps().get(&key).expect("texture stamp");
         let sync = stamp.sync.lock().unwrap();
         assert!(
-            sync.foreign_reads.get(&ctx_handle).is_some(),
+            sync.foreign_reads.get(ctx_handle).is_some(),
             "submit gate must fold resolved present promise into foreign_reads"
         );
         drop(sync);
@@ -3823,9 +3823,10 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
     /// (present easement is an exercised-claim / foreign read, not a scheduled `last_reads`).
     #[test]
     fn out_image_fine_write_and_present_copy_share_ledger_identity() {
-        use crate::task_graph::cross_submit::{compute_cross_submit_sync, net_access_per_resource, ResourceKey};
+        use crate::task_graph::cross_submit::{
+            compute_cross_submit_sync, net_access_per_resource, ResourceKey, ResourceKeyMap,
+        };
         use crate::task_graph::ResourceId;
-        use std::collections::HashMap;
 
         let device = mock_device();
         let (ctx, spool) = mock_swapchain_pool(&device);
@@ -3892,13 +3893,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             let sync = registered.sync.lock().unwrap();
             let read_tv = sync
                 .last_reads
-                .get(&ctx_handle)
-                .copied()
+                .get(ctx_handle)
                 .expect("present-copy read must be on the ledger after submit");
             let write_tv = sync
                 .last_write
-                .get(&ctx_handle)
-                .copied()
+                .get(ctx_handle)
                 .expect("fine-write must be on the ledger after submit");
             assert!(
                 read_tv <= frame1_tv && write_tv <= frame1_tv,
@@ -3912,9 +3911,9 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         let _sub2 = scheme.submit().expect("submit frame 2");
         let present_read_tv = {
             let sync = registered.sync.lock().unwrap();
-            *sync
+            sync
                 .foreign_reads
-                .get(&ctx_handle)
+                .get(ctx_handle)
                 .expect("foreign_reads after present fold")
         };
         assert!(
@@ -3923,7 +3922,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         );
 
         // Loop-carried WAR (present read frame N, fine write frame N+1) must plan a live wait.
-        let mut write_only = HashMap::new();
+        let mut write_only = ResourceKeyMap::default();
         write_only.insert(
             key,
             net_access_per_resource(&scheme.ir)[&key], // reads+writes in IR; override for next-frame write admission
@@ -3931,7 +3930,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
         write_only.get_mut(&key).unwrap().reads = false;
         let ledger = {
             let sync = registered.sync.lock().unwrap().clone();
-            let mut ledger = crate::task_graph::cross_submit::LedgerSnapshot::new();
+            let mut ledger = crate::task_graph::cross_submit::LedgerSnapshot::default();
             ledger.insert(key, crate::task_graph::cross_submit::LedgerEntry { sync });
             ledger
         };

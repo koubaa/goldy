@@ -166,7 +166,7 @@ impl ParcelStamp {
         }
         let device = ctx.device();
         let mut waiting = None;
-        for (&c, &tv) in &merged {
+        for (c, tv) in merged.iter() {
             let progress = device
                 .context_gpu_progress(c)
                 .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
@@ -340,7 +340,7 @@ impl Parcel {
 
     /// Last referencing timeline for a single context, if any.
     pub fn last_referenced_on(&self, ctx: ContextHandle) -> Option<TimelineValue> {
-        self.stamp.merged_references().get(&ctx).copied()
+        self.stamp.merged_references().get(ctx)
     }
 
     /// Reuse-gate state for this parcel on `ctx`, including outstanding timeline promises.
@@ -630,15 +630,8 @@ impl Buffer {
     pub fn last_referenced(&self) -> ReferenceTable {
         let mut merged = ReferenceTable::new();
         for unit in &self.units {
-            for (ctx, tv) in unit.last_referenced() {
-                merged
-                    .entry(ctx)
-                    .and_modify(|e| {
-                        if tv > *e {
-                            *e = tv;
-                        }
-                    })
-                    .or_insert(tv);
+            for (ctx, tv) in unit.last_referenced().iter() {
+                crate::timeline::mark_reference(&mut merged, ctx, tv);
             }
         }
         merged
@@ -1198,7 +1191,7 @@ mod tests {
         assert_eq!(parcel.settle(&ctx), Settle::Waiting(25));
         assert!(stamp.pending.lock().unwrap().is_empty());
         let sync = stamp.sync.lock().unwrap();
-        assert_eq!(sync.foreign_reads.get(&ctx_handle), Some(&25));
+        assert_eq!(sync.foreign_reads.get(ctx_handle), Some(25));
         assert!(sync.last_reads.is_empty());
     }
 

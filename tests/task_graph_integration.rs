@@ -542,7 +542,7 @@ fn write_parcel_then_dispatch_reads_uploaded_data() {
 
     let refs = parcel.last_referenced();
     assert_eq!(refs.len(), 1, "bind_parcel should stamp at submit");
-    assert_eq!(*refs.values().next().unwrap(), tv);
+    assert_eq!(refs.values().next().unwrap(), tv);
 }
 
 // ---------------------------------------------------------------------------

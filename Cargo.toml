@@ -37,6 +37,7 @@ tracy-client = { version = "0.18", default-features = false, optional = true }
 
 # Utilities
 bitflags = "2.6"
+rustc-hash = "2"
 bytemuck = { version = "1.21", features = ["derive"] }
 # Optional: `update-screenshots` binary only
 image = { version = "0.25", optional = true }
