@@ -3,7 +3,7 @@
 //! Handles creation, destruction, rendering, and readback of off-screen render targets.
 
 use super::types::{LogicalDevice, RenderTargetState, SharedRenderTargetTable};
-use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk};
+use super::utils::{depth_aspect_mask, depth_format_to_vk, format_to_vk, with_buffer_sharing, with_image_sharing};
 use super::{DeviceHandle, PipelineHandle, RenderTargetHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, TextureFormat};
@@ -50,21 +50,24 @@ pub(super) fn create(
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Create render target image (GPU only - no staging yet)
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(format_to_vk(format))
-        .extent(vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let qf = logical_device.concurrent_queue_families();
+    let image_info = with_image_sharing(
+        vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format_to_vk(format))
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+            .initial_layout(vk::ImageLayout::UNDEFINED),
+        qf.as_ref(),
+    );
 
     let image = unsafe { logical_device.device.create_image(&image_info, None) }
         .context("Failed to create render target image")?;
@@ -162,21 +165,24 @@ pub(super) fn create_with_depth(
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
 
     // Create color render target image
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(format_to_vk(color_format))
-        .extent(vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let qf = logical_device.concurrent_queue_families();
+    let image_info = with_image_sharing(
+        vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format_to_vk(color_format))
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+            .initial_layout(vk::ImageLayout::UNDEFINED),
+        qf.as_ref(),
+    );
 
     let image = unsafe { logical_device.device.create_image(&image_info, None) }
         .context("Failed to create render target image")?;
@@ -219,21 +225,23 @@ pub(super) fn create_with_depth(
     let (depth_image, depth_memory, depth_view) = if let Some(df) = depth_format {
         let vk_depth_format = depth_format_to_vk(df);
 
-        let depth_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(vk_depth_format)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let depth_info = with_image_sharing(
+            vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk_depth_format)
+                .extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            qf.as_ref(),
+        );
 
         let d_image = unsafe { logical_device.device.create_image(&depth_info, None) }
             .context("Failed to create depth buffer image")?;
@@ -686,10 +694,13 @@ pub(super) fn read_to_cpu(
         let logical_device = devices.get(&device_handle).unwrap();
         let buffer_size = expected_size as u64;
 
-        let staging_info = vk::BufferCreateInfo::default()
-            .size(buffer_size)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let qf = logical_device.concurrent_queue_families();
+        let staging_info = with_buffer_sharing(
+            vk::BufferCreateInfo::default()
+                .size(buffer_size)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+            qf.as_ref(),
+        );
 
         let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_info, None) }
             .context("Failed to create staging buffer")?;

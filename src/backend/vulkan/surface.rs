@@ -50,7 +50,7 @@
 use super::types::{
     self, FrameSync, LogicalDevice, SharedTextureTable, SurfaceState, TextureState, MAX_FRAMES_IN_FLIGHT,
 };
-use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type};
+use super::utils::{depth_aspect_mask, depth_format_to_vk, find_memory_type, with_image_sharing};
 use super::{DeviceHandle, PipelineHandle, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use crate::backend::RenderCommand;
 use crate::types::{Color, DepthFormat, TextureFormat};
@@ -1785,29 +1785,28 @@ fn ensure_scratch_texture_slot(
 
     let (image, memory) = {
         let ld = state.devices.get(&device_handle).context("Device invalid")?;
-        let cross_family = ld.compute_queue_family != ld.queue_family;
-        let families = cross_family.then_some([ld.queue_family, ld.compute_queue_family]);
-        let mut image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-        if let Some(ref family_indices) = families {
-            image_info = image_info
-                .sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(family_indices);
-        } else {
-            image_info = image_info.sharing_mode(vk::SharingMode::EXCLUSIVE);
-        }
+        let qf = ld.concurrent_queue_families();
+        let image_info = with_image_sharing(
+            vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(format)
+                .extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(
+                    vk::ImageUsageFlags::STORAGE
+                        | vk::ImageUsageFlags::TRANSFER_SRC
+                        | vk::ImageUsageFlags::TRANSFER_DST,
+                )
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            qf.as_ref(),
+        );
 
         let img =
             unsafe { ld.device.create_image(&image_info, None) }.context("Failed to create scratch texture image")?;

@@ -916,6 +916,20 @@ pub(crate) struct RetainedVkCb {
 }
 
 impl LogicalDevice {
+    /// Graphics + compute family indices for [`vk::SharingMode::CONCURRENT`], or
+    /// `None` when both use the same family (EXCLUSIVE is fine).
+    ///
+    /// Cross-family resources must be CONCURRENT (or use ownership-transfer barriers).
+    /// Goldy uses CONCURRENT so timeline waits alone order access between context
+    /// compute queues and the device graphics/present queue.
+    pub(crate) fn concurrent_queue_families(&self) -> Option<[u32; 2]> {
+        if self.compute_queue_family != self.queue_family {
+            Some([self.queue_family, self.compute_queue_family])
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn register_active_compute_queue_lock(&self, lock: Arc<Mutex<()>>) {
         self.active_context_queue_locks.lock().unwrap().push(lock);
     }

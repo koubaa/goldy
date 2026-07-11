@@ -2,7 +2,7 @@
 
 use super::sparse;
 use super::types::{self, BufferState, SharedBufferTable};
-use super::utils::find_memory_type;
+use super::utils::{find_memory_type, with_buffer_sharing};
 use super::{BufferHandle, DeviceHandle};
 use crate::backend::BufferKind;
 use crate::types::BufferFlags;
@@ -123,10 +123,11 @@ pub(super) fn create(
 
     let bindless_descriptor_set = logical_device.bindless_descriptor_set;
 
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(allocation_size)
-        .usage(vk_usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = logical_device.concurrent_queue_families();
+    let buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default().size(allocation_size).usage(vk_usage),
+        qf.as_ref(),
+    );
 
     let buffer =
         unsafe { logical_device.device.create_buffer(&buffer_info, None) }.context("Failed to create buffer")?;
@@ -311,11 +312,14 @@ pub(super) fn create_sparse_with_capacity(
         vk_usage |= vk::BufferUsageFlags::INDIRECT_BUFFER;
     }
 
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(allocation_size)
-        .usage(vk_usage)
-        .flags(vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = ld.concurrent_queue_families();
+    let buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(allocation_size)
+            .usage(vk_usage)
+            .flags(vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY),
+        qf.as_ref(),
+    );
 
     let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }.context("Failed to create sparse buffer")?;
 
@@ -827,10 +831,11 @@ fn allocate_vk_buffer_memory(
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
     };
 
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(vk_usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = logical_device.concurrent_queue_families();
+    let buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default().size(size).usage(vk_usage),
+        qf.as_ref(),
+    );
 
     let buffer = unsafe { logical_device.device.create_buffer(&buffer_info, None) }
         .context("Failed to create buffer (resize)")?;
@@ -889,10 +894,11 @@ fn submit_resize_transfer(
 
     let (zero_staging, zero_mem) = if need_zero {
         let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC;
-        let staging_info = vk::BufferCreateInfo::default()
-            .size(CHUNK)
-            .usage(staging_usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let qf = device.concurrent_queue_families();
+        let staging_info = with_buffer_sharing(
+            vk::BufferCreateInfo::default().size(CHUNK).usage(staging_usage),
+            qf.as_ref(),
+        );
         let zb = unsafe { device.device.create_buffer(&staging_info, None) }.context("resize: zero staging buffer")?;
         let req = unsafe { device.device.get_buffer_memory_requirements(zb) };
         let mt = find_memory_type(
@@ -1429,10 +1435,11 @@ pub(super) fn ensure_staging(
     let device = devices.get(&device_handle).context("Buffer's device is invalid")?;
 
     let staging_usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
-    let staging_info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(staging_usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = device.concurrent_queue_families();
+    let staging_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default().size(size).usage(staging_usage),
+        qf.as_ref(),
+    );
 
     let stg_buf =
         unsafe { device.device.create_buffer(&staging_info, None) }.context("Failed to create staging buffer")?;
@@ -1780,10 +1787,13 @@ pub(super) fn alloc_readback_buffer(
     size: u64,
 ) -> Result<BufferHandle> {
     let logical_device = devices.get(&device_handle).context("Invalid device handle")?;
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(vk::BufferUsageFlags::TRANSFER_DST)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = logical_device.concurrent_queue_families();
+    let buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_DST),
+        qf.as_ref(),
+    );
     let buffer = unsafe { logical_device.device.create_buffer(&buffer_info, None) }
         .context("Failed to create readback buffer")?;
     let mem_requirements = unsafe { logical_device.device.get_buffer_memory_requirements(buffer) };

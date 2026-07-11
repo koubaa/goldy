@@ -4,7 +4,7 @@ use super::types::{
     self, BufferState, LogicalDevice, SharedBufferTable, SharedContextFrameTable, SharedContextMap,
     SharedPipelineTable, VulkanState,
 };
-use super::utils::find_memory_type;
+use super::utils::{find_memory_type, with_buffer_sharing};
 use super::BufferHandle;
 use crate::backend::GpuCommand;
 use crate::frame_table::{
@@ -228,10 +228,13 @@ fn create_upload_table_buffer(
     ld: &LogicalDevice,
 ) -> Result<(vk::Buffer, vk::DeviceMemory, usize)> {
     let size = FRAME_TABLE_STAGING_BYTES.max(256);
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = ld.concurrent_queue_families();
+    let buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+        qf.as_ref(),
+    );
 
     let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }.context("frame table staging create_buffer")?;
 
@@ -275,10 +278,11 @@ fn create_scattered_u32_buffer_registered(
     let vk_usage =
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
 
-    let buffer_info = vk::BufferCreateInfo::default()
-        .size(allocation_size)
-        .usage(vk_usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = ld.concurrent_queue_families();
+    let buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default().size(allocation_size).usage(vk_usage),
+        qf.as_ref(),
+    );
 
     let buffer = unsafe { ld.device.create_buffer(&buffer_info, None) }.context("frame table buffer create_buffer")?;
 
