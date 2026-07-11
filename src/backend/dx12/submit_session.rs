@@ -196,7 +196,9 @@ impl Dx12SubmitSession {
             .iter()
             .map(|(handle, device)| (*handle, Arc::clone(device)))
             .collect();
-        let use_global_buffer_barriers = ld.adapter_id == super::WARP_ADAPTER_ID;
+        // WARP used to force global ALL/COMMON barriers (enhanced-barrier tracker bugs).
+        // Disabled after frame-table row reservation fix; re-enable if WARP regresses.
+        let use_global_buffer_barriers = false;
         let device_owner_handle = state.device_owner_handles.get(&device_handle).copied();
         Ok(Arc::new(Self {
             ctx,

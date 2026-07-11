@@ -747,7 +747,7 @@ pub(super) fn scope_from_state(state: &Dx12State, ctx: ContextHandle) -> Result<
     );
     let device_handle = sc.lock().unwrap().device;
     let record = record_state_from_backend(state, ctx, device_handle)?;
-    let use_global_buffer_barriers = record.ld.adapter_id == super::WARP_ADAPTER_ID;
+    let use_global_buffer_barriers = false;
     let device_owner = state.device_owner_handles.get(&device_handle).copied();
     Ok(Dx12SubmitScope {
         ctx,
