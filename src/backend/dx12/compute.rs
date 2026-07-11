@@ -30,6 +30,22 @@ fn warp_full_global_barrier() -> D3D12_GLOBAL_BARRIER {
     }
 }
 
+/// Post-record tail barrier for compute/graph submits. WARP must not name UAV access.
+fn compute_submit_tail_barrier(use_global_buffer_barriers: bool) -> D3D12_GLOBAL_BARRIER {
+    if use_global_buffer_barriers {
+        warp_full_global_barrier()
+    } else {
+        D3D12_GLOBAL_BARRIER {
+            SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
+            SyncAfter: D3D12_BARRIER_SYNC_ALL,
+            AccessBefore: D3D12_BARRIER_ACCESS(
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0,
+            ),
+            AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
+        }
+    }
+}
+
 fn buffer_stride_for_bindless_index(
     buffers: &std::collections::HashMap<super::BufferHandle, types::BufferState>,
     device_handle: DeviceHandle,
@@ -1817,6 +1833,9 @@ fn execute_signal_and_finish(
     );
 
     if let Err(e) = unsafe { command_list.Close() } {
+        if let Some(row) = frame_table_row {
+            super::frame_table::record_submission(scope.frame_table(), row, 0);
+        }
         let diag = scope
             .devices()
             .get(&device_handle)
@@ -1845,15 +1864,26 @@ fn execute_signal_and_finish(
     let fence_value = {
         let _tz = tracy_zone!("dx12.execute_and_signal");
         let waits = resolve_epoch_waits(scope, sync)?;
-        super::utils::execute_with_waits_and_signal_context(
+        match super::utils::execute_with_waits_and_signal_context(
             logical_device,
             &queue,
             &queue_lock,
             &waits,
             &ctx_fence,
             &[Some(cmd_list)],
-        )?
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(row) = frame_table_row {
+                    super::frame_table::record_submission(scope.frame_table(), row, 0);
+                }
+                return Err(e);
+            }
+        }
     };
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(scope.frame_table(), row, fence_value);
+    }
 
     scope
         .ld()
@@ -1978,6 +2008,9 @@ fn execute_signal_and_finish_device(
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     if let Err(e) = unsafe { command_list.Close() } {
+        if let Some(row) = frame_table_row {
+            super::frame_table::record_submission(scope.frame_table(), row, 0);
+        }
         let diag = scope
             .devices()
             .get(&device_handle)
@@ -1993,8 +2026,19 @@ fn execute_signal_and_finish_device(
     let fence_value = {
         let _tz = tracy_zone!("dx12.execute_and_signal_device");
         let waits = resolve_epoch_waits(scope, sync)?;
-        super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)])?
+        match super::utils::execute_with_waits_and_signal_device(logical_device, &waits, &[Some(cmd_list)]) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(row) = frame_table_row {
+                    super::frame_table::record_submission(scope.frame_table(), row, 0);
+                }
+                return Err(e);
+            }
+        }
     };
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(scope.frame_table(), row, fence_value);
+    }
 
     // Device-queue render submits share the device timeline counter but must also publish
     // the value on the submitting context's fence — `Context::wait_until` blocks there.
@@ -2259,6 +2303,7 @@ pub(super) fn submit_with_scope(
         prof
     };
 
+    let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
     let (belt_idx_final, pending_deletions, frame_table_row) = {
         let _tz_cmds = tracy_zone!("dx12.submit.record_commands");
         let mut cmd_ctx = CmdCtx {
@@ -2278,22 +2323,20 @@ pub(super) fn submit_with_scope(
         };
         for cmd in &commands {
             record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, cmd)?;
+            if let Some(row) = cmd_ctx.frame_table_row {
+                row_guard.set(row);
+            }
         }
         debug_assert_eq!(
             cmd_ctx.texture_upload_idx,
             staged_texture_uploads.len(),
             "WriteTexture command count mismatch vs staging pre-pass"
         );
-        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, cmd_ctx.frame_table_row)
+        (cmd_ctx.belt_idx, cmd_ctx.pending_deletions, row_guard.take())
     };
 
     // Tail barrier: make UAV and copy writes visible to subsequent operations.
-    let tail = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0),
-        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-    };
+    let tail = compute_submit_tail_barrier(use_global_buffer_barriers);
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
@@ -2533,6 +2576,7 @@ pub(super) fn submit_graph_with_scope(
     };
 
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
+    let mut row_guard = super::frame_table::RowReservation::new(scope.frame_table());
     let (belt_idx_final, pending_deletions, frame_table_row);
     {
         let _tz_cmds = tracy_zone!("dx12.submit_graph.record_commands");
@@ -2560,6 +2604,9 @@ pub(super) fn submit_graph_with_scope(
                         frame_table_prologue_in_cb = true;
                     }
                     record_gpu_command(scope, device_handle, ctx, &mut cmd_ctx, gpu_cmd)?;
+                    if let Some(row) = cmd_ctx.frame_table_row {
+                        row_guard.set(row);
+                    }
                 }
                 GraphCommand::Render {
                     target,
@@ -2603,6 +2650,7 @@ pub(super) fn submit_graph_with_scope(
                     )?;
                     if let Some(row) = prologue_row {
                         cmd_ctx.frame_table_row = Some(row);
+                        row_guard.set(row);
                     }
                     frame_table_prologue_in_cb |= touched;
                     {
@@ -2636,15 +2684,10 @@ pub(super) fn submit_graph_with_scope(
         );
         belt_idx_final = cmd_ctx.belt_idx;
         pending_deletions = cmd_ctx.pending_deletions;
-        frame_table_row = cmd_ctx.frame_table_row;
+        frame_table_row = row_guard.take();
     }
 
-    let tail = D3D12_GLOBAL_BARRIER {
-        SyncBefore: D3D12_BARRIER_SYNC(D3D12_BARRIER_SYNC_COMPUTE_SHADING.0 | D3D12_BARRIER_SYNC_COPY.0),
-        SyncAfter: D3D12_BARRIER_SYNC_ALL,
-        AccessBefore: D3D12_BARRIER_ACCESS(D3D12_BARRIER_ACCESS_UNORDERED_ACCESS.0 | D3D12_BARRIER_ACCESS_COPY_DEST.0),
-        AccessAfter: D3D12_BARRIER_ACCESS_COMMON,
-    };
+    let tail = compute_submit_tail_barrier(use_global_buffer_barriers);
     unsafe { barriers::barrier_globals(&command_list7, &[tail]) };
 
     if let Some(ref prof) = dx_gpu_profile {
@@ -2753,11 +2796,14 @@ pub(super) fn try_resubmit_retained_with_scope(
                 r.on_device_queue,
                 r.used_slots.clone(),
                 r.frame_table_staging.clone(),
+                r.frame_table_row,
             )
         })
     };
 
-    let Some((command_list, slot_idx, on_device_queue, used_slots, _frame_table_staging)) = retained else {
+    let Some((command_list, slot_idx, on_device_queue, used_slots, _frame_table_staging, frame_table_row)) =
+        retained
+    else {
         return Ok(None);
     };
 
@@ -2875,6 +2921,10 @@ pub(super) fn try_resubmit_retained_with_scope(
         }
         fence_value
     };
+
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(scope.frame_table(), row, fence_value);
+    }
 
     {
         let fences = scope.context_fences.read().unwrap();

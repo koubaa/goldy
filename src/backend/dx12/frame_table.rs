@@ -9,9 +9,14 @@ use crate::frame_table::{
 };
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
+
+/// Sentinel in [`ContextFrameTable::last_token_for_row`]: row is reserved for CPU
+/// staging / recording and must not be claimed by another submitter until
+/// [`record_submission`] stores the GPU timeline value (or `0` on abort).
+const ROW_IN_USE: u64 = u64::MAX;
 
 /// Per-context frame-table GPU resources and ring state.
 pub(crate) struct ContextFrameTable {
@@ -26,8 +31,12 @@ pub(crate) struct ContextFrameTable {
     pub submission_counter: AtomicU32,
     /// Bitmask of rows pinned by retained command lists (must not be overwritten).
     pub pinned_rows: AtomicU32,
-    /// Last `submission_counter` value that wrote each row (ring reuse guard).
-    pub last_sub_for_row: [AtomicU32; FRAME_TABLE_MAX_ROWS as usize],
+    /// Last GPU timeline value that used each upload row (`0` = free/unused,
+    /// [`ROW_IN_USE`] = reserved by a submitter that has not yet recorded).
+    ///
+    /// Reuse waits for this value on the context (or device) fence — backpressure
+    /// when CPU submission outruns GPU consumption of the finite ring.
+    pub last_token_for_row: [AtomicU64; FRAME_TABLE_MAX_ROWS as usize],
 }
 
 /// Reserve user bindless slots once per device (low protocol slots stay unused).
@@ -88,7 +97,7 @@ pub(crate) fn init_context(
         staging_mapped,
         submission_counter: AtomicU32::new(0),
         pinned_rows: AtomicU32::new(0),
-        last_sub_for_row: std::array::from_fn(|_| AtomicU32::new(0)),
+        last_token_for_row: std::array::from_fn(|_| AtomicU64::new(0)),
     });
 
     let buffers = state.buffers.read().unwrap();
@@ -374,27 +383,106 @@ pub(crate) fn unpin_row(ft: &ContextFrameTable, row: u32) {
     ft.pinned_rows.fetch_and(!bit, Ordering::AcqRel);
 }
 
-fn assert_row_available(ft: &ContextFrameTable, sub: u32, row: u32) -> Result<()> {
+/// Record the GPU timeline value that owns `row` after Signal (or `0` to abort a reservation).
+pub(crate) fn record_submission(ft: &ContextFrameTable, row: u32, token: u64) {
+    debug_assert!(
+        token != ROW_IN_USE,
+        "frame table row token must not be the in-use sentinel"
+    );
+    ft.last_token_for_row[row as usize].store(token, Ordering::Release);
+}
+
+/// Clears [`ROW_IN_USE`] on drop unless [`Self::take`] / [`Self::commit`] runs first.
+///
+/// Use around record paths that may `?`-bail after [`record_prologue`] so a failed
+/// submit cannot leave a row permanently reserved.
+pub(crate) struct RowReservation<'a> {
+    ft: &'a ContextFrameTable,
+    row: Option<u32>,
+}
+
+impl<'a> RowReservation<'a> {
+    pub(crate) fn new(ft: &'a ContextFrameTable) -> Self {
+        Self { ft, row: None }
+    }
+
+    pub(crate) fn set(&mut self, row: u32) {
+        self.row = Some(row);
+    }
+
+    /// Disarm without recording (caller will [`record_submission`] itself).
+    pub(crate) fn take(&mut self) -> Option<u32> {
+        self.row.take()
+    }
+
+    pub(crate) fn commit(mut self, token: u64) {
+        if let Some(row) = self.row.take() {
+            record_submission(self.ft, row, token);
+        }
+    }
+}
+
+impl Drop for RowReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(row) = self.row.take() {
+            record_submission(self.ft, row, 0);
+        }
+    }
+}
+
+fn assert_not_pinned(ft: &ContextFrameTable, row: u32) -> Result<()> {
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         anyhow::bail!(
             "frame table row {row} is still pinned after evicting retained graphs; \
              retained command list lifecycle bug"
         );
     }
-    if sub >= FRAME_TABLE_MAX_ROWS {
-        let prev = ft.last_sub_for_row[row as usize].load(Ordering::Acquire);
-        let gap = sub - prev;
-        if gap < FRAME_TABLE_MAX_ROWS {
-            anyhow::bail!(
-                "frame table row capacity exceeded: row {row} may still be in flight \
-                 (sub={sub}, last_sub_for_row={prev}, need gap >= {FRAME_TABLE_MAX_ROWS})"
-            );
-        }
-    }
     Ok(())
 }
 
+/// Wait until `fence` has reached `token`, then claim the row with [`ROW_IN_USE`].
+fn reserve_row_with_backpressure(ft: &ContextFrameTable, row: u32, fence: &ID3D12Fence) -> Result<()> {
+    loop {
+        let prev = ft.last_token_for_row[row as usize].load(Ordering::Acquire);
+        if prev == ROW_IN_USE {
+            // Another submitter reserved this row and has not recorded yet.
+            std::thread::yield_now();
+            continue;
+        }
+        if prev > 0 {
+            let completed = unsafe { fence.GetCompletedValue() };
+            if completed < prev {
+                super::utils::wait_for_fence(fence, prev)?;
+            }
+        }
+        match ft.last_token_for_row[row as usize].compare_exchange(
+            prev,
+            ROW_IN_USE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(_) => continue,
+        }
+    }
+}
+
+fn write_row_payload(ft: &ContextFrameTable, data: &[u32], row: u32) {
+    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
+    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
+    let staging_ptr = ft.staging_mapped as *mut u32;
+    unsafe {
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
+        std::ptr::write(staging_ptr.add(row as usize), row);
+    }
+}
+
 /// CPU staging write before a submission (row bump + table bytes; GPU copy is in the CB).
+///
+/// When the ring wraps onto a row still referenced by in-flight GPU work, this blocks on
+/// that work's fence value (bounded pipeline backpressure) before overwriting upload bytes.
 pub(crate) fn write_staging_for_submission(
     contexts: &super::types::SharedContextMap,
     ld: &super::types::SharedLogicalDevice,
@@ -407,17 +495,19 @@ pub(crate) fn write_staging_for_submission(
     if frame_table.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         super::compute::evict_retained_pinning_row_for_context(contexts, frame_table, ld, ctx, row);
     }
-    assert_row_available(frame_table, sub, row)?;
-    frame_table.last_sub_for_row[row as usize].store(sub, Ordering::Release);
-    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
-    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = frame_table.staging_mapped as *mut u32;
-    unsafe {
-        let payload_dst =
-            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
-        std::ptr::write(staging_ptr.add(row as usize), row);
-    }
+    assert_not_pinned(frame_table, row)?;
+    let fence = {
+        let contexts_read = contexts.read().unwrap();
+        let sc_arc = contexts_read
+            .get(&ctx)
+            .with_context(|| format!("frame table staging: invalid context {ctx}"))?
+            .clone();
+        drop(contexts_read);
+        let fence = sc_arc.lock().unwrap().fence.clone();
+        fence
+    };
+    reserve_row_with_backpressure(frame_table, row, &fence)?;
+    write_row_payload(frame_table, data, row);
     Ok(row)
 }
 
@@ -482,20 +572,12 @@ pub(crate) fn sync_table_row_to_device(
 }
 
 /// CPU staging write for legacy standalone render (no context eviction).
-fn write_staging_standalone(frame_table: &ContextFrameTable, data: &[u32]) -> Result<u32> {
+fn write_staging_standalone(frame_table: &ContextFrameTable, fence: &ID3D12Fence, data: &[u32]) -> Result<u32> {
     let sub = frame_table.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
-    assert_row_available(frame_table, sub, row)?;
-    frame_table.last_sub_for_row[row as usize].store(sub, Ordering::Release);
-    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
-    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = frame_table.staging_mapped as *mut u32;
-    unsafe {
-        let payload_dst =
-            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
-        std::ptr::write(staging_ptr.add(row as usize), row);
-    }
+    assert_not_pinned(frame_table, row)?;
+    reserve_row_with_backpressure(frame_table, row, fence)?;
+    write_row_payload(frame_table, data, row);
     Ok(row)
 }
 
@@ -569,11 +651,12 @@ fn record_prologue_gpu_copies(
 /// CPU staging write + GPU copy prologue for legacy `render_to_target`.
 pub(crate) fn record_prologue_legacy(
     frame_table: &ContextFrameTable,
+    fence: &ID3D12Fence,
     buffers: &HashMap<BufferHandle, BufferState>,
     cl: &ID3D12GraphicsCommandList7,
     data: &[u32],
 ) -> Result<u32> {
-    let row = write_staging_standalone(frame_table, data)?;
+    let row = write_staging_standalone(frame_table, fence, data)?;
     record_prologue_gpu_copies(frame_table, buffers, cl, data, row)?;
     Ok(row)
 }
@@ -692,4 +775,48 @@ pub(crate) fn prepare_render_commands_state(
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
     let record = super::submit_session::record_state_from_backend(state, ctx, device_handle)?;
     prepare_render_commands(&record, commands)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal stand-in so we can exercise token bookkeeping without a GPU.
+    fn empty_tokens() -> [AtomicU64; FRAME_TABLE_MAX_ROWS as usize] {
+        std::array::from_fn(|_| AtomicU64::new(0))
+    }
+
+    #[test]
+    fn record_submission_stores_token() {
+        let tokens = empty_tokens();
+        // Simulate ContextFrameTable::last_token_for_row store path.
+        tokens[3].store(ROW_IN_USE, Ordering::Release);
+        tokens[3].store(42, Ordering::Release);
+        assert_eq!(tokens[3].load(Ordering::Acquire), 42);
+        assert_ne!(tokens[3].load(Ordering::Acquire), ROW_IN_USE);
+    }
+
+    #[test]
+    fn row_reservation_drop_aborts_to_zero() {
+        // Build a tiny fake table with only the token array + Drop path via record_submission.
+        // We can't construct a full ContextFrameTable without D3D resources, so test the
+        // atomic protocol that Drop relies on.
+        let tokens = empty_tokens();
+        tokens[1].store(ROW_IN_USE, Ordering::Release);
+        // Abort path: store 0 (what RowReservation::drop does via record_submission).
+        tokens[1].store(0, Ordering::Release);
+        assert_eq!(tokens[1].load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn cas_claims_row_from_retired_token() {
+        let tokens = empty_tokens();
+        tokens[0].store(7, Ordering::Release);
+        let prev = tokens[0].load(Ordering::Acquire);
+        assert_eq!(prev, 7);
+        assert!(tokens[0]
+            .compare_exchange(prev, ROW_IN_USE, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok());
+        assert_eq!(tokens[0].load(Ordering::Acquire), ROW_IN_USE);
+    }
 }

@@ -614,19 +614,20 @@ pub(super) fn render(
 
     let (staging_data, lowered, has_bindings) =
         super::frame_table::prepare_render_commands_state(state, ctx, device_handle, commands)?;
+    let ft = {
+        let contexts_read = state.contexts.read().unwrap();
+        let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
+        drop(contexts_read);
+        let sc_guard = sc_arc.lock().unwrap();
+        let ft = std::sync::Arc::clone(&sc_guard.frame_table);
+        drop(sc_guard);
+        ft
+    };
+    let mut row_guard = super::frame_table::RowReservation::new(&ft);
     if has_bindings {
-        let ft = {
-            let contexts_read = state.contexts.read().unwrap();
-            let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
-            drop(contexts_read);
-            let sc_guard = sc_arc.lock().unwrap();
-            let ft = std::sync::Arc::clone(&sc_guard.frame_table);
-            drop(sc_guard);
-            ft
-        };
         // Per-context frame-table slots are bound once at context init; no
         // per-submit rebinding needed.
-        let _row = super::frame_table::record_prologue(
+        let row = super::frame_table::record_prologue(
             &state.contexts,
             logical_device,
             ctx,
@@ -635,6 +636,7 @@ pub(super) fn render(
             cmd,
             &staging_data,
         )?;
+        row_guard.set(row);
     }
 
     // Execute render commands
@@ -670,6 +672,7 @@ pub(super) fn render(
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
+    row_guard.commit(fence_value);
 
     // Update fence value for next operation
 

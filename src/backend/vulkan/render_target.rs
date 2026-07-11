@@ -578,14 +578,16 @@ where
     unsafe { logical_device.device.begin_command_buffer(cmd, &begin_info) }
         .context("Failed to begin command buffer")?;
 
+    let mut row_guard = super::frame_table::RowReservation::new(resources.frame_table);
     if has_bindings {
-        super::frame_table::record_prologue_legacy(
+        let row = super::frame_table::record_prologue_legacy(
             resources.frame_table,
             resources.buffers,
             logical_device,
             cmd,
             &staging_data,
         )?;
+        row_guard.set(row);
     }
 
     record_render_pass_to_buffer(
@@ -620,6 +622,8 @@ where
             .context("Failed to wait for queue")?;
         drop(_queue_guard);
     }
+    // Legacy path waits idle — clear the reservation (no timeline token).
+    row_guard.commit(0);
 
     if let Some(rt) = render_targets.read().unwrap().entries.get(&target) {
         rt.has_rendered.store(true, std::sync::atomic::Ordering::Relaxed);

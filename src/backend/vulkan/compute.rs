@@ -881,7 +881,7 @@ pub(super) fn submit_with_scope(
         cb
     };
 
-    let (cmd, belt_idx, _texture_upload_idx) = {
+    let (cmd, belt_idx, _texture_upload_idx, frame_table_row) = {
         let logical_device = view.devices.get(&device_handle).context("Invalid device handle")?;
 
         // Cross-submission acquire: make prior submit's writes visible to this
@@ -943,12 +943,13 @@ pub(super) fn submit_with_scope(
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut belt_idx = 0usize;
         let mut texture_upload_idx = 0usize;
+        let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
 
         // Process commands (same logic as dispatch)
         for command in &commands {
             match command {
                 GpuCommand::FrameTableStaging { data } => {
-                    super::frame_table::record_prologue(
+                    let row = super::frame_table::record_prologue(
                         view.contexts,
                         ctx,
                         &scope.frame_table,
@@ -957,6 +958,7 @@ pub(super) fn submit_with_scope(
                         cmd,
                         data,
                     )?;
+                    row_guard.set(row);
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -1545,8 +1547,13 @@ pub(super) fn submit_with_scope(
             return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
         }
 
-        (cmd, belt_idx, texture_upload_idx)
+        (cmd, belt_idx, texture_upload_idx, row_guard.take())
     };
+
+    let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
+    if let Some(row) = frame_table_row {
+        row_guard.set(row);
+    }
 
     // Standalone submit: signal device timeline semaphore (Vulkan 1.2+).
     let signal_value = {
@@ -1603,6 +1610,7 @@ pub(super) fn submit_with_scope(
         }
         return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
+    row_guard.commit(signal_value);
 
     {
         let mut sc = scope.sc.lock().unwrap();
@@ -1986,6 +1994,7 @@ pub(super) fn submit_graph_with_scope(
     let mut rendered_targets: Vec<RenderTargetHandle> = Vec::new();
     let mut frame_table_prologue_in_cb = false;
     let mut frame_table_row: Option<u32> = None;
+    let mut row_guard = super::frame_table::RowReservation::new(&scope.frame_table);
 
     for graph_cmd in commands {
         match graph_cmd {
@@ -2002,6 +2011,7 @@ pub(super) fn submit_graph_with_scope(
                         data,
                     )?;
                     frame_table_row = Some(row);
+                    row_guard.set(row);
                 }
                 GpuCommand::SetPipeline(handle) => {
                     let _tz = tracy_zone!("vk.set_pipeline");
@@ -2584,6 +2594,7 @@ pub(super) fn submit_graph_with_scope(
                             &staging_data,
                         )?;
                         frame_table_row = Some(row);
+                        row_guard.set(row);
                     }
                 }
 
@@ -2747,6 +2758,7 @@ pub(super) fn submit_graph_with_scope(
         }
         return Err(anyhow::anyhow!("Failed to queue_submit2 command buffer: {:?}", e));
     }
+    row_guard.commit(signal_value);
 
     // Post-submit: store the CB for lifecycle management.
     {
@@ -2873,11 +2885,11 @@ pub(super) fn try_resubmit_retained_with_scope(
         let retained = sc
             .retained_compute_cbs
             .get(&key)
-            .map(|r| (r.command_buffer, r.used_slots.clone()));
+            .map(|r| (r.command_buffer, r.used_slots.clone(), r.frame_table_row));
         (timeline_sem, retained)
     };
 
-    let Some((cmd, used_slots)) = retained else {
+    let Some((cmd, used_slots, frame_table_row)) = retained else {
         return Ok(None);
     };
 
@@ -2930,6 +2942,10 @@ pub(super) fn try_resubmit_retained_with_scope(
         if let Some(retained) = sc.retained_compute_cbs.values_mut().find(|r| r.command_buffer == cmd) {
             retained.last_signal_value = signal_value;
         }
+    }
+
+    if let Some(row) = frame_table_row {
+        super::frame_table::record_submission(&scope.frame_table, row, signal_value);
     }
 
     {

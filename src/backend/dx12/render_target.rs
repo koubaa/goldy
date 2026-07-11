@@ -359,6 +359,7 @@ pub(super) fn record_render_pass_to_list_with_record(
         } else {
             prologue_row = Some(super::frame_table::record_prologue_legacy(
                 &record.frame_table,
+                &logical_device.fence,
                 &record.buffers.read().unwrap().entries,
                 cmd_list,
                 &staging_data,
@@ -392,9 +393,9 @@ pub(super) fn record_render_pass_to_list(
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
-) -> Result<bool> {
+) -> Result<(bool, Option<u32>)> {
     let record = super::submit_session::record_state_for_legacy_render(state, device_handle)?;
-    let (has_bindings, _) = record_render_pass_to_list_with_record(
+    record_render_pass_to_list_with_record(
         &record,
         device_handle,
         None,
@@ -402,8 +403,7 @@ pub(super) fn record_render_pass_to_list(
         commands,
         cmd_list,
         frame_table_prologue_already_recorded,
-    )?;
-    Ok(has_bindings)
+    )
 }
 
 /// Render commands to a render target.
@@ -441,7 +441,12 @@ pub(super) fn render(
 
     unsafe { cmd_gfx.Reset(&logical_device.command_allocator, None) }.context("Failed to reset command list")?;
 
-    let _ = record_render_pass_to_list(state, device_handle, target, commands, &cmd, false)?;
+    let ft = super::frame_table::ensure_legacy_frame_table(state, device_handle)?;
+    let mut row_guard = super::frame_table::RowReservation::new(&ft);
+    let (_, prologue_row) = record_render_pass_to_list(state, device_handle, target, commands, &cmd, false)?;
+    if let Some(row) = prologue_row {
+        row_guard.set(row);
+    }
 
     let cmd_gfx: &ID3D12GraphicsCommandList = unsafe { std::mem::transmute(&cmd) };
     unsafe { cmd_gfx.Close() }.context("Failed to close command list")?;
@@ -450,6 +455,8 @@ pub(super) fn render(
 
     let cmd_list: ID3D12CommandList = cmd_gfx.cast().context("Failed to cast command list")?;
     let fence_value = execute_command_lists_and_signal_device(logical_device, &[Some(cmd_list)])?;
+    // Record before wait: if wait fails, the row must still track in-flight GPU use.
+    row_guard.commit(fence_value);
     // Blocking wait — required so the shared command_allocator can be safely
     // Reset() before the next render_to_target call (see comment above Reset()).
     wait_for_fence(&logical_device.fence, fence_value)?;

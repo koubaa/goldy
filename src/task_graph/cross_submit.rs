@@ -299,6 +299,7 @@ pub fn compute_cross_submit_sync_into(
     net: &HashMap<ResourceKey, NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: ContextHandle,
+    separate_graphics: bool,
 ) {
     out.prologue.buffers.clear();
     out.prologue.textures.clear();
@@ -316,6 +317,50 @@ pub fn compute_cross_submit_sync_into(
         if access.reads {
             for (&ctx, &tv) in &sync.last_write {
                 if ctx == submitting_ctx {
+                    if separate_graphics && access.read_pipeline_kinds.contains(UsageKindFlags::RENDER) {
+                        // Render partitions on DX12 compute-style backends execute on the
+                        // device graphics queue while prior compute writes land on the
+                        // submitting context's compute queue. Ledger identity matches but
+                        // the physical queues differ — emit cross-queue wait + barrier.
+                        let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                            *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                        );
+                        let usage = BarrierUsage {
+                            src: {
+                                let mut s = SlotUsageSet::default();
+                                s.merge(NodeAccess::Write, prev_write_kinds);
+                                s
+                            },
+                            dst: {
+                                let mut d = SlotUsageSet::default();
+                                d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                                d
+                            },
+                        };
+                        merge_barrier(&mut out.prologue, *key, usage);
+                        wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                    } else {
+                        let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                            *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                        );
+                        let usage = BarrierUsage {
+                            src: {
+                                let mut s = SlotUsageSet::default();
+                                s.merge(NodeAccess::Write, prev_write_kinds);
+                                s
+                            },
+                            dst: {
+                                let mut d = SlotUsageSet::default();
+                                d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                                d
+                            },
+                        };
+                        merge_barrier(&mut out.prologue, *key, usage);
+                    }
+                } else {
+                    // Cross-context RAW: queue-wait for producer completion plus a scoped
+                    // prologue on the consumer queue. Real hardware needs the barrier for
+                    // UAV→shader-read visibility even after Wait.
                     let prev_write_kinds = UsageKindFlags::from_bits_truncate(
                         *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
                     );
@@ -332,7 +377,6 @@ pub fn compute_cross_submit_sync_into(
                         },
                     };
                     merge_barrier(&mut out.prologue, *key, usage);
-                } else {
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 }
             }
@@ -364,7 +408,7 @@ pub fn compute_cross_submit_sync_into(
             }
             for (&ctx, &tv) in &sync.last_reads {
                 if ctx == submitting_ctx {
-                    // Same per-context queue: prior submits are already strictly ordered.
+                    // Same-context WAR: prior submits are strictly ordered on this queue.
                     // A live Wait on this context's own fence can wedge the queue when the
                     // waited value would be signaled by work still behind that Wait.
                     let usage = BarrierUsage {
@@ -422,7 +466,15 @@ pub fn compute_cross_submit_sync(
     let mut sync = SubmitSync::default();
     let mut wait_map = HashMap::new();
     let mut cpu_wait_map = HashMap::new();
-    compute_cross_submit_sync_into(&mut sync, &mut wait_map, &mut cpu_wait_map, net, ledger, submitting_ctx);
+    compute_cross_submit_sync_into(
+        &mut sync,
+        &mut wait_map,
+        &mut cpu_wait_map,
+        net,
+        ledger,
+        submitting_ctx,
+        false,
+    );
     CrossSubmitSync {
         prologue: sync.prologue,
         waits: sync.waits,
@@ -544,6 +596,7 @@ impl CrossSubmitScratch {
         resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
         submitting_ctx: ContextHandle,
         waves: &[super::ir::Wave],
+        separate_graphics: bool,
     ) -> &SubmitSync {
         self.clear();
         {
@@ -567,6 +620,7 @@ impl CrossSubmitScratch {
                 &self.net,
                 &self.ledger,
                 submitting_ctx,
+                separate_graphics,
             );
         }
         &self.submit_sync
@@ -1022,7 +1076,7 @@ mod tests {
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Read);
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
-        assert!(sync.prologue.is_empty());
+        assert_eq!(sync.prologue.buffers.len(), 1);
         assert_eq!(
             sync.waits,
             vec![Epoch {
@@ -1117,9 +1171,10 @@ mod tests {
 
     #[test]
     fn render_pass_read_includes_render_pipeline_kind() {
-        let ctx = 1;
+        let producer = 1;
+        let consumer = 2;
         let key = buf_key(10);
-        let ledger = ledger_with_write(ctx, key, 1);
+        let ledger = ledger_with_write(producer, key, 1);
         let ir = GraphIR {
             nodes: vec![TaskNode {
                 label: "draw",
@@ -1135,9 +1190,15 @@ mod tests {
         };
         let net = net_access_per_resource(&ir);
         assert!(net[&key].read_pipeline_kinds.contains(UsageKindFlags::RENDER));
-        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
-        let dst = &sync.prologue.buffers[0].1.dst;
-        assert!(dst.kinds.contains(UsageKindFlags::RENDER));
+        let sync = compute_cross_submit_sync(&net, &ledger, consumer);
+        assert_eq!(sync.prologue.buffers.len(), 1);
+        assert_eq!(
+            sync.waits,
+            vec![Epoch {
+                context: producer,
+                value: 1
+            }]
+        );
     }
 
     #[test]
@@ -1167,10 +1228,11 @@ mod tests {
 
     #[test]
     fn whole_resource_disjoint_ranges_barrier_on_parent() {
-        let ctx = 1;
+        let producer = 1;
+        let consumer = 2;
         let parent: BufferHandle = 10;
         let key = ResourceKey::Buffer(parent);
-        let ledger = ledger_with_write(ctx, key, 2);
+        let ledger = ledger_with_write(producer, key, 2);
         let ir = GraphIR {
             nodes: vec![TaskNode {
                 label: "read_tail",
@@ -1191,8 +1253,15 @@ mod tests {
             }],
         };
         let net = net_access_per_resource(&ir);
-        let sync = compute_cross_submit_sync(&net, &ledger, ctx);
+        let sync = compute_cross_submit_sync(&net, &ledger, consumer);
         assert_eq!(sync.prologue.buffers[0].0, parent);
+        assert_eq!(
+            sync.waits,
+            vec![Epoch {
+                context: producer,
+                value: 2
+            }]
+        );
     }
 
     #[test]
@@ -1343,7 +1412,7 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
 
-        assert!(sync.prologue.is_empty(), "cross-ctx: no same-context barrier expected");
+        assert_eq!(sync.prologue.buffers.len(), 1, "cross-ctx RAW also emits consumer prologue");
         assert_eq!(sync.waits.len(), 2, "must wait on both producer contexts");
         assert!(
             sync.waits.iter().any(|e| e.context == producer_a && e.value == 5),
@@ -1436,7 +1505,7 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
 
-        assert!(sync.prologue.is_empty());
+        assert_eq!(sync.prologue.buffers.len(), 1);
         assert_eq!(sync.waits.len(), 3, "all three cross-ctx producers must be waited on");
         assert!(sync.waits.iter().any(|e| e.context == ctx_a && e.value == 2));
         assert!(sync.waits.iter().any(|e| e.context == ctx_b && e.value == 5));

@@ -14,7 +14,12 @@ use crate::frame_table::{
 use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Sentinel in [`ContextFrameTable::last_token_for_row`]: row is reserved for CPU
+/// staging / recording and must not be claimed by another submitter until
+/// [`record_submission`] stores the GPU timeline value (or `0` on abort).
+const ROW_IN_USE: u64 = u64::MAX;
 
 /// Per-context frame-table GPU resources and ring state.
 pub(crate) struct ContextFrameTable {
@@ -30,8 +35,12 @@ pub(crate) struct ContextFrameTable {
     pub submission_counter: AtomicU32,
     /// Bitmask of rows pinned by retained command buffers (must not be overwritten).
     pub pinned_rows: AtomicU32,
-    /// Last `submission_counter` value that wrote each row (ring reuse guard).
-    pub last_sub_for_row: [AtomicU32; FRAME_TABLE_MAX_ROWS as usize],
+    /// Last GPU timeline value that used each upload row (`0` = free/unused,
+    /// [`ROW_IN_USE`] = reserved by a submitter that has not yet recorded).
+    ///
+    /// Reuse waits for this value on the context timeline semaphore — backpressure
+    /// when CPU submission outruns GPU consumption of the finite ring.
+    pub last_token_for_row: [AtomicU64; FRAME_TABLE_MAX_ROWS as usize],
 }
 
 /// Reserve user bindless slots once per device (low protocol slots stay unused).
@@ -88,7 +97,7 @@ pub(crate) fn init_context(
         staging_mapped,
         submission_counter: AtomicU32::new(0),
         pinned_rows: AtomicU32::new(0),
-        last_sub_for_row: std::array::from_fn(|_| AtomicU32::new(0)),
+        last_token_for_row: std::array::from_fn(|_| AtomicU64::new(0)),
     });
 
     let buffers = state.buffers.read().unwrap();
@@ -395,27 +404,143 @@ pub(crate) fn unpin_row(ft: &ContextFrameTable, row: u32) {
     ft.pinned_rows.fetch_and(!bit, Ordering::AcqRel);
 }
 
-fn assert_row_available(ft: &ContextFrameTable, sub: u32, row: u32) -> Result<()> {
+/// Record the GPU timeline value that owns `row` after Signal (or `0` to abort a reservation).
+pub(crate) fn record_submission(ft: &ContextFrameTable, row: u32, token: u64) {
+    debug_assert!(
+        token != ROW_IN_USE,
+        "frame table row token must not be the in-use sentinel"
+    );
+    ft.last_token_for_row[row as usize].store(token, Ordering::Release);
+}
+
+/// Clears [`ROW_IN_USE`] on drop unless [`Self::take`] / [`Self::commit`] runs first.
+pub(crate) struct RowReservation<'a> {
+    ft: &'a ContextFrameTable,
+    row: Option<u32>,
+}
+
+impl<'a> RowReservation<'a> {
+    pub(crate) fn new(ft: &'a ContextFrameTable) -> Self {
+        Self { ft, row: None }
+    }
+
+    pub(crate) fn set(&mut self, row: u32) {
+        self.row = Some(row);
+    }
+
+    pub(crate) fn take(&mut self) -> Option<u32> {
+        self.row.take()
+    }
+
+    pub(crate) fn commit(mut self, token: u64) {
+        if let Some(row) = self.row.take() {
+            record_submission(self.ft, row, token);
+        }
+    }
+}
+
+impl Drop for RowReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(row) = self.row.take() {
+            record_submission(self.ft, row, 0);
+        }
+    }
+}
+
+fn assert_not_pinned(ft: &ContextFrameTable, row: u32) -> Result<()> {
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         anyhow::bail!(
             "frame table row {row} is still pinned after evicting retained graphs; \
              retained command buffer lifecycle bug"
         );
     }
-    if sub >= FRAME_TABLE_MAX_ROWS {
-        let prev = ft.last_sub_for_row[row as usize].load(Ordering::Acquire);
-        let gap = sub - prev;
-        if gap < FRAME_TABLE_MAX_ROWS {
-            anyhow::bail!(
-                "frame table row capacity exceeded: row {row} may still be in flight \
-                 (sub={sub}, last_sub_for_row={prev}, need gap >= {FRAME_TABLE_MAX_ROWS})"
-            );
-        }
-    }
     Ok(())
 }
 
+fn wait_for_timeline(device: &ash::Device, semaphore: vk::Semaphore, token: u64) -> Result<()> {
+    if token == 0 {
+        return Ok(());
+    }
+    let completed = unsafe { device.get_semaphore_counter_value(semaphore) }.unwrap_or(0);
+    if completed >= token {
+        return Ok(());
+    }
+    let wait = vk::SemaphoreWaitInfo::default()
+        .semaphores(std::slice::from_ref(&semaphore))
+        .values(std::slice::from_ref(&token));
+    unsafe { device.wait_semaphores(&wait, u64::MAX) }.context("frame table row timeline wait")?;
+    Ok(())
+}
+
+/// Wait until `semaphore` has reached the prior token, then claim the row with [`ROW_IN_USE`].
+fn reserve_row_with_backpressure(
+    ft: &ContextFrameTable,
+    row: u32,
+    device: &ash::Device,
+    semaphore: vk::Semaphore,
+) -> Result<()> {
+    loop {
+        let prev = ft.last_token_for_row[row as usize].load(Ordering::Acquire);
+        if prev == ROW_IN_USE {
+            std::thread::yield_now();
+            continue;
+        }
+        if prev > 0 {
+            wait_for_timeline(device, semaphore, prev)?;
+        }
+        match ft.last_token_for_row[row as usize].compare_exchange(
+            prev,
+            ROW_IN_USE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Legacy path has no timeline; prior users must [`record_submission`](`0`) after `queue_wait_idle`.
+fn reserve_row_legacy(ft: &ContextFrameTable, row: u32, ld: &LogicalDevice) -> Result<()> {
+    loop {
+        let prev = ft.last_token_for_row[row as usize].load(Ordering::Acquire);
+        if prev == ROW_IN_USE {
+            std::thread::yield_now();
+            continue;
+        }
+        if prev > 0 {
+            // Safety net if a prior legacy submit forgot to clear the token.
+            let _guard = ld.queue_lock.lock().unwrap();
+            unsafe { ld.device.queue_wait_idle(ld.queue) }.context("frame table legacy row wait")?;
+        }
+        match ft.last_token_for_row[row as usize].compare_exchange(
+            prev,
+            ROW_IN_USE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(_) => continue,
+        }
+    }
+}
+
+fn write_row_payload(ft: &ContextFrameTable, data: &[u32], row: u32) {
+    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
+    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
+    let staging_ptr = ft.staging_mapped as *mut u32;
+    unsafe {
+        let payload_dst =
+            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
+        std::ptr::write(staging_ptr.add(row as usize), row);
+    }
+}
+
 /// CPU staging write before a submission (row bump + table bytes; GPU copy is in the CB).
+///
+/// When the ring wraps onto a row still referenced by in-flight GPU work, this blocks on
+/// that work's timeline value (bounded pipeline backpressure) before overwriting upload bytes.
 fn write_staging_for_submission(
     contexts: &SharedContextMap,
     ld: &super::types::LogicalDevice,
@@ -428,35 +553,27 @@ fn write_staging_for_submission(
     if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
         super::compute::evict_retained_pinning_row_for_context(contexts, ft, ld, ctx, row);
     }
-    assert_row_available(ft, sub, row)?;
-    ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
-    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
-    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = ft.staging_mapped as *mut u32;
-    unsafe {
-        let payload_dst =
-            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
-        std::ptr::write(staging_ptr.add(row as usize), row);
-    }
+    assert_not_pinned(ft, row)?;
+    let (device, semaphore) = {
+        let contexts_read = contexts.read().unwrap();
+        let sc_arc = contexts_read
+            .get(&ctx)
+            .with_context(|| format!("frame table staging: invalid context {ctx}"))?;
+        let sc = sc_arc.lock().unwrap();
+        (ld.device.clone(), sc.timeline_semaphore)
+    };
+    reserve_row_with_backpressure(ft, row, &device, semaphore)?;
+    write_row_payload(ft, data, row);
     Ok(row)
 }
 
 /// CPU staging write for legacy standalone render (no context eviction).
-fn write_staging_standalone(ft: &ContextFrameTable, data: &[u32]) -> Result<u32> {
+fn write_staging_standalone(ft: &ContextFrameTable, ld: &LogicalDevice, data: &[u32]) -> Result<u32> {
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
     let row = sub % FRAME_TABLE_MAX_ROWS;
-    assert_row_available(ft, sub, row)?;
-    ft.last_sub_for_row[row as usize].store(sub, Ordering::Release);
-    let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
-    let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    let staging_ptr = ft.staging_mapped as *mut u32;
-    unsafe {
-        let payload_dst =
-            staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
-        std::ptr::write(staging_ptr.add(row as usize), row);
-    }
+    assert_not_pinned(ft, row)?;
+    reserve_row_legacy(ft, row, ld)?;
+    write_row_payload(ft, data, row);
     Ok(row)
 }
 
@@ -468,7 +585,7 @@ pub(crate) fn record_prologue_legacy(
     cmd: vk::CommandBuffer,
     data: &[u32],
 ) -> Result<u32> {
-    let row = write_staging_standalone(frame_table, data)?;
+    let row = write_staging_standalone(frame_table, ld, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true)?;

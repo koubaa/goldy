@@ -953,6 +953,17 @@ pub(super) fn render(
     let (staging_data, lowered, has_bindings) =
         super::frame_table::prepare_render_commands(buffers, pipelines, commands)?;
 
+    let frame_table = {
+        let contexts_read = state.contexts.read().unwrap();
+        let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
+        drop(contexts_read);
+        let sc_guard = sc_arc.lock().unwrap();
+        let ft = std::sync::Arc::clone(&sc_guard.frame_table);
+        drop(sc_guard);
+        ft
+    };
+    let mut row_guard = super::frame_table::RowReservation::new(&frame_table);
+
     {
         let logical_device = devices.get(&device_handle).context("Surface's device is invalid")?;
 
@@ -986,19 +997,10 @@ pub(super) fn render(
             logical_device.device.cmd_pipeline_barrier2(cmd, &dep_info);
         }
 
-        let frame_table = {
-            let contexts_read = state.contexts.read().unwrap();
-            let sc_arc = contexts_read.get(&ctx).context("Invalid context handle")?.clone();
-            drop(contexts_read);
-            let sc_guard = sc_arc.lock().unwrap();
-            let ft = std::sync::Arc::clone(&sc_guard.frame_table);
-            drop(sc_guard);
-            ft
-        };
         if has_bindings {
             // Per-context frame-table slots are bound once at context init; no
             // per-submit rebinding needed.
-            super::frame_table::record_prologue(
+            let row = super::frame_table::record_prologue(
                 &state.contexts,
                 ctx,
                 &frame_table,
@@ -1007,6 +1009,7 @@ pub(super) fn render(
                 cmd,
                 &staging_data,
             )?;
+            row_guard.set(row);
         }
 
         // Transition image to color attachment. The image is in `GENERAL` layout at this
@@ -1224,6 +1227,7 @@ pub(super) fn render(
         }
     }
     .context("Failed to submit render command buffer")?;
+    row_guard.commit(signal_timeline_value);
 
     if let Some(surface_state) = surfaces.get_mut(&surface_handle) {
         let fs = &mut surface_state.frame_sync[present_slot];
