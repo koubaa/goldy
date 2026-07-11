@@ -1972,13 +1972,13 @@ mod imp {
     // verify that the GPU-side arithmetic is correct.  These are distinct from the
     // compile-only `test_collectives_compiles` test in `src/shaders.rs`.
     //
-    // ⚠  Cross-module [ForceInline] + groupshared writes — known Slang bugs
+    // ⚠  Cross-module [ForceInline] + groupshared writes — Slang #10641
     //
-    // Slang issues #10641 and #10642 document that [ForceInline] functions whose
-    // bodies *write* to a groupshared parameter produce incorrect DXIL when the
-    // call site is in a different module.  Every collective except
-    // `workgroup_upper_bound` writes to groupshared internally, so calling them
-    // via `import goldy_exp` would trigger the bug and produce wrong results.
+    // [ForceInline] functions whose bodies *write* to a groupshared parameter
+    // produce incorrect DXIL when the call site is in a different module.
+    // Every collective except `workgroup_upper_bound` writes to groupshared
+    // internally, so calling them via `import goldy_exp` would trigger the bug
+    // and produce wrong results.
     //
     // Workaround (same strategy as ekrano's coarse.slang): each test shader
     // inlines the algorithm body directly in the entry point.  `import goldy_exp`

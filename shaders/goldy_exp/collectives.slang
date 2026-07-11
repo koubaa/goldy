@@ -48,10 +48,9 @@ public T mapped_workgroup_reduce<T : IMonoid, S : IScannable<T>, let N : int>(
 /// scratch[local_ix] contains the inclusive scan result.
 /// No trailing barrier — caller must sync before cross-lane reads from scratch.
 ///
-/// NOTE: Due to a Slang compiler bug with cross-module [ForceInline] generics
-/// and groupshared parameters, this function may produce incorrect DXIL when
-/// called from a different module. If you encounter incorrect results, inline
-/// the scan loop directly in the calling shader as a workaround.
+/// NOTE: Slang #10641 — cross-module [ForceInline] functions with groupshared
+/// parameters may produce incorrect DXIL. Inline the scan loop at the call site
+/// as a workaround (see ekrano coarse.slang, goldy compute_integration tests).
 [ForceInline]
 public T workgroup_inclusive_scan<T : IMonoid, let N : int>(
     T val, uint local_ix, groupshared T scratch[N]
