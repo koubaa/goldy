@@ -565,33 +565,6 @@ pub(super) unsafe fn vulkan_readback_gpu_profile(
     Ok(())
 }
 
-pub(super) unsafe fn vulkan_finish_gpu_profile_pending(
-    _ctx: super::ContextHandle,
-    device: &ash::Device,
-    timeline_sem: vk::Semaphore,
-    signal_value: TimelineValue,
-    cmd: vk::CommandBuffer,
-    profile: VulkanGpuProfilePool,
-    device_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
-    let wait = vk::SemaphoreWaitInfo::default()
-        .semaphores(std::slice::from_ref(&timeline_sem))
-        .values(std::slice::from_ref(&signal_value));
-    if let Err(e) = device.wait_semaphores(&wait, u64::MAX) {
-        unsafe {
-            device.destroy_query_pool(profile.pool, None);
-        }
-        if e == vk::Result::ERROR_DEVICE_LOST {
-            device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        return Err(anyhow::anyhow!("wait_semaphores (gpu profiling): {:?}", e));
-    }
-
-    unsafe { vulkan_readback_gpu_profile(device, signal_value, profile) }?;
-    let _ = cmd;
-    Ok(())
-}
-
 /// Returns the GPU-completed timeline value for a single context by reading its
 /// timeline semaphore counter directly, without consulting any other context.
 ///

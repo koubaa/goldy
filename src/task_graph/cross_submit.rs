@@ -296,6 +296,7 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
 }
 
 /// Emit RAW / WAW / WAR sync for one net-access key against a ledger sync cell.
+#[allow(clippy::too_many_arguments)]
 fn apply_cross_submit_hazards_for_resource(
     key: ResourceKey,
     access: NetAccess,
@@ -316,9 +317,7 @@ fn apply_cross_submit_hazards_for_resource(
                     // submitting context's compute queue. Ledger identity matches but
                     // the physical queues differ — emit cross-queue wait + barrier.
                     let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        sync.last_write_kinds
-                            .get(ctx)
-                            .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                        sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
                     );
                     let usage = BarrierUsage {
                         src: {
@@ -336,9 +335,7 @@ fn apply_cross_submit_hazards_for_resource(
                     wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
                 } else {
                     let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        sync.last_write_kinds
-                            .get(ctx)
-                            .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                        sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
                     );
                     let usage = BarrierUsage {
                         src: {
@@ -359,9 +356,7 @@ fn apply_cross_submit_hazards_for_resource(
                 // prologue on the consumer queue. Real hardware needs the barrier for
                 // UAV→shader-read visibility even after Wait.
                 let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                    sync.last_write_kinds
-                        .get(ctx)
-                        .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                    sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
                 );
                 let usage = BarrierUsage {
                     src: {
@@ -386,9 +381,7 @@ fn apply_cross_submit_hazards_for_resource(
         for (ctx, tv) in sync.last_write.iter() {
             if ctx == submitting_ctx {
                 let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                    sync.last_write_kinds
-                        .get(ctx)
-                        .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                    sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
                 );
                 let usage = BarrierUsage {
                     src: {
@@ -592,10 +585,22 @@ pub(crate) struct CrossSubmitScratch {
 impl Default for CrossSubmitScratch {
     fn default() -> Self {
         Self {
-            net: { let mut m = ResourceKeyMap::default(); m.reserve(32); m },
+            net: {
+                let mut m = ResourceKeyMap::default();
+                m.reserve(32);
+                m
+            },
             registry: Vec::with_capacity(32),
-            seen: { let mut s = FxHashSet::default(); s.reserve(32); s },
-            ledger: { let mut m = ResourceKeyMap::default(); m.reserve(32); m },
+            seen: {
+                let mut s = FxHashSet::default();
+                s.reserve(32);
+                s
+            },
+            ledger: {
+                let mut m = ResourceKeyMap::default();
+                m.reserve(32);
+                m
+            },
             wait_map: HashMap::with_capacity(4),
             cpu_wait_map: HashMap::with_capacity(4),
             submit_sync: SubmitSync::default(),

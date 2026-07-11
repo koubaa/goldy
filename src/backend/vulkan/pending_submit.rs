@@ -105,15 +105,10 @@ pub(super) fn vulkan_drain_pending_gpu_profiles_up_to(
         return;
     }
     let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
-    let (ready, pending): (Vec<_>, Vec<_>) = sc
-        .pending_gpu_profiles
-        .drain(..)
-        .partition(|(tv, _)| *tv <= completed);
+    let (ready, pending): (Vec<_>, Vec<_>) = sc.pending_gpu_profiles.drain(..).partition(|(tv, _)| *tv <= completed);
     sc.pending_gpu_profiles = pending;
     for (tv, prof) in ready {
-        if let Err(e) =
-            unsafe { super::compute::vulkan_readback_gpu_profile(&ld.device, tv, prof.prof) }
-        {
+        if let Err(e) = unsafe { super::compute::vulkan_readback_gpu_profile(&ld.device, tv, prof.prof) } {
             tracing::warn!("GOLDY_GPU_PROFILE: Vulkan readback failed: {e}");
         }
         let _ = (prof.ctx, prof.cmd);
@@ -145,8 +140,6 @@ pub(super) struct VulkanQueueSubmitPending {
     ld: SharedLogicalDevice,
     queue: vk::Queue,
     queue_lock: Arc<std::sync::Mutex<()>>,
-    timeline_sem: vk::Semaphore,
-    signal_value: TimelineValue,
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
     wait_semaphores: Vec<(vk::Semaphore, u64)>,
@@ -229,7 +222,7 @@ pub(super) fn enqueue_vulkan_submit(
     contexts: &SharedContextMap,
     queue: vk::Queue,
     queue_lock: Arc<std::sync::Mutex<()>>,
-    timeline_sem: vk::Semaphore,
+    _timeline_sem: vk::Semaphore,
     signal_value: TimelineValue,
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
     cmd: Option<vk::CommandBuffer>,
@@ -244,8 +237,6 @@ pub(super) fn enqueue_vulkan_submit(
             ld: Arc::clone(ld),
             queue,
             queue_lock,
-            timeline_sem,
-            signal_value,
             signal_semaphore_infos,
             cmd,
             wait_semaphores,

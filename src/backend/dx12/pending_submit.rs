@@ -61,12 +61,7 @@ impl PendingSubmit for Dx12ComputePendingSubmit {
         {
             let _tz = crate::tracy_zone!("dx12.submit_worker.pre_reset_slots.after");
             let mut sc = self.sc.lock().unwrap();
-            super::compute::finish_compute_slot_submit(
-                &self.logical_device,
-                &mut sc,
-                &self.ctx_fence,
-                self.slot_idx,
-            )?;
+            super::compute::finish_compute_slot_submit(&self.logical_device, &mut sc, &self.ctx_fence, self.slot_idx)?;
         }
         Ok(())
     }

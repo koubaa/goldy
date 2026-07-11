@@ -260,8 +260,7 @@ impl ContextDestroyHandle for Dx12ContextDestroyWork {
         let (last_submitted, fence) = {
             let sc = self.sc.lock().unwrap();
             (
-                sc.last_submitted_seq
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed),
                 sc.fence.clone(),
             )
         };
@@ -277,7 +276,7 @@ impl ContextDestroyHandle for Dx12ContextDestroyWork {
     }
 
     fn finish(self: Box<Self>) -> Result<()> {
-        finish_destroy(self);
+        finish_destroy(*self);
         Ok(())
     }
 }
@@ -303,7 +302,7 @@ pub(super) fn detach_for_destroy(state: &Dx12State, ctx: ContextHandle) -> Optio
     })
 }
 
-fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
+fn finish_destroy(work: Dx12ContextDestroyWork) {
     // Serialize with device create/destroy / backend drop — the D3D12 debug layer is
     // process-global and races when one thread Releases DXGI/device objects while another
     // tears down a context (observed as AV reading ~0xEB40 during parallel test teardown).
@@ -315,7 +314,7 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
         ld,
         buffers,
         context_fences,
-    } = *work;
+    } = work;
 
     let sc_mutex = std::sync::Arc::try_unwrap(sc).unwrap_or_else(|arc| {
         panic!(
@@ -415,10 +414,7 @@ pub(super) fn drain_pending_gpu_profiles_up_to(
         return;
     }
     let _tz = crate::tracy_zone!("goldy.gpu_profile_readback");
-    let (ready, pending): (Vec<_>, Vec<_>) = sc
-        .pending_gpu_profiles
-        .drain(..)
-        .partition(|(tv, _)| *tv <= completed);
+    let (ready, pending): (Vec<_>, Vec<_>) = sc.pending_gpu_profiles.drain(..).partition(|(tv, _)| *tv <= completed);
     sc.pending_gpu_profiles = pending;
     for (tv, prof) in ready {
         if let Err(e) = super::compute::dx12_readback_gpu_profile(&ld.command_queue, tv, prof) {

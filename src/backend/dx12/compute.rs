@@ -470,16 +470,6 @@ pub(super) fn dx12_readback_gpu_profile(
     Ok(())
 }
 
-pub(super) fn dx12_finish_gpu_profile(
-    ctx_fence: &ID3D12Fence,
-    command_queue: &ID3D12CommandQueue,
-    fence_value: u64,
-    profile: Dx12GpuProfileResources,
-) -> Result<()> {
-    super::utils::wait_for_fence(ctx_fence, fence_value)?;
-    dx12_readback_gpu_profile(command_queue, fence_value, profile)
-}
-
 /// Drain any pending debug-layer messages for this device into a single
 /// human-readable string. Returns `None` when the device has no
 /// `ID3D12InfoQueue` (debug layer disabled) or no messages are queued.
@@ -786,10 +776,7 @@ fn find_recyclable_allocator_slot(pool: &[ComputeAllocatorSlot], start: usize, c
     None
 }
 
-fn reset_compute_allocator_slot(
-    logical_device: &types::LogicalDevice,
-    slot: &mut ComputeAllocatorSlot,
-) -> Result<()> {
+fn reset_compute_allocator_slot(logical_device: &types::LogicalDevice, slot: &mut ComputeAllocatorSlot) -> Result<()> {
     let _tz = tracy_zone!("dx12.submit_worker.reset_compute_slot");
     unsafe { slot.allocator.Reset() }.context("Failed to reset command allocator")?;
     if let Some(ref existing) = slot.command_list {
@@ -1945,11 +1932,7 @@ fn execute_signal_and_finish(
         let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
         let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
         let mut sc_guard = scope.sc.lock().unwrap();
-        super::context::drain_context_deletion_queue_up_to(
-            logical_device,
-            &mut sc_guard,
-            ctx_completed,
-        );
+        super::context::drain_context_deletion_queue_up_to(logical_device, &mut sc_guard, ctx_completed);
         super::context::drain_pending_gpu_profiles_up_to(logical_device, &mut sc_guard, ctx_completed);
     }
 

@@ -48,7 +48,7 @@ const SMALL_CONTEXT_INLINE_CAP: usize = 4;
 ///
 /// Retained parcels and cross-submit sync typically touch 1–3 contexts; this avoids
 /// heap allocation and SipHash overhead of `HashMap` at that scale. Spills to a `Vec`
-/// when more than [`SMALL_CONTEXT_INLINE_CAP`] distinct contexts are recorded.
+/// when more than [`SmallContextMap::INLINE_CAP`] distinct contexts are recorded.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SmallContextMap<T: Copy + Default> {
     inline: [(ContextHandle, T); SMALL_CONTEXT_INLINE_CAP],
@@ -288,10 +288,7 @@ pub fn is_ready_on(table: &ReferenceTable, ctx: ContextHandle, progress: Timelin
 
 /// Collect `table` entries as [`Epoch`] values.
 pub fn epochs_from(table: &ReferenceTable) -> Vec<Epoch> {
-    table
-        .iter()
-        .map(|(context, value)| Epoch { context, value })
-        .collect()
+    table.iter().map(|(context, value)| Epoch { context, value }).collect()
 }
 
 const PROMISE_PENDING: u64 = 0;
