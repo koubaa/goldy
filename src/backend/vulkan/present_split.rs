@@ -323,8 +323,7 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
         let result = {
             let _queue_guard = queue_lock.lock().unwrap();
             let copy_signal_timeline = if !self.render_pass_submitted {
-                let signal_timeline_value =
-                    super::context::reserve_device_owner_timeline_locked(&self.logical_device);
+                let signal_timeline_value = super::context::reserve_device_owner_timeline_locked(&self.logical_device);
                 signal_timeline = Some(signal_timeline_value);
                 copy_timeline = Some(signal_timeline_value);
                 Some(signal_timeline_value)

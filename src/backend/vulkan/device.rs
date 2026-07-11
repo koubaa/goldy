@@ -230,12 +230,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             // Reserve queue index 0 for graphics/present; remaining indices are the compute pool.
             let spare = available.saturating_sub(1);
             if spare == 0 {
-                (
-                    queue_family_index,
-                    types::MAX_CONTEXT_COMPUTE_QUEUES,
-                    1u32,
-                    true,
-                )
+                (queue_family_index, types::MAX_CONTEXT_COMPUTE_QUEUES, 1u32, true)
             } else {
                 let n = spare.min(types::MAX_CONTEXT_COMPUTE_QUEUES);
                 (queue_family_index, n, 1 + n, false)

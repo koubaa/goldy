@@ -10,11 +10,7 @@ use std::sync::{Arc, Mutex};
 
 /// Record which native semaphore must reach `value` before that global timeline
 /// ticket is considered GPU-retired.
-pub(super) fn register_timeline_wait_target(
-    ld: &super::types::LogicalDevice,
-    value: u64,
-    target: TimelineWaitTarget,
-) {
+pub(super) fn register_timeline_wait_target(ld: &super::types::LogicalDevice, value: u64, target: TimelineWaitTarget) {
     if value == 0 {
         return;
     }

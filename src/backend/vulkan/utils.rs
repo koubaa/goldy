@@ -84,9 +84,7 @@ pub fn with_buffer_sharing<'a>(
     families: Option<&'a [u32; 2]>,
 ) -> vk::BufferCreateInfo<'a> {
     match families {
-        Some(f) => info
-            .sharing_mode(vk::SharingMode::CONCURRENT)
-            .queue_family_indices(f),
+        Some(f) => info.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(f),
         None => info.sharing_mode(vk::SharingMode::EXCLUSIVE),
     }
 }
@@ -97,9 +95,7 @@ pub fn with_image_sharing<'a>(
     families: Option<&'a [u32; 2]>,
 ) -> vk::ImageCreateInfo<'a> {
     match families {
-        Some(f) => info
-            .sharing_mode(vk::SharingMode::CONCURRENT)
-            .queue_family_indices(f),
+        Some(f) => info.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(f),
         None => info.sharing_mode(vk::SharingMode::EXCLUSIVE),
     }
 }

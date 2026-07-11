@@ -832,10 +832,7 @@ fn allocate_vk_buffer_memory(
     };
 
     let qf = logical_device.concurrent_queue_families();
-    let buffer_info = with_buffer_sharing(
-        vk::BufferCreateInfo::default().size(size).usage(vk_usage),
-        qf.as_ref(),
-    );
+    let buffer_info = with_buffer_sharing(vk::BufferCreateInfo::default().size(size).usage(vk_usage), qf.as_ref());
 
     let buffer = unsafe { logical_device.device.create_buffer(&buffer_info, None) }
         .context("Failed to create buffer (resize)")?;
