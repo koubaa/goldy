@@ -291,6 +291,147 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
     }
 }
 
+/// Emit RAW / WAW / WAR sync for one net-access key against a ledger sync cell.
+fn apply_cross_submit_hazards_for_resource(
+    key: ResourceKey,
+    access: NetAccess,
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    separate_graphics: bool,
+    prologue: &mut BarrierSet,
+    wait_map: &mut HashMap<ContextHandle, u64>,
+    cpu_wait_map: &mut HashMap<ContextHandle, u64>,
+) {
+    // RAW: this reads -> hazard vs last_write
+    if access.reads {
+        for (&ctx, &tv) in &sync.last_write {
+            if ctx == submitting_ctx {
+                if separate_graphics && access.read_pipeline_kinds.contains(UsageKindFlags::RENDER) {
+                    // Render partitions on DX12 compute-style backends execute on the
+                    // device graphics queue while prior compute writes land on the
+                    // submitting context's compute queue. Ledger identity matches but
+                    // the physical queues differ — emit cross-queue wait + barrier.
+                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                    );
+                    let usage = BarrierUsage {
+                        src: {
+                            let mut s = SlotUsageSet::default();
+                            s.merge(NodeAccess::Write, prev_write_kinds);
+                            s
+                        },
+                        dst: {
+                            let mut d = SlotUsageSet::default();
+                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                            d
+                        },
+                    };
+                    merge_barrier(prologue, key, usage);
+                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                } else {
+                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                    );
+                    let usage = BarrierUsage {
+                        src: {
+                            let mut s = SlotUsageSet::default();
+                            s.merge(NodeAccess::Write, prev_write_kinds);
+                            s
+                        },
+                        dst: {
+                            let mut d = SlotUsageSet::default();
+                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                            d
+                        },
+                    };
+                    merge_barrier(prologue, key, usage);
+                }
+            } else {
+                // Cross-context RAW: queue-wait for producer completion plus a scoped
+                // prologue on the consumer queue. Real hardware needs the barrier for
+                // UAV→shader-read visibility even after Wait.
+                let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                    *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                );
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(NodeAccess::Write, prev_write_kinds);
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+    }
+
+    // WAW + WAR: this writes -> hazard vs last_write and last_reads
+    if access.writes {
+        for (&ctx, &tv) in &sync.last_write {
+            if ctx == submitting_ctx {
+                let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                    *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
+                );
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(NodeAccess::Write, prev_write_kinds);
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Write, access.write_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+            } else {
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+        for (&ctx, &tv) in &sync.last_reads {
+            if ctx == submitting_ctx {
+                // Same-context WAR: prior submits are strictly ordered on this queue.
+                // A live Wait on this context's own fence can wedge the queue when the
+                // waited value would be signaled by work still behind that Wait.
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(
+                            NodeAccess::Read,
+                            UsageKindFlags::COMPUTE | UsageKindFlags::RENDER | UsageKindFlags::TRANSFER,
+                        );
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Write, access.write_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+            } else {
+                // Cross-context WAR: retire the prior read on the CPU, not via a GPU
+                // queue Wait — pairing with a cross-context RAW live wait on the peer
+                // context can wedge both per-context queues under pipelined submit.
+                cpu_wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+        for (&ctx, &tv) in &sync.foreign_reads {
+            // Same-context WAR against exercised-claim reads (e.g. present easement).
+            // Prologue barriers are baked into retained CBs and stripped on resubmit;
+            // a live queue wait survives `submit_sync_waits_only`.
+            wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+        }
+    }
+}
+
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
 pub fn compute_cross_submit_sync_into(
     out: &mut SubmitSync,
@@ -311,136 +452,16 @@ pub fn compute_cross_submit_sync_into(
         let Some(entry) = find_ledger_entry(ledger, *key) else {
             continue;
         };
-        let sync = &entry.sync;
-
-        // RAW: this reads -> hazard vs last_write
-        if access.reads {
-            for (&ctx, &tv) in &sync.last_write {
-                if ctx == submitting_ctx {
-                    if separate_graphics && access.read_pipeline_kinds.contains(UsageKindFlags::RENDER) {
-                        // Render partitions on DX12 compute-style backends execute on the
-                        // device graphics queue while prior compute writes land on the
-                        // submitting context's compute queue. Ledger identity matches but
-                        // the physical queues differ — emit cross-queue wait + barrier.
-                        let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                            *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                        );
-                        let usage = BarrierUsage {
-                            src: {
-                                let mut s = SlotUsageSet::default();
-                                s.merge(NodeAccess::Write, prev_write_kinds);
-                                s
-                            },
-                            dst: {
-                                let mut d = SlotUsageSet::default();
-                                d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                                d
-                            },
-                        };
-                        merge_barrier(&mut out.prologue, *key, usage);
-                        wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                    } else {
-                        let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                            *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                        );
-                        let usage = BarrierUsage {
-                            src: {
-                                let mut s = SlotUsageSet::default();
-                                s.merge(NodeAccess::Write, prev_write_kinds);
-                                s
-                            },
-                            dst: {
-                                let mut d = SlotUsageSet::default();
-                                d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                                d
-                            },
-                        };
-                        merge_barrier(&mut out.prologue, *key, usage);
-                    }
-                } else {
-                    // Cross-context RAW: queue-wait for producer completion plus a scoped
-                    // prologue on the consumer queue. Real hardware needs the barrier for
-                    // UAV→shader-read visibility even after Wait.
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                    );
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(NodeAccess::Write, prev_write_kinds);
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(&mut out.prologue, *key, usage);
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-        }
-
-        // WAW + WAR: this writes -> hazard vs last_write and last_reads
-        if access.writes {
-            for (&ctx, &tv) in &sync.last_write {
-                if ctx == submitting_ctx {
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                    );
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(NodeAccess::Write, prev_write_kinds);
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Write, access.write_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(&mut out.prologue, *key, usage);
-                } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-            for (&ctx, &tv) in &sync.last_reads {
-                if ctx == submitting_ctx {
-                    // Same-context WAR: prior submits are strictly ordered on this queue.
-                    // A live Wait on this context's own fence can wedge the queue when the
-                    // waited value would be signaled by work still behind that Wait.
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(
-                                NodeAccess::Read,
-                                UsageKindFlags::COMPUTE | UsageKindFlags::RENDER | UsageKindFlags::TRANSFER,
-                            );
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Write, access.write_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(&mut out.prologue, *key, usage);
-                } else {
-                    // Cross-context WAR: retire the prior read on the CPU, not via a GPU
-                    // queue Wait — pairing with a cross-context RAW live wait on the peer
-                    // context can wedge both per-context queues under pipelined submit.
-                    cpu_wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-            for (&ctx, &tv) in &sync.foreign_reads {
-                // Same-context WAR against exercised-claim reads (e.g. present easement).
-                // Prologue barriers are baked into retained CBs and stripped on resubmit;
-                // a live queue wait survives `submit_sync_waits_only`.
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-            }
-        }
+        apply_cross_submit_hazards_for_resource(
+            *key,
+            *access,
+            &entry.sync,
+            submitting_ctx,
+            separate_graphics,
+            &mut out.prologue,
+            wait_map,
+            cpu_wait_map,
+        );
     }
 
     out.waits.clear();
