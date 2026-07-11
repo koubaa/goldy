@@ -1102,3 +1102,107 @@ float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
         &pixels[..4]
     );
 }
+
+/// Cross-queue compute→graphics smoke without swapchain present.
+///
+/// One scheme submission: a compute partition writes a shared buffer, then a render
+/// partition reads it on the graphics queue. On Vulkan with a dedicated compute queue
+/// family this exercises CONCURRENT buffer sharing and timeline waits between
+/// families; validation layers will fault if sharing mode or ownership is wrong.
+#[test]
+fn compute_then_render_same_submit_no_present() {
+    let Some((device, mut pool)) = device_and_pool() else {
+        eprintln!("Skipping test: no GPU available");
+        return;
+    };
+    let ctx = submission_context(&device);
+
+    const W: u32 = 4;
+    const H: u32 = 4;
+
+    let sentinel = pool
+        .acquire_buffer_with_data(&[0u32], BufferKind::Scattered)
+        .expect("sentinel buffer");
+
+    let write_shader_src = r#"
+import goldy_exp;
+[goldy_compute][numthreads(1,1,1)]
+void cs_main(Scattered<uint> buf, ThreadId id) {
+    buf[id.x] = 42u;
+}
+"#;
+
+    let render_shader_src = r#"
+import goldy_exp;
+static const float2 kPositions[3] = {
+    float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)
+};
+struct VSOut { float4 pos : SV_Position; };
+[goldy_vertex]
+VSOut vs_main(VertexId id) {
+    VSOut o;
+    o.pos = float4(kPositions[id.value], 0.0, 1.0);
+    return o;
+}
+[goldy_fragment]
+float4 fs_main(BufRO<uint> sentinel, VSOut v) : SV_Target {
+    uint val = sentinel[0];
+    return (val == 42u) ? float4(0.0, 1.0, 0.0, 1.0) : float4(1.0, 0.0, 0.0, 1.0);
+}
+"#;
+
+    let write_shader = ShaderModule::from_slang(&device, write_shader_src).expect("write shader");
+    let render_shader = ShaderModule::from_slang(&device, render_shader_src).expect("render shader");
+    let write_pipeline = ComputePipeline::new(&device, &write_shader).expect("write pipeline");
+    let render_pipeline = RenderPipeline::new(
+        &device,
+        &render_shader,
+        &render_shader,
+        &RenderPipelineDesc {
+            vertex_layout: VertexBufferLayout {
+                attributes: vec![],
+                stride: 0,
+            },
+            topology: PrimitiveTopology::TriangleList,
+            target_format: TextureFormat::Rgba8Unorm,
+            ..Default::default()
+        },
+    )
+    .expect("render pipeline");
+
+    let readback = acquire_readback_texture(&mut pool, W, H, TextureFormat::Rgba8Unorm);
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .node("write_sentinel", &write_pipeline)
+        .with_parcel(&sentinel, NodeAccess::Write)
+        .dispatch(1, 1, 1);
+    let rt = scheme
+        .lease_render_target(W, H, TextureFormat::Rgba8Unorm, None)
+        .expect("render target lease");
+    {
+        let mut pass = scheme.render_pass("read_sentinel", &rt);
+        pass.clear(Color::RED);
+        pass.with_shader_resources(&[ShaderResourceSlot::Parcel {
+            parcel: &sentinel,
+            access: NodeAccess::Read,
+        }]);
+        pass.set_pipeline(&render_pipeline);
+        pass.draw(0..3, 0..1);
+        pass.finish();
+    }
+    scheme.copy_to_texture(&rt, &readback).expect("copy to readback");
+    let grant = scheme.grant_read_texture(&readback).expect("grant read texture");
+
+    let submission = scheme.submit().expect("submit");
+    let pixels = read_grant_texture(&grant, &submission);
+
+    assert_eq!(pixels.len(), (W * H * 4) as usize);
+    let all_green = pixels.chunks(4).all(|p| p[1] > 200 && p[0] < 50);
+    assert!(
+        all_green,
+        "render partition must see compute-written sentinel (42); red pixels mean \
+         cross-queue sync or CONCURRENT sharing failed. First pixel: {:?}",
+        &pixels[..4]
+    );
+}
