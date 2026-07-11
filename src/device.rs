@@ -826,6 +826,15 @@ impl Device {
         backend.max_bindless_slots_per_category(self.inner.handle, category)
     }
 
+    /// Maximum concurrent [`crate::Context`]s this device can create.
+    ///
+    /// On Vulkan this is the size of the per-device compute-queue pool (fixed at
+    /// device create). On DX12/Metal it is effectively unlimited (`u32::MAX`).
+    pub fn max_submission_contexts(&self) -> u32 {
+        let backend = self.inner.backend.lock().unwrap();
+        backend.max_submission_contexts(self.inner.handle)
+    }
+
     /// Snapshot of the Metal buffer heap allocator state.
     /// Returns `None` on non-Metal backends.
     #[doc(hidden)]

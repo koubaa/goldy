@@ -497,12 +497,7 @@ void cs_main(BufRO<uint> src, Scattered<uint> dst, ThreadId id) {
         trial!(partitioned_buffer_disjoint_ranges_no_cross_submit_hazard);
 
         let mut args = libtest_mimic::Arguments::from_args();
-        #[cfg(all(feature = "dx12", target_os = "windows"))]
-        if device.backend_type() == BackendType::Dx12 && device.adapter_id() == goldy::WARP_ADAPTER_ID {
-            // WARP has known contention under parallel trial execution; force serial
-            // regardless of --test-threads (hardware DX12 and other backends unchanged).
-            args.test_threads = Some(1);
-        }
+        crate::submission::clamp_test_threads(&mut args, &device);
         let conclusion = libtest_mimic::run(&args, trials);
 
         drop(device);

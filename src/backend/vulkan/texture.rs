@@ -1333,10 +1333,9 @@ pub(super) fn record_compute_texture_upload(
 
     let (src_stage, src_access) = match old_layout {
         vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
-            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-            vk::AccessFlags2::SHADER_READ,
-        ),
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+            (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_READ)
+        }
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
         vk::ImageLayout::GENERAL => (
             vk::PipelineStageFlags2::COMPUTE_SHADER,
@@ -1398,7 +1397,7 @@ pub(super) fn record_compute_texture_upload(
     let barrier_to_shader = vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
         .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
         .dst_access_mask(vk::AccessFlags2::SHADER_READ)
         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
         .new_layout(settled_layout)

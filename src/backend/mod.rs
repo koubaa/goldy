@@ -1620,6 +1620,14 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
         u32::MAX
     }
 
+    /// Maximum concurrent submission contexts this device can create.
+    ///
+    /// Vulkan pre-allocates a fixed compute-queue pool at device create; DX12/Metal
+    /// create queues on demand and report [`u32::MAX`].
+    fn max_submission_contexts(&self, _device: DeviceHandle) -> u32 {
+        u32::MAX
+    }
+
     /// Process pending GPU deletions and reclaim bindless descriptor slots
     /// whose GPU timeline barrier has been signaled.
     ///

@@ -43,6 +43,23 @@ pub(crate) struct ContextFrameTable {
     pub last_token_for_row: [AtomicU64; FRAME_TABLE_MAX_ROWS as usize],
 }
 
+/// Stub frame table for the synthetic device-owner context (never used for recording).
+pub(crate) fn device_owner_frame_table_stub() -> SharedContextFrameTable {
+    use std::sync::Arc;
+    Arc::new(ContextFrameTable {
+        selector: 0,
+        device_table: 0,
+        selector_slot: 0,
+        table_slot: 0,
+        staging: vk::Buffer::null(),
+        staging_memory: vk::DeviceMemory::null(),
+        staging_mapped: 0,
+        submission_counter: AtomicU32::new(0),
+        pinned_rows: AtomicU32::new(0),
+        last_token_for_row: std::array::from_fn(|_| AtomicU64::new(0)),
+    })
+}
+
 /// Reserve user bindless slots once per device (low protocol slots stay unused).
 pub(crate) fn reserve_device_bindless_slots(ld: &LogicalDevice) {
     ld.descriptors
@@ -318,9 +335,14 @@ fn create_scattered_u32_buffer_registered(
     Ok((handle, bindless_slot))
 }
 
-fn prologue_pre_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer) {
+fn prologue_pre_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer, on_graphics_queue: bool) {
+    let src_graphics = if on_graphics_queue {
+        vk::PipelineStageFlags2::ALL_GRAPHICS
+    } else {
+        vk::PipelineStageFlags2::empty()
+    };
     let mem_barrier = vk::MemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_GRAPHICS)
+        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | src_graphics)
         .src_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE)
         .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
         .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
@@ -330,11 +352,16 @@ fn prologue_pre_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer) {
     }
 }
 
-fn prologue_post_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer) {
+fn prologue_post_copy_barrier(device: &ash::Device, cmd: vk::CommandBuffer, on_graphics_queue: bool) {
+    let dst_graphics = if on_graphics_queue {
+        vk::PipelineStageFlags2::ALL_GRAPHICS
+    } else {
+        vk::PipelineStageFlags2::empty()
+    };
     let mem_barrier = vk::MemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
         .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::ALL_GRAPHICS)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | dst_graphics)
         .dst_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE);
     let dep_info = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&mem_barrier));
     unsafe {
@@ -350,6 +377,7 @@ fn record_table_copies(
     row: u32,
     copy_u32s: usize,
     copy_selector: bool,
+    on_graphics_queue: bool,
 ) -> Result<()> {
     let buffers_read = buffers.read().unwrap();
     let device_table = buffers_read.entries.get(&ft.device_table).context("device table")?;
@@ -359,7 +387,7 @@ fn record_table_copies(
     let src_payload = crate::frame_table::staging_row_payload_byte_offset(row);
     let src_selector = crate::frame_table::staging_selector_byte_offset(row);
 
-    prologue_pre_copy_barrier(&ld.device, cmd);
+    prologue_pre_copy_barrier(&ld.device, cmd, on_graphics_queue);
     unsafe {
         ld.device.cmd_copy_buffer(
             cmd,
@@ -384,7 +412,7 @@ fn record_table_copies(
             );
         }
     }
-    prologue_post_copy_barrier(&ld.device, cmd);
+    prologue_post_copy_barrier(&ld.device, cmd, on_graphics_queue);
     Ok(())
 }
 
@@ -588,7 +616,7 @@ pub(crate) fn record_prologue_legacy(
     let row = write_staging_standalone(frame_table, ld, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true)?;
+    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true, true)?;
     Ok(row)
 }
 
@@ -607,11 +635,12 @@ pub(crate) fn record_prologue(
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     data: &[u32],
+    on_graphics_queue: bool,
 ) -> Result<u32> {
     let row = write_staging_for_submission(contexts, ld, ctx, frame_table, data)?;
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true)?;
+    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, true, on_graphics_queue)?;
     Ok(row)
 }
 
@@ -622,6 +651,7 @@ pub(crate) fn sync_table_row_to_device(
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     data: &[u32],
+    on_graphics_queue: bool,
 ) -> Result<()> {
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
@@ -633,7 +663,8 @@ pub(crate) fn sync_table_row_to_device(
         std::ptr::copy_nonoverlapping(data.as_ptr(), payload_dst, copy_u32s);
         std::ptr::write(staging_ptr.add(row as usize), row);
     }
-    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, false)
+    record_table_copies(frame_table, buffers, ld, cmd, row, copy_u32s, false, on_graphics_queue)?;
+    Ok(())
 }
 
 /// Lower render commands and build staging for standalone render passes (not graph submit).

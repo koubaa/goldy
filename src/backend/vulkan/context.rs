@@ -26,6 +26,7 @@ pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
             if sc.device != device {
                 return None;
             }
+            // Device owner shares the device timeline space with render submits.
             Some(unsafe {
                 ld.device
                     .get_semaphore_counter_value(sc.timeline_semaphore)
@@ -40,6 +41,17 @@ pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
 pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<ContextHandle> {
     let ld = state.devices.get(&device).context("Invalid device handle")?.clone();
 
+    let queue_index = ld
+        .free_compute_queue_indices
+        .lock()
+        .unwrap()
+        .pop_front()
+        .context("Vulkan per-context compute queue pool exhausted — destroy a context or create another device")?;
+    let queue = ld.compute_queues[queue_index];
+    let compute_family = ld.compute_queue_family;
+    let queue_lock = Arc::new(Mutex::new(()));
+    ld.register_active_compute_queue_lock(Arc::clone(&queue_lock));
+
     let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
         .semaphore_type(vk::SemaphoreType::TIMELINE)
         .initial_value(0);
@@ -48,7 +60,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
         .context("Failed to create per-context Vulkan timeline semaphore")?;
 
     let pool_info = vk::CommandPoolCreateInfo::default()
-        .queue_family_index(ld.queue_family)
+        .queue_family_index(compute_family)
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
     let command_pool = unsafe { ld.device.create_command_pool(&pool_info, None) }
         .context("Failed to create per-context command pool")?;
@@ -82,6 +94,11 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
         id,
         Arc::new(Mutex::new(SubmissionContext {
             device,
+            is_device_owner: false,
+            queue,
+            queue_family: compute_family,
+            queue_index: Some(queue_index),
+            queue_lock,
             timeline_semaphore,
             last_submitted_seq: 0,
             signal_queue,
@@ -91,6 +108,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             free_cmd_buffers: Vec::new(),
             retained_compute_cbs: std::collections::HashMap::new(),
             timeline_cmd_buffers: std::collections::HashMap::new(),
+            graphics_timeline_cmd_buffers: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
@@ -138,7 +156,16 @@ pub(super) fn detach_for_destroy(state: &VulkanState, ctx: ContextHandle) -> Opt
 }
 
 fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
-    let VulkanContextDestroyWork { mut sc, ld, buffers } = *work;
+    let VulkanContextDestroyWork { sc, ld, buffers } = *work;
+    teardown_submission_context(sc, &ld, &buffers);
+}
+
+/// Destroy Vulkan objects owned by a submission context (command pool, timeline semaphore, etc.).
+pub(super) fn teardown_submission_context(
+    mut sc: SubmissionContext,
+    ld: &super::types::SharedLogicalDevice,
+    buffers: &super::types::SharedBufferTable,
+) {
     let device = sc.device;
 
     let completed = unsafe {
@@ -155,7 +182,7 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
     if !ctx_batch.is_empty() {
         let mut registry = ld.descriptors.lock().unwrap();
         for r in ctx_batch {
-            super::types::destroy_pending_deletion(&ld, &mut registry, r);
+            super::types::destroy_pending_deletion(ld, &mut registry, r);
         }
     }
 
@@ -167,12 +194,17 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
     }
 
     unsafe {
-        sc.staging_belt.destroy_all(&ld);
-        sc.texture_staging_pool.destroy_all(&ld);
+        sc.staging_belt.destroy_all(ld);
+        sc.texture_staging_pool.destroy_all(ld);
         let command_pool = sc.command_pool;
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {
             for cb in cbs {
                 ld.device.free_command_buffers(command_pool, &[cb]);
+            }
+        }
+        for (_, cbs) in sc.graphics_timeline_cmd_buffers.drain() {
+            for cb in cbs {
+                ld.device.free_command_buffers(ld.command_pool, &[cb]);
             }
         }
         for cb in sc.free_cmd_buffers.drain(..) {
@@ -181,16 +213,73 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
         let mut rows_to_unpin = Vec::new();
         for (_, retained) in sc.retained_compute_cbs.drain() {
             rows_to_unpin.push(retained.frame_table_row);
-            ld.device.free_command_buffers(command_pool, &[retained.command_buffer]);
+            let pool = if retained.on_graphics_queue {
+                ld.command_pool
+            } else {
+                command_pool
+            };
+            ld.device.free_command_buffers(pool, &[retained.command_buffer]);
         }
         for row in rows_to_unpin.into_iter().flatten() {
             super::frame_table::unpin_row(&sc.frame_table, row);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);
-        super::frame_table::destroy_context_resources(&buffers, &ld, &sc.frame_table);
+        if !sc.is_device_owner {
+            if let Some(idx) = sc.queue_index {
+                ld.free_compute_queue_indices.lock().unwrap().push_back(idx);
+            }
+            ld.unregister_active_compute_queue_lock(&sc.queue_lock);
+        }
+        if !sc.is_device_owner {
+            super::frame_table::destroy_context_resources(buffers, ld, &sc.frame_table);
+        }
     }
     let _ = device;
+}
+
+/// Tear down the synthetic device-owner context before `vkDestroyDevice`.
+pub(super) fn destroy_device_owner(state: &VulkanState, ld: &super::types::SharedLogicalDevice, owner: ContextHandle) {
+    let Some(sc_arc) = state.contexts.write().unwrap().remove(&owner) else {
+        return;
+    };
+    let sc = std::sync::Arc::try_unwrap(sc_arc)
+        .unwrap_or_else(|_| panic!("device-owner context {owner} still has extra Arc owners at device destroy"))
+        .into_inner()
+        .expect("device-owner context Mutex poisoned");
+    teardown_submission_context(sc, ld, &state.buffers);
+}
+
+/// Timeline semaphore for the synthetic device-owner (graphics-queue) context.
+pub(super) fn owner_timeline_semaphore(state: &VulkanState, device: DeviceHandle) -> Option<vk::Semaphore> {
+    let owner = state.device_owner_handles.get(&device)?;
+    Some(
+        state
+            .contexts
+            .read()
+            .unwrap()
+            .get(owner)?
+            .lock()
+            .unwrap()
+            .timeline_semaphore,
+    )
+}
+
+/// Block until the device-owner timeline has reached `seq` (graphics/present work).
+pub(super) fn wait_until_owner_seq_at_least(state: &VulkanState, device: DeviceHandle, seq: u64) {
+    if seq == 0 {
+        return;
+    }
+    let Some(sem) = owner_timeline_semaphore(state, device) else {
+        return;
+    };
+    let Some(ld) = state.devices.get(&device) else {
+        return;
+    };
+    let wait = vk::SemaphoreWaitInfo::default()
+        .semaphores(std::slice::from_ref(&sem))
+        .values(std::slice::from_ref(&seq));
+    let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
 }
 
 /// Block until the device-global submission sequence `seq` has been signalled on the GPU.
@@ -282,7 +371,7 @@ fn contexts_on_device(state: &VulkanState, device: DeviceHandle) -> Vec<ContextH
         .iter()
         .filter_map(|(&h, sc_arc)| {
             let sc = sc_arc.lock().unwrap();
-            (sc.device == device).then_some(h)
+            (sc.device == device && !sc.is_device_owner).then_some(h)
         })
         .collect()
 }

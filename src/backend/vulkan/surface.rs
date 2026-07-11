@@ -27,8 +27,10 @@
 //! 3. **`present()`** — records a one-shot copy CB:
 //!    `scratch GENERAL→TRANSFER_SRC`, `swapchain UNDEFINED→TRANSFER_DST`,
 //!    `vkCmdCopyImage`, `scratch TRANSFER_SRC→GENERAL`,
-//!    `swapchain TRANSFER_DST→PRESENT_SRC_KHR`.  All deferred CBs plus the
-//!    copy CB are submitted in a **single `vkQueueSubmit2`** waiting on
+//!    `swapchain TRANSFER_DST→PRESENT_SRC_KHR`.  When compute and graphics use
+//!    different queue families the scratch image is created `CONCURRENT` across
+//!    both families so layout barriers suffice (no queue-family ownership transfer).
+//!    The copy CB is submitted in a **single `vkQueueSubmit2`** waiting on
 //!    `image_available_semaphore` and the runtime's final timeline value,
 //!    signalling `render_finished_semaphore` and advancing the timeline. Then
 //!    `vkQueuePresentKHR`.
@@ -460,27 +462,33 @@ fn wait_surface_gpu_idle(state: &super::types::VulkanState, surface_handle: Surf
         }
     }
 
-    let max_timeline = surface_state
+    let max_copy_timeline = surface_state
         .frame_sync
         .iter()
-        .flat_map(|f| f.frame_timeline_value.into_iter().chain(f.copy_timeline_value))
+        .filter_map(|f| f.copy_timeline_value)
+        .max()
+        .unwrap_or(0);
+    let max_compute_timeline = surface_state
+        .frame_sync
+        .iter()
+        .flat_map(|f| f.frame_timeline_value)
         .chain(surface_state.frame_sync.iter().map(|f| f.last_compute_timeline_value))
         .max()
         .unwrap_or(0);
 
-    if max_timeline > 0 {
-        super::context::wait_until_device_seq_at_least(state, device_handle, max_timeline);
+    if max_copy_timeline > 0 {
+        super::context::wait_until_owner_seq_at_least(state, device_handle, max_copy_timeline);
+    }
+    if max_compute_timeline > 0 {
+        super::context::wait_until_device_seq_at_least(state, device_handle, max_compute_timeline);
     }
 
     // Timeline retirement covers compute/copy submits, but `queuePresent` may still be
-    // waiting on `render_finished_semaphore` after the copy submit returns. Drain the
-    // queue before destroying per-frame binary semaphores (VUID-vkDestroySemaphore).
+    // waiting on `render_finished_semaphore` after the copy submit returns. Drain graphics
+    // and per-context compute queues before destroying per-frame binary semaphores
+    // (VUID-vkDestroySemaphore).
     if let Some(ld) = state.devices.get(&device_handle) {
-        let queue_lock = std::sync::Arc::clone(&ld.queue_lock);
-        let _queue_guard = queue_lock.lock().unwrap();
-        unsafe {
-            let _ = ld.device.queue_wait_idle(ld.queue);
-        }
+        let _ = ld.queues_wait_idle_locked();
     }
 }
 
@@ -686,10 +694,14 @@ pub(super) fn acquire(
         let slot_copy = surface_state.frame_sync[current_frame].copy_timeline_value.unwrap_or(0);
         let next_slot = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         let next_compute = surface_state.frame_sync[next_slot].last_compute_timeline_value;
+        if slot_copy > 0 {
+            super::context::wait_until_owner_seq_at_least(state, device_handle, slot_copy);
+        }
+        if next_compute > 0 {
+            super::context::wait_until_device_seq_at_least(state, device_handle, next_compute);
+        }
         let slot_timeline = slot_copy.max(next_compute);
         if slot_timeline > 0 {
-            super::context::wait_until_device_seq_at_least(state, device_handle, slot_timeline);
-
             if crate::validation_env::timeline_validation_enabled() {
                 let completed = super::context::device_retired(state, device_handle);
                 assert!(
@@ -1008,6 +1020,7 @@ pub(super) fn render(
                 logical_device,
                 cmd,
                 &staging_data,
+                true,
             )?;
             row_guard.set(row);
         }
@@ -1772,7 +1785,9 @@ fn ensure_scratch_texture_slot(
 
     let (image, memory) = {
         let ld = state.devices.get(&device_handle).context("Device invalid")?;
-        let image_info = vk::ImageCreateInfo::default()
+        let cross_family = ld.compute_queue_family != ld.queue_family;
+        let families = cross_family.then_some([ld.queue_family, ld.compute_queue_family]);
+        let mut image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -1785,8 +1800,14 @@ fn ensure_scratch_texture_slot(
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        if let Some(ref family_indices) = families {
+            image_info = image_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(family_indices);
+        } else {
+            image_info = image_info.sharing_mode(vk::SharingMode::EXCLUSIVE);
+        }
 
         let img =
             unsafe { ld.device.create_image(&image_info, None) }.context("Failed to create scratch texture image")?;

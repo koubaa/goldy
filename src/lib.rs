@@ -208,9 +208,7 @@ pub mod test_support {
                     .find(|a| a.device_type() == preferred)
                     .or(adapters.first())
                     .expect("no adapter");
-                adapter
-                    .request_device(&DeviceDescriptor::default())
-                    .expect("device")
+                adapter.request_device(&DeviceDescriptor::default()).expect("device")
             })
         }
 
@@ -233,10 +231,7 @@ pub mod test_support {
                 None => None,
             };
 
-            Self {
-                device,
-                _warp_guard,
-            }
+            Self { device, _warp_guard }
         }
     }
 

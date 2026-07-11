@@ -6,6 +6,7 @@ use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
+use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -210,20 +211,52 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         features2 = features2.push_next(&mut compute_derivatives_features);
     }
 
-    // Create logical device with swapchain extension
-    let mut queue_family_set = std::collections::BTreeSet::new();
-    queue_family_set.insert(queue_family_index);
-    if supports_sparse {
-        queue_family_set.insert(sparse_queue_family_index);
-    }
+    // Per-context compute queue pool (see types::MAX_CONTEXT_COMPUTE_QUEUES).
+    let dedicated_compute_family = queue_families.iter().enumerate().find_map(|(idx, props)| {
+        let has_compute = props.queue_flags.contains(vk::QueueFlags::COMPUTE);
+        let has_graphics = props.queue_flags.contains(vk::QueueFlags::GRAPHICS);
+        (has_compute && !has_graphics).then_some(idx as u32)
+    });
 
-    let queue_priorities = [1.0f32];
-    let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = queue_family_set
+    let (compute_queue_family, compute_pool_size, graphics_family_queue_count) =
+        if let Some(cf) = dedicated_compute_family {
+            let family_count = queue_families[cf as usize].queue_count;
+            let n = family_count.min(types::MAX_CONTEXT_COMPUTE_QUEUES).max(1);
+            (cf, n, 1u32)
+        } else {
+            let available = queue_families[queue_family_index as usize].queue_count;
+            // Reserve queue index 0 for graphics/present; remaining indices are the compute pool.
+            let spare = available.saturating_sub(1);
+            let n = spare.clamp(1, types::MAX_CONTEXT_COMPUTE_QUEUES);
+            (queue_family_index, n, 1 + n)
+        };
+
+    // Create logical device with swapchain extension
+    let mut queue_priority_storage: Vec<Vec<f32>> = Vec::new();
+    let mut queue_family_counts: Vec<(u32, usize)> = Vec::new();
+    if compute_queue_family == queue_family_index {
+        queue_family_counts.push((queue_family_index, graphics_family_queue_count as usize));
+        queue_priority_storage.push(vec![1.0f32; graphics_family_queue_count as usize]);
+    } else {
+        queue_family_counts.push((queue_family_index, 1));
+        queue_priority_storage.push(vec![1.0f32]);
+        queue_family_counts.push((compute_queue_family, compute_pool_size as usize));
+        queue_priority_storage.push(vec![1.0f32; compute_pool_size as usize]);
+    }
+    if supports_sparse
+        && sparse_queue_family_index != queue_family_index
+        && sparse_queue_family_index != compute_queue_family
+    {
+        queue_family_counts.push((sparse_queue_family_index, 1));
+        queue_priority_storage.push(vec![1.0f32]);
+    }
+    let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = queue_family_counts
         .iter()
-        .map(|&family| {
+        .enumerate()
+        .map(|(idx, (family, _))| {
             vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(family)
-                .queue_priorities(&queue_priorities)
+                .queue_family_index(*family)
+                .queue_priorities(&queue_priority_storage[idx])
         })
         .collect();
     // Extensions: swapchain for presentation, plus 1.4-promoted extensions whose KHR
@@ -253,6 +286,18 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     .context("Failed to create logical device")?;
 
     let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+    let mut compute_queues = Vec::with_capacity(compute_pool_size as usize);
+    if compute_queue_family == queue_family_index {
+        for i in 1..=compute_pool_size {
+            compute_queues.push(unsafe { device.get_device_queue(compute_queue_family, i) });
+        }
+    } else {
+        for i in 0..compute_pool_size {
+            compute_queues.push(unsafe { device.get_device_queue(compute_queue_family, i) });
+        }
+    }
+    let free_compute_queue_indices: VecDeque<usize> = (0..compute_queues.len()).collect();
 
     let sparse_binding_queue = if supports_sparse {
         unsafe { device.get_device_queue(sparse_queue_family_index, 0) }
@@ -438,6 +483,10 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             adapter_id,
             queue,
             queue_family: queue_family_index,
+            compute_queue_family,
+            compute_queues,
+            free_compute_queue_indices: Mutex::new(free_compute_queue_indices),
+            free_device_cmd_buffers: Mutex::new(Vec::new()),
             sparse_binding_queue,
             command_pool,
             supports_sparse_buffer: supports_sparse,
@@ -455,6 +504,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),
             queue_lock: Arc::new(Mutex::new(())),
+            active_context_queue_locks: Mutex::new(Vec::new()),
             pipeline_cache,
             vk_timestamp_compute_and_graphics: physical_device.vk_timestamp_compute_and_graphics,
             vk_timestamp_period_ns: physical_device.vk_timestamp_period_ns,
@@ -462,16 +512,75 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         }),
     );
 
-    tracing::info!("Created Vulkan device {} for adapter {}", handle, adapter_id);
-    if let Some(ld) = state.devices.get(&handle) {
-        super::frame_table::reserve_device_bindless_slots(ld);
+    tracing::info!(
+        "Created Vulkan device {} for adapter {} (compute pool: {} queues, family {})",
+        handle,
+        adapter_id,
+        compute_pool_size,
+        compute_queue_family
+    );
+    if let Some(ld) = state.devices.get(&handle).cloned() {
+        super::frame_table::reserve_device_bindless_slots(&ld);
+        create_device_owner_context(state, handle, &ld)?;
     }
     Ok(handle)
+}
+
+/// Synthetic submission context for device-queue render epoch stamps.
+fn create_device_owner_context(
+    state: &mut VulkanState,
+    device_handle: DeviceHandle,
+    ld: &types::SharedLogicalDevice,
+) -> Result<()> {
+    let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let timeline_sem_ci = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_sem_type);
+    let timeline_semaphore = unsafe { ld.device.create_semaphore(&timeline_sem_ci, None) }
+        .context("Failed to create device-owner Vulkan timeline semaphore")?;
+
+    let pool_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(ld.queue_family)
+        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+    let command_pool = unsafe { ld.device.create_command_pool(&pool_info, None) }
+        .context("Failed to create device-owner command pool")?;
+
+    let owner_id = state.next_context_id;
+    state.next_context_id = state.next_context_id.saturating_add(1);
+
+    state.contexts.write().unwrap().insert(
+        owner_id,
+        Arc::new(Mutex::new(types::SubmissionContext {
+            device: device_handle,
+            is_device_owner: true,
+            queue: ld.queue,
+            queue_family: ld.queue_family,
+            queue_index: None,
+            queue_lock: Arc::clone(&ld.queue_lock),
+            timeline_semaphore,
+            last_submitted_seq: 0,
+            signal_queue: Arc::new(crate::signal::SignalQueue::new()),
+            fence_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fence_thread: None,
+            command_pool,
+            free_cmd_buffers: Vec::new(),
+            retained_compute_cbs: std::collections::HashMap::new(),
+            timeline_cmd_buffers: std::collections::HashMap::new(),
+            graphics_timeline_cmd_buffers: std::collections::HashMap::new(),
+            staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
+            texture_staging_pool: super::staging::TextureStagingPool::new(),
+            deletion_queue: types::DeletionQueue::new(),
+            frame_table: super::frame_table::device_owner_frame_table_stub(),
+        })),
+    );
+    state.device_owner_handles.insert(device_handle, owner_id);
+    Ok(())
 }
 
 /// Destroy a logical device and all resources associated with it.
 #[allow(clippy::too_many_lines)]
 pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
+    let device_owner = state.device_owner_handles.remove(&device_handle);
     tracing::info!(
         %device_handle,
         global_devices = state.devices.len(),
@@ -570,9 +679,11 @@ pub(super) fn destroy(state: &mut VulkanState, device_handle: DeviceHandle) {
             // Flush any pending deferred deletions via the new &self helper.
             logical_device.flush_deletion_queue();
 
+            if let Some(owner) = device_owner {
+                super::context::destroy_device_owner(state, &logical_device, owner);
+            }
+
             // Destroy per-context staging belt and texture pool for this device.
-            // Command pools/semaphores in the context are intentionally NOT destroyed
-            // here — they are child objects of the device and reclaimed by vkDestroyDevice.
             let ctx_keys: Vec<_> = state
                 .contexts
                 .read()
