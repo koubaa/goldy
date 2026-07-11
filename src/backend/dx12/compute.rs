@@ -1858,8 +1858,7 @@ fn execute_signal_and_finish(
         let mut sc = scope.sc.lock().unwrap();
         sc.staging_belt.finish(fence_value);
         if !staged_texture_entries.is_empty() {
-            sc.texture_staging_pool
-                .release(fence_value, staged_texture_entries);
+            sc.texture_staging_pool.release(fence_value, staged_texture_entries);
         }
     }
 

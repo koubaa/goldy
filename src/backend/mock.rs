@@ -302,6 +302,17 @@ impl MockBackend {
         self.context_state(ctx).signal_queue.push(signal);
     }
 
+    fn mock_pending_submit(ctx: ContextHandle, tv: u64, backend: &MockBackend) -> Result<MockPendingSubmit> {
+        let context_state = Arc::clone(
+            backend
+                .contexts
+                .get(&ctx)
+                .ok_or_else(|| anyhow::anyhow!("Invalid context handle"))?,
+        );
+        Ok(MockPendingSubmit { tv, context_state })
+    }
+
+    /// Present-at-submit path: enqueue on the FIFO worker so ordering matches real backends.
     fn enqueue_mock_submit(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
         let device = self.context_device(ctx);
         let dev = self
@@ -309,18 +320,19 @@ impl MockBackend {
             .get(&device)
             .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
         dev.submission_worker.check_error()?;
-        let context_state = Arc::clone(
-            self.contexts
-                .get(&ctx)
-                .ok_or_else(|| anyhow::anyhow!("Invalid context handle"))?,
-        );
-        dev.submission_worker.enqueue(
-            tv,
-            Box::new(MockPendingSubmit {
-                tv,
-                context_state,
-            }),
-        )
+        dev.submission_worker
+            .enqueue(tv, Box::new(Self::mock_pending_submit(ctx, tv, self)?))
+    }
+
+    /// Compute/transfer path: run synchronously on the caller thread (no worker mutex wait).
+    fn execute_mock_submit_immediately(&self, ctx: ContextHandle, tv: u64) -> Result<()> {
+        let device = self.context_device(ctx);
+        let dev = self
+            .devices
+            .get(&device)
+            .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
+        dev.submission_worker
+            .execute_immediately(tv, Box::new(Self::mock_pending_submit(ctx, tv, self)?))
     }
 
     /// Block until the worker has executed a mock submit (uses condvar, not spin-wait).
@@ -489,8 +501,7 @@ impl crate::backend::GpuBackendTimelineWait for MockBackend {
         if let Some(dev) = self.devices.get(&device) {
             dev.submission_worker.flush()?;
             let horizon = self.mock_scheduled_horizon(device);
-            dev.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
+            dev.submission_worker.wait_submitted_if_scheduled(value, horizon)?;
         }
         self.wait_until_count += 1;
         let cur = self.gpu_progress(ctx);
@@ -1579,8 +1590,7 @@ impl GpuBackend for MockBackend {
         if let Some(dev) = self.devices.get(&device) {
             dev.submission_worker.flush()?;
             let horizon = self.mock_scheduled_horizon(device);
-            dev.submission_worker
-                .wait_submitted_if_scheduled(value, horizon)?;
+            dev.submission_worker.wait_submitted_if_scheduled(value, horizon)?;
         }
         // On the mock, advance every context on this device to at least `value`
         // so that device_retired() >= value after the call.
@@ -1688,7 +1698,7 @@ impl GpuBackend for MockBackend {
             let mut state = self.context_state_mut(ctx);
             state.last_submitted_seq = tv;
         }
-        self.enqueue_mock_submit(ctx, tv)?;
+        self.execute_mock_submit_immediately(ctx, tv)?;
         self.await_mock_submit(ctx, tv)?;
         Ok(tv)
     }
@@ -2578,7 +2588,12 @@ mod tests {
             state.completed = 7;
             state.last_submitted_seq = 10;
         }
-        backend.devices.get(&device).unwrap().timeline_next.store(10, std::sync::atomic::Ordering::Relaxed);
+        backend
+            .devices
+            .get(&device)
+            .unwrap()
+            .timeline_next
+            .store(10, std::sync::atomic::Ordering::Relaxed);
 
         crate::backend::destroy_context_mut(&mut backend, ctx);
 

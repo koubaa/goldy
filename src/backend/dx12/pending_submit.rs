@@ -90,35 +90,7 @@ impl PendingSubmit for Dx12RetainedResubmitPending {
     }
 }
 
-struct Dx12PresentCopyPendingSubmit {
-    logical_device: SharedLogicalDevice,
-    command_lists: Vec<Option<ID3D12CommandList>>,
-    tv: u64,
-}
-
-impl PendingSubmit for Dx12PresentCopyPendingSubmit {
-    fn execute(self: Box<Self>) -> Result<()> {
-        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.present_copy");
-        super::utils::signal_preallocated_device(&self.logical_device, &self.command_lists, self.tv)
-    }
-}
-
-pub(super) fn enqueue_present_copy(
-    logical_device: &SharedLogicalDevice,
-    command_lists: Vec<Option<ID3D12CommandList>>,
-    tv: u64,
-) -> Result<()> {
-    logical_device.submission_worker.check_error()?;
-    logical_device.submission_worker.enqueue(
-        tv,
-        Box::new(Dx12PresentCopyPendingSubmit {
-            logical_device: Arc::clone(logical_device),
-            command_lists,
-            tv,
-        }),
-    )
-}
-
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_compute_submit(
     logical_device: &SharedLogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,
@@ -147,6 +119,7 @@ pub(super) fn enqueue_compute_submit(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_retained_resubmit(
     logical_device: &SharedLogicalDevice,
     context_fences: &Arc<RwLock<HashMap<ContextHandle, ContextFenceEntry>>>,

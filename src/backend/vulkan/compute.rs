@@ -607,6 +607,7 @@ pub(super) fn ctx_completed_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enqueue_vulkan_compute_with_housekeeping(
     scope: &super::submit_session::VulkanSubmitScope<'_>,
     device_handle: super::DeviceHandle,
@@ -624,13 +625,7 @@ fn enqueue_vulkan_compute_with_housekeeping(
     let view = &scope.view;
     let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
     let completed = scope.completed_timeline_value();
-    super::pending_submit::vulkan_drain_context_deletion_up_to(
-        ld,
-        view.contexts,
-        device_handle,
-        &scope.sc,
-        completed,
-    );
+    super::pending_submit::vulkan_drain_context_deletion_up_to(ld, view.contexts, device_handle, &scope.sc, completed);
     super::pending_submit::enqueue_vulkan_submit(
         ld,
         view.contexts,
@@ -1686,11 +1681,7 @@ pub(super) fn submit_with_scope(
 
     let texture_entries: Vec<staging::TextureStagingEntry> =
         texture_upload_scratch.into_iter().map(|s| s.entry).collect();
-    let gpu_profile_work = vk_gpu_profile.map(|prof| super::pending_submit::VulkanGpuProfileWork {
-        ctx,
-        cmd,
-        prof,
-    });
+    let gpu_profile_work = vk_gpu_profile.map(|prof| super::pending_submit::VulkanGpuProfileWork { ctx, cmd, prof });
 
     enqueue_vulkan_compute_with_housekeeping(
         scope,
@@ -2789,11 +2780,7 @@ pub(super) fn submit_graph_with_scope(
 
     let texture_entries: Vec<staging::TextureStagingEntry> =
         texture_upload_scratch.into_iter().map(|s| s.entry).collect();
-    let gpu_profile_work = vk_gpu_profile.map(|prof| super::pending_submit::VulkanGpuProfileWork {
-        ctx,
-        cmd,
-        prof,
-    });
+    let gpu_profile_work = vk_gpu_profile.map(|prof| super::pending_submit::VulkanGpuProfileWork { ctx, cmd, prof });
 
     enqueue_vulkan_compute_with_housekeeping(
         scope,

@@ -617,7 +617,9 @@ where
         .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
         .context("Failed to submit command buffer")?;
 
-    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
+    logical_device
+        .synchronized_queue_wait_idle()
+        .context("Failed to wait for queue")?;
     // Legacy path waits idle — clear the reservation (no timeline token).
     row_guard.commit(0);
 
@@ -786,7 +788,9 @@ pub(super) fn read_to_cpu(
         .synchronized_queue_submit(std::slice::from_ref(&submit_info), vk::Fence::null())
         .context("Failed to submit command buffer")?;
 
-    logical_device.synchronized_queue_wait_idle().context("Failed to wait for queue")?;
+    logical_device
+        .synchronized_queue_wait_idle()
+        .context("Failed to wait for queue")?;
 
     // Read from staging buffer
     unsafe {

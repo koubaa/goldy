@@ -32,8 +32,7 @@ fn apply_cpu_epoch_waits(
         let wait = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&sem))
             .values(std::slice::from_ref(&epoch.value));
-        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }
-            .context("cross-submit cpu wait on timeline semaphore")?;
+        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }.context("cross-submit cpu wait on timeline semaphore")?;
     }
     Ok(())
 }
@@ -159,11 +158,9 @@ impl PendingSubmit for VulkanQueueSubmitPending {
                         .command_buffer_infos(std::slice::from_ref(&cmd_info))
                         .signal_semaphore_infos(&self.signal_semaphore_infos);
                     unsafe {
-                        self.ld.device.queue_submit2(
-                            self.queue,
-                            std::slice::from_ref(&submit_info2),
-                            vk::Fence::null(),
-                        )
+                        self.ld
+                            .device
+                            .queue_submit2(self.queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
                     }
                 }
                 (Some(cmd), false) => {
@@ -173,22 +170,17 @@ impl PendingSubmit for VulkanQueueSubmitPending {
                         .wait_semaphore_infos(&wait_infos)
                         .signal_semaphore_infos(&self.signal_semaphore_infos);
                     unsafe {
-                        self.ld.device.queue_submit2(
-                            self.queue,
-                            std::slice::from_ref(&submit_info2),
-                            vk::Fence::null(),
-                        )
+                        self.ld
+                            .device
+                            .queue_submit2(self.queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
                     }
                 }
                 (None, true) => {
-                    let submit_info2 =
-                        vk::SubmitInfo2::default().signal_semaphore_infos(&self.signal_semaphore_infos);
+                    let submit_info2 = vk::SubmitInfo2::default().signal_semaphore_infos(&self.signal_semaphore_infos);
                     unsafe {
-                        self.ld.device.queue_submit2(
-                            self.queue,
-                            std::slice::from_ref(&submit_info2),
-                            vk::Fence::null(),
-                        )
+                        self.ld
+                            .device
+                            .queue_submit2(self.queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
                     }
                 }
                 (None, false) => {
@@ -196,11 +188,9 @@ impl PendingSubmit for VulkanQueueSubmitPending {
                         .wait_semaphore_infos(&wait_infos)
                         .signal_semaphore_infos(&self.signal_semaphore_infos);
                     unsafe {
-                        self.ld.device.queue_submit2(
-                            self.queue,
-                            std::slice::from_ref(&submit_info2),
-                            vk::Fence::null(),
-                        )
+                        self.ld
+                            .device
+                            .queue_submit2(self.queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
                     }
                 }
             }
@@ -225,6 +215,7 @@ impl PendingSubmit for VulkanQueueSubmitPending {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_vulkan_submit(
     ld: &SharedLogicalDevice,
     contexts: &SharedContextMap,
@@ -289,17 +280,16 @@ impl PendingSubmit for VulkanPresentCopyPendingSubmit {
             .signal_semaphore_infos(&self.signal_semaphore_infos);
         let _submit = crate::tracy_zone!("goldy.submit_worker.vk.queue_submit2");
         unsafe {
-            self.ld.device.queue_submit2(
-                self.queue,
-                std::slice::from_ref(&submit),
-                vk::Fence::null(),
-            )
+            self.ld
+                .device
+                .queue_submit2(self.queue, std::slice::from_ref(&submit), vk::Fence::null())
         }
         .context("Failed queue_submit2 on submission worker (present copy)")?;
         Ok(())
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_vulkan_present_copy(
     ld: &SharedLogicalDevice,
     queue: vk::Queue,

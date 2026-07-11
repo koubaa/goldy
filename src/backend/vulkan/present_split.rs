@@ -347,7 +347,9 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
                 copy_signal_timeline,
                 signals,
             )?;
-            self.logical_device.submission_worker.wait_submitted(copy_signal_timeline)?;
+            self.logical_device
+                .submission_worker
+                .wait_submitted(copy_signal_timeline)?;
             self.logical_device.submission_worker.check_error()?;
         }
         let result = {

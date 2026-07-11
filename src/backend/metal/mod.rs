@@ -108,8 +108,7 @@ pub(in crate::backend::metal) fn wait_device_idle(state: &MetalState, device: De
     if target == 0 {
         return Ok(());
     }
-    ld.submission_worker
-        .wait_submitted_if_scheduled(target, target)?;
+    ld.submission_worker.wait_submitted_if_scheduled(target, target)?;
     ld.submission_worker.check_error()?;
     const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
     let reached = context::wait_until_device_seq_at_least(state, device, target, IDLE_TIMEOUT);
@@ -819,8 +818,7 @@ impl GpuBackend for MetalBackend {
             .ok_or_else(|| anyhow::anyhow!("Invalid device handle"))?;
         ld.submission_worker.flush()?;
         let horizon = ld.timeline_scheduled_max.load(std::sync::atomic::Ordering::Acquire);
-        ld.submission_worker
-            .wait_submitted_if_scheduled(value, horizon)?;
+        ld.submission_worker.wait_submitted_if_scheduled(value, horizon)?;
         let timeout = std::time::Duration::from_secs(60);
         if context::wait_until_device_seq_at_least(&self.state, device, value, timeout) {
             Ok(())

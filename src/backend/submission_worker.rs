@@ -110,6 +110,7 @@ impl SubmissionWorker {
     /// Advance the worker epoch for GPU work executed synchronously on the caller thread
     /// (e.g. DX12 device DIRECT-queue render submits) so [`Self::wait_submitted`] matches
     /// [`submission_horizon`](submission_horizon).
+    #[cfg(any(feature = "vulkan", feature = "dx12"))]
     pub fn record_synchronous_submit(&self, tv: u64) -> Result<()> {
         self.check_error()?;
         if tv == 0 {
@@ -124,13 +125,7 @@ impl SubmissionWorker {
         if tv == 0 {
             return Ok(());
         }
-        wait_for_submitted_epoch(
-            &self.submitted_epoch,
-            &self.wait_notify,
-            &self.latched_error,
-            tv,
-            None,
-        )?;
+        wait_for_submitted_epoch(&self.submitted_epoch, &self.wait_notify, &self.latched_error, tv, None)?;
         Ok(())
     }
 
@@ -202,11 +197,7 @@ impl Drop for SubmissionWorker {
     }
 }
 
-fn advance_submitted_epoch(
-    submitted_epoch: &AtomicU64,
-    wait_notify: &Arc<(Mutex<()>, Condvar)>,
-    tv: u64,
-) {
+fn advance_submitted_epoch(submitted_epoch: &AtomicU64, wait_notify: &Arc<(Mutex<()>, Condvar)>, tv: u64) {
     submitted_epoch.fetch_max(tv, Ordering::Release);
     // Hold the wait mutex while notifying so a waiter cannot pass the epoch
     // check and then miss the notify before condvar.wait (lost wakeup).
@@ -260,10 +251,7 @@ fn wait_for_submitted_epoch(
                     let remaining = d.saturating_duration_since(Instant::now());
                     let (g, timeout) = wait_notify.1.wait_timeout(guard, remaining).unwrap();
                     guard = g;
-                    if timeout.timed_out()
-                        && submitted_epoch.load(Ordering::Acquire) < tv
-                        && Instant::now() >= d
-                    {
+                    if timeout.timed_out() && submitted_epoch.load(Ordering::Acquire) < tv && Instant::now() >= d {
                         drop(guard);
                         return Ok(false);
                     }
@@ -331,6 +319,7 @@ pub(crate) fn allocate_timeline_value(timeline_next: &AtomicU64) -> u64 {
 }
 
 /// Highest timeline value pre-allocated on this device (may still be in the worker queue).
+#[cfg(any(feature = "vulkan", feature = "dx12"))]
 pub(crate) fn submission_horizon(timeline_next: &AtomicU64) -> u64 {
     timeline_next.load(Ordering::Acquire).saturating_sub(1)
 }

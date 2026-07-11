@@ -1284,10 +1284,7 @@ impl DescriptorRegistry {
     /// Return pending slots to the free list once every referencing context has retired.
     ///
     /// A missing context entry means the context was destroyed and is treated as retired.
-    pub(crate) fn drain_ready_slot_reclamations(
-        &mut self,
-        completed_values: &HashMap<super::ContextHandle, u64>,
-    ) {
+    pub(crate) fn drain_ready_slot_reclamations(&mut self, completed_values: &HashMap<super::ContextHandle, u64>) {
         let mut i = 0;
         while i < self.pending_slot_reclamations.len() {
             let slot = self.pending_slot_reclamations[i].slot;
