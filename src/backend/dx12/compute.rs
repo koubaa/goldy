@@ -1820,6 +1820,16 @@ fn execute_signal_and_finish(
         }
     }
 
+    {
+        let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
+        let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+        super::context::drain_context_deletion_queue_up_to(
+            logical_device,
+            &mut scope.sc.lock().unwrap(),
+            ctx_completed,
+        );
+    }
+
     let staged_texture_entries = staged_texture_uploads
         .into_iter()
         .filter_map(|u| {
@@ -1839,11 +1849,19 @@ fn execute_signal_and_finish(
         ctx_fence,
         vec![Some(cmd_list)],
         sync,
-        std::sync::Arc::clone(&scope.sc),
         fence_value,
         gpu_profile,
-        staged_texture_entries,
     )?;
+
+    {
+        let _tz = crate::tracy_zone!("goldy.submit.dx12.staging_finish");
+        let mut sc = scope.sc.lock().unwrap();
+        sc.staging_belt.finish(fence_value);
+        if !staged_texture_entries.is_empty() {
+            sc.texture_staging_pool
+                .release(fence_value, staged_texture_entries);
+        }
+    }
 
     Ok(fence_value)
 }
@@ -2765,6 +2783,16 @@ pub(super) fn try_resubmit_retained_with_scope(
                 .store(fence_value, std::sync::atomic::Ordering::Relaxed);
         }
 
+        {
+            let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
+            let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+            super::context::drain_context_deletion_queue_up_to(
+                logical_device,
+                &mut scope.sc.lock().unwrap(),
+                ctx_completed,
+            );
+        }
+
         super::pending_submit::enqueue_retained_resubmit(
             logical_device,
             scope.context_fences,
@@ -2773,7 +2801,6 @@ pub(super) fn try_resubmit_retained_with_scope(
             ctx_fence,
             vec![Some(cmd_list)],
             sync,
-            std::sync::Arc::clone(&scope.sc),
             fence_value,
         )?;
 
