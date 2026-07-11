@@ -842,14 +842,7 @@ pub(crate) fn submit_resolved_ir(
         let schedule = analysis::schedule_waves(ir, &edges);
         let g = compile_graph_commands_for_ir(ir);
         let mut cross_scratch = CrossSubmitScratch::new();
-        let sync = cross_sync_for_ir(
-            &mut cross_scratch,
-            submit_state,
-            ir,
-            ctx,
-            &schedule.waves,
-            separate,
-        );
+        let sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &schedule.waves, separate);
         let tv = backend_submit_graph(session, ctx, &g, sync)?;
         if let Some(state) = submit_state {
             state.apply_partition_reference_stamps(ctx, &context.device().inner, ir, &schedule.waves, tv);
@@ -870,14 +863,7 @@ pub(crate) fn submit_resolved_ir(
         // Plan hazards against the queue that will actually execute this partition
         // (device graphics owner for DX12 render), not the recording context.
         let stamp_ctx = partition_stamp_context(separate, has_render_part, ctx, device_owner);
-        let base_sync = cross_sync_for_ir(
-            &mut cross_scratch,
-            submit_state,
-            ir,
-            stamp_ctx,
-            &waves,
-            separate,
-        );
+        let base_sync = cross_sync_for_ir(&mut cross_scratch, submit_state, ir, stamp_ctx, &waves, separate);
         let sync = merge_queue_boundary_waits(
             base_sync,
             separate,
@@ -928,13 +914,7 @@ fn cross_sync_for_stamps<'a>(
     if resource_stamps.is_empty() {
         return None;
     }
-    Some(scratch.plan(
-        ir,
-        resource_stamps,
-        submitting_ctx,
-        waves,
-        separate_graphics,
-    ))
+    Some(scratch.plan(ir, resource_stamps, submitting_ctx, waves, separate_graphics))
 }
 
 fn cross_sync_for_ir<'a>(
@@ -1054,14 +1034,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
             };
             let sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_ir(
-                    &mut cross_scratch,
-                    submit_state,
-                    ir,
-                    ctx,
-                    &merged_waves,
-                    separate,
-                )
+                cross_sync_for_ir(&mut cross_scratch, submit_state, ir, ctx, &merged_waves, separate)
             };
             let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
@@ -1117,14 +1090,7 @@ pub(crate) fn submit_resolved_ir_and_retain(
         let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
         let base_sync = {
             let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-            cross_sync_for_ir(
-                &mut cross_scratch,
-                submit_state,
-                ir,
-                stamp_ctx,
-                &waves,
-                separate,
-            )
+            cross_sync_for_ir(&mut cross_scratch, submit_state, ir, stamp_ctx, &waves, separate)
         };
         let sync = merge_queue_boundary_waits(
             base_sync,
@@ -1328,14 +1294,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
                 };
                 let sync = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                    cross_sync_for_stamps(
-                        &mut cross_scratch,
-                        resource_stamps,
-                        ir,
-                        ctx,
-                        &merged_waves,
-                        separate,
-                    )
+                    cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, ctx, &merged_waves, separate)
                 };
                 let cached_key = cache.as_ref().unwrap().partition_retention_keys[part_idx];
 
@@ -1381,14 +1340,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
             let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
             let base_sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_stamps(
-                    &mut cross_scratch,
-                    resource_stamps,
-                    ir,
-                    stamp_ctx,
-                    &waves,
-                    separate,
-                )
+                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, stamp_ctx, &waves, separate)
             };
             let sync = merge_queue_boundary_waits(
                 base_sync,

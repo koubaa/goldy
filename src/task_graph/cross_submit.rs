@@ -1412,7 +1412,11 @@ mod tests {
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
 
-        assert_eq!(sync.prologue.buffers.len(), 1, "cross-ctx RAW also emits consumer prologue");
+        assert_eq!(
+            sync.prologue.buffers.len(),
+            1,
+            "cross-ctx RAW also emits consumer prologue"
+        );
         assert_eq!(sync.waits.len(), 2, "must wait on both producer contexts");
         assert!(
             sync.waits.iter().any(|e| e.context == producer_a && e.value == 5),

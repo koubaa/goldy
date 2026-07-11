@@ -39,7 +39,6 @@ pub(crate) struct Dx12SubmitScope<'a> {
     pub sc: super::types::SharedSubmissionContext,
     pub record: Dx12RecordState<'a>,
     pub context_fences: &'a Arc<RwLock<HashMap<ContextHandle, super::types::ContextFenceEntry>>>,
-    pub use_global_buffer_barriers: bool,
     /// Synthetic context for device-queue epoch stamps (compute style only).
     pub device_owner: Option<ContextHandle>,
 }
@@ -167,7 +166,6 @@ pub(crate) struct Dx12SubmitSession {
     render_targets: SharedRenderTargetTable,
     textures: SharedTextureTable,
     samplers: SharedSamplerTable,
-    use_global_buffer_barriers: bool,
     device_owner_handle: Option<ContextHandle>,
 }
 
@@ -196,9 +194,6 @@ impl Dx12SubmitSession {
             .iter()
             .map(|(handle, device)| (*handle, Arc::clone(device)))
             .collect();
-        // WARP used to force global ALL/COMMON barriers (enhanced-barrier tracker bugs).
-        // Disabled after frame-table row reservation fix; re-enable if WARP regresses.
-        let use_global_buffer_barriers = false;
         let device_owner_handle = state.device_owner_handles.get(&device_handle).copied();
         Ok(Arc::new(Self {
             ctx,
@@ -216,7 +211,6 @@ impl Dx12SubmitSession {
             render_targets: Arc::clone(&state.render_targets),
             textures: Arc::clone(&state.textures),
             samplers: Arc::clone(&state.samplers),
-            use_global_buffer_barriers,
             device_owner_handle,
         }))
     }
@@ -240,7 +234,6 @@ impl Dx12SubmitSession {
                 samplers: &self.samplers,
             },
             context_fences: &self.context_fences,
-            use_global_buffer_barriers: self.use_global_buffer_barriers,
             device_owner: self.device_owner_handle,
         }
     }
