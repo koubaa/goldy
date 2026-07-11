@@ -4,7 +4,6 @@ use super::types::{SharedLogicalDevice, VulkanState};
 use super::SurfaceHandle;
 use anyhow::{Context, Result};
 use ash::{khr, vk};
-use std::sync::atomic::Ordering;
 
 pub(super) fn prepare_present_work(
     state: &VulkanState,
@@ -318,25 +317,20 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        let copy_signal_timeline = if !self.render_pass_submitted {
-            let signal_timeline_value = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-            super::context::register_timeline_wait_target(
-                &self.logical_device,
-                signal_timeline_value,
-                super::types::TimelineWaitTarget::DeviceOwner,
-            );
-            signal_timeline = Some(signal_timeline_value);
-            copy_timeline = Some(signal_timeline_value);
-            Some(signal_timeline_value)
-        } else {
-            None
-        };
-
         let queue_lock = std::sync::Arc::clone(&self.logical_device.queue_lock);
         // Hold queue_lock across copy submit and WSI present: both APIs mark the queue
         // parameter as externally synchronized. TID_PRESENT may overlap TID_RENDER submits.
         let result = {
             let _queue_guard = queue_lock.lock().unwrap();
+            let copy_signal_timeline = if !self.render_pass_submitted {
+                let signal_timeline_value =
+                    super::context::reserve_device_owner_timeline_locked(&self.logical_device);
+                signal_timeline = Some(signal_timeline_value);
+                copy_timeline = Some(signal_timeline_value);
+                Some(signal_timeline_value)
+            } else {
+                None
+            };
             if let Some(signal_timeline_value) = copy_signal_timeline {
                 let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(self.copy_cb);
                 let wait_compute_done = vk::SemaphoreSubmitInfo::default()

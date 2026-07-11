@@ -21,6 +21,16 @@ pub(super) fn register_timeline_wait_target(
     ld.timeline_wait_targets.lock().unwrap().insert(value, target);
 }
 
+/// Reserve the next global timeline value as [`TimelineWaitTarget::DeviceOwner`].
+///
+/// Caller must already hold [`super::types::LogicalDevice::queue_lock`] so owner
+/// signals cannot be enqueued out of order when present and render submits overlap.
+pub(super) fn reserve_device_owner_timeline_locked(ld: &super::types::LogicalDevice) -> u64 {
+    let value = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+    register_timeline_wait_target(ld, value, TimelineWaitTarget::DeviceOwner);
+    value
+}
+
 fn target_completed_value(state: &VulkanState, device: DeviceHandle, target: TimelineWaitTarget) -> u64 {
     let Some(ld) = state.devices.get(&device) else {
         return 0;

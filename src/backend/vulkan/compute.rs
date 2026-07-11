@@ -2775,25 +2775,8 @@ pub(super) fn submit_graph_with_scope(
         return Err(anyhow::anyhow!("Failed to end command buffer: {:?}", e));
     }
 
-    let signal_value = {
-        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
-        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
-    };
-    register_submit_timeline(
-        view.devices.get(&device_handle).context("Invalid device handle")?,
-        signal_value,
-        route_device,
-        ctx,
-    );
-
     let used_slots =
         collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.pipelines, view.buffers);
-    if let Some(ld) = view.devices.get(&device_handle) {
-        ld.descriptors
-            .lock()
-            .unwrap()
-            .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
-    }
 
     let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let (queue, queue_lock) = if route_device {
@@ -2801,19 +2784,8 @@ pub(super) fn submit_graph_with_scope(
     } else {
         context_queue_target(scope)
     };
-    let signal_infos = build_submit_signal_infos(scope, route_device, signal_value)?;
     let wait_infos = build_cross_submit_wait_infos(view, sync)?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
-    let submit_info2 = if wait_infos.is_empty() {
-        vk::SubmitInfo2::default()
-            .command_buffer_infos(std::slice::from_ref(&cmd_info))
-            .signal_semaphore_infos(&signal_infos)
-    } else {
-        vk::SubmitInfo2::default()
-            .command_buffer_infos(std::slice::from_ref(&cmd_info))
-            .wait_semaphore_infos(&wait_infos)
-            .signal_semaphore_infos(&signal_infos)
-    };
 
     let retain_plan = if let Some(key) = retain_key {
         let ft = &scope.frame_table;
@@ -2829,14 +2801,39 @@ pub(super) fn submit_graph_with_scope(
         None
     };
 
-    let queue_submit_result = {
+    let (signal_value, queue_submit_result) = {
         let _tz = tracy_zone!("vk.queue_submit2");
         let _queue_guard = queue_lock.lock().unwrap();
-        unsafe {
+        let signal_value = if route_device {
+            super::context::reserve_device_owner_timeline_locked(submit_device)
+        } else {
+            let value = submit_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+            register_submit_timeline(submit_device, value, false, ctx);
+            value
+        };
+        if let Some(ld) = view.devices.get(&device_handle) {
+            ld.descriptors
+                .lock()
+                .unwrap()
+                .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
+        }
+        let signal_infos = build_submit_signal_infos(scope, route_device, signal_value)?;
+        let submit_info2 = if wait_infos.is_empty() {
+            vk::SubmitInfo2::default()
+                .command_buffer_infos(std::slice::from_ref(&cmd_info))
+                .signal_semaphore_infos(&signal_infos)
+        } else {
+            vk::SubmitInfo2::default()
+                .command_buffer_infos(std::slice::from_ref(&cmd_info))
+                .wait_semaphore_infos(&wait_infos)
+                .signal_semaphore_infos(&signal_infos)
+        };
+        let queue_submit_result = unsafe {
             submit_device
                 .device
                 .queue_submit2(queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
-        }
+        };
+        (signal_value, queue_submit_result)
     };
     if let Err(e) = queue_submit_result {
         if route_device {
@@ -3000,46 +2997,44 @@ pub(super) fn try_resubmit_retained_with_scope(
         return Ok(None);
     };
 
-    let signal_value = {
-        let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
-        ld.timeline_next.fetch_add(1, Ordering::Relaxed)
-    };
-    register_submit_timeline(
-        view.devices.get(&device_handle).context("Invalid device handle")?,
-        signal_value,
-        on_graphics_queue,
-        ctx,
-    );
     let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let (queue, queue_lock) = if on_graphics_queue {
         device_graphics_queue_target(submit_device)
     } else {
         context_queue_target(scope)
     };
-    let signal_infos = build_submit_signal_infos(scope, on_graphics_queue, signal_value)?;
     let wait_infos = build_cross_submit_wait_infos(view, sync)?;
     let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(cmd);
-    let submit_info2 = if wait_infos.is_empty() {
-        vk::SubmitInfo2::default()
-            .command_buffer_infos(std::slice::from_ref(&cmd_info))
-            .signal_semaphore_infos(&signal_infos)
-    } else {
-        vk::SubmitInfo2::default()
-            .command_buffer_infos(std::slice::from_ref(&cmd_info))
-            .wait_semaphore_infos(&wait_infos)
-            .signal_semaphore_infos(&signal_infos)
-    };
 
-    {
+    let signal_value = {
         let _tz = tracy_zone!("vk.resubmit_retained");
         let _queue_guard = queue_lock.lock().unwrap();
+        let signal_value = if on_graphics_queue {
+            super::context::reserve_device_owner_timeline_locked(submit_device)
+        } else {
+            let value = submit_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+            register_submit_timeline(submit_device, value, false, ctx);
+            value
+        };
+        let signal_infos = build_submit_signal_infos(scope, on_graphics_queue, signal_value)?;
+        let submit_info2 = if wait_infos.is_empty() {
+            vk::SubmitInfo2::default()
+                .command_buffer_infos(std::slice::from_ref(&cmd_info))
+                .signal_semaphore_infos(&signal_infos)
+        } else {
+            vk::SubmitInfo2::default()
+                .command_buffer_infos(std::slice::from_ref(&cmd_info))
+                .wait_semaphore_infos(&wait_infos)
+                .signal_semaphore_infos(&signal_infos)
+        };
         unsafe {
             submit_device
                 .device
                 .queue_submit2(queue, std::slice::from_ref(&submit_info2), vk::Fence::null())
         }
         .context("Failed to queue_submit2 retained dispatch CB")?;
-    }
+        signal_value
+    };
 
     record_last_submitted(scope, on_graphics_queue, signal_value);
 
