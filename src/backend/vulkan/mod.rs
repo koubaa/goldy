@@ -17,6 +17,7 @@ mod compute;
 mod context;
 mod device;
 mod frame_table;
+mod pending_submit;
 mod pipeline;
 mod present_split;
 mod render_commands;
@@ -292,6 +293,29 @@ impl VulkanBackend {
 // GpuBackend trait implementation - thin wrapper delegating to domain modules
 #[allow(clippy::manual_find)]
 impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<crate::backend::submission_worker::SubmissionEpochWait>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device_handle = self.context_device(ctx);
+        let Some(ld) = self.state.devices.get(&device_handle) else {
+            return Ok(None);
+        };
+        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
+            std::sync::Arc::clone(&ld.submission_worker),
+            value,
+            horizon,
+        )))
+    }
+
     fn take_timeline_blocking_wait(
         &self,
         ctx: ContextHandle,
@@ -322,32 +346,23 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            ld.submission_worker.flush()?;
+        }
         {
             let _reap = crate::tracy_zone!("vk.wait_until.reap_timeline_cmd_buffers");
             compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
         }
         if let Some(ld) = self.state.devices.get(&device_handle) {
-            let ctx_completed = self
-                .state
-                .contexts
-                .read()
-                .unwrap()
-                .get(&ctx)
-                .map(|sc| unsafe {
-                    ld.device
-                        .get_semaphore_counter_value(sc.lock().unwrap().timeline_semaphore)
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            let drain_to = value.min(ctx_completed);
-            let ctx_batch: Vec<_> = self
-                .state
-                .contexts
-                .read()
-                .unwrap()
-                .get(&ctx)
-                .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(drain_to))
-                .unwrap_or_default();
+            if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
+                pending_submit::vulkan_drain_context_deletion_up_to(
+                    ld,
+                    &self.state.contexts,
+                    device_handle,
+                    sc_arc,
+                    value,
+                );
+            }
             {
                 let _destroy = crate::tracy_zone!("vk.wait_until.deletion_queue.destroy");
                 let completed_values =
@@ -355,7 +370,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                 let device_batch = ld.drain_deletion_queue_ready(&completed_values);
                 let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                 let mut registry = descriptors_arc.lock().unwrap();
-                for r in ctx_batch.into_iter().chain(device_batch) {
+                for r in device_batch {
                     types::destroy_pending_deletion(ld, &mut registry, r);
                 }
                 registry.drain_ready_slot_reclamations(&completed_values);
@@ -430,7 +445,7 @@ impl GpuBackend for VulkanBackend {
             .devices
             .get(&device_handle)
             .context("Invalid device handle")?;
-        ld.device_wait_idle_locked()
+        ld.synchronized_device_wait_idle()
             .map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
         Ok(())
     }
@@ -1228,6 +1243,13 @@ impl GpuBackend for VulkanBackend {
     }
 
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> anyhow::Result<()> {
+        if let Some(ld) = self.state.devices.get(&device) {
+            ld.submission_worker.flush()?;
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            if value <= horizon {
+                ld.submission_worker.wait_submitted(value)?;
+            }
+        }
         context::wait_until_device_seq_at_least(&self.state, device, value);
         Ok(())
     }
@@ -1294,6 +1316,16 @@ impl GpuBackend for VulkanBackend {
         timeout_ms: u32,
     ) -> Result<bool> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            if !ld
+                .submission_worker
+                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
+            {
+                return Ok(false);
+            }
+            ld.submission_worker.check_error()?;
+        }
         let sem = self
             .state
             .contexts
@@ -1313,22 +1345,21 @@ impl GpuBackend for VulkanBackend {
             Ok(()) => {
                 compute::reap_timeline_cmd_buffers_up_to(&self.state, ctx, value);
                 if let Some(ld) = self.state.devices.get(&device_handle) {
-                    let ctx_completed = unsafe { ld.device.get_semaphore_counter_value(sem).unwrap_or(0) };
-                    let drain_to = value.min(ctx_completed);
-                    let ctx_batch: Vec<_> = self
-                        .state
-                        .contexts
-                        .read()
-                        .unwrap()
-                        .get(&ctx)
-                        .map(|sc| sc.lock().unwrap().deletion_queue.drain_up_to(drain_to))
-                        .unwrap_or_default();
+                    if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx) {
+                        pending_submit::vulkan_drain_context_deletion_up_to(
+                            ld,
+                            &self.state.contexts,
+                            device_handle,
+                            sc_arc,
+                            value,
+                        );
+                    }
                     let completed_values =
                         types::snapshot_context_completed_values(&ld.device, &self.state.contexts, device_handle);
                     let device_batch = ld.drain_deletion_queue_ready(&completed_values);
                     let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
                     let mut registry = descriptors_arc.lock().unwrap();
-                    for r in ctx_batch.into_iter().chain(device_batch) {
+                    for r in device_batch {
                         types::destroy_pending_deletion(ld, &mut registry, r);
                     }
                     registry.drain_ready_slot_reclamations(&completed_values);

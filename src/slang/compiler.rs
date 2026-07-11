@@ -6,7 +6,13 @@ use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Serializes Slang global-session create/destroy and compilation.
+///
+/// Parallel `Instance::new` / `release_idle_shader_compiler` paths can otherwise
+/// call `create_global_session` and `global_session_release` concurrently and SIGSEGV.
+static SLANG_PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
 use super::ffi::*;
 use super::loader::SlangLibrary;
@@ -356,6 +362,8 @@ impl SlangCompiler {
     pub fn new() -> Result<Self> {
         let _span = goldy_span!("slang.compiler.init").entered();
 
+        let _guard = SLANG_PROCESS_LOCK.lock().unwrap();
+
         let library = Arc::new(SlangLibrary::load()?);
 
         // Create global session using the new COM API
@@ -465,6 +473,8 @@ impl SlangCompiler {
         optimization_level: OptimizationLevel,
         f: impl FnOnce(&Self, *mut SlangCompileRequest, i32) -> Result<R>,
     ) -> Result<R> {
+        let _guard = SLANG_PROCESS_LOCK.lock().unwrap();
+
         // Create session with session-level preprocessor macros.
         let define_names: Vec<CString> = defines.iter().map(|(k, _)| CString::new(*k).unwrap()).collect();
         let define_values: Vec<CString> = defines.iter().map(|(_, v)| CString::new(*v).unwrap()).collect();
@@ -1851,8 +1861,10 @@ mod struct_layout_validate_tests {
 
 impl Drop for SlangCompiler {
     fn drop(&mut self) {
+        let _guard = SLANG_PROCESS_LOCK.lock().unwrap();
         if !self.global_session.is_null() {
             unsafe { global_session_release(self.global_session) };
+            self.global_session = std::ptr::null_mut();
         }
     }
 }

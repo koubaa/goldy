@@ -8,6 +8,7 @@ use super::shader;
 use super::submit_session::{record_state_from_backend, Dx12SubmitScope};
 use super::types::{self, ComputeAllocatorSlot, ComputePipelineState, DeferredSlot, Dx12State};
 use super::{ComputePipelineHandle, ContextHandle, DeviceHandle, RenderTargetHandle, ShaderHandle};
+use crate::backend::submission_worker::allocate_timeline_value;
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
 use crate::timeline::TimelineValue;
 use crate::tracy_zone;
@@ -323,7 +324,7 @@ fn texture_barrier_state_for_usage(
 }
 
 #[derive(Debug)]
-struct Dx12GpuProfileResources {
+pub(super) struct Dx12GpuProfileResources {
     heap: ID3D12QueryHeap,
     readback: ID3D12Resource,
     query_count: u32,
@@ -431,7 +432,7 @@ fn dx12_decode_duration_ns(start: u64, end: u64, freq: u64) -> u64 {
     ((delta as f64 / freq as f64) * 1e9) as u64
 }
 
-fn dx12_finish_gpu_profile(
+pub(super) fn dx12_finish_gpu_profile(
     ctx_fence: &ID3D12Fence,
     command_queue: &ID3D12CommandQueue,
     fence_value: u64,
@@ -1751,26 +1752,7 @@ fn execute_signal_and_finish(
         let sc = scope.sc.lock().unwrap();
         (sc.command_queue.clone(), std::sync::Arc::clone(&sc.queue_lock))
     };
-    let fence_value = {
-        let _tz = tracy_zone!("dx12.execute_and_signal");
-        let waits = resolve_epoch_waits(scope, sync)?;
-        match super::utils::execute_with_waits_and_signal_context(
-            logical_device,
-            &queue,
-            &queue_lock,
-            &waits,
-            &ctx_fence,
-            &[Some(cmd_list)],
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(row) = frame_table_row {
-                    super::frame_table::record_submission(scope.frame_table(), row, 0);
-                }
-                return Err(e);
-            }
-        }
-    };
+    let fence_value = allocate_timeline_value(&logical_device.timeline_next);
     if let Some(row) = frame_table_row {
         super::frame_table::record_submission(scope.frame_table(), row, fence_value);
     }
@@ -1786,12 +1768,6 @@ fn execute_signal_and_finish(
         let mut sc = scope.sc.lock().unwrap();
         for resource in pending_deletions {
             sc.deletion_queue.queue(fence_value, resource);
-        }
-    }
-
-    if let Some(prof) = gpu_profile {
-        if let Err(e) = dx12_finish_gpu_profile(&ctx_fence, &queue, fence_value, prof) {
-            tracing::warn!("GOLDY_GPU_PROFILE: DX12 readback failed: {e}");
         }
     }
 
@@ -1845,33 +1821,44 @@ fn execute_signal_and_finish(
     }
 
     {
-        let fences = scope.context_fences.read().unwrap();
-        let dev = scope.ld();
-        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        registry.drain_ready_slot_reclamations(&fences);
+        let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
+        let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+        super::context::drain_context_deletion_queue_up_to(
+            logical_device,
+            &mut scope.sc.lock().unwrap(),
+            ctx_completed,
+        );
     }
 
-    scope.sc.lock().unwrap().staging_belt.finish(fence_value);
+    let staged_texture_entries = staged_texture_uploads
+        .into_iter()
+        .filter_map(|u| {
+            if let super::texture::TextureUploadSource::Pooled(entry) = u.source {
+                Some(entry)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
 
-    if !staged_texture_uploads.is_empty() {
-        let entries = staged_texture_uploads
-            .into_iter()
-            .filter_map(|u| {
-                if let super::texture::TextureUploadSource::Pooled(entry) = u.source {
-                    Some(entry)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        if !entries.is_empty() {
-            scope
-                .sc
-                .lock()
-                .unwrap()
-                .texture_staging_pool
-                .release(fence_value, entries);
+    super::pending_submit::enqueue_compute_submit(
+        logical_device,
+        scope.context_fences,
+        queue,
+        queue_lock,
+        ctx_fence,
+        vec![Some(cmd_list)],
+        sync,
+        fence_value,
+        gpu_profile,
+    )?;
+
+    {
+        let _tz = crate::tracy_zone!("goldy.submit.dx12.staging_finish");
+        let mut sc = scope.sc.lock().unwrap();
+        sc.staging_belt.finish(fence_value);
+        if !staged_texture_entries.is_empty() {
+            sc.texture_staging_pool.release(fence_value, staged_texture_entries);
         }
     }
 
@@ -2013,6 +2000,10 @@ fn execute_signal_and_finish_device(
         let mut registry = descriptors_arc.lock().unwrap();
         registry.drain_ready_slot_reclamations(&fences);
     }
+
+    logical_device
+        .submission_worker
+        .record_synchronous_submit(fence_value)?;
 
     Ok(fence_value)
 }
@@ -2746,6 +2737,9 @@ pub(super) fn try_resubmit_retained_with_scope(
             fence_value,
             used_slots.iter().copied(),
         );
+        logical_device
+            .submission_worker
+            .record_synchronous_submit(fence_value)?;
         fence_value
     } else {
         let (queue, queue_lock, prior_signal) = {
@@ -2767,19 +2761,7 @@ pub(super) fn try_resubmit_retained_with_scope(
                 super::utils::wait_for_fence(&ctx_fence, prior_signal)?;
             }
         }
-        let waits = {
-            let _tz_sync = tracy_zone!("dx12.resubmit_retained.cross_sync");
-            resolve_epoch_waits(scope, sync)?
-        };
-        let _tz_exec = tracy_zone!("dx12.resubmit_retained.execute_and_signal");
-        let fence_value = super::utils::execute_with_waits_and_signal_context(
-            logical_device,
-            &queue,
-            &queue_lock,
-            &waits,
-            &ctx_fence,
-            &[Some(cmd_list)],
-        )?;
+        let fence_value = allocate_timeline_value(&logical_device.timeline_next);
 
         {
             let _tz_slots = tracy_zone!("dx12.resubmit_retained.slot_usage");
@@ -2799,19 +2781,33 @@ pub(super) fn try_resubmit_retained_with_scope(
             sc.last_submitted_seq
                 .store(fence_value, std::sync::atomic::Ordering::Relaxed);
         }
+
+        {
+            let _tz = crate::tracy_zone!("goldy.submit.dx12.deletion_drain");
+            let ctx_completed = unsafe { ctx_fence.GetCompletedValue() };
+            super::context::drain_context_deletion_queue_up_to(
+                logical_device,
+                &mut scope.sc.lock().unwrap(),
+                ctx_completed,
+            );
+        }
+
+        super::pending_submit::enqueue_retained_resubmit(
+            logical_device,
+            scope.context_fences,
+            queue,
+            queue_lock,
+            ctx_fence,
+            vec![Some(cmd_list)],
+            sync,
+            fence_value,
+        )?;
+
         fence_value
     };
 
     if let Some(row) = frame_table_row {
         super::frame_table::record_submission(scope.frame_table(), row, fence_value);
-    }
-
-    {
-        let fences = scope.context_fences.read().unwrap();
-        let dev = scope.ld();
-        let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);
-        let mut registry = descriptors_arc.lock().unwrap();
-        registry.drain_ready_slot_reclamations(&fences);
     }
 
     Ok(Some(fence_value))

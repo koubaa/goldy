@@ -235,66 +235,39 @@ pub(super) fn execute_with_waits_and_signal_device(
     Ok(fence_value)
 }
 
+/// GPU-side queue waits, execute, and context-fence signal under per-context queue lock.
+/// Caller must pre-allocate `tv` via [`crate::backend::submission_worker::allocate_timeline_value`].
+pub(super) fn execute_preallocated_context_submit(
+    _logical_device: &LogicalDevice,
+    queue: &ID3D12CommandQueue,
+    queue_lock: &Arc<Mutex<()>>,
+    ctx_fence: &ID3D12Fence,
+    command_lists: &[Option<ID3D12CommandList>],
+    queue_waits: &[(ID3D12Fence, u64)],
+    tv: u64,
+) -> Result<()> {
+    let _guard = queue_lock.lock().unwrap();
+    if !queue_waits.is_empty() {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.queue_wait");
+        for (fence, value) in queue_waits {
+            unsafe { queue.Wait(fence, *value).context("cross-submit GPU queue Wait")? };
+        }
+    }
+    {
+        let _tz = crate::tracy_zone!("goldy.submit_worker.dx12.execute_and_signal");
+        unsafe {
+            queue.ExecuteCommandLists(command_lists);
+        }
+        unsafe { queue.Signal(ctx_fence, tv).context("Failed to signal context fence")? };
+    }
+    Ok(())
+}
+
 /// Run `f` while holding [`LogicalDevice::queue_lock`] (the queue is externally synchronized).
 pub(super) fn with_queue_lock<R>(logical_device: &LogicalDevice, f: impl FnOnce() -> R) -> R {
     let queue_lock = Arc::clone(&logical_device.queue_lock);
     let _guard = queue_lock.lock().unwrap();
     f()
-}
-
-/// Enqueue cross-context GPU waits, execute command lists, and signal a context fence — all
-/// under a single hold of `queue_lock`, on `queue`.
-///
-/// `queue` and `queue_lock` are the *calling context's own* command queue and its per-context
-/// queue lock (`Dx12SubmissionContext::command_queue`/`queue_lock`) — never the shared
-/// `LogicalDevice::command_queue`. Each context owns its queue so that a cross-context `Wait`
-/// enqueued here only ever stalls this context's queue: it can never block a sibling
-/// context's submission, and a sibling context's submission can never be blocked behind this
-/// one's `Wait` on the (now nonexistent) shared queue. `logical_device` is only used for the
-/// shared timeline-value counter (see the comment below), never for its own queue.
-///
-/// The queue itself is externally synchronized in D3D12: `Wait`, `ExecuteCommandLists`, and
-/// `Signal` are all queue mutations that must not interleave with another thread's submission
-/// on the *same* queue. Splitting the `Wait` out of the lock (the previous behavior) both
-/// races the queue object and can reorder a same-context resubmit behind this submission's
-/// wait, deadlocking or removing the device under parallel submit.
-pub(super) fn execute_with_waits_and_signal_context(
-    logical_device: &LogicalDevice,
-    queue: &ID3D12CommandQueue,
-    queue_lock: &Arc<Mutex<()>>,
-    waits: &[(ID3D12Fence, u64)],
-    ctx_fence: &ID3D12Fence,
-    command_lists: &[Option<ID3D12CommandList>],
-) -> Result<u64> {
-    let _guard = queue_lock.lock().unwrap();
-    let api_log_on = super::api_log::enabled();
-    let queue_id = if api_log_on {
-        super::api_log::com_identity(queue)
-    } else {
-        0
-    };
-    for (producer_fence, value) in waits {
-        if api_log_on {
-            super::api_log::log_queue_wait(queue_id, super::api_log::com_identity(producer_fence), *value);
-        }
-        unsafe { queue.Wait(producer_fence, *value) }.context("cross-submit GPU queue Wait")?;
-    }
-    // Values are drawn from the device-shared counter (not a per-context one): the public
-    // `Device::wait_until_retired` contract requires an arbitrary context's `TimelineValue` to
-    // be findable/comparable across every other context on the device (see
-    // `Dx12Backend::device_wait_until`), which only holds if all contexts share one space.
-    let fence_value = logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-    if api_log_on {
-        super::api_log::log_execute_command_lists(queue_id, command_lists.len());
-    }
-    unsafe {
-        queue.ExecuteCommandLists(command_lists);
-    }
-    unsafe { queue.Signal(ctx_fence, fence_value) }.context("Failed to signal context fence")?;
-    if api_log_on {
-        super::api_log::log_queue_signal(queue_id, super::api_log::com_identity(ctx_fence), fence_value);
-    }
-    Ok(fence_value)
 }
 
 /// Wait for a fence to reach the specified value.

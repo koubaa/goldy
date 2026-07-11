@@ -186,13 +186,25 @@ impl Context {
 
     fn wait_until_context(&self, ctx: ContextHandle, value: TimelineValue) -> Result<(), GoldyError> {
         let _tz = crate::tracy_zone!("context.wait_until");
+        let progress = self.gpu_progress();
         let already_complete = if ctx == self.inner.handle {
-            self.gpu_progress() >= value
+            progress >= value
         } else {
             self.inner.device.context_gpu_progress(ctx).is_some_and(|p| p >= value)
         };
         let backend_mutex = &self.inner.device.inner.backend;
         if !already_complete {
+            let submission_wait = {
+                let _lock = crate::tracy_zone!("context.wait_until.lock");
+                let backend = backend_mutex.lock().unwrap();
+                backend
+                    .take_timeline_submission_epoch_wait(ctx, value)
+                    .map_err(|e| self.classify(e))?
+            };
+            if let Some(wait) = submission_wait {
+                let _sw = crate::tracy_zone!("context.wait_until.submission_worker");
+                wait.wait().map_err(|e| self.classify(e))?;
+            }
             let blocking = {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();
@@ -213,8 +225,9 @@ impl Context {
             backend.finish_timeline_wait(ctx, value).map_err(|e| {
                 drop(backend);
                 self.classify(e)
-            })
+            })?;
         }
+        Ok(())
     }
 
     /// Like [`wait_until`](Self::wait_until) but returns `Err(`[`GoldyError::SubmitTimeout`]`)` on timeout.
@@ -223,6 +236,17 @@ impl Context {
         let already_complete = self.gpu_progress() >= value;
         let backend_mutex = &self.inner.device.inner.backend;
         if !already_complete {
+            let submission_wait = {
+                let _lock = crate::tracy_zone!("context.wait_until.lock");
+                let backend = backend_mutex.lock().unwrap();
+                backend
+                    .take_timeline_submission_epoch_wait(ctx, value)
+                    .map_err(|e| self.classify(e))?
+            };
+            if let Some(wait) = submission_wait {
+                let _sw = crate::tracy_zone!("context.wait_until.submission_worker");
+                wait.wait().map_err(|e| self.classify(e))?;
+            }
             let blocking = {
                 let _lock = crate::tracy_zone!("context.wait_until.lock");
                 let backend = backend_mutex.lock().unwrap();

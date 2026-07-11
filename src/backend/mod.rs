@@ -37,6 +37,9 @@ pub mod metal;
 /// task-graph command emission (e.g. `DispatchBatch` argument packing).
 pub(crate) mod shared;
 
+/// Per-device FIFO worker for async GPU queue submission.
+pub(crate) mod submission_worker;
+
 /// Fence/timeline polling threads for async [`crate::signal::Signal`] delivery (Vulkan, DX12).
 #[cfg(any(feature = "vulkan", all(feature = "dx12", target_os = "windows")))]
 pub(crate) mod signal_fence;
@@ -904,7 +907,10 @@ impl ContextSubmitSession for LockedSubmitSession {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.backend.lock().unwrap().submit_standalone(ctx, commands, sync)
+        let mut guard = self.backend.lock().unwrap();
+        let tv = guard.submit_standalone(ctx, commands, sync)?;
+        drop(guard);
+        Ok(tv)
     }
 
     fn submit_graph(
@@ -963,6 +969,15 @@ pub(crate) trait GpuBackendPresentSplit {
 /// Split timeline wait hooks used by [`Context::wait_until`](crate::Context::wait_until)
 /// to drop the global backend lock during blocking GPU waits.
 pub(crate) trait GpuBackendTimelineWait {
+    /// Returns a worker wait handle when `value` may still be in the submission queue.
+    /// The caller must run [`submission_worker::SubmissionEpochWait::wait`] without holding
+    /// the backend mutex so parallel submits cannot deadlock with `wait_until`.
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<submission_worker::SubmissionEpochWait>>;
+
     fn take_timeline_blocking_wait(
         &self,
         ctx: ContextHandle,

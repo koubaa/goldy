@@ -514,6 +514,7 @@ impl DeletionQueue {
 
     /// Destroy resources whose `barrier` has been signaled by the GPU (`signaled_value >= barrier`).
     /// The variants are dropped here which releases the MTL objects.
+    #[allow(dead_code)]
     pub fn process_up_to(&mut self, signaled: TimelineValue) {
         self.process_up_to_gated(signaled, |_| true);
     }
@@ -645,7 +646,7 @@ pub(crate) struct MetalRetainedGraph {
     pub used_slots: Vec<MetalSlotKey>,
 }
 
-/// Bindless slot identity for retained-graph pin tracking (category + local index).
+/// Bindless slot identity for retained-graph pin tracking and last-use stamping.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum MetalSlotKey {
     StorageBuffer(u32),
@@ -663,6 +664,13 @@ impl MetalSlotKey {
     }
 }
 
+/// Slot waiting for referencing contexts' timelines to retire before free-list return.
+pub(crate) struct PendingSlotReclamation {
+    pub slot: MetalSlotKey,
+    /// `(context_handle, min_seq_that_must_retire)`
+    pub requirements: Vec<(super::ContextHandle, u64)>,
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -671,19 +679,14 @@ pub(crate) struct LogicalDevice {
     /// The single command queue shared by all contexts on this device.
     ///
     /// Metal guarantees that command buffers committed to the same queue execute
-    /// in FIFO order.  The slot-reclamation logic in `unregister_buffer` and
-    /// `drain_pending_slots_up_to` relies on this: it defers recycling a
-    /// descriptor slot until `device_retired` (max signaled timeline across all
-    /// contexts) passes `timeline_scheduled_max`, which is only sound when every
-    /// submission that could reference the slot is ordered behind every other
-    /// submission on the same queue.
+    /// in FIFO order. Bindless slot recycling uses per-slot `slot_last_seen`
+    /// epochs (same model as Vulkan/DX12): a slot is freed only after every
+    /// context that referenced it has retired that submission. Physical buffer
+    /// teardown uses the max of those last-use epochs as its deletion barrier.
     ///
-    /// **If this ever changes to per-context `MTLCommandQueue`s**, that ordering
-    /// guarantee disappears.  Submissions from different contexts could then race,
-    /// and a slot freed once *one* context retires could still be in use by
-    /// another.  The fix would be the same per-resource per-context retirement
-    /// tracking used by the DX12/Vulkan backends (see `slot_last_seen` and
-    /// `pending_slot_reclamations` there).
+    /// **If this ever changes to per-context `MTLCommandQueue`s**, submissions
+    /// from different contexts could race on the same slot; the existing
+    /// per-context requirement map already covers that case.
     pub command_queue: CommandQueue,
 
     // Bindless infrastructure (always present — Tier 2 required)
@@ -725,11 +728,21 @@ pub(crate) struct LogicalDevice {
     /// serialising the queue-enqueue moment.  Cloned out of `LogicalDevice` before
     /// recording begins so the global backend lock can be dropped before commit.
     pub queue_lock: Arc<Mutex<()>>,
+    /// Async FIFO worker for `command_buffer.commit()` (render thread enqueues, worker runs).
+    pub submission_worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
 }
 
 impl LogicalDevice {
-    /// Drop deferred resources whose barrier is `<= completed` (device-global retirement horizon).
-    pub(crate) fn process_deletion_queue_up_to(&self, completed: u64) {
+    /// Drop deferred resources whose barrier is `<= completed`.
+    ///
+    /// When `completed_by_context` is provided, also reclaim bindless slots whose
+    /// per-context last-use epochs have retired. Pass `None` only from paths that
+    /// lack a full context snapshot (they must not free slots against a partial view).
+    pub(crate) fn process_deletion_queue_up_to(
+        &self,
+        completed: u64,
+        completed_by_context: Option<&HashMap<super::ContextHandle, u64>>,
+    ) {
         {
             let registry = self.descriptors.lock().unwrap();
             self.deletion_queue
@@ -740,7 +753,9 @@ impl LogicalDevice {
                     _ => true,
                 });
         }
-        self.descriptors.lock().unwrap().drain_pending_slots_up_to(completed);
+        if let Some(map) = completed_by_context {
+            self.descriptors.lock().unwrap().drain_ready_slot_reclamations(map);
+        }
     }
 }
 
@@ -798,12 +813,16 @@ pub(crate) struct ResourceRegistry {
     /// straight to the free list above. Otherwise they park here until
     /// `wait_fence()` succeeds, at which point `drain_pending_slots()`
     /// promotes them to the free list.
-    /// Each entry is `(local_index, barrier)` where `barrier` is the
-    /// `timeline_scheduled_max` recorded at destroy time. The slot becomes
-    /// safe to recycle once `timeline_event.signaled_value() >= barrier`.
+    /// Each entry is `(local_index, barrier)` where `barrier` is a GPU timeline
+    /// epoch that must retire before the slot may be recycled. Prefer
+    /// [`DescriptorRegistry`]'s `slot_last_seen` path for production reclaim;
+    /// these lists remain for unit tests of the lower-level allocator.
     pending_free_storage_buffer_slots: Vec<(u32, TimelineValue)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pending_free_uniform_buffer_slots: Vec<(u32, TimelineValue)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pending_free_texture_slots: Vec<(u32, TimelineValue)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pending_free_storage_image_slots: Vec<(u32, TimelineValue)>,
     /// (local_index, access) for each live buffer handle. The access is
     /// needed at `unregister_buffer()` time to know which free list the slot
@@ -910,6 +929,7 @@ impl ResourceRegistry {
     /// that might still reference this slot's descriptor; the slot parks in
     /// the pending list until `drain_pending_slots_up_to(signaled)` promotes
     /// it. Pass `None` when the GPU is known idle.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
         release_slot(
             local_index,
@@ -956,6 +976,7 @@ impl ResourceRegistry {
     /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
     ///
     /// See [`Self::release_texture_slot`] for the `barrier` semantics.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
         release_slot(
             local_index,
@@ -995,6 +1016,7 @@ impl ResourceRegistry {
     /// this slot's descriptor is still in-flight; the slot parks in the pending
     /// list and is promoted by `drain_pending_slots_up_to(signaled)` once
     /// `signaled >= barrier`. Pass `None` when the GPU is known idle.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>, slot_pinned: bool) {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
             match access {
@@ -1024,12 +1046,40 @@ impl ResourceRegistry {
         self.sampler_indices.remove(&handle);
     }
 
+    /// Bindless slot keys for `handle` without removing the registry entry.
+    pub fn buffer_slot_keys(&self, handle: BufferHandle) -> Vec<MetalSlotKey> {
+        self.buffer_indices
+            .get(&handle)
+            .map(|&(local_index, access)| vec![MetalSlotKey::from_buffer(access, local_index)])
+            .unwrap_or_default()
+    }
+
+    /// Remove a buffer's handle mapping and return its slot key without recycling.
+    pub fn extract_buffer_slots(&mut self, handle: BufferHandle) -> Vec<MetalSlotKey> {
+        if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
+            vec![MetalSlotKey::from_buffer(access, local_index)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Return a slot to its category free list.
+    pub fn free_slot(&mut self, key: MetalSlotKey) {
+        match key {
+            MetalSlotKey::StorageBuffer(i) => self.storage_buffer.free(i),
+            MetalSlotKey::UniformBuffer(i) => self.uniform_buffer.free(i),
+            MetalSlotKey::Texture(i) => self.texture.free(i),
+            MetalSlotKey::StorageImage(i) => self.storage_image.free(i),
+        }
+    }
+
     /// Promote pending slots whose GPU barrier has been signaled.
     ///
     /// Only entries where `barrier <= signaled` are moved to the [`SlotAllocator`]
     /// free list; entries still waiting for a higher timeline value stay pending.
     /// This is the per-frame call path — invoked on every `acquire_frame` /
     /// `present` so slots are recycled as soon as the GPU catches up.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn drain_pending_slots_up_to<F>(&mut self, signaled: TimelineValue, can_free: F)
     where
         F: Fn(MetalSlotKey) -> bool,
@@ -1067,6 +1117,7 @@ impl ResourceRegistry {
     }
 
     /// Promote pending slots whose GPU barrier has been signaled (no retained-graph pin gate).
+    #[cfg(test)]
     pub fn drain_pending_slots_up_to_unpinned(&mut self, signaled: TimelineValue) {
         self.drain_pending_slots_up_to(signaled, |_| true);
     }
@@ -1076,6 +1127,7 @@ impl ResourceRegistry {
     /// Only safe to call after `wait_all_in_flight` has confirmed that no
     /// GPU command buffers are in-flight. For the per-frame path use
     /// `drain_pending_slots_up_to(signaled)` instead.
+    #[cfg(test)]
     pub fn drain_pending_slots(&mut self) {
         self.drain_pending_slots_up_to_unpinned(TimelineValue::MAX);
     }
@@ -1117,6 +1169,7 @@ impl ResourceRegistry {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn release_slot(
     local_index: u32,
     barrier: Option<TimelineValue>,
@@ -1134,18 +1187,20 @@ fn release_slot(
 
 /// Device-shared descriptor registry.
 ///
-/// Wraps `ResourceRegistry` (the bindless slot allocator + pending-free lists)
-/// behind an `Arc<Mutex<>>` so that submit paths can acquire it independently
-/// of the global backend mutex. The critical section is intentionally minimal:
-/// slot alloc/free only. MTL object encoding and GPU submission stay outside.
+/// Wraps `ResourceRegistry` (the bindless slot allocator) behind an `Arc<Mutex<>>`
+/// so submit paths can acquire it independently of the global backend mutex.
 ///
-/// Metal does not need `slot_last_seen` / `pending_slot_reclamations` tracking
-/// (those exist on Vulkan/DX12 for multi-referencer slots). Under the
-/// no-cross-context-dependency axiom each slot has a single owning context, so
-/// per-context own-clock reclaim is sufficient; the conservative
-/// `device_retired` GC drain is kept as a safety net (see issue #190).
+/// Slot recycling follows the same model as Vulkan/DX12: every submit stamps
+/// referenced slots into `slot_last_seen`, destroy queues a
+/// [`PendingSlotReclamation`], and slots return to the free list only after
+/// each referencing context has retired that epoch (and retained-graph pins
+/// clear). Never recycle from `timeline_scheduled_max` or `TimelineValue::MAX`.
 pub(crate) struct DescriptorRegistry {
     pub resource_registry: ResourceRegistry,
+    /// Maps bindless slot → per-context last-submitted seq that referenced it.
+    pub slot_last_seen: HashMap<MetalSlotKey, HashMap<super::ContextHandle, u64>>,
+    /// Slots waiting for referencing contexts to retire before free-list return.
+    pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
     /// Retained graphs still baking each bindless slot (incremental refcount).
     retained_users: HashMap<MetalSlotKey, u32>,
 }
@@ -1154,6 +1209,8 @@ impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
+            slot_last_seen: HashMap::new(),
+            pending_slot_reclamations: Vec::new(),
             retained_users: HashMap::new(),
         }
     }
@@ -1188,51 +1245,118 @@ impl DescriptorRegistry {
         slots.iter().all(|slot| !self.slot_pinned(*slot))
     }
 
-    pub(crate) fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>) {
-        let pinned = self
-            .resource_registry
-            .buffer_indices
-            .get(&handle)
-            .map(|&(local, access)| self.slot_pinned(MetalSlotKey::from_buffer(access, local)))
-            .unwrap_or(false);
-        self.resource_registry.unregister_buffer(handle, barrier, pinned);
+    /// Record that `ctx` submitted `seq` referencing each bindless slot in `slots`.
+    pub(crate) fn record_slot_usage(
+        &mut self,
+        ctx: super::ContextHandle,
+        seq: u64,
+        slots: impl IntoIterator<Item = MetalSlotKey>,
+    ) {
+        for slot in slots {
+            self.slot_last_seen
+                .entry(slot)
+                .or_default()
+                .entry(ctx)
+                .and_modify(|v| *v = (*v).max(seq))
+                .or_insert(seq);
+        }
+    }
+
+    /// Queue a slot for deferred reclamation once all referencing contexts retire.
+    pub(crate) fn queue_slot_reclamation(&mut self, slot: MetalSlotKey) {
+        let requirements: Vec<_> = self
+            .slot_last_seen
+            .remove(&slot)
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default();
+        self.pending_slot_reclamations
+            .push(PendingSlotReclamation { slot, requirements });
+    }
+
+    /// Reclaim all descriptor slots for a destroyed buffer handle.
+    ///
+    /// Returns the slot keys that were reclaimed (for gating physical GPU free).
+    pub(crate) fn reclaim_buffer_slots(&mut self, handle: BufferHandle) -> Vec<MetalSlotKey> {
+        let slots = self.resource_registry.extract_buffer_slots(handle);
+        for slot in slots.iter().copied() {
+            self.queue_slot_reclamation(slot);
+        }
+        slots
+    }
+
+    /// Queue deferred reclamation for a texture / storage-image local index.
+    pub(crate) fn reclaim_texture_slot(&mut self, key: MetalSlotKey) {
+        self.queue_slot_reclamation(key);
+    }
+
+    /// Return pending slots to the free list once every referencing context has retired.
+    ///
+    /// A missing context entry means the context was destroyed and is treated as retired.
+    pub(crate) fn drain_ready_slot_reclamations(&mut self, completed_values: &HashMap<super::ContextHandle, u64>) {
+        let mut i = 0;
+        while i < self.pending_slot_reclamations.len() {
+            let slot = self.pending_slot_reclamations[i].slot;
+            let gpu_ready = self.pending_slot_reclamations[i]
+                .requirements
+                .iter()
+                .all(|(ctx_id, required_seq)| completed_values.get(ctx_id).is_none_or(|&v| v >= *required_seq));
+            let pin_clear = !self.slot_pinned(slot);
+            if gpu_ready && pin_clear {
+                let entry = self.pending_slot_reclamations.swap_remove(i);
+                self.resource_registry.free_slot(entry.slot);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Per-context requirements that must retire before a buffer's GPU resource can be
+    /// released: `base` merged with every live `slot_last_seen` entry for this buffer's slots.
+    pub(crate) fn bindless_retirement_requirements_for_buffer(
+        &self,
+        handle: BufferHandle,
+        base: Vec<(super::ContextHandle, u64)>,
+    ) -> Vec<(super::ContextHandle, u64)> {
+        let slots = self.resource_registry.buffer_slot_keys(handle);
+        let mut merged: HashMap<super::ContextHandle, u64> = base.into_iter().collect();
+        for &slot in &slots {
+            if let Some(map) = self.slot_last_seen.get(&slot) {
+                for (ctx, seq) in map.iter() {
+                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Promote all pending reclamations unconditionally (GPU known idle).
+    pub(crate) fn drain_pending_slots(&mut self) {
+        self.drain_ready_slot_reclamations(&HashMap::new());
+        #[cfg(test)]
+        self.resource_registry.drain_pending_slots();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn unregister_buffer(&mut self, handle: BufferHandle) {
+        let _ = self.reclaim_buffer_slots(handle);
     }
 
     pub(crate) fn unregister_texture(&mut self, handle: TextureHandle) {
         self.resource_registry.unregister_texture(handle);
     }
 
-    pub(crate) fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
-        let key = MetalSlotKey::Texture(local_index);
-        let pinned = self.slot_pinned(key);
-        self.resource_registry
-            .release_texture_slot(local_index, barrier, pinned);
+    #[allow(dead_code)] // kept for symmetry with release_storage_image_slot
+    pub(crate) fn release_texture_slot(&mut self, local_index: u32) {
+        self.reclaim_texture_slot(MetalSlotKey::Texture(local_index));
     }
 
-    pub(crate) fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>) {
-        let key = MetalSlotKey::StorageImage(local_index);
-        let pinned = self.slot_pinned(key);
-        self.resource_registry
-            .release_storage_image_slot(local_index, barrier, pinned);
-    }
-
-    pub(crate) fn drain_pending_slots_up_to(&mut self, signaled: TimelineValue) {
-        let retained = &self.retained_users;
-        self.resource_registry
-            .drain_pending_slots_up_to(signaled, |slot| retained.get(&slot).copied().unwrap_or(0) == 0);
-    }
-
-    pub(crate) fn drain_pending_slots(&mut self) {
-        self.drain_pending_slots_up_to(TimelineValue::MAX);
+    pub(crate) fn release_storage_image_slot(&mut self, local_index: u32) {
+        self.reclaim_texture_slot(MetalSlotKey::StorageImage(local_index));
     }
 
     /// Slot keys for a live buffer handle (for gating physical GPU free).
     pub(crate) fn buffer_retained_slot_keys(&self, handle: BufferHandle) -> Vec<MetalSlotKey> {
-        self.resource_registry
-            .buffer_indices
-            .get(&handle)
-            .map(|&(local_index, access)| vec![MetalSlotKey::from_buffer(access, local_index)])
-            .unwrap_or_default()
+        self.resource_registry.buffer_slot_keys(handle)
     }
 }
 
@@ -1663,7 +1787,7 @@ mod tests {
         );
     }
 
-    /// Retained-graph pin blocks slot promotion even when the GPU barrier is met.
+    /// Retained-graph pin blocks slot promotion even when last-use epochs are met.
     #[test]
     fn retained_pin_blocks_drain_until_unpin() {
         let mut dr = DescriptorRegistry::new();
@@ -1672,17 +1796,17 @@ mod tests {
         let key = MetalSlotKey::StorageBuffer(i0);
 
         dr.pin_retained_slots([key]);
-        dr.unregister_buffer(h0, Some(0));
-        dr.drain_pending_slots_up_to(TimelineValue::MAX);
+        dr.unregister_buffer(h0);
+        dr.drain_pending_slots();
         assert_eq!(dr.resource_registry.free_storage_buffer_count(), 0, "pin blocks drain");
         assert_eq!(dr.retained_user_count(key), 1);
 
         dr.unpin_retained_slots([key]);
-        dr.drain_pending_slots_up_to(TimelineValue::MAX);
+        dr.drain_pending_slots();
         assert_eq!(dr.resource_registry.free_storage_buffer_count(), 1);
     }
 
-    /// Immediate unregister (GPU idle) still respects retained-graph pins.
+    /// Retained-graph pins block reclaim until unpin + drain.
     #[test]
     fn retained_pin_blocks_immediate_unregister() {
         let mut dr = DescriptorRegistry::new();
@@ -1691,30 +1815,64 @@ mod tests {
         let key = MetalSlotKey::StorageBuffer(i0);
 
         dr.pin_retained_slots([key]);
-        dr.unregister_buffer(h0, None);
+        dr.unregister_buffer(h0);
         assert_eq!(dr.resource_registry.free_storage_buffer_count(), 0);
-        assert_eq!(dr.resource_registry.pending_buffer_slot_count(), 1);
+        assert_eq!(dr.pending_slot_reclamations.len(), 1);
 
         dr.unpin_retained_slots([key]);
         dr.drain_pending_slots();
         assert_eq!(dr.resource_registry.free_storage_buffer_count(), 1);
     }
 
-    /// After unpin, LIFO slot reuse resumes.
+    /// After unpin, LIFO slot reuse resumes once last-use epochs retire.
     #[test]
     fn retained_pin_unpin_then_lifo_reuse() {
         let mut dr = DescriptorRegistry::new();
         let h0: BufferHandle = 3;
         let i0 = dr.resource_registry.register_storage_buffer(h0);
         let key = MetalSlotKey::StorageBuffer(i0);
+        let ctx = 1u64;
 
+        dr.record_slot_usage(ctx, 1, [key]);
         dr.pin_retained_slots([key]);
-        dr.unregister_buffer(h0, Some(1));
+        dr.unregister_buffer(h0);
         dr.unpin_retained_slots([key]);
-        dr.drain_pending_slots_up_to(1);
+        let mut completed = HashMap::new();
+        completed.insert(ctx, 1);
+        dr.drain_ready_slot_reclamations(&completed);
 
         let h1: BufferHandle = 4;
         let i1 = dr.resource_registry.register_storage_buffer(h1);
         assert_eq!(i1, i0, "LIFO reuse after unpin + drain");
+    }
+
+    #[test]
+    fn slot_last_seen_gates_reclaim_until_context_retires() {
+        let mut dr = DescriptorRegistry::new();
+        let h0: BufferHandle = 5;
+        let i0 = dr.resource_registry.register_storage_buffer(h0);
+        let key = MetalSlotKey::StorageBuffer(i0);
+        let ctx_a = 10u64;
+        let ctx_b = 11u64;
+
+        dr.record_slot_usage(ctx_a, 5, [key]);
+        dr.record_slot_usage(ctx_b, 7, [key]);
+        dr.unregister_buffer(h0);
+
+        let mut completed = HashMap::new();
+        completed.insert(ctx_a, 5);
+        // ctx_b not yet at 7
+        completed.insert(ctx_b, 6);
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(dr.resource_registry.free_storage_buffer_count(), 0);
+
+        completed.insert(ctx_b, 7);
+        dr.drain_ready_slot_reclamations(&completed);
+        assert_eq!(dr.resource_registry.free_storage_buffer_count(), 1);
+        assert_eq!(
+            dr.resource_registry.register_storage_buffer(6),
+            i0,
+            "reclaimed slot must be reusable"
+        );
     }
 }

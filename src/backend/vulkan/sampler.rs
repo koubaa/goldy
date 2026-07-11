@@ -103,7 +103,7 @@ pub(super) fn destroy(
                 .reclaim_sampler_slots(sampler_handle);
 
             unsafe {
-                logical_device.device_wait_idle_locked().ok();
+                let _ = logical_device.synchronized_device_wait_idle();
                 logical_device.device.destroy_sampler(sampler.sampler, None);
             }
         }

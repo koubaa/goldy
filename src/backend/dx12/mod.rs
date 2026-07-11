@@ -41,6 +41,7 @@ mod tiles;
 pub(crate) use diagnostic::log_warp_module_path_once;
 mod device;
 mod frame_table;
+mod pending_submit;
 mod pipeline;
 mod process_shared;
 mod pso_cache;
@@ -264,6 +265,7 @@ impl Dx12Backend {
             if let Some(owner) = self.state.device_owner_handles.remove(&device_handle) {
                 self.state.context_fences.write().unwrap().remove(&owner);
             }
+            let _ = logical_device.submission_worker.flush();
             let _ = self.wait_for_gpu(device_handle, &logical_device);
             // Advance timeline_next past the value consumed by wait_for_gpu so that
             // flush_deletion_queue's per-buffer Signal calls use fresh, strictly-increasing
@@ -423,6 +425,29 @@ fn slot_access_from_push_constant_slot_kinds(
 }
 
 impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
+    fn take_timeline_submission_epoch_wait(
+        &self,
+        ctx: ContextHandle,
+        value: crate::timeline::TimelineValue,
+    ) -> Result<Option<crate::backend::submission_worker::SubmissionEpochWait>> {
+        if self.gpu_progress(ctx) >= value {
+            return Ok(None);
+        }
+        let device_handle = context::context_device(&self.state, ctx);
+        let Some(ld) = self.state.devices.get(&device_handle) else {
+            return Ok(None);
+        };
+        let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+        if value == 0 || value > horizon {
+            return Ok(None);
+        }
+        Ok(Some(crate::backend::submission_worker::SubmissionEpochWait::new(
+            std::sync::Arc::clone(&ld.submission_worker),
+            value,
+            horizon,
+        )))
+    }
+
     fn take_timeline_blocking_wait(
         &self,
         ctx: ContextHandle,
@@ -445,6 +470,9 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
 
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            ld.submission_worker.flush()?;
+        }
         let fence = self
             .state
             .context_fences
@@ -936,6 +964,13 @@ impl GpuBackend for Dx12Backend {
         if context::device_retired(&self.state, device) >= value {
             return Ok(());
         }
+        if let Some(ld) = self.state.devices.get(&device) {
+            ld.submission_worker.flush()?;
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            if value <= horizon {
+                ld.submission_worker.wait_submitted(value)?;
+            }
+        }
         // Find the context that submitted value (or past it) and wait on its fence.
         let fence = {
             let fences = self.state.context_fences.read().unwrap();
@@ -949,10 +984,11 @@ impl GpuBackend for Dx12Backend {
         };
         if let Some(fence) = fence {
             utils::wait_for_fence(&fence, value)?;
-        }
-        // If no context has submitted past value yet, device_wait_idle is the safe fallback.
-        if context::device_retired(&self.state, device) < value {
-            self.device_wait_idle(device)?;
+        } else if context::device_retired(&self.state, device) < value {
+            // Present copies and other device-fence work may not map to a context fence.
+            if let Some(ld) = self.state.devices.get(&device) {
+                utils::wait_for_fence(&ld.fence, value)?;
+            }
         }
         Ok(())
     }
@@ -1017,6 +1053,16 @@ impl GpuBackend for Dx12Backend {
         timeout_ms: u32,
     ) -> Result<bool> {
         let device_handle = self.context_device(ctx);
+        if let Some(ld) = self.state.devices.get(&device_handle) {
+            let horizon = crate::backend::submission_worker::submission_horizon(&ld.timeline_next);
+            if !ld
+                .submission_worker
+                .wait_submitted_if_scheduled_timeout(value, horizon, timeout_ms)?
+            {
+                return Ok(false);
+            }
+            ld.submission_worker.check_error()?;
+        }
         let fence = self
             .state
             .context_fences

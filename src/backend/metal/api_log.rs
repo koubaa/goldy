@@ -113,13 +113,8 @@ pub(super) fn init() {
             while let Ok(line) = rx.recv() {
                 let _ = writeln!(writer, "{line}");
                 // Flush lazily: drain the channel first, then flush.
-                loop {
-                    match rx.try_recv() {
-                        Ok(extra) => {
-                            let _ = writeln!(writer, "{extra}");
-                        }
-                        Err(_) => break,
-                    }
+                while let Ok(extra) = rx.try_recv() {
+                    let _ = writeln!(writer, "{extra}");
                 }
                 let _ = writer.flush();
             }

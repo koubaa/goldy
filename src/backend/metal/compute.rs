@@ -64,44 +64,9 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
     let mut current_render_pipeline = None;
     for gc in commands {
         match gc {
-            GraphCommand::Compute(cmd) => match cmd {
-                GpuCommand::SetPipeline(p) => current_compute_pipeline = Some(*p),
-                GpuCommand::BindResourcesRaw { indices, .. } => {
-                    if let Some(h) = current_compute_pipeline {
-                        if let Some(p) = state.compute_pipelines.get(&h) {
-                            slots.extend(collect_metal_slots_from_raw_bind(indices, &p.push_constant_categories));
-                        }
-                    }
-                }
-                GpuCommand::BindResourcesTyped { handles } => {
-                    for h in handles {
-                        if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
-                            slots.push(key);
-                        }
-                    }
-                }
-                GpuCommand::DispatchBatch { arg_data, count, .. } => {
-                    if let Some(h) = current_compute_pipeline {
-                        if let Some(p) = state.compute_pipelines.get(&h) {
-                            let layout_size = std::mem::size_of::<PushLayout>();
-                            for i in 0..*count as usize {
-                                let base = i * shared::DISPATCH_BATCH_STRIDE;
-                                if base + layout_size <= arg_data.len() {
-                                    let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                                    for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                        if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
-                                            if let Some(key) = metal_slot_key_from_category(cat, idx as u32) {
-                                                slots.push(key);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            },
+            GraphCommand::Compute(cmd) => {
+                collect_metal_slots_from_gpu_command(state, cmd, &mut current_compute_pipeline, &mut slots);
+            }
             GraphCommand::Render {
                 commands: render_cmds, ..
             } => {
@@ -139,6 +104,61 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
         }
     }
     slots
+}
+
+fn collect_metal_slots_from_gpu_commands(state: &MetalState, commands: &[GpuCommand]) -> Vec<MetalSlotKey> {
+    let mut slots = Vec::new();
+    let mut current_pipeline = None;
+    for cmd in commands {
+        collect_metal_slots_from_gpu_command(state, cmd, &mut current_pipeline, &mut slots);
+    }
+    slots
+}
+
+fn collect_metal_slots_from_gpu_command(
+    state: &MetalState,
+    cmd: &GpuCommand,
+    current_pipeline: &mut Option<ComputePipelineHandle>,
+    slots: &mut Vec<MetalSlotKey>,
+) {
+    match cmd {
+        GpuCommand::SetPipeline(p) => *current_pipeline = Some(*p),
+        GpuCommand::BindResourcesRaw { indices, .. } => {
+            if let Some(h) = *current_pipeline {
+                if let Some(p) = state.compute_pipelines.get(&h) {
+                    slots.extend(collect_metal_slots_from_raw_bind(indices, &p.push_constant_categories));
+                }
+            }
+        }
+        GpuCommand::BindResourcesTyped { handles } => {
+            for h in handles {
+                if let Some(key) = metal_slot_key_from_category(h.category(), h.index()) {
+                    slots.push(key);
+                }
+            }
+        }
+        GpuCommand::DispatchBatch { arg_data, count, .. } => {
+            if let Some(h) = *current_pipeline {
+                if let Some(p) = state.compute_pipelines.get(&h) {
+                    let layout_size = std::mem::size_of::<PushLayout>();
+                    for i in 0..*count as usize {
+                        let base = i * shared::DISPATCH_BATCH_STRIDE;
+                        if base + layout_size <= arg_data.len() {
+                            let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
+                            for (slot_i, &idx) in layout.bindless.iter().enumerate() {
+                                if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
+                                    if let Some(key) = metal_slot_key_from_category(cat, idx as u32) {
+                                        slots.push(key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Option<super::types::MetalRetainedGraph> {
@@ -220,7 +240,7 @@ fn buffer_stride_for_arg_index(state: &MetalState, index: u32, cat: ResourceCate
 }
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLBlitOption, MTLCommandBufferStatus, MTLOrigin, MTLSize};
+use mtl::{MTLBlitOption, MTLOrigin, MTLSize};
 use objc::{msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -1410,78 +1430,33 @@ pub(super) fn submit(
         )?;
     }
 
-    let waiter = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_waiter
-        .clone();
-    let timeline_event = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_event
-        .clone();
-    let queue_lock = state
+    let ld = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?
-        .queue_lock
         .clone();
+    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
+    let waiter = sc_arc.lock().unwrap().timeline_waiter.clone();
+    let timeline_event = sc_arc.lock().unwrap().timeline_event.clone();
 
     let compute_commit_instant = std::time::Instant::now();
-    let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let _queue_guard = queue_lock.lock().unwrap();
-        let signal_value = {
-            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-            v
-        };
-        if super::api_log::enabled() {
-            super::api_log::log_commit(signal_value);
-        }
-        let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
-            let status = cb.status();
-            if status != MTLCommandBufferStatus::Completed {
-                let description = read_command_buffer_error_description(cb);
-                tracing::error!(
-                    "GPU command buffer (timeline={}) finished with status={:?}: {}",
-                    signal_value,
-                    status,
-                    description
-                );
-            }
-            let cpu_lifetime = compute_commit_instant.elapsed();
-            let (gpu_start, gpu_end): (f64, f64) = unsafe {
-                (
-                    objc::msg_send![cb, GPUStartTime],
-                    objc::msg_send![cb, GPUEndTime],
-                )
-            };
-            let gpu_ms = (gpu_end - gpu_start) * 1000.0;
-            tracing::debug!(
-                "[mtl.cb_done] kind=compute signal_value={signal_value} commit_to_complete={cpu_lifetime:?} gpu_exec={gpu_ms:.3}ms"
-            );
-            if crate::gpu_profiler::gpu_profile_enabled() {
-                crate::gpu_profiler::log_cb_timing("metal", signal_value, gpu_ms);
-            }
-            waiter.signal(signal_value);
-        })
-        .copy();
-        command_buffer_ref.add_completed_handler(&handler);
-        command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
-        tracing::debug!(
-            "[mtl.cb_commit] kind=compute signal_value={signal_value} queue=command_queue commands={n}",
-            n = commands.len()
-        );
-        command_buffer_ref.commit();
-        signal_value
-    };
+    let signal_value = super::pending_submit::preallocate_device_timeline(&ld);
+    let used_slots = collect_metal_slots_from_gpu_commands(state, commands);
+    ld.descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(ctx, signal_value, used_slots);
+    super::pending_submit::enqueue_metal_commit(
+        &ld,
+        owned_command_buffer,
+        signal_value,
+        timeline_event,
+        waiter,
+        Some(sc_arc),
+        "compute",
+        true,
+        Some(compute_commit_instant),
+    )?;
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1489,10 +1464,7 @@ pub(super) fn submit(
         sc.staging_belt.finish(signal_value);
         sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
-        sc.in_flight_command_buffers
-            .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
-        super::drain_completed_cbs(&mut sc);
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1508,7 +1480,7 @@ pub(super) fn submit(
             super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
         let retired = super::context::device_retired(state, device_handle);
-        ld.process_deletion_queue_up_to(retired);
+        super::process_device_deletions_up_to(state, device_handle, retired);
         maybe_log_mem_diag(ld);
     }
 
@@ -1695,64 +1667,32 @@ pub(super) fn submit_graph(
     }
 
     // Signal timeline and commit — same pattern as `submit`.
-    let waiter = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_waiter
-        .clone();
-    let timeline_event = state
-        .contexts
-        .get(&ctx)
-        .context("Invalid context handle")?
-        .lock()
-        .unwrap()
-        .timeline_event
-        .clone();
-    let queue_lock = state
+    let ld = state
         .devices
         .get(&device_handle)
         .context("Invalid device handle")?
-        .queue_lock
         .clone();
+    let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?.clone();
+    let waiter = sc_arc.lock().unwrap().timeline_waiter.clone();
+    let timeline_event = sc_arc.lock().unwrap().timeline_event.clone();
 
-    let signal_value = {
-        let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let _queue_guard = queue_lock.lock().unwrap();
-        let signal_value = {
-            let v = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            ld.timeline_scheduled_max.fetch_max(v, Ordering::Relaxed);
-            v
-        };
-        let handler = block::ConcreteBlock::new(move |cb: &mtl::CommandBufferRef| {
-            let status = cb.status();
-            if status != MTLCommandBufferStatus::Completed {
-                let description = read_command_buffer_error_description(cb);
-                tracing::error!(
-                    "GPU command buffer (graph, timeline={}) finished with status={:?}: {}",
-                    signal_value,
-                    status,
-                    description
-                );
-            }
-            // Capture per-command-buffer GPU timestamps. `GPUStartTime` / `GPUEndTime`
-            // are only valid after completion, which is guaranteed here.
-            if crate::gpu_profiler::gpu_profile_enabled() {
-                let gpu_start: f64 = unsafe { objc::msg_send![cb, GPUStartTime] };
-                let gpu_end: f64 = unsafe { objc::msg_send![cb, GPUEndTime] };
-                let ms = (gpu_end - gpu_start) * 1000.0;
-                crate::gpu_profiler::log_cb_timing("metal", signal_value, ms);
-            }
-            waiter.signal(signal_value);
-        })
-        .copy();
-        command_buffer_ref.add_completed_handler(&handler);
-        command_buffer_ref.encode_signal_event(timeline_event.as_ref(), signal_value);
-        command_buffer_ref.commit();
-        signal_value
-    };
+    let signal_value = super::pending_submit::preallocate_device_timeline(&ld);
+    let used_slots = collect_metal_slots_from_graph_commands(state, commands);
+    ld.descriptors
+        .lock()
+        .unwrap()
+        .record_slot_usage(ctx, signal_value, used_slots.iter().copied());
+    super::pending_submit::enqueue_metal_commit(
+        &ld,
+        owned_command_buffer,
+        signal_value,
+        timeline_event,
+        waiter,
+        Some(sc_arc),
+        "graph",
+        false,
+        None,
+    )?;
 
     // Post-submit: tag in-flight staging resources with the timeline signal value.
     if let Some(sc_arc) = state.contexts.get(&ctx) {
@@ -1760,10 +1700,7 @@ pub(super) fn submit_graph(
         sc.staging_belt.finish(signal_value);
         sc.texture_staging_pool.release(signal_value, texture_scratches);
         sc.last_committed_timeline = Some(signal_value);
-        sc.in_flight_command_buffers
-            .push_back((signal_value, owned_command_buffer));
         sc.last_submitted_seq = signal_value;
-        super::drain_completed_cbs(&mut sc);
     }
     if let Some(row) = prologue_row {
         if let Some(ld) = state.devices.get(&device_handle) {
@@ -1779,7 +1716,7 @@ pub(super) fn submit_graph(
             super::drain_context_deletion_queue_up_to(ld, &mut sc.deletion_queue, ctx_signaled);
         }
         let retired = super::context::device_retired(state, device_handle);
-        ld.process_deletion_queue_up_to(retired);
+        super::process_device_deletions_up_to(state, device_handle, retired);
         maybe_log_mem_diag(ld);
     }
 

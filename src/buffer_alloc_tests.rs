@@ -1,10 +1,9 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
     use crate::buffer::BufferPool;
-    use crate::task_graph::NodeAccess;
     use crate::test_support::SerialGpuDevice;
     use crate::types::{BufferFlags, ResourceAccess};
-    use crate::{BufferKind, DeviceType};
+    use crate::BufferKind;
 
     fn make_device() -> SerialGpuDevice {
         SerialGpuDevice::new()
@@ -202,8 +201,9 @@ mod buffer_alloc_tests {
     #[cfg(all(feature = "dx12", target_os = "windows"))]
     #[test]
     fn dx12_reserved_buffer_resize_compute_smoke() {
+        use crate::task_graph::NodeAccess;
         use crate::types::BufferResizeCost;
-        use crate::{BackendType, ComputePipeline, ShaderModule, TaskGraph};
+        use crate::{BackendType, ComputePipeline, DeviceType, ShaderModule, TaskGraph};
         const SMOKY_SHADER: &str = r#"
     import goldy_exp;
 

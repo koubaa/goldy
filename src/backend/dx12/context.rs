@@ -254,9 +254,23 @@ pub(super) struct Dx12ContextDestroyWork {
 impl ContextDestroyHandle for Dx12ContextDestroyWork {
     fn wait(&self) -> Result<()> {
         let last_submitted = self.sc.last_submitted_seq.load(std::sync::atomic::Ordering::Relaxed);
-        if last_submitted > 0 {
-            super::utils::wait_for_fence(&self.sc.fence, last_submitted)?;
+        match self.ld.submission_worker.flush() {
+            Ok(()) if last_submitted > 0 => {
+                self.ld.submission_worker.wait_submitted(last_submitted)?;
+                let submitted = self
+                    .ld
+                    .submission_worker
+                    .submitted_epoch()
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let fence_wait = last_submitted.min(submitted);
+                if fence_wait > 0 {
+                    super::utils::wait_for_fence(&self.sc.fence, fence_wait)?;
+                }
+            }
+            Ok(()) => {}
+            Err(e) => return Err(e),
         }
+        self.ld.submission_worker.check_error()?;
         Ok(())
     }
 

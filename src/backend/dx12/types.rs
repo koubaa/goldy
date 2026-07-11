@@ -1086,6 +1086,8 @@ pub(crate) struct LogicalDevice {
     pub device_direct_pool: std::sync::Mutex<Vec<DeviceDirectSlot>>,
     /// Frame table for legacy `render_to_target` (no submission context).
     pub legacy_frame_table: Mutex<Option<SharedContextFrameTable>>,
+    /// Async FIFO worker for `ExecuteCommandLists` + `Signal` (render thread enqueues, worker runs).
+    pub submission_worker: std::sync::Arc<super::super::submission_worker::SubmissionWorker>,
 }
 
 /// Shared logical device handle — cloned out of `Dx12State` before dropping the global lock.
@@ -1281,7 +1283,11 @@ pub(crate) fn destroy_pending_deletion(
             // Flush the queue so the unmap is processed before releasing the resource.
             // Without this, the driver can crash (device removal) on Release.
             let fv = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
-            if unsafe { ld.command_queue.Signal(&ld.fence, fv) }.is_ok() {
+            let signaled = super::utils::with_queue_lock(ld, || {
+                unsafe { ld.command_queue.Signal(&ld.fence, fv) }
+                    .map_err(|e| anyhow::anyhow!("Failed to signal device fence for buffer deletion: {e:?}"))
+            });
+            if signaled.is_ok() {
                 let _ = super::utils::wait_for_fence(&ld.fence, fv);
             }
             drop(resource);
