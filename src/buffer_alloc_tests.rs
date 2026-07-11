@@ -1,27 +1,13 @@
 #[cfg(test)]
 mod buffer_alloc_tests {
     use crate::buffer::BufferPool;
-    use crate::device::{Device, DeviceDescriptor, Instance, RequestAdapterOptions};
     use crate::task_graph::NodeAccess;
+    use crate::test_support::SerialGpuDevice;
     use crate::types::{BufferFlags, ResourceAccess};
     use crate::{BufferKind, DeviceType};
 
-    fn make_device() -> Device {
-        let inst = Instance::new().expect("instance");
-        inst.request_adapter(&RequestAdapterOptions::default())
-            .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
-            .expect("device")
-    }
-
-    fn request_device_preferring(inst: &Instance, preferred: DeviceType) -> Device {
-        let adapters = inst.enumerate_adapters();
-        let adapter = adapters
-            .iter()
-            .find(|a| a.device_type() == preferred)
-            .or(adapters.first())
-            .expect("no adapter");
-        adapter.request_device(&DeviceDescriptor::default()).expect("device")
+    fn make_device() -> SerialGpuDevice {
+        SerialGpuDevice::new()
     }
 
     // ─── Buffer resize (Phase 1: stable handles, realloc-copy fallback) ───────────
@@ -148,9 +134,8 @@ mod buffer_alloc_tests {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn device_capabilities_metal_reports_constant_resize() {
-        use crate::{types::BufferResizeCost, BackendType, Instance};
-        let inst = Instance::new().expect("i");
-        let device = request_device_preferring(&inst, crate::DeviceType::IntegratedGpu);
+        use crate::{types::BufferResizeCost, BackendType};
+        let device = SerialGpuDevice::preferring(crate::DeviceType::IntegratedGpu);
         let _ctx = device.create_context().expect("context");
         assert_eq!(device.backend_type(), BackendType::Metal);
         let caps = device.capabilities();
@@ -161,9 +146,8 @@ mod buffer_alloc_tests {
     #[cfg(feature = "vulkan")]
     #[test]
     fn device_capabilities_vulkan_reports_pagebind_when_sparse() {
-        use crate::{types::BufferResizeCost, BackendType, Instance};
-        let inst = Instance::new().expect("i");
-        let device = request_device_preferring(&inst, crate::DeviceType::DiscreteGpu);
+        use crate::{types::BufferResizeCost, BackendType};
+        let device = SerialGpuDevice::preferring(crate::DeviceType::DiscreteGpu);
         if device.backend_type() != BackendType::Vulkan {
             return;
         }
@@ -177,10 +161,9 @@ mod buffer_alloc_tests {
     #[cfg(feature = "dx12")]
     #[test]
     fn device_capabilities_dx12_reports_pagebind_when_reserved_supported() {
-        use crate::{types::BufferResizeCost, BackendType, Instance};
+        use crate::{types::BufferResizeCost, BackendType};
         // With multiple backends enabled, `GOLDY_BACKEND` may select a non-DX12 API; skip in that case.
-        let inst = Instance::new().expect("i");
-        let device = request_device_preferring(&inst, crate::DeviceType::DiscreteGpu);
+        let device = SerialGpuDevice::preferring(crate::DeviceType::DiscreteGpu);
         if device.backend_type() != BackendType::Dx12 {
             return;
         }
@@ -194,9 +177,8 @@ mod buffer_alloc_tests {
     #[cfg(any(feature = "vulkan", feature = "dx12"))]
     #[test]
     fn sparse_backend_oversize_resize_and_hint_within_capacity() {
-        use crate::{types::BufferResizeCost, Instance};
-        let inst = Instance::new().expect("i");
-        let device = request_device_preferring(&inst, crate::DeviceType::DiscreteGpu);
+        use crate::types::BufferResizeCost;
+        let device = SerialGpuDevice::preferring(crate::DeviceType::DiscreteGpu);
         if device.capabilities().buffer_resize_cost != BufferResizeCost::PageBind {
             return;
         }
@@ -231,8 +213,7 @@ mod buffer_alloc_tests {
         data[id.x] = data[id.x] * 2;
     }
     "#;
-        let inst = Instance::new().expect("i");
-        let device = request_device_preferring(&inst, DeviceType::DiscreteGpu);
+        let device = SerialGpuDevice::preferring(DeviceType::DiscreteGpu);
         let ctx = device.create_context().expect("context");
         if device.backend_type() != BackendType::Dx12 {
             return;

@@ -116,12 +116,19 @@ mod boundary_reclamation;
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 pub use backend::dx12::WARP_ADAPTER_ID;
 
-/// Mock-backend helpers for integration tests (`tests/cross_submit_mock.rs`, etc.).
+/// Test helpers for `--lib` and integration tests.
+///
+/// - [`mock_device`] / [`with_mock`]: pure software; safe to run in parallel.
+/// - [`SerialGpuDevice`]: real GPU device for unit tests that touch DX12/Vulkan/Metal.
+///   On DX12 WARP, holds a process-wide lock for the device lifetime so lib tests do not
+///   interleave WARP work (same rationale as `test_threads = 1` in compute_integration).
 #[doc(hidden)]
 pub mod test_support {
     use crate::backend::mock::MockBackend;
-    use crate::Device;
-    use std::sync::Arc;
+    use crate::device::{DeviceDescriptor, Instance, RequestAdapterOptions};
+    use crate::{BackendType, Device, DeviceType};
+    use std::ops::Deref;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     pub fn mock_device() -> Arc<Device> {
         Arc::new(Device::from_backend(Box::new(MockBackend::new())).expect("mock device"))
@@ -129,5 +136,115 @@ pub mod test_support {
 
     pub fn with_mock<R>(device: &Device, f: impl FnOnce(&mut MockBackend) -> R) -> R {
         device.with_mock_backend(f)
+    }
+
+    /// Process-wide gate for DX12 WARP lib tests. MockBackend never takes this lock.
+    static WARP_LIB_TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn warp_lib_test_serial() -> &'static Mutex<()> {
+        WARP_LIB_TEST_SERIAL.get_or_init(|| Mutex::new(()))
+    }
+
+    fn env_force_warp() -> bool {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            crate::backend::dx12::env_force_warp()
+        }
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        {
+            false
+        }
+    }
+
+    fn is_dx12_warp(device: &Device) -> bool {
+        #[cfg(all(feature = "dx12", target_os = "windows"))]
+        {
+            device.backend_type() == BackendType::Dx12 && device.adapter_id() == crate::WARP_ADAPTER_ID
+        }
+        #[cfg(not(all(feature = "dx12", target_os = "windows")))]
+        {
+            let _ = device;
+            false
+        }
+    }
+
+    /// Real GPU [`Device`] for `--lib` tests, with WARP serialization when needed.
+    ///
+    /// Drop order releases the device before the optional WARP lock so the next
+    /// serialized test can create a fresh device safely.
+    pub struct SerialGpuDevice {
+        device: Device,
+        _warp_guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl SerialGpuDevice {
+        /// Default adapter (`RequestAdapterOptions::default`, honors `GOLDY_DX12_FORCE_WARP`).
+        pub fn new() -> Self {
+            Self::from_factory(|instance| {
+                instance
+                    .request_adapter(&RequestAdapterOptions::default())
+                    .expect("adapter")
+                    .request_device(&DeviceDescriptor::default())
+                    .expect("device")
+            })
+        }
+
+        /// Prefer an adapter of `preferred` type, unless `GOLDY_DX12_FORCE_WARP=1` (then WARP).
+        pub fn preferring(preferred: DeviceType) -> Self {
+            Self::from_factory(|instance| {
+                if env_force_warp() && instance.backend_type() == BackendType::Dx12 {
+                    return instance
+                        .request_adapter(&RequestAdapterOptions {
+                            force_fallback_adapter: true,
+                            ..RequestAdapterOptions::default()
+                        })
+                        .expect("WARP adapter")
+                        .request_device(&DeviceDescriptor::default())
+                        .expect("WARP device");
+                }
+                let adapters = instance.enumerate_adapters();
+                let adapter = adapters
+                    .iter()
+                    .find(|a| a.device_type() == preferred)
+                    .or(adapters.first())
+                    .expect("no adapter");
+                adapter
+                    .request_device(&DeviceDescriptor::default())
+                    .expect("device")
+            })
+        }
+
+        fn from_factory(create: impl FnOnce(&Instance) -> Device) -> Self {
+            // Lock before device create when FORCE_WARP so two threads cannot both
+            // open WARP devices before either observes adapter_id.
+            let pre_guard = if env_force_warp() {
+                Some(warp_lib_test_serial().lock().unwrap())
+            } else {
+                None
+            };
+
+            let instance = Instance::new().expect("Instance::new");
+            let device = create(&instance);
+            drop(instance);
+
+            let _warp_guard = match pre_guard {
+                Some(g) => Some(g),
+                None if is_dx12_warp(&device) => Some(warp_lib_test_serial().lock().unwrap()),
+                None => None,
+            };
+
+            Self {
+                device,
+                _warp_guard,
+            }
+        }
+    }
+
+    impl Deref for SerialGpuDevice {
+        type Target = Device;
+
+        fn deref(&self) -> &Device {
+            &self.device
+        }
     }
 }

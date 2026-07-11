@@ -18,20 +18,16 @@ mod heap_tests {
 
     use crate::buffer::Allocation;
     use crate::task_graph::TaskGraph;
+    use crate::test_support::SerialGpuDevice;
     use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
-    use crate::{BufferKind, Device, DeviceDescriptor, Instance, RequestAdapterOptions};
+    use crate::BufferKind;
 
     fn submission_context(device: &crate::Device) -> crate::Context {
         device.create_context().expect("context")
     }
 
-    fn make_device() -> Device {
-        let instance = Instance::new().expect("Instance::new");
-        instance
-            .request_adapter(&RequestAdapterOptions::default())
-            .expect("adapter")
-            .request_device(&DeviceDescriptor::default())
-            .expect("No Goldy device")
+    fn make_device() -> SerialGpuDevice {
+        SerialGpuDevice::new()
     }
 
     // ===========================================================================
