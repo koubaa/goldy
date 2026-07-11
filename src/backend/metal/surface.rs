@@ -51,7 +51,6 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use mtl::{MTLPixelFormat, MTLStorageMode, MTLTextureUsage, TextureDescriptor};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::types::{SharedLogicalDevice, SharedMetalSubmissionContext, TimelineWaiter};
@@ -611,56 +610,20 @@ impl PresentGpuWork for MetalPresentGpuWork {
     fn run(self: Box<Self>) -> Result<PresentFinishState> {
         let _tz = crate::tracy_zone!("mtl.present.gpu");
         let owned_command_buffer = self.logical_device.command_queue.new_command_buffer().to_owned();
-        let signal_value = {
-            let _queue_guard = self.logical_device.queue_lock.lock().unwrap();
-            let signal_value = {
-                let v = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-                self.logical_device
-                    .timeline_scheduled_max
-                    .fetch_max(v, Ordering::Relaxed);
-                v
-            };
-            let command_buffer = owned_command_buffer.as_ref();
-            let queue_lock = self.logical_device.queue_lock.clone();
-            let drawable_ptr = self.drawable_ptr as id;
-            let drawable_ref: &mtl::DrawableRef = unsafe { &*(drawable_ptr as *const mtl::DrawableRef) };
-
-            command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
-            let surface = self.surface;
-            let return_image = self.return_image;
-            let signal_queue_present = Arc::clone(&self.signal_queue_present);
-            let return_pending = Arc::clone(&self.return_pending);
-            let waiter = self.waiter.clone();
-            let handler = block::ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
-                waiter.signal(signal_value);
-                if let Some(idx) = return_image {
-                    signal_queue_present.push(crate::signal::Signal::SwapchainReturned { image_index: idx });
-                    if let Ok(mut pending) = return_pending.lock() {
-                        pending.push((surface, idx));
-                    }
-                }
-            })
-            .copy();
-            command_buffer.add_completed_handler(&handler);
-            command_buffer.present_drawable(drawable_ref);
-            if super::api_log::enabled() {
-                super::api_log::log_present_drawable(signal_value);
-            }
-            command_buffer.commit();
-            signal_value
-        };
-
-        unsafe {
-            let drawable_ptr = self.drawable_ptr as id;
-            let (): () = msg_send![drawable_ptr, release];
-        }
-
-        {
-            let mut sc = self.sc_arc.lock().unwrap();
-            sc.in_flight_command_buffers
-                .push_back((signal_value, owned_command_buffer));
-            super::drain_completed_cbs(&mut sc);
-        }
+        let signal_value = super::pending_submit::preallocate_device_timeline(&self.logical_device);
+        super::pending_submit::enqueue_metal_present(
+            &self.logical_device,
+            owned_command_buffer,
+            signal_value,
+            self.timeline_event,
+            self.waiter,
+            self.sc_arc,
+            self.surface,
+            self.drawable_ptr,
+            self.return_image,
+            self.signal_queue_present,
+            self.return_pending,
+        )?;
 
         Ok(PresentFinishState {
             frame: self.frame,

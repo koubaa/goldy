@@ -9,6 +9,35 @@ use anyhow::{Context as _, Result};
 use ash::vk;
 use std::sync::Arc;
 
+fn apply_cpu_epoch_waits(
+    ld: &SharedLogicalDevice,
+    contexts: &SharedContextMap,
+    sync: Option<&SubmitSync>,
+) -> Result<()> {
+    let Some(s) = sync else {
+        return Ok(());
+    };
+    if s.cpu_waits.is_empty() {
+        return Ok(());
+    }
+    for epoch in &s.cpu_waits {
+        let sem = contexts
+            .read()
+            .unwrap()
+            .get(&epoch.context)
+            .with_context(|| format!("cross-submit cpu wait: invalid context {:?}", epoch.context))?
+            .lock()
+            .unwrap()
+            .timeline_semaphore;
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&sem))
+            .values(std::slice::from_ref(&epoch.value));
+        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }
+            .context("cross-submit cpu wait on timeline semaphore")?;
+    }
+    Ok(())
+}
+
 pub(super) fn resolve_cross_submit_waits(
     contexts: &SharedContextMap,
     sync: Option<&SubmitSync>,
@@ -207,6 +236,7 @@ pub(super) fn enqueue_vulkan_submit(
     device_lost: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     ld.submission_worker.check_error()?;
+    apply_cpu_epoch_waits(ld, contexts, sync)?;
     let wait_semaphores = resolve_cross_submit_waits(contexts, sync)?;
     ld.submission_worker.enqueue(
         signal_value,
@@ -238,8 +268,6 @@ struct VulkanPresentCopyPendingSubmit {
     timeline_sem: vk::Semaphore,
     frame_compute_timeline_value: u64,
     image_available_sem: vk::Semaphore,
-    render_finished_sem: vk::Semaphore,
-    signal_timeline_value: TimelineValue,
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
 }
 
@@ -282,7 +310,7 @@ pub(super) fn enqueue_vulkan_present_copy(
     timeline_sem: vk::Semaphore,
     frame_compute_timeline_value: u64,
     image_available_sem: vk::Semaphore,
-    render_finished_sem: vk::Semaphore,
+    _render_finished_sem: vk::Semaphore,
     signal_timeline_value: TimelineValue,
     signal_semaphore_infos: Vec<vk::SemaphoreSubmitInfo<'static>>,
 ) -> Result<()> {
@@ -297,8 +325,6 @@ pub(super) fn enqueue_vulkan_present_copy(
             timeline_sem,
             frame_compute_timeline_value,
             image_available_sem,
-            render_finished_sem,
-            signal_timeline_value,
             signal_semaphore_infos,
         }),
     )

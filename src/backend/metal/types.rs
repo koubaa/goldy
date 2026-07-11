@@ -514,6 +514,7 @@ impl DeletionQueue {
 
     /// Destroy resources whose `barrier` has been signaled by the GPU (`signaled_value >= barrier`).
     /// The variants are dropped here which releases the MTL objects.
+    #[allow(dead_code)]
     pub fn process_up_to(&mut self, signaled: TimelineValue) {
         self.process_up_to_gated(signaled, |_| true);
     }
@@ -1069,6 +1070,7 @@ impl ResourceRegistry {
     }
 
     /// Promote pending slots whose GPU barrier has been signaled (no retained-graph pin gate).
+    #[cfg(test)]
     pub fn drain_pending_slots_up_to_unpinned(&mut self, signaled: TimelineValue) {
         self.drain_pending_slots_up_to(signaled, |_| true);
     }
@@ -1078,6 +1080,7 @@ impl ResourceRegistry {
     /// Only safe to call after `wait_all_in_flight` has confirmed that no
     /// GPU command buffers are in-flight. For the per-frame path use
     /// `drain_pending_slots_up_to(signaled)` instead.
+    #[cfg(test)]
     pub fn drain_pending_slots(&mut self) {
         self.drain_pending_slots_up_to_unpinned(TimelineValue::MAX);
     }

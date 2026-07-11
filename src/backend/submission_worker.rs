@@ -49,6 +49,7 @@ impl SubmissionWorker {
         }
     }
 
+    #[allow(dead_code)]
     pub fn submitted_epoch(&self) -> &Arc<AtomicU64> {
         &self.submitted_epoch
     }
@@ -129,12 +130,14 @@ impl SubmissionWorker {
     }
 
     pub fn flush(&self) -> Result<()> {
+        self.check_error()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.sender
             .send(WorkerMessage::Flush { done: tx })
             .map_err(|e| anyhow::anyhow!("submission worker channel closed: {e}"))?;
         rx.recv()
-            .map_err(|e| anyhow::anyhow!("submission worker flush response lost: {e}"))?
+            .map_err(|e| anyhow::anyhow!("submission worker flush response lost: {e}"))??;
+        self.check_error()
     }
 
     pub fn shutdown(&self) {

@@ -89,7 +89,6 @@ struct MockDevice {
 }
 
 struct MockPendingSubmit {
-    ctx: ContextHandle,
     tv: u64,
     context_state: std::sync::Arc<std::sync::Mutex<MockContextState>>,
 }
@@ -292,6 +291,7 @@ impl MockBackend {
         }
     }
 
+    #[allow(dead_code)]
     fn complete_context_seq(&mut self, ctx: ContextHandle, seq: u64) {
         let mut state = self.context_state_mut(ctx);
         state.completed = seq;
@@ -317,7 +317,6 @@ impl MockBackend {
         dev.submission_worker.enqueue(
             tv,
             Box::new(MockPendingSubmit {
-                ctx,
                 tv,
                 context_state,
             }),

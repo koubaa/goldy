@@ -21,64 +21,6 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// Build GPU-side timeline-semaphore waits for cross-context [`SubmitSync::waits`].
-fn apply_cpu_epoch_waits(view: &VulkanSubmitView<'_>, sync: Option<&SubmitSync>) -> Result<()> {
-    let Some(s) = sync else {
-        return Ok(());
-    };
-    if s.cpu_waits.is_empty() {
-        return Ok(());
-    }
-    for epoch in &s.cpu_waits {
-        let (device_handle, sem) = {
-            let contexts = view.contexts.read().unwrap();
-            let sc = contexts
-                .get(&epoch.context)
-                .with_context(|| format!("cross-submit cpu wait: invalid context {:?}", epoch.context))?;
-            let sc = sc.lock().unwrap();
-            (sc.device, sc.timeline_semaphore)
-        };
-        let ld = view
-            .devices
-            .get(&device_handle)
-            .with_context(|| format!("cross-submit cpu wait: invalid device {:?}", device_handle))?;
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(std::slice::from_ref(&sem))
-            .values(std::slice::from_ref(&epoch.value));
-        unsafe { ld.device.wait_semaphores(&wait, u64::MAX) }.context("cross-submit cpu wait on timeline semaphore")?;
-    }
-    Ok(())
-}
-
-fn build_cross_submit_wait_infos(
-    view: &VulkanSubmitView<'_>,
-    sync: Option<&SubmitSync>,
-) -> Result<Vec<vk::SemaphoreSubmitInfo<'static>>> {
-    apply_cpu_epoch_waits(view, sync)?;
-    let Some(s) = sync else {
-        return Ok(Vec::new());
-    };
-    let mut wait_infos = Vec::with_capacity(s.waits.len());
-    for epoch in &s.waits {
-        let sem = view
-            .contexts
-            .read()
-            .unwrap()
-            .get(&epoch.context)
-            .with_context(|| format!("cross-submit wait: invalid context {:?}", epoch.context))?
-            .lock()
-            .unwrap()
-            .timeline_semaphore;
-        wait_infos.push(
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(sem)
-                .value(epoch.value)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        );
-    }
-    Ok(wait_infos)
-}
-
 fn slot_key_from_category(cat: crate::types::ResourceCategory, index: u32) -> Option<SlotKey> {
     use crate::types::ResourceCategory;
     match cat {
@@ -641,62 +583,6 @@ pub(super) unsafe fn vulkan_finish_gpu_profile_pending(
     Ok(())
 }
 
-unsafe fn vulkan_finish_gpu_profile(
-    view: &VulkanSubmitView<'_>,
-    ctx: super::ContextHandle,
-    device: &ash::Device,
-    timeline_sem: vk::Semaphore,
-    signal_value: TimelineValue,
-    cmd: vk::CommandBuffer,
-    profile: VulkanGpuProfilePool,
-) -> Result<()> {
-    let wait = vk::SemaphoreWaitInfo::default()
-        .semaphores(std::slice::from_ref(&timeline_sem))
-        .values(std::slice::from_ref(&signal_value));
-    if let Err(e) = device.wait_semaphores(&wait, u64::MAX) {
-        unsafe {
-            device.destroy_query_pool(profile.pool, None);
-        }
-        if e == vk::Result::ERROR_DEVICE_LOST {
-            view.device_lost.store(true, Ordering::Relaxed);
-        }
-        return Err(anyhow::anyhow!("wait_semaphores (gpu profiling): {:?}", e));
-    }
-
-    let mut raw = vec![0u64; profile.query_count as usize];
-    if let Err(e) = device.get_query_pool_results(
-        profile.pool,
-        0,
-        &mut raw,
-        vk::QueryResultFlags::WAIT | vk::QueryResultFlags::TYPE_64,
-    ) {
-        unsafe {
-            device.destroy_query_pool(profile.pool, None);
-        }
-        return Err(anyhow::anyhow!("get_query_pool_results: {:?}", e));
-    }
-
-    let cb_ns = vulkan_decode_duration_ns(raw[0], raw[1], profile.valid_bits, profile.period_ns);
-    gpu_profiler::log_cb_timing("vulkan", signal_value, cb_ns as f64 / 1_000_000.0);
-
-    let n = profile.dispatch_labels.len();
-    if n > 0 {
-        let mut dispatches = Vec::with_capacity(n);
-        for i in 0..n {
-            let si = 2 + 2 * i;
-            let ns = vulkan_decode_duration_ns(raw[si], raw[si + 1], profile.valid_bits, profile.period_ns);
-            let label = profile.dispatch_labels[i].unwrap_or("dispatch");
-            dispatches.push(DispatchGpuNs { label, gpu_ns: ns });
-        }
-        gpu_profiler::log_dispatch_timings("vulkan", signal_value, &dispatches);
-    }
-
-    device.destroy_query_pool(profile.pool, None);
-    reap_timeline_cmd_buffers_up_to_with_view(view, ctx, signal_value);
-    let _ = cmd;
-    Ok(())
-}
-
 /// Returns the GPU-completed timeline value for a single context by reading its
 /// timeline semaphore counter directly, without consulting any other context.
 ///
@@ -1076,8 +962,6 @@ pub(super) fn submit_with_scope(
         let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         create_vulkan_gpu_profile_pool(ld, false, dispatch_count, dispatch_labels)?
     };
-
-    let mut vk_gpu_profile = vk_gpu_profile;
 
     let cmd = {
         let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
@@ -2053,7 +1937,7 @@ pub(super) fn submit_graph_with_scope(
     let logical_device = view.devices.get(&device_handle).context("Invalid device handle")?;
 
     let (dispatch_count_graph, dispatch_labels_graph) = collect_dispatch_labels_graph(commands);
-    let mut vk_gpu_profile =
+    let vk_gpu_profile =
         unsafe { create_vulkan_gpu_profile_pool(logical_device, false, dispatch_count_graph, dispatch_labels_graph)? };
 
     // Cross-submission acquire: make prior submit's writes visible to this graph's

@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use ash::vk;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 /// Submit a one-shot vkCmdCopyBuffer between two buffers and wait for completion.
 fn submit_copy(

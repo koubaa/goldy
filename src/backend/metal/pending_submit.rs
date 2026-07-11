@@ -1,4 +1,7 @@
 //! Async GPU submission work enqueued on the per-device submission worker.
+//!
+//! Uses `cocoa::base::id` for drawable retain/release; see `surface.rs` for the
+//! objc2 migration note.
 #![allow(deprecated)]
 
 use super::super::SurfaceHandle;
@@ -174,9 +177,9 @@ impl PendingSubmit for MetalPresentPendingSubmit {
 
         command_buffer.encode_signal_event(self.timeline_event.as_ref(), signal_value);
         let return_image = self.return_image;
+        let surface = self.surface;
         let signal_queue_present = std::sync::Arc::clone(&self.signal_queue_present);
         let return_pending = std::sync::Arc::clone(&self.return_pending);
-        let surface = self.surface;
         let waiter = self.waiter.clone();
         let handler = ConcreteBlock::new(move |_cb: &mtl::CommandBufferRef| {
             waiter.signal(signal_value);
