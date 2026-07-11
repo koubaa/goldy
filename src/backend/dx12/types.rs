@@ -14,7 +14,9 @@ use super::super::{
     BufferHandle, ComputePipelineHandle, ContextHandle, DeviceHandle, PipelineHandle, RenderTargetHandle,
     SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
+use crate::timeline::SmallContextMap;
 use crate::types::{DepthFormat, SamplerDesc, TextureFormat};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -552,6 +554,10 @@ pub(crate) struct ComputeAllocatorSlot {
     /// When `true`, this slot holds a retained command list that must not be reset
     /// until the caller explicitly releases it via `evict_retained`.
     pub retained: bool,
+    /// Allocator and command list were reset on the submission worker and are ready to record.
+    pub pre_reset: bool,
+    /// Render thread holds this slot open for recording until the matching submit executes.
+    pub in_recording: bool,
 }
 
 /// Per-context async submission stream (fence, poller, compute allocator pool).
@@ -578,6 +584,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub fence_thread: Option<std::thread::JoinHandle<()>>,
     /// Pool of command allocators for non-blocking compute submission on this context.
     pub compute_allocator_pool: Vec<ComputeAllocatorSlot>,
+    /// Round-robin start index for compute allocator pool reuse.
+    pub allocator_recycle_hint: usize,
     /// Retained command lists keyed by scheme fingerprint for zero-recording-cost re-submission.
     pub retained_graphs: HashMap<u64, RetainedGraph>,
     /// Upload belt for `GpuCommand::WriteBuffer` on this context.
@@ -592,6 +600,8 @@ pub(crate) struct Dx12SubmissionContext {
     pub reclamation_context: Option<(std::thread::ThreadId, u64)>,
     /// Per-context frame-table GPU resources and ring state (bindless slots 0/1).
     pub frame_table: SharedContextFrameTable,
+    /// GPU profile readbacks deferred until the context timeline retires each submit TV.
+    pub pending_gpu_profiles: Vec<(u64, super::compute::Dx12GpuProfileResources)>,
 }
 
 /// A retained (closed but not reset) command list available for re-execution.
@@ -610,7 +620,7 @@ pub(crate) struct RetainedGraph {
     /// re-executed there (not on the context COMPUTE queue).
     pub on_device_queue: bool,
     /// Bindless heap indices baked into this command list (for slot retirement on resubmit).
-    pub used_slots: Vec<DeferredSlot>,
+    pub used_slots: Arc<[DeferredSlot]>,
     /// Snapshot of staging at record time (prologue copy offsets are baked into the CB).
     pub frame_table_staging: Option<std::sync::Arc<[u32]>>,
     /// Row index baked into this CB's prologue copies; pinned until evict.
@@ -693,6 +703,10 @@ fn slot_requirements_met(
     requirements: &[(super::ContextHandle, u64)],
     context_fences: &HashMap<super::ContextHandle, ContextFenceEntry>,
 ) -> bool {
+    // Missing context ⇒ already destroyed after its GPU drain wait, so requirements on it
+    // are satisfied. Callers must keep the fence entry in the map until that wait + local
+    // teardown finish (see `finish_destroy`); removing earlier lets concurrent drains free
+    // slots still referenced by the dying context.
     requirements.iter().all(|(ctx_id, required_seq)| {
         context_fences
             .get(ctx_id)
@@ -799,7 +813,7 @@ pub(crate) struct DescriptorRegistry {
     pub resource_registry: ResourceRegistry,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
     /// Updated at every submit. Entry removed when the slot is queued for reclamation.
-    pub slot_last_seen: HashMap<DeferredSlot, HashMap<super::ContextHandle, u64>>,
+    pub slot_last_seen: FxHashMap<DeferredSlot, SmallContextMap<u64>>,
     /// Slots waiting for referencing contexts to retire before returning to the free list.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
     /// Retained command lists still baking each bindless slot (incremental refcount).
@@ -810,7 +824,7 @@ impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
-            slot_last_seen: HashMap::new(),
+            slot_last_seen: FxHashMap::default(),
             pending_slot_reclamations: Vec::new(),
             retained_users: HashMap::new(),
         }
@@ -855,12 +869,7 @@ impl DescriptorRegistry {
         slots: impl IntoIterator<Item = DeferredSlot>,
     ) {
         for slot in slots {
-            self.slot_last_seen
-                .entry(slot)
-                .or_default()
-                .entry(ctx)
-                .and_modify(|v| *v = (*v).max(seq))
-                .or_insert(seq);
+            self.slot_last_seen.entry(slot).or_default().mark_max(ctx, seq);
         }
     }
 
@@ -869,7 +878,7 @@ impl DescriptorRegistry {
         let requirements: Vec<_> = self
             .slot_last_seen
             .remove(&slot)
-            .map(|m| m.into_iter().collect())
+            .map(|m| m.iter().collect())
             .unwrap_or_default();
         // Always defer: empty requirements may still be referenced by retained command lists
         // on other live contexts (see `device_deletion_requirements_met`).
@@ -974,7 +983,7 @@ impl DescriptorRegistry {
         for &slot in slots {
             if let Some(map) = self.slot_last_seen.get(&DeferredSlot::CbvSrvUav(slot)) {
                 for (ctx, seq) in map.iter() {
-                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
+                    merged.entry(ctx).and_modify(|v| *v = (*v).max(seq)).or_insert(seq);
                 }
             }
         }

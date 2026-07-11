@@ -330,8 +330,11 @@ impl Context {
     /// Per-handle last-touch reclamation (tighter than `device_retired` for the VRAM ring)
     /// is a future optimization.
     pub fn boundary_crossed(&self, epoch: TimelineValue) {
+        self.boundary_crossed_inner(epoch, self.device().timeline_retired());
+    }
+
+    fn boundary_crossed_inner(&self, epoch: TimelineValue, vram_retire: TimelineValue) {
         let _tz = crate::tracy_zone!("context.boundary_crossed");
-        let retired = self.device().timeline_retired();
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.flush_pre");
             self.inner.deletion_flush.as_ref().expect("deletion flush").flush();
@@ -346,7 +349,7 @@ impl Context {
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_vram");
-            self.device().vram_allocator().boundary_crossed(retired);
+            self.device().vram_allocator().boundary_crossed(vram_retire);
         }
         {
             let _tz = crate::tracy_zone!("context.boundary_crossed.drain_transient_pool");
@@ -370,9 +373,14 @@ impl Context {
     }
 
     /// Pull-side reclamation using [`gpu_progress`](Self::gpu_progress).
+    ///
+    /// Uses per-context fence progress for the VRAM ring (not [`Device::timeline_retired`]),
+    /// so device-queue work (e.g. texture upload on DIRECT) cannot advance reclamation past
+    /// in-flight compute submits on this context's queue.
     pub fn flush_deferred_deletions(&self) {
         let _tz = crate::tracy_zone!("context.flush_deferred_deletions");
-        self.boundary_crossed(self.gpu_progress());
+        let progress = self.gpu_progress();
+        self.boundary_crossed_inner(progress, progress);
     }
 
     pub fn has_deferred_payloads(&self) -> bool {
@@ -465,7 +473,7 @@ impl Context {
         }
         let device = &self.inner.device;
         let mut progress = HashMap::with_capacity(refs.len());
-        for &ctx in refs.keys() {
+        for ctx in refs.keys() {
             let p = device
                 .context_gpu_progress(ctx)
                 .unwrap_or(crate::timeline::CONTEXT_DESTROYED_PROGRESS);
@@ -476,7 +484,7 @@ impl Context {
 
     /// Block until every context in `refs` has retired the stamped timeline values.
     pub fn wait_until_parcel_ready(&self, refs: &ReferenceTable) -> Result<(), GoldyError> {
-        for (&ctx_handle, &tv) in refs {
+        for (ctx_handle, tv) in refs.iter() {
             self.wait_until_context(ctx_handle, tv)?;
         }
         Ok(())

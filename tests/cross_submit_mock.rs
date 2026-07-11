@@ -361,9 +361,9 @@ fn stamp_monotonicity_never_regresses() {
         scheme.submit().expect("submit");
     }
     let ctx_handle = ctx.test_backend_handle();
-    let epoch = parcel.last_referenced().get(&ctx_handle).copied().expect("stamped");
+    let epoch = parcel.last_referenced().get(ctx_handle).expect("stamped");
     scheme.submit().expect("again");
-    let later = parcel.last_referenced().get(&ctx_handle).copied().expect("stamped");
+    let later = parcel.last_referenced().get(ctx_handle).expect("stamped");
     assert!(later >= epoch);
 }
 

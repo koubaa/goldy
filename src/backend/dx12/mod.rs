@@ -256,8 +256,21 @@ impl Dx12Backend {
     }
 }
 
+/// Serialize DX12 device create/destroy across all backend instances in the process.
+///
+/// Parallel `cargo test` creates one backend (and often one device) per test thread. The D3D12
+/// debug layer tracks objects process-wide; concurrent `ID3D12Device` teardown races there and
+/// shows up as `STATUS_ACCESS_VIOLATION` reading a near-null pointer (observed IP in system
+/// range, fault target `0xEB40`) after `Dx12Backend::drop` with `devices == 0`.
+pub(super) static DEVICE_LIFETIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Dx12Backend {
     fn destroy_device_inner(&mut self, device_handle: DeviceHandle) {
+        let _lifetime = DEVICE_LIFETIME_LOCK.lock().unwrap();
+        self.destroy_device_inner_locked(device_handle);
+    }
+
+    fn destroy_device_inner_locked(&mut self, device_handle: DeviceHandle) {
         if api_log::enabled() {
             api_log::log_device_destroy(device_handle);
         }
@@ -402,9 +415,14 @@ impl Drop for Dx12Backend {
     fn drop(&mut self) {
         tracing::info!("Shutting down DX12 backend");
 
+        // Hold the process-wide lifetime lock across the whole backend drop so another
+        // thread cannot create/destroy a device or finish_destroy a context while we
+        // release DXGI/D3D12 process state.
+        let _lifetime = DEVICE_LIFETIME_LOCK.lock().unwrap();
         let device_handles: Vec<_> = self.state.devices.keys().copied().collect();
         for handle in device_handles {
-            self.destroy_device_inner(handle);
+            // Already holding DEVICE_LIFETIME_LOCK; call the body without re-locking.
+            self.destroy_device_inner_locked(handle);
         }
     }
 }
@@ -506,6 +524,7 @@ impl crate::backend::GpuBackendTimelineWait for Dx12Backend {
             if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                 let mut sc = sc_arc.lock().unwrap();
                 context::drain_context_deletion_queue_up_to(ld, &mut sc, drain_to);
+                context::drain_pending_gpu_profiles_up_to(ld, &mut sc, completed);
             }
             ld.process_deletion_queue_up_to(&self.state.context_fences);
             let descriptors_arc = std::sync::Arc::clone(&ld.descriptors);
@@ -552,6 +571,7 @@ impl GpuBackend for Dx12Backend {
     }
 
     fn create_device(&mut self, adapter_id: u32) -> Result<DeviceHandle> {
+        let _lifetime = DEVICE_LIFETIME_LOCK.lock().unwrap();
         device::create(&mut self.state, adapter_id)
     }
 
@@ -1096,6 +1116,7 @@ impl GpuBackend for Dx12Backend {
                 if let Some(sc_arc) = self.state.contexts.read().unwrap().get(&ctx).cloned() {
                     let mut sc = sc_arc.lock().unwrap();
                     context::drain_context_deletion_queue_up_to(dev, &mut sc, drain_to);
+                    context::drain_pending_gpu_profiles_up_to(dev, &mut sc, completed);
                 }
                 dev.process_deletion_queue_up_to(&self.state.context_fences);
                 let descriptors_arc = std::sync::Arc::clone(&dev.descriptors);

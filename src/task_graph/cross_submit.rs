@@ -4,9 +4,11 @@
 //! scoped memory barriers and cross-context queue-waits from the runtime's ledger
 //! (spec §5): the standing per-parcel ownership record on [`crate::parcel::ParcelStamp`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::backend::{BufferHandle, ContextHandle, SubmitSync, TextureHandle};
 use crate::parcel::{InteractionEdge, InteractionRole, ParcelStamp};
@@ -72,6 +74,9 @@ impl ResourceKey {
     }
 }
 
+/// FxHash-backed map keyed by [`ResourceKey`] (hot-path lookups use integer handles).
+pub type ResourceKeyMap<V> = FxHashMap<ResourceKey, V>;
+
 /// True when two ledger keys refer to overlapping GPU memory for hazard analysis.
 pub(crate) fn resource_keys_alias(a: ResourceKey, b: ResourceKey) -> bool {
     use crate::task_graph::analysis::ranges_overlap;
@@ -115,19 +120,18 @@ fn find_ledger_entry(ledger: &LedgerSnapshot, key: ResourceKey) -> Option<Ledger
         match &mut merged {
             None => merged = Some(entry.clone()),
             Some(m) => {
-                for (&ctx, &tv) in &entry.sync.last_write {
+                for (ctx, tv) in entry.sync.last_write.iter() {
                     let kinds = entry
                         .sync
                         .last_write_kinds
-                        .get(&ctx)
-                        .copied()
+                        .get(ctx)
                         .unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER);
                     m.sync.record_write(ctx, tv, kinds);
                 }
-                for (&ctx, &tv) in &entry.sync.last_reads {
+                for (ctx, tv) in entry.sync.last_reads.iter() {
                     m.sync.record_read(ctx, tv);
                 }
-                for (&ctx, &tv) in &entry.sync.foreign_reads {
+                for (ctx, tv) in entry.sync.foreign_reads.iter() {
                     m.sync.record_foreign_read(ctx, tv);
                 }
             }
@@ -143,7 +147,7 @@ pub struct LedgerEntry {
 }
 
 /// Per-resource ledger keyed by [`ResourceKey`], populated from parcel stamps.
-pub type LedgerSnapshot = HashMap<ResourceKey, LedgerEntry>;
+pub type LedgerSnapshot = ResourceKeyMap<LedgerEntry>;
 
 /// Result of cross-submission hazard analysis for one submit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,8 +205,8 @@ fn barrier_usage_kind_for_binding(
 }
 
 /// Union each resource's access across all nodes in `ir`.
-pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> {
-    let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
+pub fn net_access_per_resource(ir: &GraphIR) -> ResourceKeyMap<NetAccess> {
+    let mut net: ResourceKeyMap<NetAccess> = ResourceKeyMap::default();
     for node in &ir.nodes {
         absorb_node_net_access(&mut net, node);
     }
@@ -210,7 +214,7 @@ pub fn net_access_per_resource(ir: &GraphIR) -> HashMap<ResourceKey, NetAccess> 
 }
 
 /// Union each resource's access across the nodes in `waves` (one submit partition).
-pub fn net_access_for_waves_into(out: &mut HashMap<ResourceKey, NetAccess>, ir: &GraphIR, waves: &[super::ir::Wave]) {
+pub fn net_access_for_waves_into(out: &mut ResourceKeyMap<NetAccess>, ir: &GraphIR, waves: &[super::ir::Wave]) {
     out.clear();
     for wave in waves {
         for &node_idx in &wave.node_indices {
@@ -220,13 +224,13 @@ pub fn net_access_for_waves_into(out: &mut HashMap<ResourceKey, NetAccess>, ir: 
 }
 
 /// Union each resource's access across the nodes in `waves` (one submit partition).
-pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> HashMap<ResourceKey, NetAccess> {
-    let mut net = HashMap::new();
+pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> ResourceKeyMap<NetAccess> {
+    let mut net = ResourceKeyMap::default();
     net_access_for_waves_into(&mut net, ir, waves);
     net
 }
 
-fn absorb_node_net_access(net: &mut HashMap<ResourceKey, NetAccess>, node: &super::ir::TaskNode) {
+fn absorb_node_net_access(net: &mut ResourceKeyMap<NetAccess>, node: &super::ir::TaskNode) {
     if matches!(node.kind, NodeKind::GrantRead { .. } | NodeKind::GrantPresent { .. }) {
         return;
     }
@@ -291,12 +295,154 @@ fn merge_barrier(barriers: &mut BarrierSet, key: ResourceKey, usage: BarrierUsag
     }
 }
 
+/// Emit RAW / WAW / WAR sync for one net-access key against a ledger sync cell.
+#[allow(clippy::too_many_arguments)]
+fn apply_cross_submit_hazards_for_resource(
+    key: ResourceKey,
+    access: NetAccess,
+    sync: &ResourceSync,
+    submitting_ctx: ContextHandle,
+    separate_graphics: bool,
+    prologue: &mut BarrierSet,
+    wait_map: &mut HashMap<ContextHandle, u64>,
+    cpu_wait_map: &mut HashMap<ContextHandle, u64>,
+) {
+    // RAW: this reads -> hazard vs last_write
+    if access.reads {
+        for (ctx, tv) in sync.last_write.iter() {
+            if ctx == submitting_ctx {
+                if separate_graphics && access.read_pipeline_kinds.contains(UsageKindFlags::RENDER) {
+                    // Render partitions on DX12 compute-style backends execute on the
+                    // device graphics queue while prior compute writes land on the
+                    // submitting context's compute queue. Ledger identity matches but
+                    // the physical queues differ — emit cross-queue wait + barrier.
+                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                        sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                    );
+                    let usage = BarrierUsage {
+                        src: {
+                            let mut s = SlotUsageSet::default();
+                            s.merge(NodeAccess::Write, prev_write_kinds);
+                            s
+                        },
+                        dst: {
+                            let mut d = SlotUsageSet::default();
+                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                            d
+                        },
+                    };
+                    merge_barrier(prologue, key, usage);
+                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+                } else {
+                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                        sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                    );
+                    let usage = BarrierUsage {
+                        src: {
+                            let mut s = SlotUsageSet::default();
+                            s.merge(NodeAccess::Write, prev_write_kinds);
+                            s
+                        },
+                        dst: {
+                            let mut d = SlotUsageSet::default();
+                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                            d
+                        },
+                    };
+                    merge_barrier(prologue, key, usage);
+                }
+            } else {
+                // Cross-context RAW: queue-wait for producer completion plus a scoped
+                // prologue on the consumer queue. Real hardware needs the barrier for
+                // UAV→shader-read visibility even after Wait.
+                let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                    sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                );
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(NodeAccess::Write, prev_write_kinds);
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+    }
+
+    // WAW + WAR: this writes -> hazard vs last_write and last_reads
+    if access.writes {
+        for (ctx, tv) in sync.last_write.iter() {
+            if ctx == submitting_ctx {
+                let prev_write_kinds = UsageKindFlags::from_bits_truncate(
+                    sync.last_write_kinds.get(ctx).unwrap_or(WRITE_KINDS_COMPUTE_TRANSFER),
+                );
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(NodeAccess::Write, prev_write_kinds);
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Write, access.write_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+            } else {
+                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+        for (ctx, tv) in sync.last_reads.iter() {
+            if ctx == submitting_ctx {
+                // Same-context WAR: prior submits are strictly ordered on this queue.
+                // A live Wait on this context's own fence can wedge the queue when the
+                // waited value would be signaled by work still behind that Wait.
+                let usage = BarrierUsage {
+                    src: {
+                        let mut s = SlotUsageSet::default();
+                        s.merge(
+                            NodeAccess::Read,
+                            UsageKindFlags::COMPUTE | UsageKindFlags::RENDER | UsageKindFlags::TRANSFER,
+                        );
+                        s
+                    },
+                    dst: {
+                        let mut d = SlotUsageSet::default();
+                        d.merge(NodeAccess::Write, access.write_kinds);
+                        d
+                    },
+                };
+                merge_barrier(prologue, key, usage);
+            } else {
+                // Cross-context WAR: retire the prior read on the CPU, not via a GPU
+                // queue Wait — pairing with a cross-context RAW live wait on the peer
+                // context can wedge both per-context queues under pipelined submit.
+                cpu_wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+            }
+        }
+        for (ctx, tv) in sync.foreign_reads.iter() {
+            // Same-context WAR against exercised-claim reads (e.g. present easement).
+            // Prologue barriers are baked into retained CBs and stripped on resubmit;
+            // a live queue wait survives `submit_sync_waits_only`.
+            wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
+        }
+    }
+}
+
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
 pub fn compute_cross_submit_sync_into(
     out: &mut SubmitSync,
     wait_map: &mut HashMap<ContextHandle, u64>,
     cpu_wait_map: &mut HashMap<ContextHandle, u64>,
-    net: &HashMap<ResourceKey, NetAccess>,
+    net: &ResourceKeyMap<NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: ContextHandle,
     separate_graphics: bool,
@@ -311,136 +457,16 @@ pub fn compute_cross_submit_sync_into(
         let Some(entry) = find_ledger_entry(ledger, *key) else {
             continue;
         };
-        let sync = &entry.sync;
-
-        // RAW: this reads -> hazard vs last_write
-        if access.reads {
-            for (&ctx, &tv) in &sync.last_write {
-                if ctx == submitting_ctx {
-                    if separate_graphics && access.read_pipeline_kinds.contains(UsageKindFlags::RENDER) {
-                        // Render partitions on DX12 compute-style backends execute on the
-                        // device graphics queue while prior compute writes land on the
-                        // submitting context's compute queue. Ledger identity matches but
-                        // the physical queues differ — emit cross-queue wait + barrier.
-                        let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                            *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                        );
-                        let usage = BarrierUsage {
-                            src: {
-                                let mut s = SlotUsageSet::default();
-                                s.merge(NodeAccess::Write, prev_write_kinds);
-                                s
-                            },
-                            dst: {
-                                let mut d = SlotUsageSet::default();
-                                d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                                d
-                            },
-                        };
-                        merge_barrier(&mut out.prologue, *key, usage);
-                        wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                    } else {
-                        let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                            *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                        );
-                        let usage = BarrierUsage {
-                            src: {
-                                let mut s = SlotUsageSet::default();
-                                s.merge(NodeAccess::Write, prev_write_kinds);
-                                s
-                            },
-                            dst: {
-                                let mut d = SlotUsageSet::default();
-                                d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                                d
-                            },
-                        };
-                        merge_barrier(&mut out.prologue, *key, usage);
-                    }
-                } else {
-                    // Cross-context RAW: queue-wait for producer completion plus a scoped
-                    // prologue on the consumer queue. Real hardware needs the barrier for
-                    // UAV→shader-read visibility even after Wait.
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                    );
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(NodeAccess::Write, prev_write_kinds);
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Read, access.read_kinds | access.read_pipeline_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(&mut out.prologue, *key, usage);
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-        }
-
-        // WAW + WAR: this writes -> hazard vs last_write and last_reads
-        if access.writes {
-            for (&ctx, &tv) in &sync.last_write {
-                if ctx == submitting_ctx {
-                    let prev_write_kinds = UsageKindFlags::from_bits_truncate(
-                        *sync.last_write_kinds.get(&ctx).unwrap_or(&WRITE_KINDS_COMPUTE_TRANSFER),
-                    );
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(NodeAccess::Write, prev_write_kinds);
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Write, access.write_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(&mut out.prologue, *key, usage);
-                } else {
-                    wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-            for (&ctx, &tv) in &sync.last_reads {
-                if ctx == submitting_ctx {
-                    // Same-context WAR: prior submits are strictly ordered on this queue.
-                    // A live Wait on this context's own fence can wedge the queue when the
-                    // waited value would be signaled by work still behind that Wait.
-                    let usage = BarrierUsage {
-                        src: {
-                            let mut s = SlotUsageSet::default();
-                            s.merge(
-                                NodeAccess::Read,
-                                UsageKindFlags::COMPUTE | UsageKindFlags::RENDER | UsageKindFlags::TRANSFER,
-                            );
-                            s
-                        },
-                        dst: {
-                            let mut d = SlotUsageSet::default();
-                            d.merge(NodeAccess::Write, access.write_kinds);
-                            d
-                        },
-                    };
-                    merge_barrier(&mut out.prologue, *key, usage);
-                } else {
-                    // Cross-context WAR: retire the prior read on the CPU, not via a GPU
-                    // queue Wait — pairing with a cross-context RAW live wait on the peer
-                    // context can wedge both per-context queues under pipelined submit.
-                    cpu_wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-                }
-            }
-            for (&ctx, &tv) in &sync.foreign_reads {
-                // Same-context WAR against exercised-claim reads (e.g. present easement).
-                // Prologue barriers are baked into retained CBs and stripped on resubmit;
-                // a live queue wait survives `submit_sync_waits_only`.
-                wait_map.entry(ctx).and_modify(|v| *v = (*v).max(tv)).or_insert(tv);
-            }
-        }
+        apply_cross_submit_hazards_for_resource(
+            *key,
+            *access,
+            &entry.sync,
+            submitting_ctx,
+            separate_graphics,
+            &mut out.prologue,
+            wait_map,
+            cpu_wait_map,
+        );
     }
 
     out.waits.clear();
@@ -459,7 +485,7 @@ pub fn compute_cross_submit_sync_into(
     reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
 )]
 pub fn compute_cross_submit_sync(
-    net: &HashMap<ResourceKey, NetAccess>,
+    net: &ResourceKeyMap<NetAccess>,
     ledger: &LedgerSnapshot,
     submitting_ctx: crate::backend::ContextHandle,
 ) -> CrossSubmitSync {
@@ -498,7 +524,7 @@ pub fn build_ledger_snapshot_into(out: &mut LedgerSnapshot, stamps: &[(ResourceK
     reason = "allocating convenience wrapper; hot path uses CrossSubmitScratch"
 )]
 pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> LedgerSnapshot {
-    let mut ledger = LedgerSnapshot::new();
+    let mut ledger = LedgerSnapshot::default();
     build_ledger_snapshot_into(&mut ledger, stamps);
     ledger
 }
@@ -506,9 +532,9 @@ pub fn build_ledger_snapshot(stamps: &[(ResourceKey, Arc<ParcelStamp>)]) -> Ledg
 /// Collect unique resource keys from IR that have registered stamps.
 pub fn resource_stamps_from_ir_into(
     out: &mut Vec<(ResourceKey, Arc<ParcelStamp>)>,
-    seen: &mut HashSet<ResourceKey>,
+    seen: &mut FxHashSet<ResourceKey>,
     ir: &GraphIR,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
 ) {
     out.clear();
     seen.clear();
@@ -534,9 +560,9 @@ pub fn resource_stamps_from_ir_into(
 )]
 pub fn resource_stamps_from_ir(
     ir: &GraphIR,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
 ) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     let mut out = Vec::new();
     resource_stamps_from_ir_into(&mut out, &mut seen, ir, resource_stamps);
     out
@@ -547,9 +573,9 @@ pub fn resource_stamps_from_ir(
 /// Retains container capacity across frames so steady-state cross-submit planning avoids
 /// repeated HashMap/Vec/HashSet allocations.
 pub(crate) struct CrossSubmitScratch {
-    net: HashMap<ResourceKey, NetAccess>,
+    net: ResourceKeyMap<NetAccess>,
     registry: Vec<(ResourceKey, Arc<ParcelStamp>)>,
-    seen: HashSet<ResourceKey>,
+    seen: FxHashSet<ResourceKey>,
     ledger: LedgerSnapshot,
     wait_map: HashMap<ContextHandle, u64>,
     cpu_wait_map: HashMap<ContextHandle, u64>,
@@ -559,10 +585,22 @@ pub(crate) struct CrossSubmitScratch {
 impl Default for CrossSubmitScratch {
     fn default() -> Self {
         Self {
-            net: HashMap::with_capacity(32),
+            net: {
+                let mut m = ResourceKeyMap::default();
+                m.reserve(32);
+                m
+            },
             registry: Vec::with_capacity(32),
-            seen: HashSet::with_capacity(32),
-            ledger: HashMap::with_capacity(32),
+            seen: {
+                let mut s = FxHashSet::default();
+                s.reserve(32);
+                s
+            },
+            ledger: {
+                let mut m = ResourceKeyMap::default();
+                m.reserve(32);
+                m
+            },
             wait_map: HashMap::with_capacity(4),
             cpu_wait_map: HashMap::with_capacity(4),
             submit_sync: SubmitSync::default(),
@@ -593,7 +631,7 @@ impl CrossSubmitScratch {
     pub fn plan(
         &mut self,
         ir: &GraphIR,
-        resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+        resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
         submitting_ctx: ContextHandle,
         waves: &[super::ir::Wave],
         separate_graphics: bool,
@@ -629,8 +667,8 @@ impl CrossSubmitScratch {
 
 /// After a successful submit, record this submission's access on each touched stamp.
 pub fn apply_resource_sync_updates(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     ctx: crate::backend::ContextHandle,
     tv: u64,
 ) {
@@ -714,8 +752,8 @@ type SelfTopologyEdge = (InteractionRole, u8, ContextHandle);
 pub(crate) fn clear_scheme_topology_registration(
     scheme_id: u64,
     prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
-) -> HashMap<ResourceKey, SelfTopologyEdge> {
-    let mut removed = HashMap::new();
+) -> ResourceKeyMap<SelfTopologyEdge> {
+    let mut removed = ResourceKeyMap::default();
     for (key, stamp) in prev_parcels {
         let mut edges = stamp.interaction_set.lock().unwrap();
         if let Some(idx) = edges.iter().position(|edge| edge.scheme_id == scheme_id) {
@@ -728,8 +766,8 @@ pub(crate) fn clear_scheme_topology_registration(
 }
 
 fn topology_parcels_from_net(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
 ) -> Vec<(ResourceKey, Arc<ParcelStamp>)> {
     net.keys()
         .filter_map(|key| resource_stamps.get(key).map(|stamp| (*key, Arc::clone(stamp))))
@@ -739,12 +777,12 @@ fn topology_parcels_from_net(
 /// Insert/update this scheme's edges for the current submission and dirty foreign schemes
 /// when a parcel's interaction set actually changes.
 pub(crate) fn update_scheme_topology(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     scheme_id: u64,
     ctx: ContextHandle,
     dirty_flag: &Arc<AtomicBool>,
-    previous_self_edges: &HashMap<ResourceKey, SelfTopologyEdge>,
+    previous_self_edges: &ResourceKeyMap<SelfTopologyEdge>,
 ) {
     let weak_dirty = Arc::downgrade(dirty_flag);
 
@@ -793,8 +831,8 @@ pub(crate) fn update_scheme_topology(
 
 /// Clear prior cross-scheme registration, register the current footprint, return the new set.
 pub(crate) fn reregister_scheme_topology(
-    net: &HashMap<ResourceKey, NetAccess>,
-    resource_stamps: &HashMap<ResourceKey, Arc<ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
     prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
     scheme_id: u64,
     ctx: ContextHandle,
@@ -825,7 +863,7 @@ mod tests {
     fn ledger_with_write(ctx: ContextHandle, key: ResourceKey, tv: u64) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, tv, WRITE_KINDS_COMPUTE_TRANSFER);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
         ledger
     }
@@ -833,7 +871,7 @@ mod tests {
     fn ledger_with_write_kinds(ctx: ContextHandle, key: ResourceKey, tv: u64, kinds: UsageKindFlags) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, tv, kinds.bits());
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
         ledger
     }
@@ -841,7 +879,7 @@ mod tests {
     fn ledger_with_read(ctx: ContextHandle, key: ResourceKey, tv: u64) -> LedgerSnapshot {
         let mut sync = ResourceSync::default();
         sync.record_read(ctx, tv);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
         ledger
     }
@@ -868,7 +906,7 @@ mod tests {
         let mut sync = ResourceSync::default();
         sync.record_write(ctx, 44, WRITE_KINDS_COMPUTE_TRANSFER);
         sync.record_read(ctx, 45);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
 
         let mut ir = GraphIR::default();
@@ -906,7 +944,7 @@ mod tests {
         sync.record_write(ctx, 44, WRITE_KINDS_COMPUTE_TRANSFER);
         sync.record_foreign_read(ctx, 45);
         assert!(sync.last_reads.is_empty());
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync });
 
         let mut ir = GraphIR::default();
@@ -938,7 +976,7 @@ mod tests {
         sync_a.record_foreign_read(ctx, 7);
         let mut sync_b = ResourceSync::default();
         sync_b.record_read(ctx, 9);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,
@@ -1028,16 +1066,15 @@ mod tests {
     /// later submission's barrier analysis can recover them.
     #[test]
     fn apply_updates_round_trips_write_kinds() {
-        use std::collections::HashMap;
         use std::sync::Arc;
 
         let ctx = 1;
         let key = buf_key(10);
         let stamp = empty_stamp();
-        let mut stamps: HashMap<ResourceKey, Arc<ParcelStamp>> = HashMap::new();
+        let mut stamps: ResourceKeyMap<Arc<ParcelStamp>> = ResourceKeyMap::default();
         stamps.insert(key, Arc::clone(&stamp));
 
-        let mut net: HashMap<ResourceKey, NetAccess> = HashMap::new();
+        let mut net: ResourceKeyMap<NetAccess> = ResourceKeyMap::default();
         net.insert(
             key,
             NetAccess {
@@ -1052,8 +1089,8 @@ mod tests {
         apply_resource_sync_updates(&net, &stamps, ctx, 9);
 
         let sync = stamp.sync.lock().unwrap();
-        assert_eq!(sync.last_write.get(&ctx), Some(&9));
-        assert_eq!(sync.last_write_kinds.get(&ctx), Some(&UsageKindFlags::TRANSFER.bits()));
+        assert_eq!(sync.last_write.get(ctx), Some(9));
+        assert_eq!(sync.last_write_kinds.get(ctx), Some(UsageKindFlags::TRANSFER.bits()));
     }
 
     #[test]
@@ -1091,7 +1128,7 @@ mod tests {
         let ctx = 1;
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Write);
         let net = net_access_per_resource(&ir);
-        let sync = compute_cross_submit_sync(&net, &LedgerSnapshot::new(), ctx);
+        let sync = compute_cross_submit_sync(&net, &LedgerSnapshot::default(), ctx);
         assert!(sync.is_empty());
     }
 
@@ -1210,7 +1247,7 @@ mod tests {
         let mut sync_state = ResourceSync::default();
         sync_state.record_write(ctx_a, 3, WRITE_KINDS_COMPUTE_TRANSFER);
         sync_state.record_write(ctx_b, 7, WRITE_KINDS_COMPUTE_TRANSFER);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = single_binding_ir(ResourceId::Buffer(10), NodeAccess::Read);
         let net = net_access_per_resource(&ir);
@@ -1271,7 +1308,7 @@ mod tests {
         let mut sync_state = ResourceSync::default();
         sync_state.record_write(ctx, 5, WRITE_KINDS_COMPUTE_TRANSFER);
         sync_state.record_read(ctx, 3);
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = GraphIR {
             nodes: vec![TaskNode {
@@ -1336,7 +1373,7 @@ mod tests {
         sync_a.record_write(ctx_a, tv_a, kinds_a.bits());
         let mut sync_b = ResourceSync::default();
         sync_b.record_write(ctx_b, tv_b, kinds_b.bits());
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,
@@ -1478,7 +1515,7 @@ mod tests {
         let mut sync_c = ResourceSync::default();
         sync_c.record_write(ctx_c, 9, UsageKindFlags::TRANSFER.bits());
 
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,
@@ -1557,7 +1594,7 @@ mod tests {
         let mut sync_b = ResourceSync::default();
         sync_b.record_write(ctx, 9, UsageKindFlags::COMPUTE.bits());
 
-        let mut ledger = LedgerSnapshot::new();
+        let mut ledger = LedgerSnapshot::default();
         ledger.insert(
             ResourceKey::BufferRange {
                 parent,

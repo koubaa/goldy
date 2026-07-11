@@ -3,7 +3,7 @@
 use super::analysis;
 use super::cross_submit::{
     apply_resource_sync_updates, apply_stamp_targets_legacy, net_access_for_waves, prepend_prologue,
-    CrossSubmitScratch, ResourceKey,
+    CrossSubmitScratch, ResourceKey, ResourceKeyMap,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, ResourceBinding, TaskNode, Wave};
 use super::{
@@ -418,7 +418,7 @@ fn partition_has_unkeyed_bindings(ir: &GraphIR, waves: &[Wave]) -> bool {
 
 /// Stamp parcel epochs for resources touched in one partition at that partition's timeline value.
 fn apply_partition_epoch_stamps(
-    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
     ctx: crate::backend::ContextHandle,
     ir: &GraphIR,
@@ -905,7 +905,7 @@ pub(crate) fn submit_resolved_ir(
 
 fn cross_sync_for_stamps<'a>(
     scratch: &'a mut CrossSubmitScratch,
-    resource_stamps: &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     ir: &GraphIR,
     submitting_ctx: crate::backend::ContextHandle,
     waves: &[Wave],
@@ -1169,7 +1169,7 @@ pub(crate) struct ResolvedPresentSlot {
 /// Present-lease and cross-submit stamp inputs for [`submit_resolved_ir_and_retain_with_presents`].
 pub(crate) struct PresentSubmitOptions<'a> {
     pub present_slots: &'a [ResolvedPresentSlot],
-    pub resource_stamps: &'a HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    pub resource_stamps: &'a ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
     pub stamp_targets: &'a [Arc<crate::parcel::ParcelStamp>],
     pub ir_clean: bool,
 }
@@ -1505,7 +1505,7 @@ pub(crate) fn submit_resolved_ir_and_retain_with_presents(
 pub(crate) struct IrSubmitState {
     schedule_cache: Option<CompiledCacheEntry>,
     stamp_targets: Vec<Arc<crate::parcel::ParcelStamp>>,
-    resource_stamps: HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>>,
+    resource_stamps: ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 }
 
 impl IrSubmitState {
@@ -1513,7 +1513,7 @@ impl IrSubmitState {
         Self {
             schedule_cache: None,
             stamp_targets: Vec::new(),
-            resource_stamps: HashMap::new(),
+            resource_stamps: ResourceKeyMap::default(),
         }
     }
 
@@ -1609,7 +1609,7 @@ impl IrSubmitState {
         self.invalidate_retention();
     }
 
-    pub fn resource_stamps(&self) -> &HashMap<ResourceKey, Arc<crate::parcel::ParcelStamp>> {
+    pub fn resource_stamps(&self) -> &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>> {
         &self.resource_stamps
     }
 
@@ -4712,7 +4712,7 @@ mod tests {
         let tv = graph.submit(&ctx).unwrap();
 
         let stamped = pool.transfer_out_buffer(&ctx, parcel);
-        assert_eq!(stamped.ready_after.get(&ctx.backend_handle()), Some(&tv));
+        assert_eq!(stamped.ready_after.get(ctx.backend_handle()), Some(tv));
     }
 
     #[test]
