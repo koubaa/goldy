@@ -1788,7 +1788,7 @@ fn execute_signal_and_finish(
         }
         if let Some(key) = retain_key {
             if let Some(old) = sc.retained_graphs.remove(&key) {
-                unpin_slots = old.used_slots.clone();
+                unpin_slots = old.used_slots.iter().copied().collect();
                 if let Some(row) = old.frame_table_row {
                     super::frame_table::unpin_row(scope.frame_table(), row);
                 }
@@ -1811,7 +1811,7 @@ fn execute_signal_and_finish(
                         command_list: cl,
                         slot_idx,
                         on_device_queue: false,
-                        used_slots,
+                        used_slots: std::sync::Arc::from(used_slots),
                         frame_table_staging,
                         frame_table_row: pin_row_index,
                     },
@@ -1957,7 +1957,7 @@ fn execute_signal_and_finish_device(
         }
         if let Some(key) = retain_key {
             if let Some(old) = sc.retained_graphs.remove(&key) {
-                unpin_slots = old.used_slots.clone();
+                unpin_slots = old.used_slots.iter().copied().collect();
                 if let Some(row) = old.frame_table_row {
                     super::frame_table::unpin_row(scope.frame_table(), row);
                 }
@@ -1982,7 +1982,7 @@ fn execute_signal_and_finish_device(
                         command_list: cl,
                         slot_idx,
                         on_device_queue: true,
-                        used_slots: used_slots.clone(),
+                        used_slots: std::sync::Arc::from(used_slots.clone()),
                         frame_table_staging,
                         frame_table_row: pin_row_index,
                     },
@@ -2853,7 +2853,7 @@ fn evict_retained_on_context(
             .descriptors
             .lock()
             .unwrap()
-            .unpin_retained_slots(old.used_slots.clone());
+            .unpin_retained_slots(old.used_slots.iter().copied());
         if let Some(row) = old.frame_table_row {
             super::frame_table::unpin_row(frame_table, row);
         }

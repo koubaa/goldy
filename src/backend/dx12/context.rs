@@ -345,7 +345,7 @@ fn finish_destroy(work: Box<Dx12ContextDestroyWork>) {
     {
         let mut registry = ld.descriptors.lock().unwrap();
         for (_, old) in sc.retained_graphs.drain() {
-            registry.unpin_retained_slots(old.used_slots.clone());
+            registry.unpin_retained_slots(old.used_slots.iter().copied());
             if let Some(row) = old.frame_table_row {
                 super::frame_table::unpin_row(&sc.frame_table, row);
             }
