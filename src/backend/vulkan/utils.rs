@@ -73,6 +73,33 @@ pub fn vk_to_format(format: vk::Format) -> Option<TextureFormat> {
     }
 }
 
+/// Apply buffer sharing mode for resources that may be used from both the
+/// graphics/present queue and a dedicated compute-family context queue.
+///
+/// When `families` is `Some([graphics, compute])`, uses [`vk::SharingMode::CONCURRENT`]
+/// so timeline waits alone are sufficient (no queue-family ownership transfers).
+/// When `None` (same family), keeps [`vk::SharingMode::EXCLUSIVE`].
+pub fn with_buffer_sharing<'a>(
+    info: vk::BufferCreateInfo<'a>,
+    families: Option<&'a [u32; 2]>,
+) -> vk::BufferCreateInfo<'a> {
+    match families {
+        Some(f) => info.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(f),
+        None => info.sharing_mode(vk::SharingMode::EXCLUSIVE),
+    }
+}
+
+/// Like [`with_buffer_sharing`] for images.
+pub fn with_image_sharing<'a>(
+    info: vk::ImageCreateInfo<'a>,
+    families: Option<&'a [u32; 2]>,
+) -> vk::ImageCreateInfo<'a> {
+    match families {
+        Some(f) => info.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(f),
+        None => info.sharing_mode(vk::SharingMode::EXCLUSIVE),
+    }
+}
+
 /// Find a suitable memory type for allocation.
 pub fn find_memory_type(
     instance: &ash::Instance,

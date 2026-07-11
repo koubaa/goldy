@@ -10,7 +10,7 @@
 use super::super::shared::{BeltChunk as BeltChunkTrait, StagingBeltCore};
 use super::super::DeviceHandle;
 use super::types::{ComputeFencePool, LogicalDevice};
-use super::utils::find_memory_type;
+use super::utils::{find_memory_type, with_buffer_sharing};
 use anyhow::{Context, Result};
 use ash::{vk, Instance};
 use std::collections::HashMap;
@@ -145,10 +145,13 @@ fn allocate_chunk(
     physical_device: vk::PhysicalDevice,
     size: u64,
 ) -> Result<VkBeltChunk> {
-    let info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = device.concurrent_queue_families();
+    let info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+        qf.as_ref(),
+    );
 
     let buffer = unsafe { device.device.create_buffer(&info, None) }.context("StagingBelt: create_buffer failed")?;
 
@@ -315,10 +318,13 @@ fn allocate_texture_staging_entry(
     logical_device: &LogicalDevice,
     size: u64,
 ) -> Result<TextureStagingEntry> {
-    let info = vk::BufferCreateInfo::default()
-        .size(size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = logical_device.concurrent_queue_families();
+    let info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+        qf.as_ref(),
+    );
 
     let buffer = unsafe { logical_device.device.create_buffer(&info, None) }
         .context("TextureStagingPool: create_buffer failed")?;

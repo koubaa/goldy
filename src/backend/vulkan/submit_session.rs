@@ -54,6 +54,8 @@ pub(crate) struct VulkanSubmitScope<'a> {
     pub sc: SharedSubmissionContext,
     pub view: VulkanSubmitView<'a>,
     pub frame_table: SharedContextFrameTable,
+    /// Synthetic context for device-queue epoch stamps (render partitions).
+    pub device_owner: Option<ContextHandle>,
 }
 
 impl<'a> VulkanSubmitScope<'a> {
@@ -87,6 +89,7 @@ pub(crate) struct VulkanSubmitSession {
     textures: SharedTextureTable,
     compute_fence_pool: SharedComputeFencePool,
     device_lost: Arc<AtomicBool>,
+    device_owner_handle: Option<ContextHandle>,
 }
 
 impl VulkanSubmitSession {
@@ -103,6 +106,7 @@ impl VulkanSubmitSession {
             let sc_guard = sc.lock().unwrap();
             (sc_guard.device, Arc::clone(&sc_guard.frame_table))
         };
+        let device_owner_handle = state.device_owner_handles.get(&device_handle).copied();
         let devices: HashMap<DeviceHandle, SharedLogicalDevice> = state
             .devices
             .iter()
@@ -123,6 +127,7 @@ impl VulkanSubmitSession {
             textures: Arc::clone(&state.textures),
             compute_fence_pool: Arc::clone(&state.compute_fence_pool),
             device_lost: Arc::clone(&state.device_lost),
+            device_owner_handle,
         }))
     }
 
@@ -144,6 +149,7 @@ impl VulkanSubmitSession {
                 device_lost: &self.device_lost,
             },
             frame_table: Arc::clone(&self.frame_table),
+            device_owner: self.device_owner_handle,
         }
     }
 
@@ -166,16 +172,26 @@ pub(crate) fn scope_from_state(state: &VulkanState, ctx: ContextHandle) -> Resul
         let sc_guard = sc.lock().unwrap();
         (sc_guard.device, Arc::clone(&sc_guard.frame_table))
     };
+    let device_owner = state.device_owner_handles.get(&device_handle).copied();
     Ok(VulkanSubmitScope {
         ctx,
         device_handle,
         sc,
         view: state.submit_view(),
         frame_table,
+        device_owner,
     })
 }
 
 impl crate::backend::ContextSubmitSession for VulkanSubmitSession {
+    fn separate_graphics_queue(&self) -> bool {
+        true
+    }
+
+    fn device_queue_owner(&self, _ctx: ContextHandle) -> Option<ContextHandle> {
+        self.device_owner_handle
+    }
+
     fn retains_present_partitions(&self) -> bool {
         true
     }

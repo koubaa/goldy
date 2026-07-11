@@ -1,6 +1,6 @@
 //! Per-context submission stream lifecycle (Vulkan).
 
-use super::types::{SubmissionContext, VulkanState};
+use super::types::{SubmissionContext, TimelineWaitTarget, VulkanState};
 use super::{ContextHandle, DeviceHandle};
 use crate::backend::ContextDestroyHandle;
 use anyhow::{Context as _, Result};
@@ -8,37 +8,122 @@ use ash::vk;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-/// Latest device-global seq retired on `device` (max over live context semaphores, floored).
-pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
-    let floor = state
-        .devices
-        .get(&device)
-        .map(|d| d.retired_floor.load(Ordering::Relaxed))
-        .unwrap_or(0);
+/// Record which native semaphore must reach `value` before that global timeline
+/// ticket is considered GPU-retired.
+pub(super) fn register_timeline_wait_target(ld: &super::types::LogicalDevice, value: u64, target: TimelineWaitTarget) {
+    if value == 0 {
+        return;
+    }
+    ld.timeline_wait_targets.lock().unwrap().insert(value, target);
+}
+
+/// Reserve the next global timeline value as [`TimelineWaitTarget::DeviceOwner`].
+///
+/// Caller must already hold [`super::types::LogicalDevice::queue_lock`] so owner
+/// signals cannot be enqueued out of order when present and render submits overlap.
+pub(super) fn reserve_device_owner_timeline_locked(ld: &super::types::LogicalDevice) -> u64 {
+    let value = ld.timeline_next.fetch_add(1, Ordering::Relaxed);
+    register_timeline_wait_target(ld, value, TimelineWaitTarget::DeviceOwner);
+    value
+}
+
+fn target_completed_value(state: &VulkanState, device: DeviceHandle, target: TimelineWaitTarget) -> u64 {
     let Some(ld) = state.devices.get(&device) else {
-        return floor;
+        return 0;
     };
-    let contexts = state.contexts.read().unwrap();
-    let max_ctx = contexts
-        .values()
-        .filter_map(|sc_arc| {
-            let sc = sc_arc.lock().unwrap();
-            if sc.device != device {
-                return None;
-            }
-            Some(unsafe {
-                ld.device
-                    .get_semaphore_counter_value(sc.timeline_semaphore)
-                    .unwrap_or(0)
+    match target {
+        TimelineWaitTarget::Context(ctx) => state
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .map(|sc_arc| {
+                let sem = sc_arc.lock().unwrap().timeline_semaphore;
+                unsafe { ld.device.get_semaphore_counter_value(sem).unwrap_or(0) }
             })
-        })
-        .max()
-        .unwrap_or(0);
-    floor.max(max_ctx)
+            .unwrap_or(0),
+        TimelineWaitTarget::DeviceOwner => owner_timeline_semaphore(state, device)
+            .map(|sem| unsafe { ld.device.get_semaphore_counter_value(sem).unwrap_or(0) })
+            .unwrap_or(0),
+    }
+}
+
+fn resolve_timeline_wait_semaphore(
+    state: &VulkanState,
+    device: DeviceHandle,
+    target: TimelineWaitTarget,
+) -> Option<vk::Semaphore> {
+    match target {
+        TimelineWaitTarget::Context(ctx) => state
+            .contexts
+            .read()
+            .unwrap()
+            .get(&ctx)
+            .map(|sc_arc| sc_arc.lock().unwrap().timeline_semaphore),
+        TimelineWaitTarget::DeviceOwner => owner_timeline_semaphore(state, device),
+    }
+}
+
+/// Advance and return the highest global timeline value whose owning semaphore has
+/// completed, starting from the cached horizon and floored by post-destroy retirement.
+pub(super) fn advance_timeline_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
+    let Some(ld) = state.devices.get(&device) else {
+        return 0;
+    };
+    let floor = ld.retired_floor.load(Ordering::Relaxed);
+    let mut retired = ld.timeline_retired.load(Ordering::Relaxed).max(floor);
+
+    loop {
+        let next = retired.saturating_add(1);
+        let target = {
+            let targets = ld.timeline_wait_targets.lock().unwrap();
+            targets.get(&next).copied()
+        };
+        let Some(target) = target else {
+            break;
+        };
+        if target_completed_value(state, device, target) < next {
+            break;
+        }
+        retired = next;
+    }
+
+    if retired > ld.timeline_retired.load(Ordering::Relaxed) {
+        ld.timeline_retired.store(retired, Ordering::Relaxed);
+        ld.timeline_wait_targets
+            .lock()
+            .unwrap()
+            .retain(|value, _| *value > retired);
+    }
+    retired.max(floor)
+}
+
+/// Latest device-global seq retired on `device` (contiguous prefix over attributed values, floored).
+pub(super) fn device_retired(state: &VulkanState, device: DeviceHandle) -> u64 {
+    advance_timeline_retired(state, device)
 }
 
 pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<ContextHandle> {
     let ld = state.devices.get(&device).context("Invalid device handle")?.clone();
+
+    let queue_index = ld
+        .free_compute_queue_indices
+        .lock()
+        .unwrap()
+        .pop_front()
+        .context("Vulkan per-context compute queue pool exhausted — destroy a context or create another device")?;
+    let queue = ld.compute_queues[queue_index];
+    let compute_family = ld.compute_queue_family;
+    // One-queue devices: all contexts share the graphics/present queue and its lock.
+    // Private locks would race on the same VkQueue (externally synchronized).
+    let (queue_lock, register_compute_lock) = if ld.compute_queues_alias_graphics {
+        (Arc::clone(&ld.queue_lock), false)
+    } else {
+        (Arc::new(Mutex::new(())), true)
+    };
+    if register_compute_lock {
+        ld.register_active_compute_queue_lock(Arc::clone(&queue_lock));
+    }
 
     let mut timeline_sem_type = vk::SemaphoreTypeCreateInfo::default()
         .semaphore_type(vk::SemaphoreType::TIMELINE)
@@ -48,7 +133,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
         .context("Failed to create per-context Vulkan timeline semaphore")?;
 
     let pool_info = vk::CommandPoolCreateInfo::default()
-        .queue_family_index(ld.queue_family)
+        .queue_family_index(compute_family)
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
     let command_pool = unsafe { ld.device.create_command_pool(&pool_info, None) }
         .context("Failed to create per-context command pool")?;
@@ -82,6 +167,11 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
         id,
         Arc::new(Mutex::new(SubmissionContext {
             device,
+            is_device_owner: false,
+            queue,
+            queue_family: compute_family,
+            queue_index: Some(queue_index),
+            queue_lock,
             timeline_semaphore,
             last_submitted_seq: 0,
             signal_queue,
@@ -91,6 +181,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
             free_cmd_buffers: Vec::new(),
             retained_compute_cbs: std::collections::HashMap::new(),
             timeline_cmd_buffers: std::collections::HashMap::new(),
+            graphics_timeline_cmd_buffers: std::collections::HashMap::new(),
             staging_belt: super::staging::StagingBelt::new(super::staging::DEFAULT_STAGING_CHUNK_SIZE),
             texture_staging_pool: super::staging::TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
@@ -101,6 +192,7 @@ pub(super) fn create(state: &mut VulkanState, device: DeviceHandle) -> Result<Co
 }
 
 pub(super) struct VulkanContextDestroyWork {
+    ctx: ContextHandle,
     sc: SubmissionContext,
     ld: super::types::SharedLogicalDevice,
     buffers: super::types::SharedBufferTable,
@@ -131,6 +223,7 @@ pub(super) fn detach_for_destroy(state: &VulkanState, ctx: ContextHandle) -> Opt
     let device = sc.device;
     let ld = state.devices.get(&device)?.clone();
     Some(VulkanContextDestroyWork {
+        ctx,
         sc,
         ld,
         buffers: std::sync::Arc::clone(&state.buffers),
@@ -138,7 +231,17 @@ pub(super) fn detach_for_destroy(state: &VulkanState, ctx: ContextHandle) -> Opt
 }
 
 fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
-    let VulkanContextDestroyWork { mut sc, ld, buffers } = *work;
+    let VulkanContextDestroyWork { ctx, sc, ld, buffers } = *work;
+    teardown_submission_context(ctx, sc, &ld, &buffers);
+}
+
+/// Destroy Vulkan objects owned by a submission context (command pool, timeline semaphore, etc.).
+pub(super) fn teardown_submission_context(
+    ctx: ContextHandle,
+    mut sc: SubmissionContext,
+    ld: &super::types::SharedLogicalDevice,
+    buffers: &super::types::SharedBufferTable,
+) {
     let device = sc.device;
 
     let completed = unsafe {
@@ -147,6 +250,19 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
             .unwrap_or(0)
     };
     ld.retired_floor.fetch_max(completed, Ordering::Relaxed);
+    if sc.is_device_owner {
+        ld.timeline_wait_targets
+            .lock()
+            .unwrap()
+            .retain(|_, target| !matches!(target, TimelineWaitTarget::DeviceOwner));
+        ld.timeline_retired.fetch_max(completed, Ordering::Relaxed);
+    } else {
+        ld.timeline_wait_targets
+            .lock()
+            .unwrap()
+            .retain(|_, target| !matches!(target, TimelineWaitTarget::Context(c) if *c == ctx));
+        ld.timeline_retired.fetch_max(completed, Ordering::Relaxed);
+    }
 
     let fence_thread = sc.fence_thread.take();
     crate::backend::signal_fence::join_fence_poller(&sc.fence_shutdown, fence_thread);
@@ -155,7 +271,7 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
     if !ctx_batch.is_empty() {
         let mut registry = ld.descriptors.lock().unwrap();
         for r in ctx_batch {
-            super::types::destroy_pending_deletion(&ld, &mut registry, r);
+            super::types::destroy_pending_deletion(ld, &mut registry, r);
         }
     }
 
@@ -167,12 +283,17 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
     }
 
     unsafe {
-        sc.staging_belt.destroy_all(&ld);
-        sc.texture_staging_pool.destroy_all(&ld);
+        sc.staging_belt.destroy_all(ld);
+        sc.texture_staging_pool.destroy_all(ld);
         let command_pool = sc.command_pool;
         for (_, cbs) in sc.timeline_cmd_buffers.drain() {
             for cb in cbs {
                 ld.device.free_command_buffers(command_pool, &[cb]);
+            }
+        }
+        for (_, cbs) in sc.graphics_timeline_cmd_buffers.drain() {
+            for cb in cbs {
+                ld.device.free_command_buffers(ld.command_pool, &[cb]);
             }
         }
         for cb in sc.free_cmd_buffers.drain(..) {
@@ -181,23 +302,83 @@ fn finish_destroy(work: Box<VulkanContextDestroyWork>) {
         let mut rows_to_unpin = Vec::new();
         for (_, retained) in sc.retained_compute_cbs.drain() {
             rows_to_unpin.push(retained.frame_table_row);
-            ld.device.free_command_buffers(command_pool, &[retained.command_buffer]);
+            let pool = if retained.on_graphics_queue {
+                ld.command_pool
+            } else {
+                command_pool
+            };
+            ld.device.free_command_buffers(pool, &[retained.command_buffer]);
         }
         for row in rows_to_unpin.into_iter().flatten() {
             super::frame_table::unpin_row(&sc.frame_table, row);
         }
         ld.device.destroy_command_pool(sc.command_pool, None);
         ld.device.destroy_semaphore(sc.timeline_semaphore, None);
-        super::frame_table::destroy_context_resources(&buffers, &ld, &sc.frame_table);
+        if !sc.is_device_owner {
+            if let Some(idx) = sc.queue_index {
+                ld.free_compute_queue_indices.lock().unwrap().push_back(idx);
+            }
+            // Shared graphics lock is never registered in active_context_queue_locks.
+            if !ld.compute_queues_alias_graphics {
+                ld.unregister_active_compute_queue_lock(&sc.queue_lock);
+            }
+        }
+        if !sc.is_device_owner {
+            super::frame_table::destroy_context_resources(buffers, ld, &sc.frame_table);
+        }
     }
     let _ = device;
 }
 
+/// Tear down the synthetic device-owner context before `vkDestroyDevice`.
+pub(super) fn destroy_device_owner(state: &VulkanState, ld: &super::types::SharedLogicalDevice, owner: ContextHandle) {
+    let Some(sc_arc) = state.contexts.write().unwrap().remove(&owner) else {
+        return;
+    };
+    let sc = std::sync::Arc::try_unwrap(sc_arc)
+        .unwrap_or_else(|_| panic!("device-owner context {owner} still has extra Arc owners at device destroy"))
+        .into_inner()
+        .expect("device-owner context Mutex poisoned");
+    teardown_submission_context(owner, sc, ld, &state.buffers);
+}
+
+/// Timeline semaphore for the synthetic device-owner (graphics-queue) context.
+pub(super) fn owner_timeline_semaphore(state: &VulkanState, device: DeviceHandle) -> Option<vk::Semaphore> {
+    let owner = state.device_owner_handles.get(&device)?;
+    Some(
+        state
+            .contexts
+            .read()
+            .unwrap()
+            .get(owner)?
+            .lock()
+            .unwrap()
+            .timeline_semaphore,
+    )
+}
+
+/// Block until the device-owner timeline has reached `seq` (graphics/present work).
+pub(super) fn wait_until_owner_seq_at_least(state: &VulkanState, device: DeviceHandle, seq: u64) {
+    if seq == 0 {
+        return;
+    }
+    let Some(sem) = owner_timeline_semaphore(state, device) else {
+        return;
+    };
+    let Some(ld) = state.devices.get(&device) else {
+        return;
+    };
+    let wait = vk::SemaphoreWaitInfo::default()
+        .semaphores(std::slice::from_ref(&sem))
+        .values(std::slice::from_ref(&seq));
+    let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
+}
+
 /// Block until the device-global submission sequence `seq` has been signalled on the GPU.
 ///
-/// Finds the context on `device` that last submitted at or beyond `seq` and issues a
-/// `vkWaitSemaphores` on its timeline semaphore. This replaces the previous 1ms
-/// sleep-poll loop, eliminating the latency floor that capped Vulkan FPS at ~1260.
+/// Looks up the native semaphore that was signalled for `seq` at submit time and waits
+/// on that semaphore directly. With independent per-context compute queues, waiting on
+/// an arbitrary context whose `last_submitted_seq >= seq` is unsound.
 pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: DeviceHandle, seq: u64) {
     if seq == 0 {
         return;
@@ -207,59 +388,54 @@ pub(super) fn wait_until_device_seq_at_least(state: &VulkanState, device: Device
         return;
     };
 
-    // Find a context on this device whose last_submitted_seq covers `seq`.
-    // In the unified-context model there is typically exactly one such context.
-    let sem = {
-        let contexts = state.contexts.read().unwrap();
-        contexts.values().find_map(|sc_arc| {
-            let sc = sc_arc.lock().unwrap();
-            if sc.device == device && sc.last_submitted_seq >= seq {
-                Some(sc.timeline_semaphore)
-            } else {
-                None
-            }
-        })
-    };
+    if advance_timeline_retired(state, device) >= seq {
+        return;
+    }
 
-    if let Some(sem) = sem {
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(std::slice::from_ref(&sem))
-            .values(std::slice::from_ref(&seq));
-        let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
-    } else {
-        // Seq not yet submitted on any known context — rare transient race. Poll with
-        // bounded spin then sleep; re-check for a covering context before each sleep.
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-        const MAX_SPIN: u32 = 10_000;
-        let deadline = std::time::Instant::now() + TIMEOUT;
-        let mut spins = 0u32;
-        while device_retired(state, device) < seq {
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!("wait_until_device_seq_at_least timed out waiting for seq {seq} on device {device}");
-                return;
-            }
-            if let Some(sem) = state.contexts.read().unwrap().values().find_map(|sc_arc| {
-                let sc = sc_arc.lock().unwrap();
-                if sc.device == device && sc.last_submitted_seq >= seq {
-                    Some(sc.timeline_semaphore)
-                } else {
-                    None
-                }
-            }) {
+    let target = lookup_timeline_wait_target(ld, seq);
+    if let Some(target) = target {
+        if let Some(sem) = resolve_timeline_wait_semaphore(state, device, target) {
+            let wait = vk::SemaphoreWaitInfo::default()
+                .semaphores(std::slice::from_ref(&sem))
+                .values(std::slice::from_ref(&seq));
+            let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
+            let _ = advance_timeline_retired(state, device);
+            return;
+        }
+    }
+
+    // Seq not yet registered (transient race before submit records attribution) or owner
+    // context torn down — poll until retired or a wait target appears.
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const MAX_SPIN: u32 = 10_000;
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let mut spins = 0u32;
+    while advance_timeline_retired(state, device) < seq {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!("wait_until_device_seq_at_least timed out waiting for seq {seq} on device {device}");
+            return;
+        }
+        if let Some(target) = lookup_timeline_wait_target(ld, seq) {
+            if let Some(sem) = resolve_timeline_wait_semaphore(state, device, target) {
                 let wait = vk::SemaphoreWaitInfo::default()
                     .semaphores(std::slice::from_ref(&sem))
                     .values(std::slice::from_ref(&seq));
                 let _ = unsafe { ld.device.wait_semaphores(&wait, u64::MAX) };
+                let _ = advance_timeline_retired(state, device);
                 return;
             }
-            if spins < MAX_SPIN {
-                spins += 1;
-                std::hint::spin_loop();
-            } else {
-                std::thread::sleep(std::time::Duration::from_micros(100));
-            }
+        }
+        if spins < MAX_SPIN {
+            spins += 1;
+            std::hint::spin_loop();
+        } else {
+            std::thread::sleep(std::time::Duration::from_micros(100));
         }
     }
+}
+
+fn lookup_timeline_wait_target(ld: &super::types::LogicalDevice, seq: u64) -> Option<TimelineWaitTarget> {
+    ld.timeline_wait_targets.lock().unwrap().get(&seq).copied()
 }
 
 pub(super) fn context_device(state: &VulkanState, ctx: ContextHandle) -> DeviceHandle {
@@ -282,7 +458,7 @@ fn contexts_on_device(state: &VulkanState, device: DeviceHandle) -> Vec<ContextH
         .iter()
         .filter_map(|(&h, sc_arc)| {
             let sc = sc_arc.lock().unwrap();
-            (sc.device == device).then_some(h)
+            (sc.device == device && !sc.is_device_owner).then_some(h)
         })
         .collect()
 }

@@ -17,7 +17,7 @@ use super::super::{
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -771,8 +771,22 @@ pub(crate) struct PhysicalDeviceInfo {
 }
 
 /// Per-context async submission stream (timeline, poller, command pool).
+/// Max compute-capable queues allocated for per-context assignment at device create.
+pub(crate) const MAX_CONTEXT_COMPUTE_QUEUES: u32 = 8;
+
 pub(crate) struct SubmissionContext {
     pub device: super::DeviceHandle,
+    /// Synthetic device-owner context for render-partition epoch stamps (no compute queue).
+    pub is_device_owner: bool,
+    /// Per-context compute queue (or device graphics queue for [`Self::is_device_owner`]).
+    pub queue: vk::Queue,
+    /// Queue family of [`Self::queue`] (compute family for normal contexts).
+    #[allow(dead_code)]
+    pub queue_family: u32,
+    /// Index into [`LogicalDevice::compute_queues`] free list; `None` for device owner.
+    pub queue_index: Option<usize>,
+    /// Serialises `vkQueueSubmit2` on this context's queue.
+    pub queue_lock: std::sync::Arc<std::sync::Mutex<()>>,
     pub timeline_semaphore: vk::Semaphore,
     /// Last device-global seq value submitted on this context.
     pub last_submitted_seq: u64,
@@ -785,6 +799,8 @@ pub(crate) struct SubmissionContext {
     pub retained_compute_cbs: HashMap<u64, RetainedVkCb>,
     /// Command buffers to free once this context's timeline reaches the key.
     pub timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
+    /// Device-queue render CBs (from [`LogicalDevice::command_pool`]) keyed by timeline value.
+    pub graphics_timeline_cmd_buffers: std::collections::HashMap<u64, Vec<vk::CommandBuffer>>,
     /// Per-context staging belt for DEVICE_LOCAL WriteBuffer uploads.
     /// Pools HOST_VISIBLE chunks across submits so no staging memory is reused
     /// before its GPU copy finishes (keyed by this context's timeline values).
@@ -806,6 +822,15 @@ pub(crate) struct SubmissionContext {
     pub frame_table: SharedContextFrameTable,
 }
 
+/// Which timeline semaphore must reach a device-global submission value before that
+/// value is considered retired. Independent per-context compute queues cannot share
+/// a single max-over-contexts completion horizon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimelineWaitTarget {
+    Context(super::ContextHandle),
+    DeviceOwner,
+}
+
 /// A logical Vulkan device with associated resources.
 pub(crate) struct LogicalDevice {
     pub device: ash::Device,
@@ -813,8 +838,20 @@ pub(crate) struct LogicalDevice {
     #[allow(dead_code)]
     pub adapter_id: u32,
     pub queue: vk::Queue,
-    #[allow(dead_code)]
     pub queue_family: u32,
+    /// Queue family used for per-context compute submits (may equal [`Self::queue_family`]).
+    pub compute_queue_family: u32,
+    /// Pool of compute-capable queues assigned to submission contexts.
+    ///
+    /// When [`Self::compute_queues_alias_graphics`] is true, every entry is the
+    /// same handle as [`Self::queue`] (logical slots on a one-queue device).
+    pub compute_queues: Vec<vk::Queue>,
+    /// True when the graphics family exposes only one queue: contexts share
+    /// [`Self::queue`] and [`Self::queue_lock`] instead of private compute queues.
+    pub compute_queues_alias_graphics: bool,
+    pub free_compute_queue_indices: std::sync::Mutex<std::collections::VecDeque<usize>>,
+    /// Reusable primary command buffers for device-queue render submits.
+    pub free_device_cmd_buffers: std::sync::Mutex<Vec<vk::CommandBuffer>>,
     /// Queue used for [`vk::Device::queue_bind_sparse`] (often same as graphics).
     pub sparse_binding_queue: vk::Queue,
     pub command_pool: vk::CommandPool,
@@ -857,31 +894,22 @@ pub(crate) struct LogicalDevice {
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     /// `AtomicU64` so `LogicalDevice` can be `Arc`-wrapped; updated with `fetch_max`.
     pub retired_floor: AtomicU64,
+    /// Per global timeline value: which native semaphore must reach that value.
+    pub timeline_wait_targets: Mutex<BTreeMap<u64, TimelineWaitTarget>>,
+    /// Cached highest contiguous retired timeline value (≥ [`Self::retired_floor`]).
+    pub timeline_retired: AtomicU64,
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,
 
-    /// Serialises all `vkQueueSubmit2` calls on this device's queue.
+    /// Serialises all `vkQueueSubmit2` calls on this device's graphics/present queue.
     ///
-    /// The Vulkan spec marks `vkQueueSubmit2`'s `queue` parameter as externally
-    /// synchronized (VUID-vkQueueSubmit2-queue-parameter): concurrent calls from
-    /// different threads on the same `VkQueue` are undefined behaviour.  The outer
-    /// `Arc<Mutex<Box<dyn GpuBackend>>>` currently provides this serialisation as a
-    /// side-effect, but Phase 5c will replace that coarse lock with fine-grained
-    /// per-context/device locks, leaving the queue unprotected unless we insert an
-    /// explicit guard here.
-    ///
-    /// Each submit call clones this `Arc`, locks it for the duration of
-    /// `vkQueueSubmit2`, then drops the guard — so only the GPU call itself
-    /// serialises; recording and post-submit bookkeeping run concurrently.
-    ///
-    /// NOTE (Phase 5d — intentionally deferred): giving each `SubmissionContext`
-    /// its own `VkQueue` (requested from the same family) would let submits from
-    /// different contexts proceed in parallel without ever touching this lock.
-    /// That approach is deferred because queue count is a driver resource and the
-    /// practical benefit over this per-device lock is small with today's single-
-    /// context-per-device workloads.
+    /// Per-context compute submits use [`SubmissionContext::queue_lock`] instead.
     pub queue_lock: Arc<Mutex<()>>,
+    /// Live per-context compute queue locks (registered at context create, removed at destroy).
+    /// [`Self::device_wait_idle_locked`] and [`Self::queues_wait_idle_locked`] acquire these
+    /// alongside [`Self::queue_lock`] so idle calls do not race with compute submits.
+    pub active_context_queue_locks: Mutex<Vec<Arc<Mutex<()>>>>,
 
     /// Timestamp query support (`VkPhysicalDeviceLimits::timestamp_compute_and_graphics`).
     pub vk_timestamp_compute_and_graphics: bool,
@@ -902,9 +930,37 @@ pub(crate) struct RetainedVkCb {
     /// Timeline value signalled by the most recent submission of this CB.
     /// Used to defer free-listing until the GPU has retired the CB.
     pub last_signal_value: u64,
+    /// When true, resubmit on [`LogicalDevice::queue`] under [`LogicalDevice::queue_lock`].
+    pub on_graphics_queue: bool,
 }
 
 impl LogicalDevice {
+    /// Graphics + compute family indices for [`vk::SharingMode::CONCURRENT`], or
+    /// `None` when both use the same family (EXCLUSIVE is fine).
+    ///
+    /// Cross-family resources must be CONCURRENT (or use ownership-transfer barriers).
+    /// Goldy uses CONCURRENT so timeline waits alone order access between context
+    /// compute queues and the device graphics/present queue.
+    pub(crate) fn concurrent_queue_families(&self) -> Option<[u32; 2]> {
+        if self.compute_queue_family != self.queue_family {
+            Some([self.queue_family, self.compute_queue_family])
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn register_active_compute_queue_lock(&self, lock: Arc<Mutex<()>>) {
+        self.active_context_queue_locks.lock().unwrap().push(lock);
+    }
+
+    pub(crate) fn unregister_active_compute_queue_lock(&self, lock: &Arc<Mutex<()>>) {
+        // Remove one matching entry (shared graphics lock may be registered zero times).
+        let mut locks = self.active_context_queue_locks.lock().unwrap();
+        if let Some(i) = locks.iter().position(|l| Arc::ptr_eq(l, lock)) {
+            locks.swap_remove(i);
+        }
+    }
+
     /// `vkMapMemory2KHR` — core in Vulkan 1.4. Struct-based API that replaces `vkMapMemory`.
     pub unsafe fn map_memory2(
         &self,
@@ -923,10 +979,47 @@ impl LogicalDevice {
         (self.map_memory2.fp().unmap_memory2_khr)(self.device.handle(), &info).result()
     }
 
-    /// `vkDeviceWaitIdle` under [`Self::queue_lock`]: externally synchronized like queue submits.
+    /// `vkDeviceWaitIdle` under all queue submit locks: externally synchronized like queue submits.
     pub(crate) fn device_wait_idle_locked(&self) -> ash::prelude::VkResult<()> {
-        let _guard = self.queue_lock.lock().unwrap();
+        let _graphics_guard = self.queue_lock.lock().unwrap();
+        let arcs = {
+            let mut locks = self.active_context_queue_locks.lock().unwrap().clone();
+            locks.sort_by_key(|l| Arc::as_ptr(l) as usize);
+            locks
+        };
+        let mut compute_guards = Vec::with_capacity(arcs.len());
+        for arc in &arcs {
+            if !Arc::ptr_eq(arc, &self.queue_lock) {
+                compute_guards.push(arc.lock().unwrap());
+            }
+        }
         unsafe { self.device.device_wait_idle() }
+    }
+
+    /// Idle the graphics/present queue and every compute queue in the context pool.
+    ///
+    /// Prefer this over graphics-only `queue_wait_idle` when tearing down surfaces or
+    /// other resources that may still be referenced from per-context compute work.
+    pub(crate) fn queues_wait_idle_locked(&self) -> ash::prelude::VkResult<()> {
+        let _graphics_guard = self.queue_lock.lock().unwrap();
+        let arcs = {
+            let mut locks = self.active_context_queue_locks.lock().unwrap().clone();
+            locks.sort_by_key(|l| Arc::as_ptr(l) as usize);
+            locks
+        };
+        let mut compute_guards = Vec::with_capacity(arcs.len());
+        for arc in &arcs {
+            if !Arc::ptr_eq(arc, &self.queue_lock) {
+                compute_guards.push(arc.lock().unwrap());
+            }
+        }
+        unsafe {
+            self.device.queue_wait_idle(self.queue)?;
+            for &q in &self.compute_queues {
+                self.device.queue_wait_idle(q)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1718,6 +1811,8 @@ pub(super) struct VulkanState {
     pub next_device_handle: DeviceHandle,
     pub contexts: SharedContextMap,
     pub next_context_id: super::ContextHandle,
+    /// Synthetic context per device for device-queue render epoch stamps.
+    pub device_owner_handles: HashMap<super::DeviceHandle, super::ContextHandle>,
     pub buffers: SharedBufferTable,
     pub shaders: SharedShaderTable,
     pub pipelines: SharedPipelineTable,

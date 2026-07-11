@@ -21,11 +21,20 @@ pub fn spawn_fence_poller(state: FencePollerState) -> JoinHandle<()> {
     thread::spawn(move || {
         while !state.shutdown.load(Ordering::Relaxed) {
             let completed = (state.gpu_completed)();
-            let mut last = state.last_emitted_epoch.load(Ordering::Acquire);
-            while last < completed {
-                last += 1;
-                state.signal_queue.push(Signal::BoundaryCrossed { epoch: last });
-                state.last_emitted_epoch.store(last, Ordering::Release);
+            // `u64::MAX` is the device-removed sentinel (Vulkan/DX12 both report it this way
+            // once the device is gone). Treat it as "nothing new retired" rather than trying
+            // to catch `last_emitted_epoch` up to it one increment at a time: with a real
+            // last-emitted epoch anywhere near typical values, that catch-up loop is ~2^64
+            // iterations, which never finishes — it hangs this thread forever (so
+            // `join_fence_poller`'s `.join()` never returns) while unboundedly growing
+            // `signal_queue`.
+            if completed != u64::MAX {
+                let mut last = state.last_emitted_epoch.load(Ordering::Acquire);
+                while last < completed {
+                    last += 1;
+                    state.signal_queue.push(Signal::BoundaryCrossed { epoch: last });
+                    state.last_emitted_epoch.store(last, Ordering::Release);
+                }
             }
             // Avoid busy-spin; driver callbacks are coarse-grained.
             thread::sleep(Duration::from_millis(1));

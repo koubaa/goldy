@@ -4,7 +4,6 @@ use super::types::{SharedLogicalDevice, VulkanState};
 use super::SurfaceHandle;
 use anyhow::{Context, Result};
 use ash::{khr, vk};
-use std::sync::atomic::Ordering;
 
 pub(super) fn prepare_present_work(
     state: &VulkanState,
@@ -28,7 +27,7 @@ pub(super) fn prepare_present_work(
         .context("Surface's device is invalid")?
         .clone();
 
-    let timeline_sem = state
+    let compute_timeline_sem = state
         .contexts
         .read()
         .unwrap()
@@ -37,6 +36,9 @@ pub(super) fn prepare_present_work(
         .lock()
         .unwrap()
         .timeline_semaphore;
+
+    let owner_timeline_sem = super::context::owner_timeline_semaphore(state, device_handle)
+        .context("device-owner context missing for present")?;
 
     let (copy_cb, scratch_image, swapchain_image, width, height) = if render_pass_submitted {
         (vk::CommandBuffer::null(), vk::Image::null(), vk::Image::null(), 0, 0)
@@ -66,7 +68,8 @@ pub(super) fn prepare_present_work(
         render_finished_sem,
         image_available_sem,
         swapchain,
-        timeline_sem,
+        compute_timeline_sem,
+        owner_timeline_sem,
         copy_cb,
         scratch_image,
         swapchain_image,
@@ -82,8 +85,15 @@ pub(super) fn finish_present(state: &mut VulkanState, finish: crate::backend::Pr
     let image_index = finish.frame.image as u32;
 
     if let Some(signal_timeline) = finish.signal_timeline {
-        if let Some(sc_arc) = state.contexts.read().unwrap().get(&ctx) {
-            sc_arc.lock().unwrap().last_submitted_seq = signal_timeline;
+        let device_handle = state
+            .surfaces
+            .get(&surface_handle)
+            .map(|s| s.device_handle)
+            .context("Invalid surface handle")?;
+        if let Some(owner) = state.device_owner_handles.get(&device_handle) {
+            if let Some(owner_arc) = state.contexts.read().unwrap().get(owner) {
+                owner_arc.lock().unwrap().last_submitted_seq = signal_timeline;
+            }
         }
     }
 
@@ -97,6 +107,18 @@ pub(super) fn finish_present(state: &mut VulkanState, finish: crate::backend::Pr
     if let Some(copy_timeline) = finish.copy_timeline {
         if let Some(surface_state_mut) = state.surfaces.get_mut(&surface_handle) {
             surface_state_mut.frame_sync[present_slot].copy_timeline_value = Some(copy_timeline);
+        }
+        if !finish.render_pass_submitted {
+            if let Some(scratch) = state
+                .surfaces
+                .get(&surface_handle)
+                .and_then(|s| s.scratch_texture_slots.get(present_slot))
+                .and_then(|slot| slot.as_ref())
+            {
+                if let Some(tex) = state.textures.read().unwrap().entries.get(&scratch.texture_handle) {
+                    tex.set_image_layout(vk::ImageLayout::GENERAL);
+                }
+            }
         }
     }
 
@@ -147,7 +169,8 @@ struct VulkanPresentGpuWork {
     render_finished_sem: vk::Semaphore,
     image_available_sem: vk::Semaphore,
     swapchain: vk::SwapchainKHR,
-    timeline_sem: vk::Semaphore,
+    compute_timeline_sem: vk::Semaphore,
+    owner_timeline_sem: vk::Semaphore,
     copy_cb: vk::CommandBuffer,
     scratch_image: vk::Image,
     swapchain_image: vk::Image,
@@ -294,24 +317,23 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        let copy_signal_timeline = if !self.render_pass_submitted {
-            let signal_timeline_value = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
-            signal_timeline = Some(signal_timeline_value);
-            copy_timeline = Some(signal_timeline_value);
-            Some(signal_timeline_value)
-        } else {
-            None
-        };
-
         let queue_lock = std::sync::Arc::clone(&self.logical_device.queue_lock);
         // Hold queue_lock across copy submit and WSI present: both APIs mark the queue
         // parameter as externally synchronized. TID_PRESENT may overlap TID_RENDER submits.
         let result = {
             let _queue_guard = queue_lock.lock().unwrap();
+            let copy_signal_timeline = if !self.render_pass_submitted {
+                let signal_timeline_value = super::context::reserve_device_owner_timeline_locked(&self.logical_device);
+                signal_timeline = Some(signal_timeline_value);
+                copy_timeline = Some(signal_timeline_value);
+                Some(signal_timeline_value)
+            } else {
+                None
+            };
             if let Some(signal_timeline_value) = copy_signal_timeline {
                 let cmd_info = vk::CommandBufferSubmitInfo::default().command_buffer(self.copy_cb);
                 let wait_compute_done = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.timeline_sem)
+                    .semaphore(self.compute_timeline_sem)
                     .value(self.frame_compute_timeline_value)
                     .stage_mask(vk::PipelineStageFlags2::TRANSFER);
                 let wait_acq = vk::SemaphoreSubmitInfo::default()
@@ -324,7 +346,7 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
                     .value(0)
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
                 let sig_timeline = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(self.timeline_sem)
+                    .semaphore(self.owner_timeline_sem)
                     .value(signal_timeline_value)
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
                 let signals = [sig_render_finished, sig_timeline];
@@ -382,7 +404,7 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
             frame: self.frame,
             return_fence: copy_timeline.unwrap_or(0),
             scratch_texture: None,
-            scratch_layout_updated: false,
+            scratch_layout_updated: !self.render_pass_submitted,
             present_timeline,
             copy_timeline,
             frame_compute_timeline: if self.render_pass_submitted {

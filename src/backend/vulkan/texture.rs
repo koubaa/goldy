@@ -1,7 +1,7 @@
 //! Texture management logic.
 
 use super::types::{self, SharedTextureTable, TextureState};
-use super::utils::format_to_vk;
+use super::utils::{format_to_vk, with_buffer_sharing, with_image_sharing};
 use super::{DeviceHandle, TextureHandle};
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use anyhow::{Context, Result};
@@ -69,21 +69,24 @@ pub(super) fn create(
     }
 
     // Create texture image
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(format_to_vk(format))
-        .extent(vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk_usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let qf = logical_device.concurrent_queue_families();
+    let image_info = with_image_sharing(
+        vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format_to_vk(format))
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk_usage)
+            .initial_layout(vk::ImageLayout::UNDEFINED),
+        qf.as_ref(),
+    );
 
     let image =
         unsafe { logical_device.device.create_image(&image_info, None) }.context("Failed to create texture image")?;
@@ -319,10 +322,13 @@ pub(super) fn write(
 
     // Create staging buffer
     let buffer_size = data.len() as u64;
-    let staging_buffer_info = vk::BufferCreateInfo::default()
-        .size(buffer_size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = logical_device.concurrent_queue_families();
+    let staging_buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(buffer_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+        qf.as_ref(),
+    );
 
     let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
         .context("Failed to create staging buffer")?;
@@ -555,10 +561,13 @@ pub(super) fn write_region(
     };
 
     let buffer_size = data.len() as u64;
-    let staging_buffer_info = vk::BufferCreateInfo::default()
-        .size(buffer_size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let qf = logical_device.concurrent_queue_families();
+    let staging_buffer_info = with_buffer_sharing(
+        vk::BufferCreateInfo::default()
+            .size(buffer_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+        qf.as_ref(),
+    );
 
     let staging_buffer = unsafe { logical_device.device.create_buffer(&staging_buffer_info, None) }
         .context("Failed to create staging buffer")?;
@@ -880,10 +889,13 @@ pub(super) fn read_to_cpu(
         (Some(buf), Some(mem)) => (buf, mem),
         (None, _) | (_, None) => {
             let buffer_size = expected_size as u64;
-            let staging_info = vk::BufferCreateInfo::default()
-                .size(buffer_size)
-                .usage(vk::BufferUsageFlags::TRANSFER_DST)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let qf = logical_device.concurrent_queue_families();
+            let staging_info = with_buffer_sharing(
+                vk::BufferCreateInfo::default()
+                    .size(buffer_size)
+                    .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                qf.as_ref(),
+            );
 
             let sb = unsafe { logical_device.device.create_buffer(&staging_info, None) }
                 .context("Failed to create staging buffer")?;
@@ -1333,10 +1345,9 @@ pub(super) fn record_compute_texture_upload(
 
     let (src_stage, src_access) = match old_layout {
         vk::ImageLayout::UNDEFINED => (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::empty()),
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
-            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER,
-            vk::AccessFlags2::SHADER_READ,
-        ),
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+            (vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_READ)
+        }
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => (vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
         vk::ImageLayout::GENERAL => (
             vk::PipelineStageFlags2::COMPUTE_SHADER,
@@ -1398,7 +1409,7 @@ pub(super) fn record_compute_texture_upload(
     let barrier_to_shader = vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
         .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
         .dst_access_mask(vk::AccessFlags2::SHADER_READ)
         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
         .new_layout(settled_layout)

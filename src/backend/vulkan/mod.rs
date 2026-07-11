@@ -254,6 +254,7 @@ impl VulkanBackend {
             next_device_handle: 1,
             contexts: Arc::new(RwLock::new(HashMap::new())),
             next_context_id: 1,
+            device_owner_handles: HashMap::new(),
             buffers: Arc::new(RwLock::new(BufferTable::new())),
             shaders: Arc::new(RwLock::new(ShaderTable::new())),
             pipelines: Arc::new(RwLock::new(PipelineTable::new())),
@@ -411,7 +412,10 @@ impl GpuBackend for VulkanBackend {
             .read()
             .unwrap()
             .iter()
-            .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
+            .filter(|(_, sc)| {
+                let sc = sc.lock().unwrap();
+                sc.device == device_handle && !sc.is_device_owner
+            })
             .map(|(k, _)| *k)
             .collect();
         for ctx in ctxs {
@@ -1438,6 +1442,14 @@ impl GpuBackend for VulkanBackend {
         _category: crate::types::ResourceCategory,
     ) -> u32 {
         types::MAX_BINDLESS_RESOURCES
+    }
+
+    fn max_submission_contexts(&self, device_handle: DeviceHandle) -> u32 {
+        self.state
+            .devices
+            .get(&device_handle)
+            .map(|ld| ld.compute_queues.len() as u32)
+            .unwrap_or(0)
     }
 
     fn flush_deferred_deletions(&mut self, ctx: ContextHandle) {
