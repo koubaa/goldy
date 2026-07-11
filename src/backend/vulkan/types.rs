@@ -17,7 +17,7 @@ use super::super::{
 use crate::timeline::TimelineValue;
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -822,6 +822,15 @@ pub(crate) struct SubmissionContext {
     pub frame_table: SharedContextFrameTable,
 }
 
+/// Which timeline semaphore must reach a device-global submission value before that
+/// value is considered retired. Independent per-context compute queues cannot share
+/// a single max-over-contexts completion horizon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimelineWaitTarget {
+    Context(super::ContextHandle),
+    DeviceOwner,
+}
+
 /// A logical Vulkan device with associated resources.
 pub(crate) struct LogicalDevice {
     pub device: ash::Device,
@@ -879,6 +888,10 @@ pub(crate) struct LogicalDevice {
     /// Minimum completed horizon after a context is destroyed (never lowers `device_retired`).
     /// `AtomicU64` so `LogicalDevice` can be `Arc`-wrapped; updated with `fetch_max`.
     pub retired_floor: AtomicU64,
+    /// Per global timeline value: which native semaphore must reach that value.
+    pub timeline_wait_targets: Mutex<BTreeMap<u64, TimelineWaitTarget>>,
+    /// Cached highest contiguous retired timeline value (≥ [`Self::retired_floor`]).
+    pub timeline_retired: AtomicU64,
 
     /// Optional driver pipeline cache persisted to disk (`~/.cache/goldy/pipeline_cache_<adapter>.bin`).
     pub pipeline_cache: vk::PipelineCache,

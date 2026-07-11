@@ -1369,16 +1369,16 @@ pub trait GpuBackend: Send + Sync + GpuBackendTimelineWait + GpuBackendPresentSp
 
     /// Latest device-global submission sequence retired on the GPU (shared queue / seq space).
     ///
-    /// `value` is done when `device_timeline_retired() >= value`. This is the max over live
-    /// context completion primitives, the device sync fence (DX12), and the post-destroy floor.
+    /// `value` is done when `device_timeline_retired() >= value`. This is the highest
+    /// contiguous prefix of attributed timeline values whose owning semaphore has completed,
+    /// floored by post-destroy retirement — not a max over independent context queues.
     fn device_timeline_retired(&self, device: DeviceHandle) -> crate::timeline::TimelineValue;
 
     /// Block until the device-global timeline has retired at least `value`.
     ///
-    /// Unlike [`Self::wait_until`] (which is per-context), this searches across all live contexts on
-    /// `device` for the one that signaled `value` and waits on its native primitive. Use this
-    /// when the `TimelineValue` was produced by an arbitrary context — e.g. from outside the
-    /// allocator — so you don't need a matching `ContextHandle`.
+    /// Unlike [`Self::wait_until`] (which is per-context), this waits on the native semaphore
+    /// that was signalled for `value` at submit time. Use this when the `TimelineValue` was
+    /// produced by an arbitrary context so you don't need a matching `ContextHandle`.
     fn device_wait_until(&mut self, device: DeviceHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 
     /// Drain pending backend signals for this context (async queue + synchronous oversubscribed).

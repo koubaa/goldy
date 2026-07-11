@@ -6,7 +6,7 @@ use crate::backend::{AdapterInfo, BackendType, DeviceType};
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::{ext, khr};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::CStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -503,6 +503,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             pending_buffer_gpu_releases: Mutex::new(Vec::new()),
             timeline_next: Arc::new(AtomicU64::new(1)),
             retired_floor: AtomicU64::new(0),
+            timeline_wait_targets: Mutex::new(BTreeMap::new()),
+            timeline_retired: AtomicU64::new(0),
             queue_lock: Arc::new(Mutex::new(())),
             active_context_queue_locks: Mutex::new(Vec::new()),
             pipeline_cache,

@@ -320,6 +320,11 @@ impl crate::backend::PresentGpuWork for VulkanPresentGpuWork {
 
         let copy_signal_timeline = if !self.render_pass_submitted {
             let signal_timeline_value = self.logical_device.timeline_next.fetch_add(1, Ordering::Relaxed);
+            super::context::register_timeline_wait_target(
+                &self.logical_device,
+                signal_timeline_value,
+                super::types::TimelineWaitTarget::DeviceOwner,
+            );
             signal_timeline = Some(signal_timeline_value);
             copy_timeline = Some(signal_timeline_value);
             Some(signal_timeline_value)

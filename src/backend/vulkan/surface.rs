@@ -772,21 +772,21 @@ pub(super) fn acquire(
         }
     }
 
-    // CPU cleanup: drain the GPU timeline and reset the frame slot.
-    let completed = super::context::device_retired(state, device_handle);
+    // CPU cleanup: drain per-context timelines and reset the frame slot.
+    let completed_by_ctx = super::types::snapshot_context_completed_values(
+        &state
+            .devices
+            .get(&device_handle)
+            .context("Surface's device is invalid")?
+            .device,
+        &state.contexts,
+        device_handle,
+    );
 
     {
         let _tz = crate::tracy_zone!("vk.surface.acquire.reap_timeline");
-        let ctxs: Vec<_> = state
-            .contexts
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(_, sc)| sc.lock().unwrap().device == device_handle)
-            .map(|(k, _)| *k)
-            .collect();
-        for ctx in ctxs {
-            super::compute::reap_timeline_cmd_buffers_up_to(state, ctx, completed);
+        for (ctx, ctx_completed) in completed_by_ctx {
+            super::compute::reap_timeline_cmd_buffers_up_to(state, ctx, ctx_completed);
         }
     }
 
@@ -1209,6 +1209,11 @@ pub(super) fn render(
         let ld = devices.get(&device_handle).context("Surface's device is invalid")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
+    super::context::register_timeline_wait_target(
+        devices.get(&device_handle).context("Surface's device is invalid")?,
+        signal_timeline_value,
+        super::types::TimelineWaitTarget::Context(ctx),
+    );
     let wait_acq = vk::SemaphoreSubmitInfo::default()
         .semaphore(image_available_semaphore)
         .value(0)

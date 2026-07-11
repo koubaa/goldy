@@ -6,7 +6,7 @@ use super::staging;
 use super::submit_session::{VulkanSubmitScope, VulkanSubmitView};
 use super::types::{
     BufferState, ComputePipelineState, LogicalDevice, PushLayout, SharedBufferTable, SharedComputePipelineTable,
-    SharedPipelineTable, SlotKey,
+    SharedPipelineTable, SlotKey, TimelineWaitTarget,
 };
 use super::{BufferHandle, ComputePipelineHandle, DeviceHandle, RenderTargetHandle};
 use crate::backend::{GpuCommand, GraphCommand, RenderCommand, SubmitSync};
@@ -489,6 +489,15 @@ fn build_submit_signal_infos(
     Ok(infos)
 }
 
+fn register_submit_timeline(ld: &LogicalDevice, value: u64, route_device: bool, ctx: super::ContextHandle) {
+    let target = if route_device {
+        TimelineWaitTarget::DeviceOwner
+    } else {
+        TimelineWaitTarget::Context(ctx)
+    };
+    super::context::register_timeline_wait_target(ld, value, target);
+}
+
 #[derive(Debug)]
 struct VulkanGpuProfilePool {
     pool: vk::QueryPool,
@@ -634,12 +643,9 @@ unsafe fn vulkan_finish_gpu_profile(
 /// Returns the GPU-completed timeline value for a single context by reading its
 /// timeline semaphore counter directly, without consulting any other context.
 ///
-/// Used on the submit hot path to replace `device_retired` (max-over-contexts)
-/// as the reclaim gate. Because all contexts submit to the same `vk::Queue`,
-/// when this context's semaphore reaches V every submit with a global timeline
-/// value ≤ V — including those from other contexts — has already completed on
-/// that queue. Draining with V is therefore safe and never creates a
-/// cross-context dependency.
+/// Used on the submit hot path as the reclaim gate for per-context resources.
+/// With independent per-context compute queues, device-global retirement is a
+/// contiguous prefix over attributed values — not a max over context semaphores.
 pub(super) fn ctx_completed_value(
     view: &VulkanSubmitView<'_>,
     ctx: super::ContextHandle,
@@ -901,6 +907,7 @@ pub(super) fn submit_with_scope(
             .timeline_next
             .fetch_add(1, Ordering::Relaxed);
         let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
+        register_submit_timeline(ld, signal_value, false, ctx);
         let (queue, queue_lock) = context_queue_target(scope);
         let signal_infos = build_submit_signal_infos(scope, false, signal_value)?;
         let wait_infos = build_cross_submit_wait_infos(view, sync)?;
@@ -1671,6 +1678,12 @@ pub(super) fn submit_with_scope(
         let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
+    register_submit_timeline(
+        view.devices.get(&device_handle).context("Invalid device handle")?,
+        signal_value,
+        false,
+        ctx,
+    );
 
     let used_slots = collect_slot_keys_from_gpu_commands(&commands, view.compute_pipelines, view.buffers);
     if let Some(ld) = view.devices.get(&device_handle) {
@@ -2766,6 +2779,12 @@ pub(super) fn submit_graph_with_scope(
         let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
+    register_submit_timeline(
+        view.devices.get(&device_handle).context("Invalid device handle")?,
+        signal_value,
+        route_device,
+        ctx,
+    );
 
     let used_slots =
         collect_slot_keys_from_graph_commands(commands, view.compute_pipelines, view.pipelines, view.buffers);
@@ -2985,6 +3004,12 @@ pub(super) fn try_resubmit_retained_with_scope(
         let ld = view.devices.get(&device_handle).context("Invalid device handle")?;
         ld.timeline_next.fetch_add(1, Ordering::Relaxed)
     };
+    register_submit_timeline(
+        view.devices.get(&device_handle).context("Invalid device handle")?,
+        signal_value,
+        on_graphics_queue,
+        ctx,
+    );
     let submit_device = view.devices.get(&device_handle).context("Invalid device handle")?;
     let (queue, queue_lock) = if on_graphics_queue {
         device_graphics_queue_target(submit_device)
