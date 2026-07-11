@@ -114,6 +114,7 @@ impl PendingSubmit for MetalCommitPendingSubmit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_metal_commit(
     ld: &SharedLogicalDevice,
     command_buffer: mtl::CommandBuffer,
@@ -209,6 +210,7 @@ impl PendingSubmit for MetalPresentPendingSubmit {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_metal_present(
     ld: &SharedLogicalDevice,
     command_buffer: mtl::CommandBuffer,

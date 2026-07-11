@@ -110,7 +110,7 @@ impl SubmissionWorker {
     /// Advance the worker epoch for GPU work executed synchronously on the caller thread
     /// (e.g. DX12 device DIRECT-queue render submits) so [`Self::wait_submitted`] matches
     /// [`submission_horizon`](submission_horizon).
-    #[cfg(any(feature = "vulkan", feature = "dx12"))]
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
     pub fn record_synchronous_submit(&self, tv: u64) -> Result<()> {
         self.check_error()?;
         if tv == 0 {

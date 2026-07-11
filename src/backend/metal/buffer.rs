@@ -613,12 +613,12 @@ pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
 }
 
 /// View tightly packed bytes in a CPU-writable storage buffer's shared mapping.
-pub(super) fn cpu_writable_flat_slice<'a>(
-    buffers: &'a std::collections::HashMap<BufferHandle, super::types::BufferState>,
+pub(super) fn cpu_writable_flat_slice(
+    buffers: &std::collections::HashMap<BufferHandle, super::types::BufferState>,
     buffer_handle: BufferHandle,
     offset: u64,
     len: usize,
-) -> Result<&'a [u8]> {
+) -> Result<&[u8]> {
     let buffer = buffers
         .get(&buffer_handle)
         .context("cpu_writable_flat_slice: invalid buffer handle")?;

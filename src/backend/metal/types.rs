@@ -818,8 +818,11 @@ pub(crate) struct ResourceRegistry {
     /// [`DescriptorRegistry`]'s `slot_last_seen` path for production reclaim;
     /// these lists remain for unit tests of the lower-level allocator.
     pending_free_storage_buffer_slots: Vec<(u32, TimelineValue)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pending_free_uniform_buffer_slots: Vec<(u32, TimelineValue)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pending_free_texture_slots: Vec<(u32, TimelineValue)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pending_free_storage_image_slots: Vec<(u32, TimelineValue)>,
     /// (local_index, access) for each live buffer handle. The access is
     /// needed at `unregister_buffer()` time to know which free list the slot
@@ -926,6 +929,7 @@ impl ResourceRegistry {
     /// that might still reference this slot's descriptor; the slot parks in
     /// the pending list until `drain_pending_slots_up_to(signaled)` promotes
     /// it. Pass `None` when the GPU is known idle.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn release_texture_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
         release_slot(
             local_index,
@@ -972,6 +976,7 @@ impl ResourceRegistry {
     /// reused by a subsequent `register_storage_image` / `reserve_storage_image_slot`.
     ///
     /// See [`Self::release_texture_slot`] for the `barrier` semantics.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn release_storage_image_slot(&mut self, local_index: u32, barrier: Option<TimelineValue>, slot_pinned: bool) {
         release_slot(
             local_index,
@@ -1011,6 +1016,7 @@ impl ResourceRegistry {
     /// this slot's descriptor is still in-flight; the slot parks in the pending
     /// list and is promoted by `drain_pending_slots_up_to(signaled)` once
     /// `signaled >= barrier`. Pass `None` when the GPU is known idle.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn unregister_buffer(&mut self, handle: BufferHandle, barrier: Option<TimelineValue>, slot_pinned: bool) {
         if let Some((local_index, access)) = self.buffer_indices.remove(&handle) {
             match access {
@@ -1073,6 +1079,7 @@ impl ResourceRegistry {
     /// free list; entries still waiting for a higher timeline value stay pending.
     /// This is the per-frame call path — invoked on every `acquire_frame` /
     /// `present` so slots are recycled as soon as the GPU catches up.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn drain_pending_slots_up_to<F>(&mut self, signaled: TimelineValue, can_free: F)
     where
         F: Fn(MetalSlotKey) -> bool,
@@ -1162,6 +1169,7 @@ impl ResourceRegistry {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn release_slot(
     local_index: u32,
     barrier: Option<TimelineValue>,
@@ -1328,6 +1336,7 @@ impl DescriptorRegistry {
         self.resource_registry.drain_pending_slots();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn unregister_buffer(&mut self, handle: BufferHandle) {
         let _ = self.reclaim_buffer_slots(handle);
     }
