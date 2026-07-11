@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use mtl::{Device as MTLDevice, Library};
 use std::collections::HashMap;
 
-/// Patch compute-shader MSL to fix two Slang codegen bugs that surface on Metal:
+/// Patch compute-shader MSL to fix Slang codegen bug that surfaces on Metal:
 ///
 /// **Bug A** — missing `constant*` / `[[buffer(1)]]` on `EntryPointParams_0`.
 /// When wave intrinsics (`WaveGetLaneCount` etc.) are combined with a cross-module
@@ -369,7 +369,7 @@ fn compile_stage_with_reflection(
         }
         patched2
     } else if desc.stage == SlangStage::Compute {
-        // Fix cross-module [ForceInline] + groupshared bugs (see patch_compute_msl).
+        // Fix cross-module [ForceInline] + groupshared bugs (slang #10641; see patch_compute_msl).
         let patched = patch_compute_msl(&raw_msl);
         if patched != raw_msl {
             tracing::debug!(

@@ -32,8 +32,12 @@ artifacts** (CI, wheels, FFI packages) that copy DLLs next to shipped binaries:
 
 ```bash
 ./download.sh              # version from manifest.json
-./download.sh 2026.4       # explicit version
+./download.sh 2026.13      # explicit version
 ```
+
+## How is slang.h used
+
+It is actually unused. It is just a local reference for the ffi implementation.
 
 ## Runtime loading
 
@@ -45,7 +49,7 @@ At runtime Goldy loads Slang dynamically (search order in `goldy/src/slang/loade
 
 ## Version
 
-Current pinned version: **2026.4**
+Current pinned version: **2026.13**
 
 ## License
 

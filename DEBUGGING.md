@@ -231,7 +231,7 @@ Enable with `RUST_LOG=goldy=debug cargo run`.
 
 ### "undefined identifier 'DescriptorHandle'" in .NET/C# or other bindings
 
-This error occurs when the FFI loads the wrong Slang DLL. Goldy requires Slang 2026.4+ with SM 6.6 bindless support (`DescriptorHandle` intrinsic).
+This error occurs when the FFI loads the wrong Slang DLL. Goldy requires Slang 2026.13+ with SM 6.6 bindless support (`DescriptorHandle` intrinsic).
 
 **Cause**: The Slang library search falls back to an older `slang.dll` from the Vulkan SDK instead of the bundled `slang-compiler.dll`.
 

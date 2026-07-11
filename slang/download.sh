@@ -7,7 +7,7 @@
 
 set -e
 
-VERSION="${1:-2026.4}"
+VERSION="${1:-2026.13}"
 BASE_URL="https://github.com/shader-slang/slang/releases/download/v${VERSION}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +50,7 @@ for platform_pair in "${PLATFORMS[@]}"; do
             if [ -d "$dir" ]; then
                 # Windows: slang.dll, slang-glslang.dll
                 cp -L "$dir"/slang*.dll "bin/${local_dir}/" 2>/dev/null || true
-                # Linux: libslang*.so* (including versioned like libslang-glslang-2026.4.so)
+                # Linux: libslang*.so* (including versioned like libslang-glslang-2026.13.so)
                 cp -L "$dir"/libslang*.so* "bin/${local_dir}/" 2>/dev/null || true
                 # macOS: libslang*.dylib
                 cp -L "$dir"/libslang*.dylib "bin/${local_dir}/" 2>/dev/null || true
